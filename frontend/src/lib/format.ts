@@ -1,0 +1,1 @@
+export const money = (v: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(v)

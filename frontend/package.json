@@ -1,0 +1,37 @@
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --open",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings=0 || exit 0",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@emotion/react": "^11.13.3",
+    "@emotion/styled": "^11.13.0",
+    "@hookform/resolvers": "3.9.0",
+    "@mui/icons-material": "^6.5.0",
+    "@mui/material": "^6.1.2",
+    "@tanstack/react-query": "5.59.0",
+    "axios": "1.7.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-hook-form": "7.53.0",
+    "react-router-dom": "6.27.0",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "22.7.5",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "9.13.0",
+    "prettier": "3.3.3",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.10"
+  }
+}

@@ -206,12 +206,17 @@ export default function Billing() {
                   <td>{r.mrp}</td>
                   <td>
                     <TextField
-                      type="number"
-                      value={r.quantity}
-                      onChange={e=>setQty(i, Number(e.target.value||1))}
-                      inputProps={{ min:1 }}
-                      sx={{ width:100 }}
-                    />
+                    type="number"
+                    value={r.quantity}  
+                    onChange={e => setQty(i, Number(e.target.value || 1))}
+                    onFocus={(e) => {
+                      // Select the whole value so typing "2" replaces "1"
+                      e.target.select()
+                    }}
+                    inputProps={{ min: 1 }}
+                    sx={{ width: 100 }}
+                  />
+
                   </td>
                   <td>{(r.quantity * r.mrp).toFixed(2)}</td>
                   <td>

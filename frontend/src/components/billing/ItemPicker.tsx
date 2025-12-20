@@ -37,7 +37,7 @@ export default function ItemPicker({
   const [q, setQ] = useState('')
 
   const { data } = useQuery({
-    queryKey: ['items', q],
+    queryKey: ['billing-items', q],
     // keep functionality, just surface fetch errors as toast
     queryFn: async () => {
       try {

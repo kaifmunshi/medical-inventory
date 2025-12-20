@@ -1,13 +1,18 @@
 # F:\medical-inventory\backend\routers\inventory.py
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlmodel import select
 from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel
+import logging
+from sqlalchemy import func
+from sqlalchemy.sql import or_
 
 from backend.db import get_session
 from backend.models import Item
+
+logger = logging.getLogger("api.items")
 
 router = APIRouter()
 
@@ -22,6 +27,7 @@ class ItemIn(BaseModel):
     class Config:
         extra = "ignore"  # ignore legacy 'batch_no' if a stale client sends it
 
+
 class ItemUpdateIn(BaseModel):
     name: Optional[str] = None
     brand: Optional[str] = None
@@ -31,6 +37,7 @@ class ItemUpdateIn(BaseModel):
 
     class Config:
         extra = "ignore"  # ignore legacy 'batch_no'
+
 
 class ItemOut(BaseModel):
     id: int
@@ -45,29 +52,76 @@ class ItemOut(BaseModel):
     class Config:
         from_attributes = True  # pydantic v2 (orm_mode=True in v1)
 
+
+# ✅ NEW: paginated response envelope for infinite scroll
+class ItemPageOut(BaseModel):
+    items: List[ItemOut]
+    total: int
+    next_offset: Optional[int] = None
+
+
 # ---------- Helpers ----------
 def now_ts():
     return datetime.now().isoformat(timespec="seconds")
 
+
 # ---------- Endpoints ----------
 
-@router.get("/", response_model=List[ItemOut])
+@router.get("/", response_model=ItemPageOut)
 def list_items(
+    request: Request,
     q: Optional[str] = Query(None, description="Search in name/brand"),
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    limit: Optional[int] = Query(None, ge=1, le=500),
+    offset: Optional[int] = Query(None, ge=0),
 ):
     with get_session() as session:
-        stmt = select(Item)
+        base_stmt = select(Item)
+
         if q:
             like = f"%{q.strip()}%"
-            stmt = stmt.where(
-                (Item.name.ilike(like)) |
-                (Item.brand.ilike(like))
-                # batch_no removed
+            base_stmt = base_stmt.where(
+                or_(
+                    Item.name.ilike(like),
+                    Item.brand.ilike(like),
+                )
             )
-        stmt = stmt.order_by(Item.name).limit(limit).offset(offset)
-        return session.exec(stmt).all()
+
+        # ✅ If ONLY q is present (client didn't pass limit/offset), return ALL matches
+        if q and limit is None and offset is None:
+            stmt = base_stmt.order_by(Item.name, Item.id)
+            items = session.exec(stmt).all()
+            total = len(items)
+            return {"items": items, "total": total, "next_offset": None}
+
+        # ✅ Otherwise paginate (defaults if not provided)
+        page_limit = limit if limit is not None else 500
+        page_offset = offset if offset is not None else 0
+
+        # total count (filtered)
+        count_stmt = select(func.count()).select_from(base_stmt.subquery())
+        total = session.exec(count_stmt).one()
+
+        # paginated items (stable order)
+        page_stmt = (
+            base_stmt
+            .order_by(Item.name, Item.id)
+            .limit(page_limit)
+            .offset(page_offset)
+        )
+        items = session.exec(page_stmt).all()
+
+        next_offset = (
+            page_offset + page_limit
+            if (page_offset + page_limit) < total
+            else None
+        )
+
+        return {
+            "items": items,
+            "total": total,
+            "next_offset": next_offset,
+        }
+
 
 @router.get("/{item_id}", response_model=ItemOut)
 def get_item(item_id: int):
@@ -76,6 +130,7 @@ def get_item(item_id: int):
         if not item:
             raise HTTPException(status_code=404, detail="Item not found")
         return item
+
 
 @router.post("/", response_model=ItemOut, status_code=201)
 def create_item(payload: ItemIn):
@@ -98,6 +153,7 @@ def create_item(payload: ItemIn):
         session.commit()
         session.refresh(item)
         return item
+
 
 @router.patch("/{item_id}", response_model=ItemOut)
 def update_item(item_id: int, payload: ItemUpdateIn):
@@ -123,6 +179,7 @@ def update_item(item_id: int, payload: ItemUpdateIn):
         session.refresh(item)
         return item
 
+
 @router.delete("/{item_id}", status_code=204)
 def delete_item(item_id: int):
     with get_session() as session:
@@ -133,9 +190,13 @@ def delete_item(item_id: int):
         session.commit()
         return
 
+
 # ---- Optional: quick stock adjust (increase/decrease) ----
 @router.post("/{item_id}/adjust", response_model=ItemOut)
-def adjust_stock(item_id: int, delta: int = Query(..., description="Positive or negative integer")):
+def adjust_stock(
+    item_id: int,
+    delta: int = Query(..., description="Positive or negative integer")
+):
     with get_session() as session:
         item = session.get(Item, item_id)
         if not item:

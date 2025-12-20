@@ -1,4 +1,5 @@
-// F:\medical-inventory\frontend\src\pages\Inventory\index.tsx
+// frontend/src/pages/Inventory/index.tsx
+
 import {
   Box,
   Button,
@@ -13,15 +14,17 @@ import {
   DialogContent,
   DialogActions,
 } from '@mui/material'
-import { useState } from 'react'
-import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useInfiniteQuery, useQueryClient, useMutation } from '@tanstack/react-query'
+
 import {
-  listItems,
+  listItemsPage, // ✅ new paginated list
   createItem,
   updateItem,
   deleteItem,
   adjustStock,
 } from '../../services/inventory'
+
 import Loading from '../../components/ui/Loading'
 import ItemForm from './ItemForm'
 import type { ItemFormValues } from './ItemForm'
@@ -35,31 +38,78 @@ export default function Inventory() {
   const toast = useToast()
 
   const [q, setQ] = useState('')
+  const [debouncedQ, setDebouncedQ] = useState('') // ✅ debounce search input
+
   const [openForm, setOpenForm] = useState(false)
   const [editing, setEditing] = useState<any | null>(null)
   const [adjustId, setAdjustId] = useState<number | null>(null)
   const [adjustName, setAdjustName] = useState<string>('')
 
-  // NEW: which item is pending delete confirmation
+  // which item is pending delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null)
 
+  // ✅ Debounce typing to avoid calling API on every keystroke
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q.trim()), 300)
+    return () => clearTimeout(t)
+  }, [q])
+
   const qc = useQueryClient()
-  const { data, isLoading } = useQuery({
-    queryKey: ['items', q],
-    queryFn: async () => {
+
+  // ✅ pagination size (you can change to 100 later if you want)
+  const LIMIT = 30
+
+  // ✅ Infinite query (offset-based pagination)
+  const {
+    data,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ['inventory-items', debouncedQ],
+    initialPageParam: 0, // offset starts at 0
+    queryFn: async ({ pageParam }) => {
       try {
-        const res = await listItems(q)
-        return res
+        // pageParam is offset
+        return await listItemsPage(debouncedQ, LIMIT, pageParam)
       } catch (err: any) {
         const msg =
           err?.response?.data?.detail ||
           err?.message ||
           'Failed to load inventory'
         toast.push(String(msg), 'error')
-        throw err // rethrow so react-query marks it as an error
+        throw err
       }
     },
+    getNextPageParam: (lastPage) => lastPage.next_offset ?? undefined,
   })
+
+  // ✅ Flatten pages into a single rows array (same as old `rows = data || []`)
+  const rows = useMemo(() => {
+    return data?.pages.flatMap((p) => p.items) ?? []
+  }, [data])
+
+  // ✅ Sentinel-based infinite scroll (reliable even if window scroll is used)
+  const loadMoreRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const el = loadMoreRef.current
+    if (!el) return
+
+    const obs = new IntersectionObserver(
+      (entries) => {
+        const first = entries[0]
+        if (first.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage()
+        }
+      },
+      { root: null, rootMargin: '200px', threshold: 0 }
+    )
+
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage])
 
   const mCreate = useMutation({
     mutationFn: (payload: ItemFormValues) => createItem(payload),
@@ -111,9 +161,7 @@ export default function Inventory() {
     },
     onError: (err: any) => {
       const msg =
-        err?.response?.data?.detail ||
-        err?.message ||
-        'Adjust stock failed'
+        err?.response?.data?.detail || err?.message || 'Adjust stock failed'
       toast.push(String(msg), 'error')
     },
   })
@@ -147,11 +195,10 @@ export default function Inventory() {
     setDeleteTarget(null)
   }
 
-  const rows = data || []
-
   return (
     <Stack gap={2}>
       <Typography variant="h5">Inventory</Typography>
+
       <Paper sx={{ p: 2 }}>
         <Stack
           direction={{ xs: 'column', sm: 'row' }}
@@ -174,70 +221,87 @@ export default function Inventory() {
         {isLoading ? (
           <Loading />
         ) : (
-          <Box component="div" sx={{ overflowX: 'auto' }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Brand</th>
-                  <th>Expiry</th>
-                  <th>MRP</th>
-                  <th>Stock</th>
-                  <th style={{ width: 140 }}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((it: any) => (
-                  <tr key={it.id}>
-                    <td>{it.name}</td>
-                    <td>{it.brand || '-'}</td>
-                    <td>{it.expiry_date || '-'}</td>
-                    <td>{it.mrp}</td>
-                    <td>{it.stock}</td>
-                    <td>
-                      <Stack direction="row" gap={1}>
-                        <Tooltip title="Edit">
-                          <IconButton
-                            size="small"
-                            onClick={() => handleEdit(it)}
-                          >
-                            <EditIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
-
-                        <Tooltip title="Adjust Stock">
-                          <IconButton
-                            size="small"
-                            onClick={() => handleAdjust(it)}
-                          >
-                            <AddCircleOutlineIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
-
-                        <Tooltip title="Delete">
-                          <IconButton
-                            size="small"
-                            color="error"
-                            onClick={() => handleDeleteClick(it)}
-                            disabled={mDelete.isPending}
-                          >
-                            <DeleteIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
-                      </Stack>
-                    </td>
+          <>
+            <Box component="div" sx={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Brand</th>
+                    <th>Expiry</th>
+                    <th>MRP</th>
+                    <th>Stock</th>
+                    <th style={{ width: 140 }}>Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </Box>
+                </thead>
+                <tbody>
+                  {rows.map((it: any) => (
+                    <tr key={it.id}>
+                      <td>{it.name}</td>
+                      <td>{it.brand || '-'}</td>
+                      <td>{it.expiry_date || '-'}</td>
+                      <td>{it.mrp}</td>
+                      <td>{it.stock}</td>
+                      <td>
+                        <Stack direction="row" gap={1}>
+                          <Tooltip title="Edit">
+                            <IconButton
+                              size="small"
+                              onClick={() => handleEdit(it)}
+                            >
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+
+                          <Tooltip title="Adjust Stock">
+                            <IconButton
+                              size="small"
+                              onClick={() => handleAdjust(it)}
+                            >
+                              <AddCircleOutlineIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+
+                          <Tooltip title="Delete">
+                            <IconButton
+                              size="small"
+                              color="error"
+                              onClick={() => handleDeleteClick(it)}
+                              disabled={mDelete.isPending}
+                            >
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </Stack>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Box>
+
+            {/* ✅ sentinel for loading next page */}
+            <div ref={loadMoreRef} style={{ height: 1 }} />
+
+            {isFetchingNextPage && (
+              <Box sx={{ py: 2, textAlign: 'center' }}>
+                <Typography variant="body2">Loading more...</Typography>
+              </Box>
+            )}
+
+            {!hasNextPage && rows.length > 0 && (
+              <Box sx={{ py: 2, textAlign: 'center' }}>
+                <Typography variant="body2">End of list</Typography>
+              </Box>
+            )}
+          </>
         )}
       </Paper>
 
       <ItemForm
         open={openForm}
         initial={editing}
-        items={rows} // 🔹 pass existing items for suggestions
+        items={rows} // ✅ still pass existing items for suggestions
         onClose={() => setOpenForm(false)}
         onSubmit={(values) => {
           if (editing?.id) mUpdate.mutate({ id: editing.id, payload: values })

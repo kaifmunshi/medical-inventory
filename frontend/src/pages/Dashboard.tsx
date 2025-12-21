@@ -101,67 +101,73 @@ export default function Dashboard() {
     return Math.round(total * 100) / 100;
   }, [qReturns.data]);
 
+  // ---- Gross Cash (Total - Returns - Online) ----
+  const grossCashToday = useMemo(() => {
+    const val =
+      Number(salesToday || 0) - Number(todayRefunds || 0) - Number(onlineSalesToday || 0);
+    return Math.round(val * 100) / 100;
+  }, [salesToday, todayRefunds, onlineSalesToday]);
+
   // ---- Low Stock (✅ aggregated by name + brand; expiry/mrp ignored) ----
-const { lowStockItems, lowStockCount } = useMemo(() => {
-  const items = (qInv.data || []) as any[];
+  const { lowStockItems, lowStockCount } = useMemo(() => {
+    const items = (qInv.data || []) as any[];
 
-  type Agg = {
-    _key: string;
-    name: string;
-    brand: string | null;
-    stock: number; // aggregated
-    // optional: keep variants if you want later
-    _variants: Array<{ id: number; mrp: number; expiry_date?: string | null; stock: number }>;
-  };
+    type Agg = {
+      _key: string;
+      name: string;
+      brand: string | null;
+      stock: number; // aggregated
+      // optional: keep variants if you want later
+      _variants: Array<{ id: number; mrp: number; expiry_date?: string | null; stock: number }>;
+    };
 
-  const map = new Map<string, Agg>();
+    const map = new Map<string, Agg>();
 
-  for (const it of items) {
-    const name = String(it?.name ?? '').trim();
-    const brand = it?.brand != null ? String(it.brand).trim() : null;
-    const stock = Number(it?.stock ?? 0);
-    const mrp = Number(it?.mrp ?? 0);
+    for (const it of items) {
+      const name = String(it?.name ?? '').trim();
+      const brand = it?.brand != null ? String(it.brand).trim() : null;
+      const stock = Number(it?.stock ?? 0);
+      const mrp = Number(it?.mrp ?? 0);
 
-    if (!name) continue;
+      if (!name) continue;
 
-    const key = `${name.toLowerCase()}|${(brand ?? '').toLowerCase()}`;
+      const key = `${name.toLowerCase()}|${(brand ?? '').toLowerCase()}`;
 
-    const existing = map.get(key);
-    if (!existing) {
-      map.set(key, {
-        _key: key,
-        name,
-        brand,
-        stock: stock,
-        _variants: [
-          {
-            id: Number(it?.id ?? 0),
-            mrp,
-            expiry_date: it?.expiry_date ?? null,
-            stock,
-          },
-        ],
-      });
-    } else {
-      existing.stock += stock;
-      existing._variants.push({
-        id: Number(it?.id ?? 0),
-        mrp,
-        expiry_date: it?.expiry_date ?? null,
-        stock,
-      });
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, {
+          _key: key,
+          name,
+          brand,
+          stock: stock,
+          _variants: [
+            {
+              id: Number(it?.id ?? 0),
+              mrp,
+              expiry_date: it?.expiry_date ?? null,
+              stock,
+            },
+          ],
+        });
+      } else {
+        existing.stock += stock;
+        existing._variants.push({
+          id: Number(it?.id ?? 0),
+          mrp,
+          expiry_date: it?.expiry_date ?? null,
+          stock,
+        });
+      }
     }
-  }
 
-  const aggregated = Array.from(map.values());
+    const aggregated = Array.from(map.values());
 
-  const lows = aggregated
-    .filter((it) => Number(it.stock || 0) <= LOW_STOCK_THRESH)
-    .sort((a, b) => a.name.localeCompare(b.name));
+    const lows = aggregated
+      .filter((it) => Number(it.stock || 0) <= LOW_STOCK_THRESH)
+      .sort((a, b) => a.name.localeCompare(b.name));
 
-  return { lowStockItems: lows, lowStockCount: lows.length };
-}, [qInv.data]);
-
+    return { lowStockItems: lows, lowStockCount: lows.length };
+  }, [qInv.data]);
 
   // ---- Expiring Soon (≤ 60 days) ----
   const { expiringSoonItems, expiringSoonCount } = useMemo(() => {
@@ -241,6 +247,9 @@ const { lowStockItems, lowStockCount } = useMemo(() => {
                     <Typography variant="caption">
                       Online: ₹{onlineSalesToday.toFixed(2)}
                     </Typography>
+                    <Typography variant="caption">
+                      Gross Cash: ₹{grossCashToday.toFixed(2)}
+                    </Typography>
                   </Stack>
                 }
               >
@@ -273,7 +282,7 @@ const { lowStockItems, lowStockCount } = useMemo(() => {
                     color="text.secondary"
                     sx={{ mt: 0.5 }}
                   >
-
+                    Gross Cash: ₹{grossCashToday.toFixed(2)}
                   </Typography>
                 </Paper>
               </Tooltip>
@@ -396,6 +405,14 @@ const { lowStockItems, lowStockCount } = useMemo(() => {
                 ₹{salesToday.toFixed(2)}
               </Typography>
             </Stack>
+            <Stack direction="row" justifyContent="space-between">
+              <Typography variant="body2" color="text.secondary">
+                Gross Cash
+              </Typography>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                ₹{grossCashToday.toFixed(2)}
+              </Typography>
+            </Stack>
           </Stack>
           <Stack alignItems="flex-end" mt={2}>
             <Button onClick={() => setOpenSalesBreakdown(false)}>Close</Button>
@@ -470,7 +487,7 @@ const { lowStockItems, lowStockCount } = useMemo(() => {
               </TableHead>
               <TableBody>
                 {expiringSoonItems.map((it: any) => (
-                    <TableRow key={it._key}>
+                  <TableRow key={it._key}>
                     <TableCell>{it.name}</TableCell>
                     <TableCell>{it.brand || '-'}</TableCell>
                     <TableCell>{it.expiry_date || '-'}</TableCell>

@@ -12,6 +12,7 @@ class Item(SQLModel, table=True):
     expiry_date: Optional[str] = Field(default=None, sa_column=Column(String(10)))
     mrp: float
     stock: int = 0
+    rack_number: int = Field(default=0, index=True)
     created_at: str = Field(
         default_factory=lambda: datetime.now().isoformat(timespec="seconds")
     )
@@ -96,6 +97,7 @@ class ItemCreate(SQLModel):
     name: str
     mrp: float
     stock: int = 0
+    rack_number: int = 0
     brand: Optional[str] = None
     # batch_no: REMOVED
     expiry_date: Optional[str] = None
@@ -106,6 +108,7 @@ class ItemUpdate(SQLModel):
     mrp: Optional[float] = None
     stock: Optional[int] = None
     brand: Optional[str] = None
+    rack_number: Optional[int] = None
     # batch_no: REMOVED
     expiry_date: Optional[str] = None
 
@@ -117,6 +120,7 @@ class ItemOut(SQLModel):
     stock: int
     brand: Optional[str] = None
     # batch_no: REMOVED
+    rack_number: int
     expiry_date: Optional[str] = None
     created_at: str
     updated_at: str

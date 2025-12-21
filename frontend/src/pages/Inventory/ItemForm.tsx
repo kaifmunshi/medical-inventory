@@ -47,8 +47,11 @@ export default function ItemForm({
       name: initial?.name ?? '',
       brand: (initial?.brand as any) ?? '',
       expiry_date: (initial?.expiry_date as any) ?? '',
-      mrp: Number(initial?.mrp ?? 0),
-      stock: Number(initial?.stock ?? 0),
+      mrp: Number((initial as any)?.mrp ?? 0),
+      stock: Number((initial as any)?.stock ?? 0),
+
+      // ✅ NEW
+      rack_number: Number((initial as any)?.rack_number ?? 0),
     },
   })
 
@@ -59,8 +62,11 @@ export default function ItemForm({
       name: initial.name ?? '',
       brand: (initial.brand as any) ?? '',
       expiry_date: (initial.expiry_date as any) ?? '',
-      mrp: Number(initial.mrp ?? 0),
-      stock: Number(initial.stock ?? 0),
+      mrp: Number((initial as any).mrp ?? 0),
+      stock: Number((initial as any).stock ?? 0),
+
+      // ✅ NEW
+      rack_number: Number((initial as any).rack_number ?? 0),
     })
   }, [initial, reset])
 
@@ -73,6 +79,9 @@ export default function ItemForm({
         expiry_date: '',
         mrp: '' as any,
         stock: '' as any,
+
+        // ✅ NEW: default 0 for new items
+        rack_number: 0 as any,
       })
     }
   }, [open, initial, reset])
@@ -86,6 +95,9 @@ export default function ItemForm({
       expiry_date: '',
       mrp: Number(it.mrp ?? 0),
       stock: '' as any,
+
+      // ✅ NEW
+      rack_number: Number(it.rack_number ?? 0),
     })
   }
 
@@ -138,7 +150,8 @@ export default function ItemForm({
   const handleListboxScroll = (event: React.UIEvent<HTMLUListElement>) => {
     const listboxNode = event.currentTarget
     const nearBottom =
-      listboxNode.scrollTop + listboxNode.clientHeight >= listboxNode.scrollHeight - 40
+      listboxNode.scrollTop + listboxNode.clientHeight >=
+      listboxNode.scrollHeight - 40
 
     if (nearBottom && hasNextPage && !isFetchingNextPage) {
       fetchNextPage()
@@ -185,7 +198,7 @@ export default function ItemForm({
                   ...params.InputProps,
                   endAdornment: (
                     <>
-                      {(isLoading || isFetchingNextPage) ? (
+                      {isLoading || isFetchingNextPage ? (
                         <CircularProgress size={18} />
                       ) : null}
                       {params.InputProps.endAdornment}
@@ -232,6 +245,17 @@ export default function ItemForm({
             InputLabelProps={{ shrink: true }}
             error={!!errors.mrp}
             helperText={errors.mrp?.message}
+          />
+
+          {/* ✅ NEW: Rack Number */}
+          <TextField
+            label="Rack Number"
+            type="number"
+            inputProps={{ step: 1, min: 0 }}
+            {...register('rack_number', { valueAsNumber: true })}
+            InputLabelProps={{ shrink: true }}
+            error={!!(errors as any).rack_number}
+            helperText={(errors as any).rack_number?.message || 'Default: 0'}
           />
 
           <TextField

@@ -8,6 +8,10 @@ export interface Item {
   expiry_date?: string | null // YYYY-MM-DD
   mrp: number
   stock: number
+
+  // ✅ NEW
+  rack_number: number
+
   created_at?: string
   updated_at?: string
 }

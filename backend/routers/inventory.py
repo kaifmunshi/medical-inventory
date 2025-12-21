@@ -24,6 +24,9 @@ class ItemIn(BaseModel):
     mrp: float
     stock: int
 
+    # ✅ NEW
+    rack_number: int = 0
+
     class Config:
         extra = "ignore"  # ignore legacy 'batch_no' if a stale client sends it
 
@@ -34,6 +37,9 @@ class ItemUpdateIn(BaseModel):
     expiry_date: Optional[str] = None
     mrp: Optional[float] = None
     stock: Optional[int] = None
+
+    # ✅ NEW
+    rack_number: Optional[int] = None
 
     class Config:
         extra = "ignore"  # ignore legacy 'batch_no'
@@ -46,6 +52,10 @@ class ItemOut(BaseModel):
     expiry_date: Optional[str] = None
     mrp: float
     stock: int
+
+    # ✅ NEW
+    rack_number: int
+
     created_at: str
     updated_at: str
 
@@ -139,6 +149,10 @@ def create_item(payload: ItemIn):
     if payload.stock is not None and payload.stock < 0:
         raise HTTPException(status_code=400, detail="Stock cannot be negative")
 
+    # ✅ NEW: rack validation
+    if payload.rack_number is not None and int(payload.rack_number) < 0:
+        raise HTTPException(status_code=400, detail="Rack number cannot be negative")
+
     with get_session() as session:
         item = Item(
             name=payload.name,
@@ -146,6 +160,10 @@ def create_item(payload: ItemIn):
             expiry_date=payload.expiry_date,
             mrp=payload.mrp,
             stock=payload.stock,
+
+            # ✅ NEW
+            rack_number=int(payload.rack_number or 0),
+
             created_at=now_ts(),
             updated_at=now_ts(),
         )
@@ -170,8 +188,16 @@ def update_item(item_id: int, payload: ItemUpdateIn):
         if "stock" in data and data["stock"] is not None and data["stock"] < 0:
             raise HTTPException(status_code=400, detail="Stock cannot be negative")
 
+        # ✅ NEW: rack validation
+        if "rack_number" in data and data["rack_number"] is not None and int(data["rack_number"]) < 0:
+            raise HTTPException(status_code=400, detail="Rack number cannot be negative")
+
         for k, v in data.items():
-            setattr(item, k, v)
+            if k == "rack_number" and v is not None:
+                setattr(item, k, int(v))
+            else:
+                setattr(item, k, v)
+
         item.updated_at = now_ts()
 
         session.add(item)

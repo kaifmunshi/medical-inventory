@@ -114,7 +114,8 @@ export default function Inventory() {
   const mCreate = useMutation({
     mutationFn: (payload: ItemFormValues) => createItem(payload),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
       toast.push('Item created', 'success')
     },
     onError: (err: any) => {
@@ -128,7 +129,8 @@ export default function Inventory() {
     mutationFn: ({ id, payload }: { id: number; payload: ItemFormValues }) =>
       updateItem(id, payload),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
       toast.push('Item updated', 'success')
     },
     onError: (err: any) => {
@@ -141,7 +143,8 @@ export default function Inventory() {
   const mDelete = useMutation({
     mutationFn: (id: number) => deleteItem(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['items'] })
+     qc.invalidateQueries({ queryKey: ['inventory-items'] })
+     qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
       toast.push('Item deleted', 'warning')
       setDeleteTarget(null)
     },
@@ -156,7 +159,8 @@ export default function Inventory() {
     mutationFn: ({ id, delta }: { id: number; delta: number }) =>
       adjustStock(id, delta),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
       toast.push('Stock adjusted', 'success')
     },
     onError: (err: any) => {
@@ -227,6 +231,7 @@ export default function Inventory() {
                 <thead>
                   <tr>
                     <th>Name</th>
+                    <th>Rack</th>
                     <th>Brand</th>
                     <th>Expiry</th>
                     <th>MRP</th>
@@ -238,6 +243,7 @@ export default function Inventory() {
                   {rows.map((it: any) => (
                     <tr key={it.id}>
                       <td>{it.name}</td>
+                      <td>{it.rack_number ?? 0}</td>
                       <td>{it.brand || '-'}</td>
                       <td>{it.expiry_date || '-'}</td>
                       <td>{it.mrp}</td>

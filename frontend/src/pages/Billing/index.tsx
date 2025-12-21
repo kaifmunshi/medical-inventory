@@ -10,7 +10,24 @@ import { createBill } from '../../services/billing'
 import { computeTotals, validatePayments } from '../../lib/billing'
 import { useToast } from '../../components/ui/Toaster'
 
-interface CartRow { item_id:number; name:string; mrp:number; quantity:number; stock?:number }
+interface CartRow {
+  item_id: number
+  name: string
+  mrp: number
+  quantity: number
+  stock?: number
+  expiry_date?: string | null
+}
+
+function formatExpiry(exp?: string | null) {
+  if (!exp) return '-'
+  const s = String(exp)
+  const iso = s.length > 10 ? s.slice(0, 10) : s // "YYYY-MM-DD"
+  const [y, m, d] = iso.split('-')
+  if (!y || !m || !d) return iso
+  return `${d}-${m}-${y}` // "DD-MM-YYYY"
+}
+
 
 export default function Billing() {
   const toast = useToast()
@@ -21,9 +38,9 @@ export default function Billing() {
   const [discount, setDiscount] = useState(0)
   const [tax, setTax] = useState(0)
 
-  const [mode, setMode] = useState<'cash'|'online'|'split'>('cash')
-  const [cash, setCash] = useState<number|''>('')
-  const [online, setOnline] = useState<number|''>('')
+  const [mode, setMode] = useState<'cash' | 'online' | 'split'>('cash')
+  const [cash, setCash] = useState<number | ''>('')
+  const [online, setOnline] = useState<number | ''>('')
 
   const [notes, setNotes] = useState('')
 
@@ -31,41 +48,40 @@ export default function Billing() {
   const [finalAmount, setFinalAmount] = useState<number>(0)
 
   const totals = useMemo(
-    () => computeTotals(rows, Number(discount)||0, Number(tax)||0),
+    () => computeTotals(rows, Number(discount) || 0, Number(tax) || 0),
     [rows, discount, tax]
   )
 
   // keep finalAmount in sync initially, but preserve manual edits afterward
   useEffect(() => {
-    setFinalAmount(prev => (prev === 0 ? totals.total : prev))
+    setFinalAmount((prev) => (prev === 0 ? totals.total : prev))
   }, [totals.total])
 
   // Quick rounding helpers (based on computed total)
-  function roundNearest10(x:number){ return Math.round(x / 10) * 10 }
-  function roundUp10(x:number){ return Math.ceil(x / 10) * 10 }
-  function roundDown10(x:number){ return Math.floor(x / 10) * 10 }
+  function roundNearest10(x: number) {
+    return Math.round(x / 10) * 10
+  }
+  function roundUp10(x: number) {
+    return Math.ceil(x / 10) * 10
+  }
+  function roundDown10(x: number) {
+    return Math.floor(x / 10) * 10
+  }
 
   // Validate payments against the chosen final amount (not just computed)
   const chosenFinal = +Number(finalAmount || totals.total).toFixed(2)
 
   // NEW: effective discount % based on computed total vs final amount
   const effectiveDiscountPercent =
-    totals.total > 0
-      ? ((totals.total - chosenFinal) / totals.total) * 100
-      : 0
+    totals.total > 0 ? ((totals.total - chosenFinal) / totals.total) * 100 : 0
 
-  const paymentsOk = validatePayments(
-    mode,
-    chosenFinal,
-    Number(cash || 0),
-    Number(online || 0)
-  )
+  const paymentsOk = validatePayments(mode, chosenFinal, Number(cash || 0), Number(online || 0))
 
   const mBill = useMutation({
     mutationFn: async () => {
       // Build payload as before, PLUS final_amount and payment alignment
       const payload: any = {
-        items: rows.map(r => ({
+        items: rows.map((r) => ({
           item_id: r.item_id,
           quantity: Number(r.quantity) || 1,
           mrp: Number(r.mrp) || 0
@@ -87,7 +103,9 @@ export default function Billing() {
         payload.payment_cash = 0
         payload.payment_online = chosenFinal
       } else {
-        const sum = +(Number(payload.payment_cash || 0) + Number(payload.payment_online || 0)).toFixed(2)
+        const sum = +(
+          Number(payload.payment_cash || 0) + Number(payload.payment_online || 0)
+        ).toFixed(2)
         if (sum !== chosenFinal) {
           toast.push('Split amounts must equal Final Amount', 'error')
           throw new Error('Split amounts must equal Final Amount')
@@ -106,17 +124,17 @@ export default function Billing() {
       setOnline('')
       setNotes('')
       setFinalAmount(0) // reset so it re-inits to computed next time
-      toast.push('Bill created successfully','success')
+      toast.push('Bill created successfully', 'success')
     },
     onError: (err: any) => {
       const msg = err?.response?.data?.detail || err?.message || 'Failed to create bill'
-      toast.push(`Bill failed: ${msg}`, 'error')   // ← was “Return failed”
+      toast.push(`Bill failed: ${msg}`, 'error') // ← was “Return failed”
     }
   })
 
   function addRow(it: any) {
-    setRows(prev => {
-      const idx = prev.findIndex(p => p.item_id === it.id)
+    setRows((prev) => {
+      const idx = prev.findIndex((p) => p.item_id === it.id)
       if (idx >= 0) {
         // bump quantity, clamp to stock if provided
         const next = prev.map((r, i) =>
@@ -130,22 +148,30 @@ export default function Billing() {
               }
             : r
         )
-        toast.push('Quantity increased','info')
+        toast.push('Quantity increased', 'info')
         return next
       }
-      // new line item
+
+      // new line item (✅ store expiry_date for display)
       const next = [
         ...prev,
-        { item_id: it.id, name: it.name, mrp: Number(it.mrp)||0, quantity: 1, stock: it.stock },
+        {
+          item_id: it.id,
+          name: it.name,
+          mrp: Number(it.mrp) || 0,
+          quantity: 1,
+          stock: it.stock,
+          expiry_date: it.expiry_date ?? null
+        }
       ]
-      toast.push('Item added to cart','success')
+      toast.push('Item added to cart', 'success')
       return next
     })
   }
 
   function setQty(i: number, q: number) {
     const n = Number(q) || 1
-    setRows(prev =>
+    setRows((prev) =>
       prev.map((r, idx) =>
         idx === i
           ? { ...r, quantity: Math.max(1, Math.min((r.stock ?? Number.POSITIVE_INFINITY) as number, n)) }
@@ -155,80 +181,85 @@ export default function Billing() {
   }
 
   function removeRow(i: number) {
-    setRows(prev => prev.filter((_, idx) => idx !== i))
-    toast.push('Item removed','info')
+    setRows((prev) => prev.filter((_, idx) => idx !== i))
+    toast.push('Item removed', 'info')
   }
 
   return (
     <Stack gap={2}>
       <Typography variant="h5">Billing</Typography>
 
-      <Paper sx={{ p:2 }}>
+      <Paper sx={{ p: 2 }}>
         <Stack direction="row" justifyContent="space-between" gap={2}>
-          <Button startIcon={<AddIcon/>} variant="contained" onClick={()=>setPickerOpen(true)}>
+          <Button startIcon={<AddIcon />} variant="contained" onClick={() => setPickerOpen(true)}>
             Add Item
           </Button>
-          <Stack direction={{ xs:'column', md:'row' }} gap={2}>
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
             <TextField
               label="Discount %"
               type="number"
               value={discount}
-              onChange={e=>setDiscount(Number(e.target.value||0))}
-              sx={{ width:120 }}
+              onChange={(e) => setDiscount(Number(e.target.value || 0))}
+              sx={{ width: 120 }}
             />
             <TextField
               label="Tax %"
               type="number"
               value={tax}
-              onChange={e=>setTax(Number(e.target.value||0))}
-              sx={{ width:120 }}
+              onChange={(e) => setTax(Number(e.target.value || 0))}
+              sx={{ width: 120 }}
             />
           </Stack>
         </Stack>
       </Paper>
 
-      <Paper sx={{ p:2 }}>
-        <Box sx={{ overflowX:'auto' }}>
+      <Paper sx={{ p: 2 }}>
+        <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
             <thead>
               <tr>
-                <th style={{minWidth:240}}>Item</th>
+                <th style={{ minWidth: 240 }}>Item</th>
                 <th>MRP</th>
+                {/* ✅ NEW column */}
+                <th style={{ minWidth: 120 }}>Expiry</th>
                 <th>Qty</th>
                 <th>Line Total</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i)=> (
+              {rows.map((r, i) => (
                 <tr key={r.item_id}>
                   <td>{r.name}</td>
                   <td>{r.mrp}</td>
+                  {/* ✅ NEW cell */}
+                  <td>{formatExpiry(r.expiry_date)}</td>
                   <td>
                     <TextField
-                    type="number"
-                    value={r.quantity}  
-                    onChange={e => setQty(i, Number(e.target.value || 1))}
-                    onFocus={(e) => {
-                      // Select the whole value so typing "2" replaces "1"
-                      e.target.select()
-                    }}
-                    inputProps={{ min: 1 }}
-                    sx={{ width: 100 }}
-                  />
-
+                      type="number"
+                      value={r.quantity}
+                      onChange={(e) => setQty(i, Number(e.target.value || 1))}
+                      onFocus={(e) => {
+                        // Select the whole value so typing "2" replaces "1"
+                        e.target.select()
+                      }}
+                      inputProps={{ min: 1 }}
+                      sx={{ width: 100 }}
+                    />
                   </td>
                   <td>{(r.quantity * r.mrp).toFixed(2)}</td>
                   <td>
-                    <IconButton color="error" onClick={()=>removeRow(i)}>
-                      <DeleteIcon/>
+                    <IconButton color="error" onClick={() => removeRow(i)}>
+                      <DeleteIcon />
                     </IconButton>
                   </td>
                 </tr>
               ))}
-              {rows.length===0 && (
+
+              {rows.length === 0 && (
                 <tr>
-                  <td colSpan={5}>
+                  {/* ✅ colSpan updated because we added Expiry column */}
+                  <td colSpan={6}>
                     <Box p={2} color="text.secondary">
                       No items in cart. Click "Add Item" to start.
                     </Box>
@@ -240,54 +271,60 @@ export default function Billing() {
         </Box>
       </Paper>
 
-      <Paper sx={{ p:2 }}>
+      <Paper sx={{ p: 2 }}>
         <Stack
-          direction={{ xs:'column', md:'row' }}
+          direction={{ xs: 'column', md: 'row' }}
           gap={2}
-          alignItems={{ md:'center' }}
+          alignItems={{ md: 'center' }}
           justifyContent="space-between"
         >
-          <Stack direction={{ xs:'column', md:'row' }} gap={2}>
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
             <TextField
               select
               label="Payment Mode"
               value={mode}
-              onChange={e=>setMode(e.target.value as any)}
-              sx={{ width:160 }}
+              onChange={(e) => setMode(e.target.value as any)}
+              sx={{ width: 160 }}
             >
               <MenuItem value="cash">Cash</MenuItem>
               <MenuItem value="online">Online</MenuItem>
               <MenuItem value="split">Split</MenuItem>
             </TextField>
 
-            {(mode==='cash' || mode==='split') && (
+            {(mode === 'cash' || mode === 'split') && (
               <TextField
                 label="Cash Amount"
                 type="number"
                 value={cash}
-                onChange={e=>setCash(e.target.value as any)}
-                sx={{ width:160 }}
+                onChange={(e) => setCash(e.target.value as any)}
+                sx={{ width: 160 }}
               />
             )}
 
-            {(mode==='online' || mode==='split') && (
+            {(mode === 'online' || mode === 'split') && (
               <TextField
                 label="Online Amount"
                 type="number"
                 value={online}
-                onChange={e=>setOnline(e.target.value as any)}
-                sx={{ width:160 }}
+                onChange={(e) => setOnline(e.target.value as any)}
+                sx={{ width: 160 }}
               />
             )}
           </Stack>
 
-          <Divider flexItem orientation="vertical" sx={{ display:{ xs:'none', md:'block' }}} />
+          <Divider flexItem orientation="vertical" sx={{ display: { xs: 'none', md: 'block' } }} />
 
           {/* Existing totals (kept) */}
-          <Stack gap={0.5} alignItems={{ md:'flex-end' }}>
-            <Typography variant="body2" color="text.secondary">Subtotal: ₹{totals.subtotal.toFixed(2)}</Typography>
-            <Typography variant="body2" color="text.secondary">Discount: ₹{totals.discount.toFixed(2)}</Typography>
-            <Typography variant="body2" color="text.secondary">Tax: ₹{totals.tax.toFixed(2)}</Typography>
+          <Stack gap={0.5} alignItems={{ md: 'flex-end' }}>
+            <Typography variant="body2" color="text.secondary">
+              Subtotal: ₹{totals.subtotal.toFixed(2)}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Discount: ₹{totals.discount.toFixed(2)}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Tax: ₹{totals.tax.toFixed(2)}
+            </Typography>
             <Typography variant="h6">Computed Total: ₹{totals.total.toFixed(2)}</Typography>
 
             {/* Final Amount you charge + quick rounders + effective % */}
@@ -319,7 +356,7 @@ export default function Billing() {
 
               {/* NEW: show percentage w.r.t. computed total */}
               <Typography variant="caption" color="text.secondary">
-               Discount Given: +{effectiveDiscountPercent.toFixed(2)}%
+                Discount Given: +{effectiveDiscountPercent.toFixed(2)}%
               </Typography>
             </Stack>
           </Stack>
@@ -332,22 +369,22 @@ export default function Billing() {
             minRows={2}
             label="Notes"
             value={notes}
-            onChange={e=>setNotes(e.target.value)}
+            onChange={(e) => setNotes(e.target.value)}
           />
         </Box>
 
         <Box mt={2} textAlign="right">
           <Button
             variant="contained"
-            disabled={rows.length===0 || !paymentsOk || mBill.isPending}
-            onClick={()=>mBill.mutate()}
+            disabled={rows.length === 0 || !paymentsOk || mBill.isPending}
+            onClick={() => mBill.mutate()}
           >
             Create Bill
           </Button>
         </Box>
       </Paper>
 
-      <ItemPicker open={pickerOpen} onClose={()=>setPickerOpen(false)} onPick={addRow} />
+      <ItemPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={addRow} />
     </Stack>
   )
 }

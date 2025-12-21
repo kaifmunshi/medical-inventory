@@ -34,6 +34,16 @@ import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'
 import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
 
+function formatExpiry(exp?: string | null) {
+  if (!exp) return '-'
+  const s = String(exp)
+  const iso = s.length > 10 ? s.slice(0, 10) : s // "YYYY-MM-DD"
+  const [y, m, d] = iso.split('-')
+  if (!y || !m || !d) return iso
+  return `${d}-${m}-${y}` // "DD-MM-YYYY"
+}
+
+
 export default function Inventory() {
   const toast = useToast()
 
@@ -245,7 +255,7 @@ export default function Inventory() {
                       <td>{it.name}</td>
                       <td>{it.rack_number ?? 0}</td>
                       <td>{it.brand || '-'}</td>
-                      <td>{it.expiry_date || '-'}</td>
+                      <td>{formatExpiry(it.expiry_date)}</td>
                       <td>{it.mrp}</td>
                       <td>{it.stock}</td>
                       <td>

@@ -234,7 +234,7 @@ export default function ItemForm({
             InputLabelProps={{ shrink: true }}
             inputProps={{ min: today }}
             error={!!errors.expiry_date}
-            helperText={errors.expiry_date?.message || 'Format: YYYY-MM-DD'}
+            helperText={errors.expiry_date?.message || 'Format: DD-MM-YYYY'}
           />
 
           <TextField

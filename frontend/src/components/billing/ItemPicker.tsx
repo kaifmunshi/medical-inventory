@@ -22,7 +22,18 @@ export interface PickerItem {
   mrp: number
   stock: number
   brand?: string | null
+  expiry_date?: string | null
 }
+
+function formatExpiry(exp?: string | null) {
+  if (!exp) return '-'
+  const s = String(exp)
+  const iso = s.length > 10 ? s.slice(0, 10) : s // "YYYY-MM-DD"
+  const [y, m, d] = iso.split('-')
+  if (!y || !m || !d) return iso
+  return `${d}-${m}-${y}` // "DD-MM-YYYY"
+}
+
 
 export default function ItemPicker({
   open,
@@ -74,7 +85,7 @@ export default function ItemPicker({
           <TextField
             fullWidth
             autoFocus
-            placeholder="Search (name/brand)"   // ✅ updated placeholder
+            placeholder="Search (name/brand)" // ✅ updated placeholder
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
@@ -82,14 +93,12 @@ export default function ItemPicker({
 
         <List>
           {items.map((it) => (
-            <ListItemButton
-              key={it.id}
-              disabled={it.stock <= 0}
-              onClick={() => handlePick(it)}
-            >
+            <ListItemButton key={it.id} disabled={it.stock <= 0} onClick={() => handlePick(it)}>
               <ListItemText
                 primary={`${it.name} — ₹${it.mrp}`}
-                secondary={`Stock: ${it.stock}${it.brand ? ` • ${it.brand}` : ''}`}
+                secondary={`Stock: ${it.stock}${
+                  it.brand ? ` • ${it.brand}` : ''
+                } • Exp: ${formatExpiry(it.expiry_date)}`}
               />
             </ListItemButton>
           ))}

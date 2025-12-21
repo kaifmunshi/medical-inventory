@@ -464,6 +464,7 @@ const { lowStockItems, lowStockCount } = useMemo(() => {
                   <TableCell>Name</TableCell>
                   <TableCell>Brand</TableCell>
                   <TableCell>Expiry</TableCell>
+                  <TableCell>Qty</TableCell>
                   <TableCell align="right">Days Left</TableCell>
                 </TableRow>
               </TableHead>
@@ -473,6 +474,7 @@ const { lowStockItems, lowStockCount } = useMemo(() => {
                     <TableCell>{it.name}</TableCell>
                     <TableCell>{it.brand || '-'}</TableCell>
                     <TableCell>{it.expiry_date || '-'}</TableCell>
+                    <TableCell>{it.stock || '-'}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 600 }}>
                       {it._daysLeft}
                     </TableCell>

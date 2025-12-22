@@ -22,6 +22,16 @@ import { listReturns } from '../services/returns';
 import { listItems } from '../services/inventory';
 import { todayRange } from '../lib/date';
 
+function formatExpiry(exp?: string | null) {
+  if (!exp) return '-'
+  const s = String(exp)
+  const iso = s.length > 10 ? s.slice(0, 10) : s
+  const [y, m, d] = iso.split('-')
+  if (!y || !m || !d) return iso
+  return `${d}-${m}-${y}`
+}
+
+
 const LOW_STOCK_THRESH = 2;       // ≤ 2 is low-stock
 const EXPIRY_WINDOW_DAYS = 60;    // within next 60 days
 
@@ -490,7 +500,7 @@ export default function Dashboard() {
                   <TableRow key={it._key}>
                     <TableCell>{it.name}</TableCell>
                     <TableCell>{it.brand || '-'}</TableCell>
-                    <TableCell>{it.expiry_date || '-'}</TableCell>
+                    <TableCell>{formatExpiry(it.expiry_date)}</TableCell>
                     <TableCell>{it.stock || '-'}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 600 }}>
                       {it._daysLeft}

@@ -14,7 +14,7 @@ import {
   DialogContent,
   DialogActions,
 } from '@mui/material'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 
 import {
@@ -31,6 +31,8 @@ import type { ItemFormValues } from './ItemForm'
 import EditIcon from '@mui/icons-material/Edit'
 import DeleteIcon from '@mui/icons-material/Delete'
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
+import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp'
 import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
 
@@ -43,6 +45,17 @@ function formatExpiry(exp?: string | null) {
   return `${d}-${m}-${y}` // "DD-MM-YYYY"
 }
 
+function toIsoDateOnly(exp?: string | null) {
+  if (!exp) return ''
+  const s = String(exp)
+  return s.length > 10 ? s.slice(0, 10) : s
+}
+
+function buildGroupKey(it: any) {
+  const name = String(it?.name ?? '').trim().toLowerCase()
+  const brand = String(it?.brand ?? '').trim().toLowerCase()
+  return `${name}__${brand}`
+}
 
 export default function Inventory() {
   const toast = useToast()
@@ -58,11 +71,19 @@ export default function Inventory() {
   // which item is pending delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null)
 
+  // ✅ expanded groups state
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
   // ✅ Debounce typing to avoid calling API on every keystroke
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(q.trim()), 300)
     return () => clearTimeout(t)
   }, [q])
+
+  // Keep UI clean on new search
+  useEffect(() => {
+    setExpanded({})
+  }, [debouncedQ])
 
   const qc = useQueryClient()
 
@@ -95,12 +116,85 @@ export default function Inventory() {
     getNextPageParam: (lastPage) => lastPage.next_offset ?? undefined,
   })
 
-  // ✅ Flatten pages into a single rows array (same as old `rows = data || []`)
+  // ✅ Flatten pages into a single rows array
   const rows = useMemo(() => {
     return data?.pages.flatMap((p) => p.items) ?? []
   }, [data])
 
-  // ✅ Sentinel-based infinite scroll (reliable even if window scroll is used)
+  // ✅ Group rows by (name + brand)
+  const groups = useMemo(() => {
+    const map = new Map<string, any[]>()
+
+    for (const it of rows) {
+      const key = buildGroupKey(it)
+      const arr = map.get(key) ?? []
+      arr.push(it)
+      map.set(key, arr)
+    }
+
+    const list = Array.from(map.entries()).map(([key, items]) => {
+      // sort batches by expiry (earliest first). If expiry missing, push last.
+      const sorted = [...items].sort((a, b) => {
+        const da = toIsoDateOnly(a?.expiry_date)
+        const db = toIsoDateOnly(b?.expiry_date)
+        if (!da && !db) return 0
+        if (!da) return 1
+        if (!db) return -1
+        return da.localeCompare(db)
+      })
+
+      const totalStock = sorted.reduce(
+        (sum, x) => sum + (Number(x.stock) || 0),
+        0
+      )
+
+      // rack label: if different across batches, show '-'
+      const racks = new Set(sorted.map((x) => String(x.rack_number ?? 0)))
+      const rackLabel = racks.size === 1 ? (sorted[0]?.rack_number ?? 0) : '-'
+
+      // expiry label: earliest expiry for quick checking
+      const earliestExpiryIso = toIsoDateOnly(sorted[0]?.expiry_date)
+      const expiryLabel = earliestExpiryIso ? formatExpiry(earliestExpiryIso) : '-'
+
+      // MRP: single or range
+      const mrpNums = sorted
+        .map((x) => Number(x.mrp))
+        .filter((n) => Number.isFinite(n))
+
+      let mrpLabel: string | number = '-'
+      if (mrpNums.length > 0) {
+        const min = Math.min(...mrpNums)
+        const max = Math.max(...mrpNums)
+        mrpLabel = min === max ? min : `${min}–${max}`
+      }
+
+      return {
+        key,
+        name: sorted[0]?.name,
+        brand: sorted[0]?.brand,
+        rackLabel,
+        expiryLabel,
+        mrpLabel,
+        totalStock,
+        count: sorted.length,
+        items: sorted,
+      }
+    })
+
+    // stable ordering: by name then brand
+    list.sort((a, b) => {
+      const an = String(a.name ?? '').toLowerCase()
+      const bn = String(b.name ?? '').toLowerCase()
+      if (an !== bn) return an.localeCompare(bn)
+      const ab = String(a.brand ?? '').toLowerCase()
+      const bb = String(b.brand ?? '').toLowerCase()
+      return ab.localeCompare(bb)
+    })
+
+    return list
+  }, [rows])
+
+  // ✅ Sentinel-based infinite scroll
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -153,8 +247,8 @@ export default function Inventory() {
   const mDelete = useMutation({
     mutationFn: (id: number) => deleteItem(id),
     onSuccess: () => {
-     qc.invalidateQueries({ queryKey: ['inventory-items'] })
-     qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
+      qc.invalidateQueries({ queryKey: ['inventory-items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
       toast.push('Item deleted', 'warning')
       setDeleteTarget(null)
     },
@@ -193,20 +287,21 @@ export default function Inventory() {
     setAdjustName(row.name)
   }
 
-  // When user clicks trash icon – just open dialog
   function handleDeleteClick(row: any) {
     setDeleteTarget(row)
   }
 
-  // When user confirms delete
   function handleConfirmDelete() {
     if (!deleteTarget) return
     mDelete.mutate(deleteTarget.id)
   }
 
-  // When user cancels dialog
   function handleCancelDelete() {
     setDeleteTarget(null)
+  }
+
+  function toggleGroup(key: string) {
+    setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
   return (
@@ -249,49 +344,162 @@ export default function Inventory() {
                     <th style={{ width: 140 }}>Actions</th>
                   </tr>
                 </thead>
+
                 <tbody>
-                  {rows.map((it: any) => (
-                    <tr key={it.id}>
-                      <td>{it.name}</td>
-                      <td>{it.rack_number ?? 0}</td>
-                      <td>{it.brand || '-'}</td>
-                      <td>{formatExpiry(it.expiry_date)}</td>
-                      <td>{it.mrp}</td>
-                      <td>{it.stock}</td>
-                      <td>
-                        <Stack direction="row" gap={1}>
-                          <Tooltip title="Edit">
-                            <IconButton
-                              size="small"
-                              onClick={() => handleEdit(it)}
-                            >
-                              <EditIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
+                  {groups.map((g) => {
+                    const isOpen = !!expanded[g.key]
+                    const isMulti = g.count > 1
 
-                          <Tooltip title="Adjust Stock">
-                            <IconButton
-                              size="small"
-                              onClick={() => handleAdjust(it)}
-                            >
-                              <AddCircleOutlineIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
+                    return (
+                      <Fragment key={g.key}>
+                        {/* GROUP ROW */}
+                        <tr
+                          style={{ cursor: isMulti ? 'pointer' : 'default' }}
+                          onClick={() => {
+                            if (!isMulti) return
+                            toggleGroup(g.key)
+                          }}
+                        >
+                          <td>
+                            <Stack direction="row" alignItems="center" gap={1}>
+                              {isMulti && (
+                                <IconButton
+                                  size="small"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    toggleGroup(g.key)
+                                  }}
+                                >
+                                  {isOpen ? (
+                                    <KeyboardArrowUpIcon fontSize="small" />
+                                  ) : (
+                                    <KeyboardArrowDownIcon fontSize="small" />
+                                  )}
+                                </IconButton>
+                              )}
 
-                          <Tooltip title="Delete">
-                            <IconButton
-                              size="small"
-                              color="error"
-                              onClick={() => handleDeleteClick(it)}
-                              disabled={mDelete.isPending}
-                            >
-                              <DeleteIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                        </Stack>
-                      </td>
-                    </tr>
-                  ))}
+                              <span>{g.name}</span>
+
+                              {isMulti && (
+                                <span
+                                  style={{
+                                    fontSize: 12,
+                                    padding: '2px 8px',
+                                    borderRadius: 999,
+                                    border: '1px solid #ddd',
+                                  }}
+                                >
+                                  {g.count} batches
+                                </span>
+                              )}
+                            </Stack>
+                          </td>
+
+                          <td>{g.rackLabel}</td>
+                          <td>{g.brand || '-'}</td>
+                          <td>{g.expiryLabel}</td>
+                          <td>{g.mrpLabel}</td>
+                          <td>{g.totalStock}</td>
+
+                          <td>
+                            {/* For single batch, keep old actions */}
+                            {!isMulti ? (
+                              <Stack direction="row" gap={1}>
+                                <Tooltip title="Edit">
+                                  <IconButton
+                                    size="small"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      handleEdit(g.items[0])
+                                    }}
+                                  >
+                                    <EditIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+
+                                <Tooltip title="Adjust Stock">
+                                  <IconButton
+                                    size="small"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      handleAdjust(g.items[0])
+                                    }}
+                                  >
+                                    <AddCircleOutlineIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+
+                                <Tooltip title="Delete">
+                                  <IconButton
+                                    size="small"
+                                    color="error"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      handleDeleteClick(g.items[0])
+                                    }}
+                                    disabled={mDelete.isPending}
+                                  >
+                                    <DeleteIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              </Stack>
+                            ) : (
+                              <Typography variant="body2" sx={{ opacity: 0.7 }}>
+                                {isOpen ? 'Hide' : 'View'}
+                              </Typography>
+                            )}
+                          </td>
+                        </tr>
+
+                        {/* EXPANDED BATCH ROWS */}
+                        {isOpen &&
+                          g.items.map((it: any) => (
+                            <tr key={it.id} style={{ background: '#fafafa' }}>
+                              <td style={{ paddingLeft: 24 }}>
+                                <span style={{ opacity: 0.7 }}>↳</span> {it.name}
+                              </td>
+                              <td>{it.rack_number ?? 0}</td>
+                              <td>{it.brand || '-'}</td>
+                              <td>{formatExpiry(it.expiry_date)}</td>
+                              <td>{it.mrp}</td>
+                              <td>{it.stock}</td>
+                              <td>
+                                <Stack direction="row" gap={1}>
+                                  <Tooltip title="Edit">
+                                    <IconButton
+                                      size="small"
+                                      onClick={() => handleEdit(it)}
+                                    >
+                                      <EditIcon fontSize="small" />
+                                    </IconButton>
+                                  </Tooltip>
+
+                                  <Tooltip title="Adjust Stock">
+                                    <IconButton
+                                      size="small"
+                                      onClick={() => handleAdjust(it)}
+                                    >
+                                      <AddCircleOutlineIcon fontSize="small" />
+                                    </IconButton>
+                                  </Tooltip>
+
+                                  <Tooltip title="Delete">
+                                    <IconButton
+                                      size="small"
+                                      color="error"
+                                      onClick={() => handleDeleteClick(it)}
+                                      disabled={mDelete.isPending}
+                                    >
+                                      <DeleteIcon fontSize="small" />
+                                    </IconButton>
+                                  </Tooltip>
+                                </Stack>
+                              </td>
+                            </tr>
+                          ))}
+                      </Fragment>
+                    )
+                  })}
                 </tbody>
               </table>
             </Box>
@@ -340,7 +548,7 @@ export default function Inventory() {
         }}
       />
 
-      {/* Fancy delete confirmation dialog */}
+      {/* Delete confirmation dialog */}
       <Dialog
         open={Boolean(deleteTarget)}
         onClose={handleCancelDelete}

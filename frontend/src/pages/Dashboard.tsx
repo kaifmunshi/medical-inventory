@@ -31,7 +31,6 @@ function formatExpiry(exp?: string | null) {
   return `${d}-${m}-${y}`
 }
 
-
 const LOW_STOCK_THRESH = 2;       // ≤ 2 is low-stock
 const EXPIRY_WINDOW_DAYS = 60;    // within next 60 days
 
@@ -118,6 +117,12 @@ export default function Dashboard() {
     return Math.round(val * 100) / 100;
   }, [salesToday, todayRefunds, onlineSalesToday]);
 
+  // ✅ NEW: Gross Total (Gross Cash + Online)
+  const grossTotalToday = useMemo(() => {
+    const val = Number(grossCashToday || 0) + Number(onlineSalesToday || 0);
+    return Math.round(val * 100) / 100;
+  }, [grossCashToday, onlineSalesToday]);
+
   // ---- Low Stock (✅ aggregated by name + brand; expiry/mrp ignored) ----
   const { lowStockItems, lowStockCount } = useMemo(() => {
     const items = (qInv.data || []) as any[];
@@ -127,7 +132,6 @@ export default function Dashboard() {
       name: string;
       brand: string | null;
       stock: number; // aggregated
-      // optional: keep variants if you want later
       _variants: Array<{ id: number; mrp: number; expiry_date?: string | null; stock: number }>;
     };
 
@@ -260,6 +264,10 @@ export default function Dashboard() {
                     <Typography variant="caption">
                       Gross Cash: ₹{grossCashToday.toFixed(2)}
                     </Typography>
+                    {/* ✅ NEW */}
+                    <Typography variant="caption">
+                      Gross Total: ₹{grossTotalToday.toFixed(2)}
+                    </Typography>
                   </Stack>
                 }
               >
@@ -287,12 +295,17 @@ export default function Dashboard() {
                   >
                     ₹{salesToday.toFixed(2)}
                   </Typography>
+
+                  {/* ✅ show Gross Total below Gross Cash */}
                   <Typography
                     variant="caption"
                     color="text.secondary"
                     sx={{ mt: 0.5 }}
                   >
                     Gross Cash: ₹{grossCashToday.toFixed(2)}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Gross Total: ₹{grossTotalToday.toFixed(2)}
                   </Typography>
                 </Paper>
               </Tooltip>
@@ -423,7 +436,18 @@ export default function Dashboard() {
                 ₹{grossCashToday.toFixed(2)}
               </Typography>
             </Stack>
+
+            {/* ✅ NEW */}
+            <Stack direction="row" justifyContent="space-between">
+              <Typography variant="body2" color="text.secondary">
+                Gross Total
+              </Typography>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                ₹{grossTotalToday.toFixed(2)}
+              </Typography>
+            </Stack>
           </Stack>
+
           <Stack alignItems="flex-end" mt={2}>
             <Button onClick={() => setOpenSalesBreakdown(false)}>Close</Button>
           </Stack>

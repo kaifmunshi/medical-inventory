@@ -26,6 +26,12 @@ type ItemFormProps = {
   items?: any[] // kept for backward compatibility (not used for pagination anymore)
 }
 
+function buildUniqueKey(it: any) {
+  const name = String(it?.name ?? '').trim().toLowerCase()
+  const brand = String(it?.brand ?? '').trim().toLowerCase()
+  return `${name}__${brand}`
+}
+
 export default function ItemForm({
   open,
   initial,
@@ -131,18 +137,50 @@ export default function ItemForm({
   const options = React.useMemo(() => {
     const all = data?.pages.flatMap((p) => p.items) ?? []
 
-    // ✅ de-duplicate by id (safe if backend ordering changes)
-    const seen = new Set<number>()
-    const uniq: any[] = []
+    // ✅ de-duplicate by (name + brand) so expiry-based duplicates don't appear
+    // Pick the "best" representative per group:
+    // - higher stock wins
+    // - if tie, higher id wins (newer row)
+    const map = new Map<string, any>()
+
     for (const it of all) {
-      if (!it?.id) continue
-      if (seen.has(it.id)) continue
-      seen.add(it.id)
-      uniq.push(it)
+      const key = buildUniqueKey(it)
+      if (!key || key === '__') continue
+
+      const prev = map.get(key)
+      if (!prev) {
+        map.set(key, it)
+        continue
+      }
+
+      const s1 = Number(prev?.stock) || 0
+      const s2 = Number(it?.stock) || 0
+      if (s2 > s1) {
+        map.set(key, it)
+        continue
+      }
+
+      const id1 = Number(prev?.id) || 0
+      const id2 = Number(it?.id) || 0
+      if (s2 === s1 && id2 > id1) {
+        map.set(key, it)
+      }
     }
 
+    const uniq = Array.from(map.values())
+
     // fallback to passed items if nothing loaded yet
-    if (uniq.length === 0 && Array.isArray(items) && items.length > 0) return items
+    if (uniq.length === 0 && Array.isArray(items) && items.length > 0) {
+      // also de-dup fallback items
+      const map2 = new Map<string, any>()
+      for (const it of items) {
+        const key = buildUniqueKey(it)
+        if (!key || key === '__') continue
+        if (!map2.has(key)) map2.set(key, it)
+      }
+      return Array.from(map2.values())
+    }
+
     return uniq
   }, [data, items])
 
@@ -182,7 +220,9 @@ export default function ItemForm({
               style: { maxHeight: 280, overflow: 'auto' },
             }}
             disablePortal
-            isOptionEqualToValue={(opt: any, val: any) => opt?.id === val?.id}
+            isOptionEqualToValue={(opt: any, val: any) =>
+              buildUniqueKey(opt) === buildUniqueKey(val)
+            }
             getOptionLabel={(option: any) =>
               option?.name
                 ? `${option.name}${option.brand ? ` (${option.brand})` : ''}`

@@ -13,6 +13,8 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
+  FormControlLabel,
+  Checkbox,
 } from '@mui/material'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient, useMutation } from '@tanstack/react-query'
@@ -74,6 +76,9 @@ export default function Inventory() {
   // ✅ expanded groups state
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
+  // ✅ Show/Hide out-of-stock items (default: hide)
+  const [showOutOfStock, setShowOutOfStock] = useState(false)
+
   // ✅ Debounce typing to avoid calling API on every keystroke
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(q.trim()), 300)
@@ -121,11 +126,17 @@ export default function Inventory() {
     return data?.pages.flatMap((p) => p.items) ?? []
   }, [data])
 
+  // ✅ Filter rows for visibility (hide stock=0 by default)
+  const visibleRows = useMemo(() => {
+    if (showOutOfStock) return rows
+    return rows.filter((x) => (Number(x.stock) || 0) > 0)
+  }, [rows, showOutOfStock])
+
   // ✅ Group rows by (name + brand)
   const groups = useMemo(() => {
     const map = new Map<string, any[]>()
 
-    for (const it of rows) {
+    for (const it of visibleRows) {
       const key = buildGroupKey(it)
       const arr = map.get(key) ?? []
       arr.push(it)
@@ -192,7 +203,7 @@ export default function Inventory() {
     })
 
     return list
-  }, [rows])
+  }, [visibleRows])
 
   // ✅ Sentinel-based infinite scroll
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
@@ -320,6 +331,17 @@ export default function Inventory() {
             onChange={(e) => setQ(e.target.value)}
             fullWidth
           />
+
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={showOutOfStock}
+                onChange={(e) => setShowOutOfStock(e.target.checked)}
+              />
+            }
+            label="Show out of stock"
+          />
+
           <Button variant="contained" onClick={handleAdd}>
             Add Item
           </Button>

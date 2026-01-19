@@ -21,18 +21,30 @@ class Item(SQLModel, table=True):
     )
 
 # --- NEW ---
+# --- UPDATED ---
 class Bill(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     date_time: str = Field(
         default_factory=lambda: datetime.now().isoformat(timespec="seconds")
     )
-    discount_percent: float = 0.0       # invoice-level discount %
-    subtotal: float                     # sum of (qty * mrp)
-    total_amount: float                 # after discount
-    payment_mode: str                   # "cash" | "online" | "split"
+    discount_percent: float = 0.0
+    subtotal: float
+    total_amount: float
+
+    # payment_mode now can also be "credit"
+    payment_mode: str  # "cash" | "online" | "split" | "credit"
+
     payment_cash: float = 0.0
     payment_online: float = 0.0
     notes: Optional[str] = None
+
+    # ✅ NEW: credit bill tracking
+    is_credit: bool = Field(default=False, index=True)              # true if credit
+    payment_status: str = Field(default="PAID", index=True)         # "PAID"|"UNPAID"|"PARTIAL"
+    paid_amount: float = 0.0                                        # total paid so far
+    paid_at: Optional[str] = Field(default=None, sa_column=Column(String))
+
+
 
 
 class BillItem(SQLModel, table=True):
@@ -43,6 +55,25 @@ class BillItem(SQLModel, table=True):
     mrp: float
     quantity: int
     line_total: float                   # qty * mrp (no tax)
+
+
+
+# --- NEW ---
+class BillPayment(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    bill_id: int = Field(index=True)
+
+    received_at: str = Field(
+        default_factory=lambda: datetime.now().isoformat(timespec="seconds"),
+        index=True,
+    )
+
+    mode: str  # "cash" | "online" | "split"
+    cash_amount: float = 0.0
+    online_amount: float = 0.0
+    note: Optional[str] = None
+
+
 
 # ---------- Returns (DB) ----------
 class Return(SQLModel, table=True):
@@ -159,7 +190,15 @@ class BillOut(SQLModel):
     payment_cash: float
     payment_online: float
     notes: Optional[str] = None
+
+    # ✅ NEW: expose credit info
+    is_credit: bool = False
+    payment_status: str = "PAID"
+    paid_amount: float = 0.0
+    paid_at: Optional[str] = None
+
     items: List[BillItemOut]
+
 
 # ---------- Returns (Schemas) ----------
 class ReturnItemIn(SQLModel):

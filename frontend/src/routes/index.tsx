@@ -8,12 +8,12 @@ import Returns from '../pages/Returns'
 import Exchange from '../pages/Returns/Exchange'
 import Reports from '../pages/Reports'
 import Settings from '../pages/Settings'
-import RequestedItems from '../pages/RequestedItems/index' // 👈 NEW
+import RequestedItems from '../pages/RequestedItems/index'
+import CreditBills from '../pages/CreditBills' // ✅ NEW
 
 export default function AppRoutes() {
   return (
     <Routes>
-      {/* Parent layout wraps all pages */}
       <Route path="/" element={<AppLayout />}>
         <Route index element={<Dashboard />} />
         <Route path="inventory" element={<Inventory />} />
@@ -21,11 +21,11 @@ export default function AppRoutes() {
         <Route path="returns" element={<Returns />} />
         <Route path="exchange" element={<Exchange />} />
         <Route path="reports" element={<Reports />} />
+        <Route path="credit-bills" element={<CreditBills />} /> {/* ✅ NEW */}
         <Route path="settings" element={<Settings />} />
-        <Route path="requested-items" element={<RequestedItems />} /> {/* 👈 NEW */}
+        <Route path="requested-items" element={<RequestedItems />} />
       </Route>
 
-      {/* Fallback */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

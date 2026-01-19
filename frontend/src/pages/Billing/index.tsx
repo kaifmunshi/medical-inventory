@@ -28,7 +28,6 @@ function formatExpiry(exp?: string | null) {
   return `${d}-${m}-${y}` // "DD-MM-YYYY"
 }
 
-
 export default function Billing() {
   const toast = useToast()
 
@@ -38,7 +37,8 @@ export default function Billing() {
   const [discount, setDiscount] = useState(0)
   const [tax, setTax] = useState(0)
 
-  const [mode, setMode] = useState<'cash' | 'online' | 'split'>('cash')
+  // ✅ UPDATED: include credit
+  const [mode, setMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
   const [cash, setCash] = useState<number | ''>('')
   const [online, setOnline] = useState<number | ''>('')
 
@@ -75,7 +75,7 @@ export default function Billing() {
   const effectiveDiscountPercent =
     totals.total > 0 ? ((totals.total - chosenFinal) / totals.total) * 100 : 0
 
-  const paymentsOk = validatePayments(mode, chosenFinal, Number(cash || 0), Number(online || 0))
+  const paymentsOk = validatePayments(mode as any, chosenFinal, Number(cash || 0), Number(online || 0))
 
   const mBill = useMutation({
     mutationFn: async () => {
@@ -95,8 +95,11 @@ export default function Billing() {
         notes
       }
 
-      // Auto-align payments for single-mode, and validate split strictly
-      if (mode === 'cash') {
+      // ✅ UPDATED: handle credit + keep old logic for others
+      if (mode === 'credit') {
+        payload.payment_cash = 0
+        payload.payment_online = 0
+      } else if (mode === 'cash') {
         payload.payment_cash = chosenFinal
         payload.payment_online = 0
       } else if (mode === 'online') {
@@ -132,42 +135,45 @@ export default function Billing() {
     }
   })
 
-  function addRow(it: any) {
-    setRows((prev) => {
-      const idx = prev.findIndex((p) => p.item_id === it.id)
-      if (idx >= 0) {
-        // bump quantity, clamp to stock if provided
-        const next = prev.map((r, i) =>
-          i === idx
-            ? {
-                ...r,
-                quantity: Math.max(
-                  1,
-                  Math.min((r.stock ?? Number.POSITIVE_INFINITY) as number, r.quantity + 1)
-                )
-              }
-            : r
-        )
-        toast.push('Quantity increased', 'info')
-        return next
-      }
-
-      // new line item (✅ store expiry_date for display)
-      const next = [
-        ...prev,
-        {
-          item_id: it.id,
-          name: it.name,
-          mrp: Number(it.mrp) || 0,
-          quantity: 1,
-          stock: it.stock,
-          expiry_date: it.expiry_date ?? null
-        }
-      ]
-      toast.push('Item added to cart', 'success')
-      return next
-    })
+function addRow(it: any) {
+  // ✅ hard block (even if UI filtered)
+  const st = Number(it.stock ?? 0)
+  if (st <= 0) {
+    toast.push('Out of stock — cannot add this item', 'error')
+    return
   }
+
+  setRows((prev) => {
+    const idx = prev.findIndex((p) => p.item_id === it.id)
+    if (idx >= 0) {
+      const next = prev.map((r, i) =>
+        i === idx
+          ? {
+              ...r,
+              quantity: Math.max(1, Math.min((r.stock ?? Number.POSITIVE_INFINITY) as number, r.quantity + 1))
+            }
+          : r
+      )
+      toast.push('Quantity increased', 'info')
+      return next
+    }
+
+    const next = [
+      ...prev,
+      {
+        item_id: it.id,
+        name: it.name,
+        mrp: Number(it.mrp) || 0,
+        quantity: 1,
+        stock: it.stock,
+        expiry_date: it.expiry_date ?? null
+      }
+    ]
+    toast.push('Item added to cart', 'success')
+    return next
+  })
+}
+
 
   function setQty(i: number, q: number) {
     const n = Number(q) || 1
@@ -283,12 +289,22 @@ export default function Billing() {
               select
               label="Payment Mode"
               value={mode}
-              onChange={(e) => setMode(e.target.value as any)}
+              // ✅ UPDATED: if credit selected, clear amounts
+              onChange={(e) => {
+                const v = e.target.value as any
+                setMode(v)
+                if (v === 'credit') {
+                  setCash('')
+                  setOnline('')
+                }
+              }}
               sx={{ width: 160 }}
             >
               <MenuItem value="cash">Cash</MenuItem>
               <MenuItem value="online">Online</MenuItem>
               <MenuItem value="split">Split</MenuItem>
+              {/* ✅ NEW */}
+              <MenuItem value="credit">Credit</MenuItem>
             </TextField>
 
             {(mode === 'cash' || mode === 'split') && (

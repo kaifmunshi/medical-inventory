@@ -1,5 +1,5 @@
 // F:\medical-inventory\frontend\src\components\billing\ItemPicker.tsx
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Box,
   Dialog,
@@ -34,7 +34,6 @@ function formatExpiry(exp?: string | null) {
   return `${d}-${m}-${y}` // "DD-MM-YYYY"
 }
 
-
 export default function ItemPicker({
   open,
   onClose,
@@ -49,7 +48,6 @@ export default function ItemPicker({
 
   const { data } = useQuery({
     queryKey: ['billing-items', q],
-    // keep functionality, just surface fetch errors as toast
     queryFn: async () => {
       try {
         return await listItems(q)
@@ -61,15 +59,22 @@ export default function ItemPicker({
     },
   })
 
-  const items = (data || []) as PickerItem[]
+  const rawItems = (data || []) as PickerItem[]
+
+  // ✅ NEW: hide stock=0 items from billing picker
+  const items = useMemo(
+    () => rawItems.filter((it) => Number(it.stock ?? 0) > 0),
+    [rawItems]
+  )
 
   useEffect(() => {
     if (!open) setQ('')
   }, [open])
 
   function handlePick(it: PickerItem) {
-    if (it.stock <= 0) {
-      toast.push('Not enough stock', 'warning')
+    // ✅ keep safety check (in case stale list / race condition)
+    if (Number(it.stock ?? 0) <= 0) {
+      toast.push('Out of stock', 'warning')
       return
     }
     onPick(it)
@@ -85,7 +90,7 @@ export default function ItemPicker({
           <TextField
             fullWidth
             autoFocus
-            placeholder="Search (name/brand)" // ✅ updated placeholder
+            placeholder="Search (name/brand)"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
@@ -93,15 +98,16 @@ export default function ItemPicker({
 
         <List>
           {items.map((it) => (
-            <ListItemButton key={it.id} disabled={it.stock <= 0} onClick={() => handlePick(it)}>
+            <ListItemButton key={it.id} onClick={() => handlePick(it)}>
               <ListItemText
                 primary={`${it.name} — ₹${it.mrp}`}
-                secondary={`Stock: ${it.stock}${
-                  it.brand ? ` • ${it.brand}` : ''
-                } • Exp: ${formatExpiry(it.expiry_date)}`}
+                secondary={`Stock: ${it.stock}${it.brand ? ` • ${it.brand}` : ''} • Exp: ${formatExpiry(
+                  it.expiry_date
+                )}`}
               />
             </ListItemButton>
           ))}
+
           {items.length === 0 && (
             <Box p={2} color="text.secondary">
               No items found.

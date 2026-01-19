@@ -14,7 +14,8 @@ import {
   SwapHoriz,
   BarChart,
   Dashboard,
-  PlaylistAddCheck, // 👈 NEW ICON
+  PlaylistAddCheck,
+  CreditCard, // ✅ NEW ICON
 } from '@mui/icons-material'
 import { NavLink, useLocation } from 'react-router-dom'
 
@@ -25,7 +26,10 @@ const links = [
   { to: '/returns', label: 'Returns', icon: <AssignmentReturn /> },
   { to: '/exchange', label: 'Exchange', icon: <SwapHoriz /> },
   { to: '/reports', label: 'Reports', icon: <BarChart /> },
-  // 👇 NEW – simple sidebar entry
+
+  // ✅ NEW
+  { to: '/credit-bills', label: 'Credit Bills', icon: <CreditCard /> },
+
   { to: '/requested-items', label: 'Requested Items', icon: <PlaylistAddCheck /> },
 ]
 
@@ -39,7 +43,7 @@ export default function Sidebar() {
       sx={{
         width: 240,
         flexShrink: 0,
-        display: { xs: 'none', sm: 'flex' }, // hide on very small screens
+        display: { xs: 'none', sm: 'flex' },
         flexDirection: 'column',
         py: 3,
         px: 2,
@@ -51,7 +55,6 @@ export default function Sidebar() {
         boxShadow: '4px 0 22px rgba(0,0,0,0.18)',
       }}
     >
-      {/* Brand */}
       <Box sx={{ mb: 1 }}>
         <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: 0.4 }}>
           Good Luck
@@ -61,7 +64,6 @@ export default function Sidebar() {
         </Typography>
       </Box>
 
-      {/* Nav links */}
       <List sx={{ mt: 1 }}>
         {links.map((link) => {
           const active = pathname === link.to
@@ -100,7 +102,6 @@ export default function Sidebar() {
 
       <Box sx={{ flexGrow: 1 }} />
 
-      {/* Small footer */}
       <Typography variant="caption" sx={{ opacity: 0.7 }}>
         © {year} Good Luck Store
       </Typography>

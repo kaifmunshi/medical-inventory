@@ -67,6 +67,19 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_billpayment_bill_id ON billpayment (bill_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_billpayment_received_at ON billpayment (received_at)"))
         session.commit()
+            # ---------- cashbookentry table migration ----------
+        session.exec(text("""
+            CREATE TABLE IF NOT EXISTS cashbookentry (
+                id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                entry_type TEXT NOT NULL,
+                amount REAL NOT NULL,
+                note TEXT
+            )
+        """))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_cashbookentry_created_at ON cashbookentry (created_at)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_cashbookentry_entry_type ON cashbookentry (entry_type)"))
+        session.commit()
 
 
 SQLModel.metadata.create_all(engine)

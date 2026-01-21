@@ -1,4 +1,3 @@
-// F:\medical-inventory\frontend\src\pages\Dashboard.tsx
 import { useMemo, useState, useEffect } from 'react'
 import {
   Grid,
@@ -16,12 +15,21 @@ import {
   Tooltip,
   Button,
   Divider,
+  TextField,
+  MenuItem,
 } from '@mui/material'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { listBills, getPaymentsSummary } from '../services/billing'
 import { listReturns } from '../services/returns'
 import { listItems } from '../services/inventory'
 import { todayRange } from '../lib/date'
+import {
+  createCashbookEntry,
+  getCashbookSummary,
+  clearCashbookToday,
+  listCashbookEntries,
+  type CashbookEntry,
+} from '../services/cashbook'
 
 function formatExpiry(exp?: string | null) {
   if (!exp) return '-'
@@ -42,6 +50,7 @@ const MONEY_TOGGLE_KEY = 'dash_show_money_cards'
 
 export default function Dashboard() {
   const { from, to } = todayRange()
+  const qc = useQueryClient()
 
   const [openLow, setOpenLow] = useState(false)
   const [openExp, setOpenExp] = useState(false)
@@ -73,6 +82,17 @@ export default function Dashboard() {
     return () => window.removeEventListener('keydown', handleKey)
   }, [])
 
+  // -------------------- Cashbook UI --------------------
+  const [openCashbook, setOpenCashbook] = useState(false)
+  const [cbType, setCbType] = useState<'WITHDRAWAL' | 'EXPENSE'>('EXPENSE')
+  const [cbAmount, setCbAmount] = useState<string>('')
+  const [cbNote, setCbNote] = useState<string>('')
+
+  // ✅ NEW: Cashbook History (custom range)
+  const [openCashbookHistory, setOpenCashbookHistory] = useState(false)
+  const [histFrom, setHistFrom] = useState(from)
+  const [histTo, setHistTo] = useState(to)
+
   // Bills created today (used for "Billed Today" + "Credit Pending")
   const qBills = useQuery({
     queryKey: ['dash-bills', from, to],
@@ -98,6 +118,26 @@ export default function Dashboard() {
     queryFn: () => getPaymentsSummary({ from_date: from, to_date: to }),
   })
 
+  // ✅ NEW: Cashbook summary for today (withdrawals + misc expenses)
+  const qCashbook = useQuery({
+    queryKey: ['dash-cashbook', from, to],
+    queryFn: () => getCashbookSummary({ from_date: from, to_date: to }),
+  })
+
+  // ✅ NEW: Cashbook History list (only fetch when dialog open)
+  const qCashbookHistory = useQuery({
+    queryKey: ['dash-cashbook-history', histFrom, histTo],
+    queryFn: () => listCashbookEntries({ from_date: histFrom, to_date: histTo, limit: 500 }),
+    enabled: openCashbookHistory,
+  })
+
+  // ✅ NEW: Cashbook History summary (only fetch when dialog open)
+  const qCashbookHistorySummary = useQuery({
+    queryKey: ['dash-cashbook-history-summary', histFrom, histTo],
+    queryFn: () => getCashbookSummary({ from_date: histFrom, to_date: histTo }),
+    enabled: openCashbookHistory,
+  })
+
   // -------------------- Money Computations (with clear meaning) --------------------
   const billedToday = useMemo(() => {
     /**
@@ -110,21 +150,13 @@ export default function Dashboard() {
     return to2(total)
   }, [qBills.data])
 
-  const creditPending = useMemo(() => {
-    /**
-     * "Credit Pending" = outstanding amount across ALL dates.
-     * = sum(max(0, total_amount - paid_amount)) for bills not fully paid.
-     *
-     * NOTE: We only have today's bills loaded in qBills,
-     * so we fetch all bills once with a bigger limit using a separate query below.
-     * (This keeps meaning correct: "all dates" pending.)
-     */
-    return 0
-  }, [])
-
   const collectedTodayCash = to2(qCollected.data?.cash_collected)
   const collectedTodayOnline = to2(qCollected.data?.online_collected)
   const collectedTodayTotal = to2(qCollected.data?.total_collected)
+
+  const cashOutTodayTotal = to2(qCashbook.data?.cash_out)
+  const cashOutTodayWithdrawals = to2(qCashbook.data?.withdrawals)
+  const cashOutTodayExpenses = to2(qCashbook.data?.expenses)
 
   const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal } = useMemo(() => {
     /**
@@ -168,16 +200,18 @@ export default function Dashboard() {
   const netCashInHandToday = useMemo(() => {
     /**
      * Net Cash In Hand Today:
-     * cash collected today - cash refunds today
-     * (This is what physically remains in cash drawer due to today's movements.)
+     * cash collected today - cash refunds today - (withdrawals/expenses)
+     *
+     * ✅ You asked: these expenses should deduct from net cash only.
      */
-    return to2(collectedTodayCash - returnsTodayCash)
-  }, [collectedTodayCash, returnsTodayCash])
+    return to2(collectedTodayCash - returnsTodayCash - cashOutTodayTotal)
+  }, [collectedTodayCash, returnsTodayCash, cashOutTodayTotal])
 
   const netOnlineToday = useMemo(() => {
     /**
      * Net Online Today:
      * online collected today - online refunds today
+     * (cashbook should NOT affect online)
      */
     return to2(collectedTodayOnline - returnsTodayOnline)
   }, [collectedTodayOnline, returnsTodayOnline])
@@ -185,10 +219,11 @@ export default function Dashboard() {
   const netTotalToday = useMemo(() => {
     /**
      * Net Total Today:
-     * total collected today - total refunds today
+     * total collected today - total refunds today - cash-out
+     * (Because cash-out reduces real total available money)
      */
-    return to2(collectedTodayTotal - returnsTodayTotal)
-  }, [collectedTodayTotal, returnsTodayTotal])
+    return to2(collectedTodayTotal - returnsTodayTotal - cashOutTodayTotal)
+  }, [collectedTodayTotal, returnsTodayTotal, cashOutTodayTotal])
 
   // -------- Credit Pending (ALL dates) --------
   const qAllBillsForPending = useQuery({
@@ -295,6 +330,36 @@ export default function Dashboard() {
     backdropFilter: 'blur(4px)',
   }
 
+  // -------------------- Cashbook mutations --------------------
+  const mAddCashbook = useMutation({
+    mutationFn: () =>
+      createCashbookEntry({
+        entry_type: cbType,
+        amount: Number(cbAmount || 0),
+        note: cbNote?.trim() ? cbNote.trim() : undefined,
+      }),
+    onSuccess: () => {
+      setCbAmount('')
+      setCbNote('')
+      setOpenCashbook(false)
+      qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
+      // also affects net row
+      qc.invalidateQueries({ queryKey: ['dash-collected'] })
+      qc.invalidateQueries({ queryKey: ['dash-returns'] })
+    },
+  })
+
+  const mClearCashbook = useMutation({
+    mutationFn: clearCashbookToday,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
+      qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
+      qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
+    },
+  })
+
+  const canAddCashbook = Number(cbAmount || 0) > 0 && !mAddCashbook.isPending
+
   return (
     <Stack gap={2}>
       <Stack direction="row" alignItems="baseline" justifyContent="space-between" flexWrap="wrap" gap={1}>
@@ -373,12 +438,72 @@ export default function Dashboard() {
               </Paper>
             </Grid>
 
-            {/* Net (optional small explanation row) */}
+            {/* ✅ Cash Out Today (Withdrawal + Expense) */}
+            <Grid item xs={12} sm={6} md={3}>
+              <Paper sx={cardBase}>
+                <Stack direction="row" alignItems="baseline" justifyContent="space-between">
+                  <Typography variant="subtitle2" color="text.secondary">
+                    Cash Out Today
+                  </Typography>
+
+                  <Stack direction="row" gap={1}>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        // default range = today when opening
+                        setHistFrom(from)
+                        setHistTo(to)
+                        setOpenCashbookHistory(true)
+                      }}
+                    >
+                      History
+                    </Button>
+                    <Button size="small" onClick={() => setOpenCashbook(true)}>
+                      Add
+                    </Button>
+                  </Stack>
+                </Stack>
+
+                <Typography variant="h5" sx={{ fontWeight: 700 }}>
+                  ₹{cashOutTodayTotal.toFixed(2)}
+                </Typography>
+
+                <Stack direction="row" gap={1} flexWrap="wrap">
+                  <Typography variant="caption" color="text.secondary">
+                    Withdrawal ₹{cashOutTodayWithdrawals.toFixed(2)}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    •
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Expense ₹{cashOutTodayExpenses.toFixed(2)}
+                  </Typography>
+                </Stack>
+
+                <Stack direction="row" justifyContent="flex-end" mt={0.5}>
+                  <Button
+                    size="small"
+                    color="error"
+                    onClick={() => {
+                      const ok = window.confirm("Clear ONLY today's withdrawals/expenses? This cannot be undone.")
+                      if (!ok) return
+                      mClearCashbook.mutate()
+                    }}
+                    disabled={mClearCashbook.isPending}
+                  >
+                    Clear Today
+                  </Button>
+
+                </Stack>
+              </Paper>
+            </Grid>
+
+            {/* Net row */}
             <Grid item xs={12}>
               <Paper sx={{ ...cardBase, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Stack>
                   <Typography variant="subtitle2" color="text.secondary">
-                    Net Today (Collected − Refunds)
+                    Net Today (Collected − Refunds − Cash Out)
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
                     Helps you match cash drawer and online settlement for the day.
@@ -443,6 +568,118 @@ export default function Dashboard() {
         </Grid>
       </Grid>
 
+      {/* ✅ Cashbook Add Dialog */}
+      <Dialog open={openCashbook} onClose={() => setOpenCashbook(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Add Withdrawal / Expense</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5} mt={1}>
+            <TextField
+              select
+              label="Type"
+              value={cbType}
+              onChange={(e) => setCbType((e.target.value as any) || 'EXPENSE')}
+              fullWidth
+            >
+              <MenuItem value="EXPENSE">Expense (Tea, etc.)</MenuItem>
+              <MenuItem value="WITHDRAWAL">Withdrawal (Cash taken out)</MenuItem>
+            </TextField>
+
+            <TextField
+              label="Amount"
+              type="number"
+              value={cbAmount}
+              onChange={(e) => setCbAmount(e.target.value)}
+              fullWidth
+              inputProps={{ min: 0, step: '0.01' }}
+            />
+
+            <TextField label="Note (optional)" value={cbNote} onChange={(e) => setCbNote(e.target.value)} fullWidth />
+
+            <Stack direction="row" justifyContent="flex-end" gap={1} mt={1}>
+              <Button onClick={() => setOpenCashbook(false)}>Cancel</Button>
+              <Button variant="contained" onClick={() => mAddCashbook.mutate()} disabled={!canAddCashbook}>
+                {mAddCashbook.isPending ? 'Saving...' : 'Save'}
+              </Button>
+            </Stack>
+          </Stack>
+        </DialogContent>
+      </Dialog>
+
+      {/* ✅ Cashbook History Dialog */}
+      <Dialog open={openCashbookHistory} onClose={() => setOpenCashbookHistory(false)} fullWidth maxWidth="md">
+        <DialogTitle>Withdrawals / Expenses History</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} mt={1}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+              <TextField
+                label="From"
+                type="date"
+                value={histFrom}
+                onChange={(e) => setHistFrom(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                fullWidth
+              />
+              <TextField
+                label="To"
+                type="date"
+                value={histTo}
+                onChange={(e) => setHistTo(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                fullWidth
+              />
+            </Stack>
+
+            <Paper sx={{ p: 1.5, borderRadius: 2, bgcolor: 'rgba(255,255,255,0.92)' }}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} justifyContent="space-between">
+                <Typography variant="body2">
+                  Total: <b>₹{to2(qCashbookHistorySummary.data?.cash_out).toFixed(2)}</b>
+                </Typography>
+                <Typography variant="body2">
+                  Withdrawals: <b>₹{to2(qCashbookHistorySummary.data?.withdrawals).toFixed(2)}</b>
+                </Typography>
+                <Typography variant="body2">
+                  Expenses: <b>₹{to2(qCashbookHistorySummary.data?.expenses).toFixed(2)}</b>
+                </Typography>
+                <Typography variant="body2">
+                  Count: <b>{qCashbookHistorySummary.data?.count ?? 0}</b>
+                </Typography>
+              </Stack>
+            </Paper>
+
+            {qCashbookHistory.isLoading ? (
+              <Typography color="text.secondary">Loading…</Typography>
+            ) : (qCashbookHistory.data || []).length === 0 ? (
+              <Typography color="text.secondary">No entries in selected range.</Typography>
+            ) : (
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Date/Time</TableCell>
+                    <TableCell>Type</TableCell>
+                    <TableCell>Note</TableCell>
+                    <TableCell align="right">Amount</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {(qCashbookHistory.data as CashbookEntry[]).map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell>{String(r.created_at).replace('T', ' ')}</TableCell>
+                      <TableCell>{r.entry_type}</TableCell>
+                      <TableCell>{r.note || '-'}</TableCell>
+                      <TableCell align="right">₹{to2(r.amount).toFixed(2)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+
+            <Stack direction="row" justifyContent="flex-end" mt={1}>
+              <Button onClick={() => setOpenCashbookHistory(false)}>Close</Button>
+            </Stack>
+          </Stack>
+        </DialogContent>
+      </Dialog>
+
       {/* Collected Today breakdown dialog */}
       <Dialog open={openCollectedBreakdown} onClose={() => setOpenCollectedBreakdown(false)} fullWidth maxWidth="xs">
         <DialogTitle>Collected Today (Breakdown)</DialogTitle>
@@ -488,7 +725,16 @@ export default function Dashboard() {
 
             <Stack direction="row" justifyContent="space-between">
               <Typography variant="body2" color="text.secondary">
-                Net (Collected − Refunds)
+                Cash Out Today
+              </Typography>
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                ₹{cashOutTodayTotal.toFixed(2)}
+              </Typography>
+            </Stack>
+
+            <Stack direction="row" justifyContent="space-between">
+              <Typography variant="body2" color="text.secondary">
+                Net (Collected − Refunds − Cash Out)
               </Typography>
               <Typography variant="body2" sx={{ fontWeight: 800 }}>
                 ₹{netTotalToday.toFixed(2)}

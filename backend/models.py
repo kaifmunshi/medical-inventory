@@ -279,3 +279,41 @@ class RequestedItemOut(SQLModel):
     is_available: bool
     created_at: str
     updated_at: str
+# --- NEW: Cashbook / Misc Expense / Withdrawal (DB) ---
+class CashbookEntry(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    created_at: str = Field(
+        default_factory=lambda: datetime.now().isoformat(timespec="seconds"),
+        index=True,
+    )
+
+    # "WITHDRAWAL" | "EXPENSE"
+    entry_type: str = Field(index=True)
+
+    # always store positive number
+    amount: float
+
+    note: Optional[str] = None
+
+
+# --- NEW: Cashbook Schemas ---
+class CashbookCreate(SQLModel):
+    entry_type: str  # "WITHDRAWAL" | "EXPENSE"
+    amount: float
+    note: Optional[str] = None
+
+
+class CashbookOut(SQLModel):
+    id: int
+    created_at: str
+    entry_type: str
+    amount: float
+    note: Optional[str] = None
+
+
+class CashbookSummary(SQLModel):
+    cash_out: float
+    withdrawals: float
+    expenses: float
+    count: int

@@ -1,3 +1,4 @@
+// frontend/src/services/cashbook.ts
 import api from './api'
 
 export type CashbookType = 'WITHDRAWAL' | 'EXPENSE'
@@ -15,6 +16,13 @@ export type CashbookSummary = {
   count: number
 }
 
+export type CashbookEntry = {
+  id: number
+  created_at: string
+  entry_type: CashbookType
+  amount: number
+  note?: string | null
+}
 
 export async function createCashbookEntry(payload: CashbookCreate) {
   const { data } = await api.post('/cashbook/', payload)
@@ -26,22 +34,6 @@ export async function getCashbookSummary(params: { from_date?: string; to_date?:
   return data
 }
 
-export async function clearCashbookAll() {
-  const { data } = await api.delete('/cashbook/clear')
-  return data
-}
-export async function clearCashbookToday() {
-  const { data } = await api.delete('/cashbook/clear-today')
-  return data
-}
-export type CashbookEntry = {
-  id: number
-  created_at: string
-  entry_type: 'WITHDRAWAL' | 'EXPENSE'
-  amount: number
-  note?: string | null
-}
-
 export async function listCashbookEntries(params: {
   from_date?: string
   to_date?: string
@@ -49,5 +41,27 @@ export async function listCashbookEntries(params: {
   offset?: number
 }) {
   const { data } = await api.get<CashbookEntry[]>('/cashbook/', { params })
+  return data
+}
+
+export async function clearCashbookAll() {
+  const { data } = await api.delete('/cashbook/clear')
+  return data
+}
+
+export async function clearCashbookToday() {
+  const { data } = await api.delete('/cashbook/clear-today')
+  return data
+}
+
+// ✅ NEW: delete a particular entry
+export async function deleteCashbookEntry(entry_id: number) {
+  const { data } = await api.delete(`/cashbook/entry/${entry_id}`)
+  return data
+}
+
+// ✅ NEW: delete last entry (safe default is "today" on backend if params not given)
+export async function clearCashbookLast(params?: { from_date?: string; to_date?: string }) {
+  const { data } = await api.delete('/cashbook/last', { params })
   return data
 }

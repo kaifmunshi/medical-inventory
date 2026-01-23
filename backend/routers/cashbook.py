@@ -103,6 +103,64 @@ def summary(
         }
 
 
+@router.delete("/entry/{entry_id}")
+def delete_cashbook_entry(entry_id: int):
+    """
+    Delete a particular cashbook entry by id.
+    """
+    with get_session() as session:
+        # ensure exists
+        row = session.exec(select(CashbookEntry).where(CashbookEntry.id == entry_id)).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="cashbook entry not found")
+
+        session.exec(text("DELETE FROM cashbookentry WHERE id = :id").bindparams(id=entry_id))
+        session.commit()
+
+    return {"ok": True, "deleted_id": entry_id}
+
+
+@router.delete("/last")
+def clear_last_cashbook_entry(
+    from_date: Optional[str] = Query(default=None),
+    to_date: Optional[str] = Query(default=None),
+):
+    """
+    Delete the last cashbook entry (most recent by id).
+    - If no from/to provided: defaults to TODAY only (safe).
+    - If from/to provided: deletes last entry within that range.
+    """
+    # default safe scope = today
+    if not from_date and not to_date:
+        today = today_yyyy_mm_dd()
+        from_date = today
+        to_date = today
+
+    start_iso, end_iso = _range_bounds(from_date, to_date)
+
+    with get_session() as session:
+        if not start_iso or not end_iso:
+            return {"ok": True, "deleted_id": None}
+
+        # get last id in range
+        q = text("""
+            SELECT id
+            FROM cashbookentry
+            WHERE created_at >= :start AND created_at <= :end
+            ORDER BY id DESC
+            LIMIT 1
+        """).bindparams(start=start_iso, end=end_iso)
+
+        last_id = session.exec(q).first()
+        if not last_id:
+            return {"ok": True, "deleted_id": None}
+
+        session.exec(text("DELETE FROM cashbookentry WHERE id = :id").bindparams(id=int(last_id)))
+        session.commit()
+
+    return {"ok": True, "deleted_id": int(last_id), "scope": "range", "from": from_date, "to": to_date}
+
+
 @router.delete("/clear-today")
 def clear_today_cashbook():
     """
@@ -121,6 +179,7 @@ def clear_today_cashbook():
 
     return {"ok": True, "scope": "today", "date": today}
 
+
 @router.delete("/clear")
 def clear_all_cashbook():
     """Dangerous: clears ALL cashbook history."""
@@ -129,4 +188,3 @@ def clear_all_cashbook():
         session.commit()
 
     return {"ok": True, "scope": "all"}
-

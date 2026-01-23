@@ -17,7 +17,9 @@ import {
   Divider,
   TextField,
   MenuItem,
+  IconButton,
 } from '@mui/material'
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { listBills, getPaymentsSummary } from '../services/billing'
 import { listReturns } from '../services/returns'
@@ -26,9 +28,11 @@ import { todayRange } from '../lib/date'
 import {
   createCashbookEntry,
   getCashbookSummary,
-  clearCashbookToday,
   listCashbookEntries,
   type CashbookEntry,
+  // ✅ CHANGED: new APIs
+  clearCashbookLast,
+  deleteCashbookEntry,
 } from '../services/cashbook'
 
 function formatExpiry(exp?: string | null) {
@@ -45,7 +49,7 @@ const EXPIRY_WINDOW_DAYS = 60 // within next 60 days
 
 const to2 = (n: any) => Math.round(Number(n || 0) * 100) / 100
 
-// ✅ Persist toggle across route changes / refresh
+// ✅ Persist key (we will force it back to hidden on leaving dashboard)
 const MONEY_TOGGLE_KEY = 'dash_show_money_cards'
 
 export default function Dashboard() {
@@ -55,17 +59,19 @@ export default function Dashboard() {
   const [openLow, setOpenLow] = useState(false)
   const [openExp, setOpenExp] = useState(false)
 
-  // Money cards are safe in your case (single-user local). Keep shortcut anyway.
-  // ✅ Persisted value
-  const [showMoneyCards, setShowMoneyCards] = useState(() => {
-    const saved = localStorage.getItem(MONEY_TOGGLE_KEY)
-    return saved == null ? true : saved === '1'
-  })
+  // ✅ CHANGED: default HIDDEN (privacy)
+  const [showMoneyCards, setShowMoneyCards] = useState(false)
 
-  // ✅ Keep localStorage in sync
+  // ✅ CHANGED: whenever dashboard mounts, FORCE hidden
   useEffect(() => {
-    localStorage.setItem(MONEY_TOGGLE_KEY, showMoneyCards ? '1' : '0')
-  }, [showMoneyCards])
+    setShowMoneyCards(false)
+    localStorage.setItem(MONEY_TOGGLE_KEY, '0')
+
+    // when leaving dashboard (route change), force hidden again
+    return () => {
+      localStorage.setItem(MONEY_TOGGLE_KEY, '0')
+    }
+  }, [])
 
   // breakdown dialog (Collected Today)
   const [openCollectedBreakdown, setOpenCollectedBreakdown] = useState(false)
@@ -75,7 +81,11 @@ export default function Dashboard() {
     const handleKey = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 's') {
         e.preventDefault()
-        setShowMoneyCards((prev) => !prev)
+        setShowMoneyCards((prev) => {
+          const next = !prev
+          localStorage.setItem(MONEY_TOGGLE_KEY, next ? '1' : '0')
+          return next
+        })
       }
     }
     window.addEventListener('keydown', handleKey)
@@ -88,7 +98,7 @@ export default function Dashboard() {
   const [cbAmount, setCbAmount] = useState<string>('')
   const [cbNote, setCbNote] = useState<string>('')
 
-  // ✅ NEW: Cashbook History (custom range)
+  // Cashbook History (custom range)
   const [openCashbookHistory, setOpenCashbookHistory] = useState(false)
   const [histFrom, setHistFrom] = useState(from)
   const [histTo, setHistTo] = useState(to)
@@ -111,39 +121,34 @@ export default function Dashboard() {
     queryFn: () => listItems(''),
   })
 
-  // ✅ Collected Today MUST come from BillPayment rows (not from bills)
-  // Because credit bills get paid later and those amounts are stored in BillPayment.
+  // Collected Today MUST come from BillPayment rows
   const qCollected = useQuery({
     queryKey: ['dash-collected', from, to],
     queryFn: () => getPaymentsSummary({ from_date: from, to_date: to }),
   })
 
-  // ✅ NEW: Cashbook summary for today (withdrawals + misc expenses)
+  // Cashbook summary for today (withdrawals + misc expenses)
   const qCashbook = useQuery({
     queryKey: ['dash-cashbook', from, to],
     queryFn: () => getCashbookSummary({ from_date: from, to_date: to }),
   })
 
-  // ✅ NEW: Cashbook History list (only fetch when dialog open)
+  // Cashbook History list (only fetch when dialog open)
   const qCashbookHistory = useQuery({
     queryKey: ['dash-cashbook-history', histFrom, histTo],
     queryFn: () => listCashbookEntries({ from_date: histFrom, to_date: histTo, limit: 500 }),
     enabled: openCashbookHistory,
   })
 
-  // ✅ NEW: Cashbook History summary (only fetch when dialog open)
+  // Cashbook History summary (only fetch when dialog open)
   const qCashbookHistorySummary = useQuery({
     queryKey: ['dash-cashbook-history-summary', histFrom, histTo],
     queryFn: () => getCashbookSummary({ from_date: histFrom, to_date: histTo }),
     enabled: openCashbookHistory,
   })
 
-  // -------------------- Money Computations (with clear meaning) --------------------
+  // -------------------- Money Computations --------------------
   const billedToday = useMemo(() => {
-    /**
-     * "Billed Today" = total value of bills created today (includes credit bills).
-     * This is NOT the same as money collected today.
-     */
     const bills = (qBills.data || []) as any[]
     let total = 0
     for (const b of bills) total += Number(b.total_amount || 0)
@@ -159,11 +164,6 @@ export default function Dashboard() {
   const cashOutTodayExpenses = to2(qCashbook.data?.expenses)
 
   const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal } = useMemo(() => {
-    /**
-     * Returns Today = refunds issued today.
-     * Prefer refund_cash/refund_online (accurate cash/online impact).
-     * Fallback: subtotal_return if refund fields are missing.
-     */
     const rets = (qReturns.data || []) as any[]
     let cash = 0
     let online = 0
@@ -173,7 +173,6 @@ export default function Dashboard() {
       const rc = Number(r.refund_cash ?? 0)
       const ro = Number(r.refund_online ?? 0)
 
-      // If backend sends refund_cash/online properly, use them.
       if (rc !== 0 || ro !== 0) {
         cash += rc
         online += ro
@@ -181,7 +180,6 @@ export default function Dashboard() {
         continue
       }
 
-      // Fallback
       const sub =
         typeof r.subtotal_return === 'number'
           ? Number(r.subtotal_return)
@@ -198,37 +196,21 @@ export default function Dashboard() {
   }, [qReturns.data])
 
   const netCashInHandToday = useMemo(() => {
-    /**
-     * Net Cash In Hand Today:
-     * cash collected today - cash refunds today - (withdrawals/expenses)
-     *
-     * ✅ You asked: these expenses should deduct from net cash only.
-     */
     return to2(collectedTodayCash - returnsTodayCash - cashOutTodayTotal)
   }, [collectedTodayCash, returnsTodayCash, cashOutTodayTotal])
 
   const netOnlineToday = useMemo(() => {
-    /**
-     * Net Online Today:
-     * online collected today - online refunds today
-     * (cashbook should NOT affect online)
-     */
     return to2(collectedTodayOnline - returnsTodayOnline)
   }, [collectedTodayOnline, returnsTodayOnline])
 
   const netTotalToday = useMemo(() => {
-    /**
-     * Net Total Today:
-     * total collected today - total refunds today - cash-out
-     * (Because cash-out reduces real total available money)
-     */
     return to2(collectedTodayTotal - returnsTodayTotal - cashOutTodayTotal)
   }, [collectedTodayTotal, returnsTodayTotal, cashOutTodayTotal])
 
   // -------- Credit Pending (ALL dates) --------
   const qAllBillsForPending = useQuery({
     queryKey: ['dash-credit-pending-all'],
-    queryFn: () => listBills({ limit: 500, offset: 0 }), // adjust if you ever have >500 bills
+    queryFn: () => listBills({ limit: 500, offset: 0 }),
   })
 
   const creditPendingAllDates = useMemo(() => {
@@ -244,7 +226,7 @@ export default function Dashboard() {
     return to2(pending)
   }, [qAllBillsForPending.data])
 
-  // ---- Low Stock (aggregated by name + brand; expiry/mrp ignored) ----
+  // ---- Low Stock ----
   const { lowStockItems, lowStockCount } = useMemo(() => {
     const items = (qInv.data || []) as any[]
 
@@ -295,7 +277,7 @@ export default function Dashboard() {
     return { lowStockItems: lows, lowStockCount: lows.length }
   }, [qInv.data])
 
-  // ---- Expiring Soon (≤ 60 days) ----
+  // ---- Expiring Soon ----
   const { expiringSoonItems, expiringSoonCount } = useMemo(() => {
     const items = (qInv.data || []) as any[]
     const today = new Date()
@@ -343,14 +325,24 @@ export default function Dashboard() {
       setCbNote('')
       setOpenCashbook(false)
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
-      // also affects net row
-      qc.invalidateQueries({ queryKey: ['dash-collected'] })
-      qc.invalidateQueries({ queryKey: ['dash-returns'] })
+      qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
+      qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
     },
   })
 
-  const mClearCashbook = useMutation({
-    mutationFn: clearCashbookToday,
+  // ✅ CHANGED: clear last entry (today)
+  const mClearCashbookLast = useMutation({
+    mutationFn: () => clearCashbookLast({ from_date: from, to_date: to }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
+      qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
+      qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
+    },
+  })
+
+  // ✅ CHANGED: delete specific entry
+  const mDeleteCashbookEntry = useMutation({
+    mutationFn: (id: number) => deleteCashbookEntry(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
@@ -371,7 +363,6 @@ export default function Dashboard() {
       <Grid container spacing={2} alignItems="stretch">
         {showMoneyCards && (
           <>
-            {/* Billed Today */}
             <Grid item xs={12} sm={6} md={3}>
               <Paper sx={cardBase}>
                 <Typography variant="subtitle2" color="text.secondary">
@@ -386,7 +377,6 @@ export default function Dashboard() {
               </Paper>
             </Grid>
 
-            {/* Collected Today */}
             <Grid item xs={12} sm={6} md={3}>
               <Paper
                 sx={{
@@ -408,7 +398,6 @@ export default function Dashboard() {
               </Paper>
             </Grid>
 
-            {/* Credit Pending (All dates) */}
             <Grid item xs={12} sm={6} md={3}>
               <Paper sx={cardBase}>
                 <Typography variant="subtitle2" color="text.secondary">
@@ -423,7 +412,6 @@ export default function Dashboard() {
               </Paper>
             </Grid>
 
-            {/* Returns Today */}
             <Grid item xs={12} sm={6} md={3}>
               <Paper sx={cardBase}>
                 <Typography variant="subtitle2" color="text.secondary">
@@ -438,7 +426,7 @@ export default function Dashboard() {
               </Paper>
             </Grid>
 
-            {/* ✅ Cash Out Today (Withdrawal + Expense) */}
+            {/* ✅ Cash Out Today */}
             <Grid item xs={12} sm={6} md={3}>
               <Paper sx={cardBase}>
                 <Stack direction="row" alignItems="baseline" justifyContent="space-between">
@@ -450,7 +438,6 @@ export default function Dashboard() {
                     <Button
                       size="small"
                       onClick={() => {
-                        // default range = today when opening
                         setHistFrom(from)
                         setHistTo(to)
                         setOpenCashbookHistory(true)
@@ -480,21 +467,21 @@ export default function Dashboard() {
                   </Typography>
                 </Stack>
 
-                <Stack direction="row" justifyContent="flex-end" mt={0.5}>
+                {/* ✅ CHANGED: Clear Last instead of Clear Today */}
+                {/* <Stack direction="row" justifyContent="flex-end" mt={0.5}>
                   <Button
                     size="small"
                     color="error"
                     onClick={() => {
-                      const ok = window.confirm("Clear ONLY today's withdrawals/expenses? This cannot be undone.")
+                      const ok = window.confirm("Clear LAST entry of TODAY (withdrawal/expense)? This cannot be undone.")
                       if (!ok) return
-                      mClearCashbook.mutate()
+                      mClearCashbookLast.mutate()
                     }}
-                    disabled={mClearCashbook.isPending}
+                    disabled={mClearCashbookLast.isPending}
                   >
-                    Clear Today
+                    Clear Last
                   </Button>
-
-                </Stack>
+                </Stack> */}
               </Paper>
             </Grid>
 
@@ -568,7 +555,7 @@ export default function Dashboard() {
         </Grid>
       </Grid>
 
-      {/* ✅ Cashbook Add Dialog */}
+      {/* Cashbook Add Dialog */}
       <Dialog open={openCashbook} onClose={() => setOpenCashbook(false)} fullWidth maxWidth="xs">
         <DialogTitle>Add Withdrawal / Expense</DialogTitle>
         <DialogContent>
@@ -605,7 +592,7 @@ export default function Dashboard() {
         </DialogContent>
       </Dialog>
 
-      {/* ✅ Cashbook History Dialog */}
+      {/* Cashbook History Dialog */}
       <Dialog open={openCashbookHistory} onClose={() => setOpenCashbookHistory(false)} fullWidth maxWidth="md">
         <DialogTitle>Withdrawals / Expenses History</DialogTitle>
         <DialogContent>
@@ -658,6 +645,9 @@ export default function Dashboard() {
                     <TableCell>Type</TableCell>
                     <TableCell>Note</TableCell>
                     <TableCell align="right">Amount</TableCell>
+                    <TableCell align="center" width={80}>
+                      Action
+                    </TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -667,6 +657,20 @@ export default function Dashboard() {
                       <TableCell>{r.entry_type}</TableCell>
                       <TableCell>{r.note || '-'}</TableCell>
                       <TableCell align="right">₹{to2(r.amount).toFixed(2)}</TableCell>
+                      <TableCell align="center">
+                        <IconButton
+                          size="small"
+                          color="error"
+                          onClick={() => {
+                            const ok = window.confirm('Delete this entry? This cannot be undone.')
+                            if (!ok) return
+                            mDeleteCashbookEntry.mutate(Number(r.id))
+                          }}
+                          disabled={mDeleteCashbookEntry.isPending}
+                        >
+                          <DeleteOutlineIcon fontSize="small" />
+                        </IconButton>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

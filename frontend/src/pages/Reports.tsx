@@ -1,4 +1,4 @@
-// F:\medical-inventory\frontend\src\pages\Reports.tsx
+// frontend/src/pages/Reports.tsx
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -22,9 +22,10 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 
 import { listBillsPaged, getBill, getSalesAggregate } from '../services/billing'
 import { listReturns, getReturn } from '../services/returns'
+import { listItems, getItemLedger } from '../services/inventory'
 import { todayRange } from '../lib/date'
 
-type Tab = 'sales' | 'returns'
+type Tab = 'sales' | 'returns' | 'stock'
 type ViewMode = 'details' | 'aggregate'
 type GroupBy = 'day' | 'month'
 
@@ -81,10 +82,27 @@ export default function Reports() {
   const [detailType, setDetailType] = useState<'bill' | 'return' | null>(null)
   const [detail, setDetail] = useState<any | null>(null)
 
+  // ✅ Stock ledger item picker
+  const [itemPickerOpen, setItemPickerOpen] = useState(false)
+  const [itemSearch, setItemSearch] = useState('')
+  const [debouncedItemSearch, setDebouncedItemSearch] = useState('')
+  const [pickedItem, setPickedItem] = useState<any | null>(null)
+  const [ledgerReason, setLedgerReason] = useState<string>('') // empty = all
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedItemSearch(itemSearch.trim()), 300)
+    return () => clearTimeout(t)
+  }, [itemSearch])
+
   // ✅ When switching tab away from sales, force viewMode to details
   useEffect(() => {
     if (tab !== 'sales' && viewMode === 'aggregate') setViewMode('details')
   }, [tab, viewMode])
+
+  // ✅ When switching to stock, force viewMode to details
+  useEffect(() => {
+    if (tab === 'stock') setViewMode('details')
+  }, [tab])
 
   // ----------------------------
   // SALES DETAILS (paged)
@@ -127,6 +145,35 @@ export default function Reports() {
     queryFn: () => getSalesAggregate({ from_date: from, to_date: to, group_by: groupBy }),
   })
 
+  // ----------------------------
+  // STOCK ITEM SEARCH (dialog list)
+  // ----------------------------
+  const qItemSearch = useQuery({
+    queryKey: ['rpt-stock-items', debouncedItemSearch],
+    enabled: itemPickerOpen && debouncedItemSearch.length > 0,
+    queryFn: () => listItems(debouncedItemSearch),
+  })
+
+  // ----------------------------
+  // STOCK LEDGER (paged)
+  // ----------------------------
+  const qLedger = useInfiniteQuery({
+    queryKey: ['rpt-stock-ledger', pickedItem?.id, from, to, ledgerReason],
+    enabled: tab === 'stock' && !!pickedItem?.id,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
+      return await getItemLedger({
+        item_id: Number(pickedItem.id),
+        from_date: from,
+        to_date: to,
+        reason: ledgerReason ? ledgerReason : undefined,
+        limit: LIMIT,
+        offset: pageParam,
+      })
+    },
+    getNextPageParam: (lastPage: any) => lastPage?.next_offset ?? undefined,
+  })
+
   const salesRaw = useMemo(() => {
     const pages: any[] = ((qSales.data as any)?.pages ?? []) as any[]
     return pages.flatMap((p) => (Array.isArray(p?.items) ? p.items : []))
@@ -138,6 +185,15 @@ export default function Reports() {
     for (const p of pages) if (Array.isArray(p)) all.push(...p)
     return all
   }, [qRets.data])
+
+  const ledgerRaw = useMemo(() => {
+    const pages: any[] = ((qLedger.data as any)?.pages ?? []) as any[]
+    const rows: any[] = []
+    for (const p of pages) {
+      if (p && Array.isArray(p.items)) rows.push(...p.items)
+    }
+    return rows
+  }, [qLedger.data])
 
   const detailRows = useMemo(() => {
     if (tab === 'sales') {
@@ -178,7 +234,7 @@ export default function Reports() {
           mode: b.payment_mode || '',
         }
       })
-    } else {
+    } else if (tab === 'returns') {
       const rets = (returnsRaw || []) as any[]
       return rets.map((r) => {
         const refundCalc = (r.items || []).reduce(
@@ -196,8 +252,21 @@ export default function Reports() {
           notes: r.notes || '',
         }
       })
+    } else {
+      // stock ledger rows
+      return ledgerRaw.map((m: any) => ({
+        id: m.id,
+        ts: m.ts,
+        delta: Number(m.delta || 0),
+        reason: m.reason || '',
+        ref_type: m.ref_type || '',
+        ref_id: m.ref_id ?? '',
+        note: m.note || '',
+        before: Number(m.balance_before ?? 0),
+        after: Number(m.balance_after ?? 0),
+      }))
     }
-  }, [tab, salesRaw, returnsRaw])
+  }, [tab, salesRaw, returnsRaw, ledgerRaw])
 
   async function openDetail(row: any) {
     if (tab === 'sales') {
@@ -230,7 +299,7 @@ export default function Reports() {
       const header = ['Period', 'Bills', 'Gross Sales', 'Paid', 'Pending']
       const body = agg.map((x: any) => [
         x.period,
-        x.bills_count,
+        String(x.bills_count),
         money(x.gross_sales),
         money(x.paid_total),
         money(x.pending_total),
@@ -241,6 +310,31 @@ export default function Reports() {
       const a = document.createElement('a')
       a.href = url
       a.download = `sales-aggregate-${groupBy}_${from}_to_${to}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+      return
+    }
+
+    // ✅ Stock export
+    if (tab === 'stock') {
+      const header = ['ID', 'TS', 'Delta', 'Reason', 'Ref Type', 'Ref ID', 'Before', 'After', 'Note']
+      const body = (detailRows as any[]).map((r: any) => [
+        String(r.id),
+        String(r.ts),
+        String(r.delta),
+        String(r.reason),
+        String(r.ref_type ?? ''),
+        String(r.ref_id ?? ''),
+        String(r.before ?? ''),
+        String(r.after ?? ''),
+        String(r.note ?? ''),
+      ])
+      const csv = toCSV([header, ...body])
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `stock-ledger_${pickedItem?.id ?? 'item'}_${from}_to_${to}.csv`
       a.click()
       URL.revokeObjectURL(url)
       return
@@ -280,29 +374,44 @@ export default function Reports() {
     URL.revokeObjectURL(url)
   }
 
-  // Infinite scroll only for details view
-  const activeFetchNextPage = tab === 'sales' ? qSales.fetchNextPage : qRets.fetchNextPage
-  const activeHasNextPage = tab === 'sales' ? qSales.hasNextPage : qRets.hasNextPage
-  const activeIsFetchingNextPage = tab === 'sales' ? qSales.isFetchingNextPage : qRets.isFetchingNextPage
+  // Infinite scroll: sales details + stock ledger
+  const activeFetchNextPage =
+    tab === 'sales' ? qSales.fetchNextPage : tab === 'stock' ? qLedger.fetchNextPage : qRets.fetchNextPage
+
+  const activeHasNextPage =
+    tab === 'sales' ? qSales.hasNextPage : tab === 'stock' ? qLedger.hasNextPage : qRets.hasNextPage
+
+  const activeIsFetchingNextPage =
+    tab === 'sales' ? qSales.isFetchingNextPage : tab === 'stock' ? qLedger.isFetchingNextPage : qRets.isFetchingNextPage
 
   const isLoading =
     tab === 'sales'
       ? viewMode === 'aggregate'
         ? qAgg.isLoading
         : qSales.isLoading
-      : qRets.isLoading
+      : tab === 'returns'
+        ? qRets.isLoading
+        : qLedger.isLoading
 
   const isError =
     tab === 'sales'
       ? viewMode === 'aggregate'
         ? qAgg.isError
         : qSales.isError
-      : qRets.isError
+      : tab === 'returns'
+        ? qRets.isError
+        : qLedger.isError
 
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    if (!(tab === 'sales' && viewMode === 'details')) return
+    // Only enable infinite scroll for SALES details and STOCK ledger
+    const enabled =
+      (tab === 'sales' && viewMode === 'details') ||
+      (tab === 'stock' && !!pickedItem?.id)
+
+    if (!enabled) return
+
     const el = loadMoreRef.current
     if (!el) return
 
@@ -318,9 +427,15 @@ export default function Reports() {
 
     obs.observe(el)
     return () => obs.disconnect()
-  }, [tab, viewMode, activeFetchNextPage, activeHasNextPage, activeIsFetchingNextPage])
+  }, [tab, viewMode, pickedItem?.id, activeFetchNextPage, activeHasNextPage, activeIsFetchingNextPage])
 
   const aggRows = (qAgg.data || []) as any[]
+
+  const exportDisabled = useMemo(() => {
+    if (tab === 'sales' && viewMode === 'aggregate') return aggRows.length === 0
+    if (tab === 'stock') return (detailRows as any[]).length === 0
+    return (detailRows as any[]).length === 0
+  }, [tab, viewMode, aggRows.length, detailRows])
 
   return (
     <>
@@ -340,10 +455,11 @@ export default function Reports() {
                 label="Report"
                 value={tab}
                 onChange={(e) => setTab(e.target.value as Tab)}
-                sx={{ width: 160 }}
+                sx={{ width: 180 }}
               >
                 <MenuItem value="sales">Sales</MenuItem>
                 <MenuItem value="returns">Returns</MenuItem>
+                <MenuItem value="stock">Stock Ledger</MenuItem>
               </TextField>
 
               {tab === 'sales' && (
@@ -395,12 +511,45 @@ export default function Reports() {
                   onChange={(e) => setQ(e.target.value)}
                 />
               )}
+
+              {tab === 'stock' && (
+                <>
+                  <Button
+                    variant="outlined"
+                    onClick={() => setItemPickerOpen(true)}
+                  >
+                    {pickedItem ? `Item: ${pickedItem.name} (#${pickedItem.id})` : 'Pick Item'}
+                  </Button>
+
+                  <TextField
+                    select
+                    label="Reason"
+                    value={ledgerReason}
+                    onChange={(e) => setLedgerReason(e.target.value)}
+                    sx={{ width: 160 }}
+                  >
+                    <MenuItem value="">All</MenuItem>
+                    <MenuItem value="OPENING">OPENING</MenuItem>
+                    <MenuItem value="ADJUST">ADJUST</MenuItem>
+                    <MenuItem value="BILL">BILL</MenuItem>
+                    <MenuItem value="RETURN">RETURN</MenuItem>
+                    <MenuItem value="EXCHANGE_IN">EXCHANGE_IN</MenuItem>
+                    <MenuItem value="EXCHANGE_OUT">EXCHANGE_OUT</MenuItem>
+                  </TextField>
+                </>
+              )}
             </Stack>
 
-            <Button variant="outlined" onClick={downloadCSV} disabled={tab === 'sales' && viewMode === 'aggregate' ? aggRows.length === 0 : (detailRows as any[]).length === 0}>
+            <Button variant="outlined" onClick={downloadCSV} disabled={exportDisabled}>
               Export CSV
             </Button>
           </Stack>
+
+          {tab === 'stock' && pickedItem && (
+            <Box mt={1} color="text.secondary">
+              Current Stock: <b>{qLedger.data?.pages?.[0]?.current_stock ?? pickedItem.stock ?? '-'}</b>
+            </Box>
+          )}
         </Paper>
 
         <Paper sx={{ p: 2 }}>
@@ -431,6 +580,57 @@ export default function Reports() {
                       <td colSpan={5}>
                         <Box p={2} color="text.secondary">
                           No data.
+                        </Box>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </Box>
+          ) : tab === 'stock' ? (
+            <Box sx={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>TS</th>
+                    <th>Delta</th>
+                    <th>Reason</th>
+                    <th>Ref</th>
+                    <th>Before</th>
+                    <th>After</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {!pickedItem ? (
+                    <tr>
+                      <td colSpan={8}>
+                        <Box p={2} color="text.secondary">
+                          Pick an item to view ledger.
+                        </Box>
+                      </td>
+                    </tr>
+                  ) : (
+                    (detailRows as any[]).map((r: any) => (
+                      <tr key={`m-${r.id}`}>
+                        <td>{r.id}</td>
+                        <td>{r.ts}</td>
+                        <td>{r.delta}</td>
+                        <td>{r.reason}</td>
+                        <td>{r.ref_type ? `${r.ref_type}${r.ref_id ? ` #${r.ref_id}` : ''}` : '-'}</td>
+                        <td>{r.before}</td>
+                        <td>{r.after}</td>
+                        <td>{r.note || '-'}</td>
+                      </tr>
+                    ))
+                  )}
+
+                  {pickedItem && (detailRows as any[]).length === 0 && !isLoading && (
+                    <tr>
+                      <td colSpan={8}>
+                        <Box p={2} color="text.secondary">
+                          No ledger rows for this date range.
                         </Box>
                       </td>
                     </tr>
@@ -535,8 +735,8 @@ export default function Reports() {
             </Box>
           )}
 
-          {/* infinite scroll only for sales details */}
-          {tab === 'sales' && viewMode === 'details' && (
+          {/* infinite scroll only for sales details and stock */}
+          {((tab === 'sales' && viewMode === 'details') || (tab === 'stock' && !!pickedItem?.id)) && (
             <>
               <div ref={loadMoreRef} style={{ height: 1 }} />
 
@@ -556,7 +756,7 @@ export default function Reports() {
         </Paper>
       </Stack>
 
-      {/* Detail dialog */}
+      {/* Detail dialog (Sales/Returns only) */}
       <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           {detailType === 'bill' ? 'Bill Details' : 'Return Details'}
@@ -671,6 +871,99 @@ export default function Reports() {
               )}
             </Stack>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ✅ Item picker dialog (Stock Ledger) */}
+      <Dialog open={itemPickerOpen} onClose={() => setItemPickerOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Pick Item
+          <IconButton onClick={() => setItemPickerOpen(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <TextField
+              label="Search item (name/brand)"
+              value={itemSearch}
+              onChange={(e) => setItemSearch(e.target.value)}
+              fullWidth
+            />
+
+            <Divider />
+
+            <Box sx={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Brand</th>
+                    <th>Stock</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {qItemSearch.isLoading && (
+                    <tr>
+                      <td colSpan={5}>
+                        <Box p={2} color="text.secondary">
+                          Loading…
+                        </Box>
+                      </td>
+                    </tr>
+                  )}
+
+                  {!qItemSearch.isLoading && (qItemSearch.data || []).length === 0 && debouncedItemSearch && (
+                    <tr>
+                      <td colSpan={5}>
+                        <Box p={2} color="text.secondary">
+                          No items found.
+                        </Box>
+                      </td>
+                    </tr>
+                  )}
+
+                  {(qItemSearch.data || []).slice(0, 50).map((it: any) => (
+                    <tr key={it.id}>
+                      <td>{it.id}</td>
+                      <td>{it.name}</td>
+                      <td>{it.brand || '-'}</td>
+                      <td>{it.stock}</td>
+                      <td style={{ width: 100 }}>
+                        <Button
+                          size="small"
+                          variant="contained"
+                          onClick={() => {
+                            setPickedItem(it)
+                            setItemPickerOpen(false)
+                          }}
+                        >
+                          Pick
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+
+                  {!debouncedItemSearch && (
+                    <tr>
+                      <td colSpan={5}>
+                        <Box p={2} color="text.secondary">
+                          Type to search items.
+                        </Box>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </Box>
+
+            <Typography variant="body2" color="text.secondary">
+              Tip: Pick the correct item batch if you have duplicates (same name/brand with different expiry).
+            </Typography>
+          </Stack>
         </DialogContent>
       </Dialog>
     </>

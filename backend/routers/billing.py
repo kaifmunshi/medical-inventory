@@ -7,18 +7,42 @@ from pydantic import BaseModel
 from sqlmodel import select
 from sqlalchemy import or_, exists, func
 
-
 from backend.db import get_session
 from backend.models import (
     Item, Bill, BillItem, BillPayment,
-    BillCreate, BillOut, BillItemOut
+    BillCreate, BillOut, BillItemOut,
+    StockMovement,  # ✅ NEW
 )
 
 router = APIRouter()
 
 
+# -------------------- Safe helpers --------------------
+
 def round2(x: float) -> float:
     return float(f"{x:.2f}")
+
+
+def as_f(x: Any) -> float:
+    """
+    Safe float conversion: None -> 0.0, "12" -> 12.0
+    Prevents future crashes due to missing numeric fields.
+    """
+    try:
+        if x is None:
+            return 0.0
+        return float(x)
+    except Exception:
+        return 0.0
+
+
+def as_i(x: Any) -> int:
+    try:
+        if x is None:
+            return 0
+        return int(x)
+    except Exception:
+        return 0
 
 
 def iso_date(s: Optional[str]) -> str:
@@ -31,11 +55,48 @@ def iso_date(s: Optional[str]) -> str:
     return ss[:10] if len(ss) >= 10 else ss
 
 
-# ✅ Paginated response for reports/infinite scroll (new)
+def now_ts() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def add_movement(
+    session,
+    *,
+    item_id: int,
+    delta: int,
+    reason: str,
+    ref_type: str,
+    ref_id: int,
+    note: Optional[str] = None,
+):
+    """
+    Append-only inventory ledger row.
+    +delta => stock IN, -delta => stock OUT.
+    """
+    session.add(
+        StockMovement(
+            item_id=int(item_id),
+            ts=now_ts(),
+            delta=int(delta),
+            reason=str(reason),
+            ref_type=str(ref_type),
+            ref_id=int(ref_id),
+            note=note,
+        )
+    )
+
+
+# -------------------- Response Models --------------------
+
 class BillPageOut(BaseModel):
+    """
+    ✅ Paginated response for reports/infinite scroll
+    """
     items: List[BillOut]
     next_offset: Optional[int] = None
 
+
+# -------------------- Bills list endpoints --------------------
 
 @router.get("/", response_model=List[BillOut])
 def list_bills(
@@ -89,7 +150,6 @@ def list_bills(
         return out
 
 
-# ✅ New paged endpoint for Reports infinite scroll
 @router.get("/paged", response_model=BillPageOut)
 def list_bills_paged(
     limit: int = Query(100, ge=1, le=500),
@@ -98,6 +158,9 @@ def list_bills_paged(
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
     q: Optional[str] = Query(None, description="Search by id/item/notes"),
 ):
+    """
+    ✅ Paged endpoint for Reports infinite scroll.
+    """
     with get_session() as session:
         stmt = select(Bill)
 
@@ -150,7 +213,6 @@ def list_bills_paged(
                 payment_online=b.payment_online,
                 notes=b.notes,
 
-                # ✅ credit fields
                 is_credit=b.is_credit,
                 payment_status=b.payment_status,
                 paid_amount=b.paid_amount,
@@ -187,7 +249,6 @@ def get_bill(bill_id: int):
             payment_online=b.payment_online,
             notes=b.notes,
 
-            # ✅ credit fields
             is_credit=b.is_credit,
             payment_status=b.payment_status,
             paid_amount=b.paid_amount,
@@ -203,6 +264,8 @@ def get_bill(bill_id: int):
         )
 
 
+# -------------------- Create Bill --------------------
+
 @router.post("/", response_model=BillOut, status_code=201)
 def create_bill(payload: BillCreate):
     if not payload.items:
@@ -212,7 +275,7 @@ def create_bill(payload: BillCreate):
     if payload.payment_mode not in {"cash", "online", "split", "credit"}:
         raise HTTPException(status_code=400, detail="Invalid payment_mode")
 
-    # NEW: read optional manual final amount (will work even if model ignores extra fields)
+    # NEW: read optional manual final amount (works even if model ignores extra fields)
     manual_final = getattr(payload, "final_amount", None)
     if manual_final is not None:
         try:
@@ -224,8 +287,9 @@ def create_bill(payload: BillCreate):
 
     with get_session() as session:
         # 1) Load items and validate stock
-        db_items = {}
+        db_items: Dict[int, Item] = {}
         subtotal = 0.0
+
         for line in payload.items:
             itm = session.get(Item, line.item_id)
             if not itm:
@@ -234,65 +298,70 @@ def create_bill(payload: BillCreate):
                 raise HTTPException(status_code=400, detail="Quantity must be > 0")
             if itm.stock < line.quantity:
                 raise HTTPException(status_code=400, detail=f"Insufficient stock for {itm.name}")
+
             db_items[line.item_id] = itm
-            subtotal += (line.quantity * itm.mrp)
+            subtotal += (as_i(line.quantity) * as_f(itm.mrp))
 
         subtotal = round2(subtotal)
-        computed_total = round2(subtotal * (1 - payload.discount_percent / 100.0))
+        computed_total = round2(subtotal * (1 - as_f(payload.discount_percent) / 100.0))
 
         # 2) Use manual override if provided; else computed total
         total = manual_final if manual_final is not None else computed_total
 
-        # 3) Validate payment split (against chosen total)
+        # 3) Validate payment split (against chosen total) — hardened for None inputs
+        pay_cash_in = round2(as_f(getattr(payload, "payment_cash", 0.0)))
+        pay_online_in = round2(as_f(getattr(payload, "payment_online", 0.0)))
+
         if payload.payment_mode == "credit":
-            # credit bill: no payment now
             cash, online = 0.0, 0.0
         elif payload.payment_mode == "cash":
-            if round2(payload.payment_cash) != total:
+            if round2(pay_cash_in) != total:
                 raise HTTPException(status_code=400, detail="payment_cash must equal total_amount")
             cash, online = total, 0.0
         elif payload.payment_mode == "online":
-            if round2(payload.payment_online) != total:
+            if round2(pay_online_in) != total:
                 raise HTTPException(status_code=400, detail="payment_online must equal total_amount")
             cash, online = 0.0, total
         else:  # split
-            if round2(payload.payment_cash + payload.payment_online) != total:
+            if round2(pay_cash_in + pay_online_in) != total:
                 raise HTTPException(status_code=400, detail="Cash + Online must equal total_amount")
-            cash, online = round2(payload.payment_cash), round2(payload.payment_online)
+            cash, online = round2(pay_cash_in), round2(pay_online_in)
 
-        # 4) Create Bill + BillItems and deduct stock
-        now_iso = datetime.now().isoformat(timespec="seconds")
+        # 4) Create Bill + BillItems and deduct stock (✅ single transaction)
+        now_iso = now_ts()
 
         is_credit = payload.payment_mode == "credit"
         status = "UNPAID" if is_credit else "PAID"
         paid_amount = 0.0 if is_credit else total
         paid_at = None if is_credit else now_iso
 
-        b = Bill(
-            discount_percent=payload.discount_percent,
-            subtotal=subtotal,
-            total_amount=total,
-            payment_mode=payload.payment_mode,
-            payment_cash=cash,
-            payment_online=online,
-            notes=payload.notes,
-
-            # ✅ credit tracking
-            is_credit=is_credit,
-            payment_status=status,
-            paid_amount=paid_amount,
-            paid_at=paid_at
-        )
-
-        session.add(b)
-        session.commit()
-        session.refresh(b)
-
         try:
-            # Deduct stock & create line items
+            b = Bill(
+                date_time=now_iso,
+                discount_percent=payload.discount_percent,
+                subtotal=subtotal,
+                total_amount=total,
+                payment_mode=payload.payment_mode,
+                payment_cash=cash,
+                payment_online=online,
+                notes=getattr(payload, "notes", None),
+
+                # ✅ credit tracking
+                is_credit=is_credit,
+                payment_status=status,
+                paid_amount=paid_amount,
+                paid_at=paid_at
+            )
+
+            session.add(b)
+            session.flush()  # ✅ ensures b.id is available without committing
+
+            # Deduct stock & create line items + SALE ledger
             for line in payload.items:
                 itm = db_items[line.item_id]
-                itm.stock -= line.quantity
+                qty = as_i(line.quantity)
+
+                itm.stock = as_i(itm.stock) - qty
                 session.add(itm)
 
                 bi = BillItem(
@@ -300,12 +369,21 @@ def create_bill(payload: BillCreate):
                     item_id=itm.id,
                     item_name=itm.name,
                     mrp=itm.mrp,
-                    quantity=line.quantity,
-                    line_total=round2(line.quantity * itm.mrp)
+                    quantity=qty,
+                    line_total=round2(qty * as_f(itm.mrp))
                 )
                 session.add(bi)
 
-            session.commit()
+                # ✅ Ledger: SALE (stock OUT)
+                add_movement(
+                    session,
+                    item_id=itm.id,
+                    delta=-qty,
+                    reason="SALE",
+                    ref_type="BILL",
+                    ref_id=b.id,
+                    note=f"Bill #{b.id}",
+                )
 
             # ✅ If not credit, create a BillPayment for reporting "Collected Today"
             if not is_credit:
@@ -318,17 +396,15 @@ def create_bill(payload: BillCreate):
                     note="auto: payment at bill creation"
                 )
                 session.add(p)
-                session.commit()
 
+            session.commit()
+            session.refresh(b)
+
+        except HTTPException:
+            session.rollback()
+            raise
         except Exception as e:
             session.rollback()
-            # restore stock
-            for line in payload.items:
-                itm = session.get(Item, line.item_id)
-                if itm:
-                    itm.stock += line.quantity
-                    session.add(itm)
-            session.commit()
             raise HTTPException(status_code=500, detail=f"Failed to create bill: {e}")
 
         items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
@@ -369,23 +445,26 @@ class ReceivePaymentIn(BaseModel):
 
 @router.post("/{bill_id}/receive-payment")
 def receive_payment(bill_id: int, payload: ReceivePaymentIn):
+    """
+    ✅ Future-bug-proofing:
+    - Inserts BillPayment (source of truth)
+    - Recomputes Bill totals from BillPayment rows (prevents drift / double counting forever)
+    """
     if payload.mode not in {"cash", "online", "split"}:
         raise HTTPException(status_code=400, detail="Invalid mode")
 
-    cash = round2(payload.cash_amount or 0.0)
-    online = round2(payload.online_amount or 0.0)
+    cash = round2(as_f(payload.cash_amount))
+    online = round2(as_f(payload.online_amount))
 
     if payload.mode == "cash" and online != 0:
         raise HTTPException(status_code=400, detail="For cash mode, online_amount must be 0")
     if payload.mode == "online" and cash != 0:
         raise HTTPException(status_code=400, detail="For online mode, cash_amount must be 0")
-    if payload.mode == "split" and (cash + online) <= 0:
-        raise HTTPException(status_code=400, detail="Split payment must have some amount")
 
-    if payload.mode != "split" and (cash + online) <= 0:
+    if (cash + online) <= 0:
         raise HTTPException(status_code=400, detail="Payment amount must be > 0")
 
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now_iso = now_ts()
 
     with get_session() as session:
         b = session.get(Bill, bill_id)
@@ -404,28 +483,33 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
         session.add(p)
         session.commit()
 
-        # 2) Recalculate paid_amount from all BillPayment rows (cash + online)
+        # 2) Recalculate totals from all BillPayment rows (prevents future inconsistencies)
         pays = session.exec(select(BillPayment).where(BillPayment.bill_id == bill_id)).all()
-        total_paid = round2(sum((x.cash_amount or 0) + (x.online_amount or 0) for x in pays))
+
+        total_cash = round2(sum(as_f(x.cash_amount) for x in pays))
+        total_online = round2(sum(as_f(x.online_amount) for x in pays))
+        total_paid = round2(total_cash + total_online)
+
+        # Keep Bill fields aligned with payments history
+        b.payment_cash = total_cash
+        b.payment_online = total_online
         b.paid_amount = total_paid
 
-        # 3) ALSO maintain Bill.payment_cash / Bill.payment_online as "total collected for this bill"
-        b.payment_cash = round2((b.payment_cash or 0.0) + cash)
-        b.payment_online = round2((b.payment_online or 0.0) + online)
+        # 3) Decide status (UNPAID / PARTIAL / PAID)
+        total_amount = round2(as_f(b.total_amount))
 
-        # 4) Decide status (UNPAID / PARTIAL / PAID)
         if total_paid <= 0:
             b.payment_status = "UNPAID"
             b.paid_at = None
             b.is_credit = True
-        elif total_paid + 0.0001 < b.total_amount:
+        elif total_paid + 0.0001 < total_amount:
             b.payment_status = "PARTIAL"
             b.paid_at = None
             b.is_credit = True
         else:
             b.payment_status = "PAID"
             b.paid_at = now_iso
-            b.is_credit = False  # fully settled
+            b.is_credit = False
 
         session.add(b)
         session.commit()
@@ -435,7 +519,7 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
             "payment_status": b.payment_status,
             "paid_amount": b.paid_amount,
             "total_amount": b.total_amount,
-            "pending_amount": round2(b.total_amount - b.paid_amount)
+            "pending_amount": round2(max(0.0, total_amount - total_paid))
         }
 
 
@@ -476,10 +560,9 @@ def payments_summary(
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)")
 ) -> Dict[str, Any]:
     """
-    Dashboard needs "Collected Today" that includes:
-    - payments collected from normal bills (auto BillPayment at bill creation)
-    - payments collected later from credit bills (/receive-payment)
-
+    Dashboard "Collected Today" MUST include:
+    - normal bills (auto BillPayment at bill creation)
+    - credit bill receipts (receive-payment)
     So we aggregate from BillPayment.received_at (NOT from Bill rows).
     """
     with get_session() as session:
@@ -490,8 +573,8 @@ def payments_summary(
         if to_date:
             pays = [p for p in pays if iso_date(p.received_at) <= to_date]
 
-        cash = round2(sum(float(p.cash_amount or 0.0) for p in pays))
-        online = round2(sum(float(p.online_amount or 0.0) for p in pays))
+        cash = round2(sum(as_f(p.cash_amount) for p in pays))
+        online = round2(sum(as_f(p.online_amount) for p in pays))
         total = round2(cash + online)
 
         return {
@@ -500,6 +583,63 @@ def payments_summary(
             "total_collected": total,
             "count": len(pays),
         }
+
+
+# ------------------ NEW FEATURE: Collections Aggregate ------------------
+
+@router.get("/payments/aggregate")
+def payments_aggregate(
+    from_date: str = Query(..., description="YYYY-MM-DD"),
+    to_date: str = Query(..., description="YYYY-MM-DD"),
+    group_by: str = Query("day", pattern="^(day|month)$"),
+) -> List[Dict[str, Any]]:
+    """
+    ✅ NEW: Aggregate REAL collections (cash/online actually received) by day or month.
+    Uses BillPayment.received_at as source of truth.
+
+    This is DIFFERENT from sales_aggregate:
+    - sales_aggregate = billed amount view (Bill.total_amount)
+    - payments_aggregate = collection view (BillPayment cash/online)
+    """
+    start_ts = f"{from_date}T00:00:00"
+    end_ts = f"{to_date}T23:59:59"
+
+    with get_session() as session:
+        if group_by == "month":
+            period_expr = func.substr(BillPayment.received_at, 1, 7)  # YYYY-MM
+        else:
+            period_expr = func.substr(BillPayment.received_at, 1, 10)  # YYYY-MM-DD
+
+        stmt = (
+            select(
+                period_expr.label("period"),
+                func.count(BillPayment.id).label("payments_count"),
+                func.coalesce(func.sum(BillPayment.cash_amount), 0).label("cash_total"),
+                func.coalesce(func.sum(BillPayment.online_amount), 0).label("online_total"),
+            )
+            .where(BillPayment.received_at >= start_ts)
+            .where(BillPayment.received_at <= end_ts)
+            .group_by(period_expr)
+            .order_by(period_expr.asc())
+        )
+
+        rows = session.exec(stmt).all()
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            cash = round2(as_f(r.cash_total))
+            online = round2(as_f(r.online_total))
+            total = round2(cash + online)
+
+            out.append({
+                "period": r.period,
+                "payments_count": int(r.payments_count or 0),
+                "cash_total": cash,
+                "online_total": online,
+                "total_collected": total,
+            })
+
+        return out
 
 
 # ------------------ Reports helper: Daily/Monthly Sales Aggregates ------------------
@@ -519,19 +659,16 @@ def sales_aggregate(
     - pending_total = gross_sales - paid_total (clamped to >= 0)
 
     This is "sales view" (based on bills).
-    If you want "collection view" (cash/online actually received), use BillPayment aggregation.
+    If you want "collection view", use /billing/payments/aggregate.
     """
     start_ts = f"{from_date}T00:00:00"
     end_ts = f"{to_date}T23:59:59"
 
     with get_session() as session:
-        # SQLite-friendly period grouping from ISO string: "YYYY-MM-DDTHH:MM:SS"
         if group_by == "month":
-            # YYYY-MM
-            period_expr = func.substr(Bill.date_time, 1, 7)
+            period_expr = func.substr(Bill.date_time, 1, 7)  # YYYY-MM
         else:
-            # YYYY-MM-DD
-            period_expr = func.substr(Bill.date_time, 1, 10)
+            period_expr = func.substr(Bill.date_time, 1, 10)  # YYYY-MM-DD
 
         stmt = (
             select(
@@ -550,8 +687,8 @@ def sales_aggregate(
 
         out: List[Dict[str, Any]] = []
         for r in rows:
-            gross = float(r.gross_sales or 0.0)
-            paid = float(r.paid_total or 0.0)
+            gross = as_f(r.gross_sales)
+            paid = as_f(r.paid_total)
             pending = max(0.0, gross - paid)
 
             out.append({

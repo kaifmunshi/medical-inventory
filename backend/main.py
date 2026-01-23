@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import SQLModel
-
+from backend import models
 from backend.db import engine
 from backend.routers import inventory, billing
 from backend.routers import returns as returns_router
@@ -10,15 +10,20 @@ from backend.routers import requested_items  # 👈 NEW
 from backend.routers import cashbook
 app = FastAPI(title="Ayurvedic Medical Inventory System")
 
-# For DEV: keep it simple and wide-open
-# (once everything works, we can tighten this)
+# For DEV: allow local frontend origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # 👈 TEMP: allow all origins in dev
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
-    allow_methods=["*"],        # 👈 allow POST, OPTIONS, etc.
-    allow_headers=["*"],        # 👈 allow Content-Type, etc.
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
 
 
 @app.on_event("startup")

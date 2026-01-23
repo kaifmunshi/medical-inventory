@@ -10,22 +10,25 @@ from sqlalchemy import func
 from sqlalchemy.sql import or_
 
 from backend.db import get_session
-from backend.models import Item, StockMovement
+from backend.models import Item, StockMovement  # ✅ NEW
 
 logger = logging.getLogger("api.items")
+
 router = APIRouter()
 
-# ---------- Local Schemas ----------
+# ---------- Local Schemas (NO batch_no) ----------
 class ItemIn(BaseModel):
     name: str
     brand: Optional[str] = None
     expiry_date: Optional[str] = None  # "YYYY-MM-DD"
     mrp: float
     stock: int
+
+    # ✅ NEW
     rack_number: int = 0
 
     class Config:
-        extra = "ignore"
+        extra = "ignore"  # ignore legacy 'batch_no' if a stale client sends it
 
 
 class ItemUpdateIn(BaseModel):
@@ -34,10 +37,12 @@ class ItemUpdateIn(BaseModel):
     expiry_date: Optional[str] = None
     mrp: Optional[float] = None
     stock: Optional[int] = None
+
+    # ✅ NEW
     rack_number: Optional[int] = None
 
     class Config:
-        extra = "ignore"
+        extra = "ignore"  # ignore legacy 'batch_no'
 
 
 class ItemOut(BaseModel):
@@ -47,21 +52,25 @@ class ItemOut(BaseModel):
     expiry_date: Optional[str] = None
     mrp: float
     stock: int
+
+    # ✅ NEW
     rack_number: int
+
     created_at: str
     updated_at: str
 
     class Config:
-        from_attributes = True
+        from_attributes = True  # pydantic v2 (orm_mode=True in v1)
 
 
+# ✅ NEW: paginated response envelope for infinite scroll
 class ItemPageOut(BaseModel):
     items: List[ItemOut]
     total: int
     next_offset: Optional[int] = None
 
 
-# ---------- Ledger Response Models ----------
+# ---------------- Ledger Response Models (NEW) ----------------
 class StockMovementOut(BaseModel):
     id: int
     ts: str
@@ -71,6 +80,8 @@ class StockMovementOut(BaseModel):
     ref_id: Optional[int] = None
     note: Optional[str] = None
     actor: Optional[str] = None
+
+    # ✅ helpful for UI
     balance_after: int
     balance_before: int
 
@@ -102,18 +113,20 @@ def add_movement(
     note: Optional[str] = None,
     actor: Optional[str] = None,
 ):
-    session.add(
-        StockMovement(
-            item_id=int(item_id),
-            ts=now_ts(),
-            delta=int(delta),
-            reason=str(reason),
-            ref_type=ref_type,
-            ref_id=ref_id,
-            note=note,
-            actor=actor,
-        )
+    """
+    Append-only ledger row. Never edits existing movements.
+    """
+    mv = StockMovement(
+        item_id=int(item_id),
+        ts=now_ts(),
+        delta=int(delta),
+        reason=str(reason),
+        ref_type=ref_type,
+        ref_id=ref_id,
+        note=note,
+        actor=actor,
     )
+    session.add(mv)
 
 
 # ---------- Endpoints ----------
@@ -136,20 +149,22 @@ def list_items(
                 )
             )
 
-        # If ONLY q is present (client didn't pass limit/offset), return ALL matches
+        # ✅ If ONLY q is present (client didn't pass limit/offset), return ALL matches
         if q and limit is None and offset is None:
             stmt = base_stmt.order_by(Item.name, Item.id)
             items = session.exec(stmt).all()
             total = len(items)
             return {"items": items, "total": total, "next_offset": None}
 
-        # Otherwise paginate (defaults if not provided)
+        # ✅ Otherwise paginate (defaults if not provided)
         page_limit = limit if limit is not None else 500
         page_offset = offset if offset is not None else 0
 
+        # total count (filtered)
         count_stmt = select(func.count()).select_from(base_stmt.subquery())
         total = session.exec(count_stmt).one()
 
+        # paginated items (stable order)
         page_stmt = (
             base_stmt
             .order_by(Item.name, Item.id)
@@ -158,9 +173,17 @@ def list_items(
         )
         items = session.exec(page_stmt).all()
 
-        next_offset = (page_offset + page_limit) if (page_offset + page_limit) < total else None
+        next_offset = (
+            page_offset + page_limit
+            if (page_offset + page_limit) < total
+            else None
+        )
 
-        return {"items": items, "total": total, "next_offset": next_offset}
+        return {
+            "items": items,
+            "total": total,
+            "next_offset": next_offset,
+        }
 
 
 @router.get("/{item_id}", response_model=ItemOut)
@@ -171,13 +194,14 @@ def get_item(item_id: int):
             raise HTTPException(status_code=404, detail="Item not found")
         return item
 
-
 @router.post("/", response_model=ItemOut, status_code=201)
 def create_item(payload: ItemIn):
     if payload.mrp <= 0:
         raise HTTPException(status_code=400, detail="MRP must be > 0")
     if payload.stock is not None and payload.stock < 0:
         raise HTTPException(status_code=400, detail="Stock cannot be negative")
+
+    # ✅ NEW: rack validation
     if payload.rack_number is not None and int(payload.rack_number) < 0:
         raise HTTPException(status_code=400, detail="Rack number cannot be negative")
 
@@ -189,7 +213,10 @@ def create_item(payload: ItemIn):
                 expiry_date=payload.expiry_date,
                 mrp=payload.mrp,
                 stock=payload.stock,
+
+                # ✅ NEW
                 rack_number=int(payload.rack_number or 0),
+
                 created_at=now_ts(),
                 updated_at=now_ts(),
             )
@@ -197,7 +224,19 @@ def create_item(payload: ItemIn):
             session.commit()
             session.refresh(item)
 
-            # Ledger: opening stock entry (ONLY if non-zero)
+            # # ✅ Ledger: opening stock entry (only if non-zero)
+            # if int(item.stock or 0) != 0:
+            #     add_movement(
+            #         session,
+            #         item_id=item.id,
+            #         delta=int(item.stock),
+            #         reason="OPENING",
+            #         ref_type="ITEM",
+            #         ref_id=item.id,
+            #         note="Opening stock at item creation",
+            #     )
+            #     session.commit()
+            # ✅ Ledger: opening stock entry (only if non-zero)
             if int(item.stock or 0) != 0:
                 try:
                     add_movement(
@@ -205,15 +244,15 @@ def create_item(payload: ItemIn):
                         item_id=item.id,
                         delta=int(item.stock),
                         reason="OPENING",
-                        ref_type="ITEM_CREATE",  # matches your DB screenshot style
+                        ref_type="ITEM",
                         ref_id=item.id,
-                        note="Initial stock on item creation",
+                        note="Opening stock at item creation",
                     )
                     session.commit()
                 except Exception as e:
                     session.rollback()
-                    # Don't break item creation; just log clearly
-                    logger.exception("Ledger insert failed (ignored). Error: %s", e)
+                    logger.exception("Ledger insert failed (ignored to keep item creation working): %s", e)
+
 
             return item
 
@@ -231,10 +270,13 @@ def update_item(item_id: int, payload: ItemUpdateIn):
 
         data = payload.model_dump(exclude_unset=True)
 
+        # Basic validations
         if "mrp" in data and data["mrp"] is not None and data["mrp"] <= 0:
             raise HTTPException(status_code=400, detail="MRP must be > 0")
         if "stock" in data and data["stock"] is not None and data["stock"] < 0:
             raise HTTPException(status_code=400, detail="Stock cannot be negative")
+
+        # ✅ NEW: rack validation
         if "rack_number" in data and data["rack_number"] is not None and int(data["rack_number"]) < 0:
             raise HTTPException(status_code=400, detail="Rack number cannot be negative")
 
@@ -245,6 +287,7 @@ def update_item(item_id: int, payload: ItemUpdateIn):
                 setattr(item, k, v)
 
         item.updated_at = now_ts()
+
         session.add(item)
         session.commit()
         session.refresh(item)
@@ -262,11 +305,12 @@ def delete_item(item_id: int):
         return
 
 
+# ---- Optional: quick stock adjust (increase/decrease) ----
 @router.post("/{item_id}/adjust", response_model=ItemOut)
 def adjust_stock(
     item_id: int,
     delta: int = Query(..., description="Positive or negative integer"),
-    note: Optional[str] = Query(None, description="Optional note for ledger"),
+    note: Optional[str] = Query(None, description="Optional note for ledger (e.g., purchase, damage, correction)"),
 ):
     with get_session() as session:
         try:
@@ -282,6 +326,7 @@ def adjust_stock(
             item.updated_at = now_ts()
             session.add(item)
 
+            # ✅ Ledger row for manual adjustment
             if int(delta) != 0:
                 add_movement(
                     session,
@@ -304,6 +349,7 @@ def adjust_stock(
             raise HTTPException(status_code=500, detail=f"Adjust stock failed: {e}")
 
 
+# ---------------- Ledger API (NEW) ----------------
 @router.get("/{item_id}/ledger", response_model=StockLedgerPageOut)
 def item_ledger(
     item_id: int,
@@ -313,6 +359,18 @@ def item_ledger(
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
     reason: Optional[str] = Query(None, description="Filter by reason"),
 ):
+    """
+    Returns newest-first ledger rows for a single item.
+    Also includes balance_before / balance_after for each row.
+
+    Balance computation strategy (fast):
+    - Start from current Item.stock
+    - Walk backwards over movements (newest -> older)
+    - For each movement:
+        after = running
+        before = after - delta
+        running = before
+    """
     with get_session() as session:
         item = session.get(Item, item_id)
         if not item:
@@ -342,20 +400,18 @@ def item_ledger(
             after = running
             before = after - int(m.delta or 0)
 
-            out.append(
-                StockMovementOut(
-                    id=m.id,
-                    ts=m.ts,
-                    delta=int(m.delta or 0),
-                    reason=m.reason,
-                    ref_type=getattr(m, "ref_type", None),
-                    ref_id=getattr(m, "ref_id", None),
-                    note=getattr(m, "note", None),
-                    actor=getattr(m, "actor", None),
-                    balance_after=after,
-                    balance_before=before,
-                )
-            )
+            out.append(StockMovementOut(
+                id=m.id,
+                ts=m.ts,
+                delta=int(m.delta or 0),
+                reason=m.reason,
+                ref_type=getattr(m, "ref_type", None),
+                ref_id=getattr(m, "ref_id", None),
+                note=getattr(m, "note", None),
+                actor=getattr(m, "actor", None),
+                balance_after=after,
+                balance_before=before,
+            ))
 
             running = before
 

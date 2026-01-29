@@ -81,7 +81,7 @@ export default function Inventory() {
 
   // ✅ Debounce typing to avoid calling API on every keystroke
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedQ(q.trim()), 300)
+    const t = setTimeout(() => setDebouncedQ(q.trim()), 600)
     return () => clearTimeout(t)
   }, [q])
 
@@ -93,7 +93,7 @@ export default function Inventory() {
   const qc = useQueryClient()
 
   // ✅ pagination size (you can change to 100 later if you want)
-  const LIMIT = 30
+  const LIMIT = 60
 
   // ✅ Infinite query (offset-based pagination)
   const {
@@ -215,7 +215,7 @@ export default function Inventory() {
     const obs = new IntersectionObserver(
       (entries) => {
         const first = entries[0]
-        if (first.isIntersecting && hasNextPage && !isFetchingNextPage) {
+        if (first.isIntersecting && hasNextPage && !isFetchingNextPage && !isLoading) {
           fetchNextPage()
         }
       },
@@ -224,7 +224,7 @@ export default function Inventory() {
 
     obs.observe(el)
     return () => obs.disconnect()
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage])
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, isLoading])
 
   const mCreate = useMutation({
     mutationFn: (payload: ItemFormValues) => createItem(payload),

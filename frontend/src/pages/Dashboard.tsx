@@ -59,6 +59,10 @@ export default function Dashboard() {
 
   const [openLow, setOpenLow] = useState(false)
   const [openExp, setOpenExp] = useState(false)
+  const [openExpired, setOpenExpired] = useState(false) // ✅ NEW
+
+  // ✅ NEW: zero stock dialog state
+  const [openZeroStock, setOpenZeroStock] = useState(false)
 
   // ✅ CHANGED: default HIDDEN (privacy)
   const [showMoneyCards, setShowMoneyCards] = useState(false)
@@ -149,6 +153,59 @@ export default function Dashboard() {
     queryKey: ['dash-inventory'],
     queryFn: () => listItems(''),
   })
+
+  // ✅ Inventory totals (Total Qty + Total Types) + ✅ Zero stock types list
+  const {
+    inventoryTotalQty,
+    inventoryTotalTypesAll,
+    inventoryAvailableTypes,
+    zeroStockTypesCount,
+    zeroStockTypesList,
+  } = useMemo(() => {
+    const items = (qInv.data || []) as any[]
+
+    type TypeAgg = { _key: string; name: string; brand: string; stock: number }
+    const map = new Map<string, TypeAgg>()
+
+    let totalQty = 0
+
+    for (const it of items) {
+      const name = String(it?.name ?? '').trim()
+      const brand = it?.brand != null ? String(it.brand).trim() : ''
+      const stock = Number(it?.stock ?? 0)
+      if (!name) continue
+
+      totalQty += stock
+
+      const key = `${name.toLowerCase()}|${brand.toLowerCase()}`
+      const existing = map.get(key)
+      if (!existing) {
+        map.set(key, { _key: key, name, brand, stock })
+      } else {
+        existing.stock += stock
+      }
+    }
+
+    const totalTypesAll = map.size
+
+    let availableTypes = 0
+    const zeroList: TypeAgg[] = []
+
+    for (const v of map.values()) {
+      if (Number(v.stock || 0) > 0) availableTypes++
+      else zeroList.push(v)
+    }
+
+    zeroList.sort((a, b) => a.name.localeCompare(b.name))
+
+    return {
+      inventoryTotalQty: totalQty,
+      inventoryTotalTypesAll: totalTypesAll,
+      inventoryAvailableTypes: availableTypes,
+      zeroStockTypesCount: zeroList.length,
+      zeroStockTypesList: zeroList,
+    }
+  }, [qInv.data])
 
   // Collected Today MUST come from BillPayment rows
   const qCollected = useQuery({
@@ -326,6 +383,31 @@ export default function Dashboard() {
       .sort((a: any, b: any) => a._daysLeft - b._daysLeft)
 
     return { expiringSoonItems: soon, expiringSoonCount: soon.length }
+  }, [qInv.data])
+
+  // ✅ NEW: ---- Expired Items ----
+  const { expiredItems, expiredCount } = useMemo(() => {
+    const items = (qInv.data || []) as any[]
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+
+    function daysUntil(exp: string | null | undefined) {
+      if (!exp) return Infinity
+      const d = new Date(String(exp).length <= 10 ? `${exp}T00:00:00` : String(exp))
+      if (isNaN(d.getTime())) return Infinity
+      d.setHours(0, 0, 0, 0)
+      return Math.ceil((d.getTime() - today.getTime()) / 86400000)
+    }
+
+    const expired = items
+      .map((it: any) => {
+        const left = daysUntil(it.expiry_date)
+        return { ...it, _daysLeft: left, _daysExpired: left === Infinity ? Infinity : Math.max(0, -left) }
+      })
+      .filter((it: any) => it._daysLeft < 0) // strictly before today
+      .sort((a: any, b: any) => a._daysLeft - b._daysLeft) // more negative first
+
+    return { expiredItems: expired, expiredCount: expired.length }
   }, [qInv.data])
 
   const cardBase = {
@@ -529,6 +611,41 @@ export default function Dashboard() {
         )}
 
         {/* Always visible cards */}
+        {/* ✅ Inventory card clickable -> show zero stock items */}
+        <Grid item xs={12} sm={6} md={3}>
+          <Tooltip title="Click to view zero stock items">
+            <Paper
+              sx={{
+                ...cardBase,
+                cursor: zeroStockTypesCount > 0 ? 'pointer' : 'default',
+                '&:hover':
+                  zeroStockTypesCount > 0
+                    ? { bgcolor: 'rgba(255,255,255,1)', boxShadow: '0 20px 45px rgba(0,0,0,0.06)' }
+                    : undefined,
+              }}
+              onClick={() => {
+                if (zeroStockTypesCount > 0) setOpenZeroStock(true)
+              }}
+            >
+              <Typography variant="subtitle2" color="text.secondary">
+                Inventory
+              </Typography>
+
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>
+                {inventoryTotalQty} qty
+              </Typography>
+
+              <Typography variant="caption" color="text.secondary" fontSize={15}>
+                Total {inventoryTotalTypesAll} • Types available {inventoryAvailableTypes}
+              </Typography>
+
+              <Typography variant="caption" color="text.secondary" fontSize={12.5}>
+                Zero stock items: {zeroStockTypesCount}
+              </Typography>
+            </Paper>
+          </Tooltip>
+        </Grid>
+
         <Grid item xs={12} sm={6} md={3}>
           <Tooltip title="Click to view low stock details">
             <Paper
@@ -568,7 +685,65 @@ export default function Dashboard() {
             </Paper>
           </Tooltip>
         </Grid>
+
+        {/* ✅ NEW CARD: Expired Items (after Expiring Soon) */}
+        <Grid item xs={12} sm={6} md={3}>
+          <Tooltip title="Click to view expired items">
+            <Paper
+              sx={{
+                ...cardBase,
+                cursor: 'pointer',
+                '&:hover': { bgcolor: 'rgba(255,255,255,1)', boxShadow: '0 20px 45px rgba(0,0,0,0.06)' },
+              }}
+              onClick={() => setOpenExpired(true)}
+            >
+              <Typography variant="subtitle2" color="text.secondary">
+                Expired Items
+              </Typography>
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>
+                {expiredCount} items
+              </Typography>
+            </Paper>
+          </Tooltip>
+        </Grid>
       </Grid>
+
+      {/* ✅ NEW: Zero Stock dialog (opened by clicking Inventory card) */}
+      <Dialog open={openZeroStock} onClose={() => setOpenZeroStock(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Zero Stock Items</DialogTitle>
+        <DialogContent>
+          {zeroStockTypesList.length === 0 ? (
+            <Typography color="text.secondary" p={1}>
+              No zero stock items.
+            </Typography>
+          ) : (
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Name</TableCell>
+                  <TableCell>Brand</TableCell>
+                  <TableCell align="right">Stock</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {zeroStockTypesList.map((it) => (
+                  <TableRow key={it._key}>
+                    <TableCell>{it.name}</TableCell>
+                    <TableCell>{it.brand || '-'}</TableCell>
+                    <TableCell align="right" sx={{ color: 'error.main', fontWeight: 700 }}>
+                      0
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+
+          <Stack alignItems="flex-end" p={1}>
+            <Button onClick={() => setOpenZeroStock(false)}>Close</Button>
+          </Stack>
+        </DialogContent>
+      </Dialog>
 
       {/* Cashbook Add Dialog */}
       <Dialog open={openCashbook} onClose={() => setOpenCashbook(false)} fullWidth maxWidth="xs">
@@ -903,6 +1078,46 @@ export default function Dashboard() {
           )}
           <Stack alignItems="flex-end" p={1}>
             <Button onClick={() => setOpenExp(false)}>Close</Button>
+          </Stack>
+        </DialogContent>
+      </Dialog>
+
+      {/* ✅ NEW: Expired Items dialog */}
+      <Dialog open={openExpired} onClose={() => setOpenExpired(false)} fullWidth maxWidth="md">
+        <DialogTitle>Expired Items</DialogTitle>
+        <DialogContent>
+          {expiredItems.length === 0 ? (
+            <Typography color="text.secondary" p={1}>
+              No expired items.
+            </Typography>
+          ) : (
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Name</TableCell>
+                  <TableCell>Brand</TableCell>
+                  <TableCell>Expiry</TableCell>
+                  <TableCell>Qty</TableCell>
+                  <TableCell align="right">Days Expired</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {expiredItems.map((it: any) => (
+                  <TableRow key={it._key}>
+                    <TableCell>{it.name}</TableCell>
+                    <TableCell>{it.brand || '-'}</TableCell>
+                    <TableCell>{formatExpiry(it.expiry_date)}</TableCell>
+                    <TableCell>{it.stock || '-'}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>
+                      {Math.max(0, -Number(it._daysLeft || 0))}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+          <Stack alignItems="flex-end" p={1}>
+            <Button onClick={() => setOpenExpired(false)}>Close</Button>
           </Stack>
         </DialogContent>
       </Dialog>

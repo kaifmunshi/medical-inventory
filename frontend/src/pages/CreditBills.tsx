@@ -59,8 +59,14 @@ function StatusChip({ status }: { status: any }) {
 export default function CreditBills() {
   const { from: todayFrom, to: todayTo } = todayRange()
 
-  const [from, setFrom] = useState(todayFrom)
-  const [to, setTo] = useState(todayTo)
+  // ✅ UI inputs (user changes freely)
+  const [uiFrom, setUiFrom] = useState(todayFrom)
+  const [uiTo, setUiTo] = useState(todayTo)
+
+  // ✅ Applied date range (sent to API). null => ALL bills
+  const [appliedFrom, setAppliedFrom] = useState<string | null>(null)
+  const [appliedTo, setAppliedTo] = useState<string | null>(null)
+
   const [q, setQ] = useState('')
 
   // Bill detail dialog
@@ -78,15 +84,21 @@ export default function CreditBills() {
   const [note, setNote] = useState('')
 
   const qBills = useQuery({
-    queryKey: ['credit-bills', from, to, q],
-    // keep old logic as-is (q still sent to API; we also do client-side filter below)
-    queryFn: () => listBills({ from_date: from, to_date: to, q, limit: 500 }),
+    queryKey: ['credit-bills', appliedFrom, appliedTo, q],
+    // ✅ date range applies ONLY when user clicks "Apply Range"
+    queryFn: () =>
+      listBills({
+        from_date: appliedFrom || undefined,
+        to_date: appliedTo || undefined,
+        q,
+        limit: 500,
+      }),
   })
 
   const creditRows = useMemo(() => {
     const bills = (qBills.data || []) as any[]
 
-    // ✅ NEW: client-side search over id/notes/item names (same behavior as BillFinder)
+    // ✅ client-side search over id/notes/item names
     const t = q.trim().toLowerCase()
     const searched =
       !t
@@ -122,6 +134,7 @@ export default function CreditBills() {
       return {
         raw: b,
         id: b.id,
+        notes: String(b.notes || ''),
         date: b.date_time || b.created_at || '',
         total: money(total),
         paid: money(paid),
@@ -239,21 +252,44 @@ export default function CreditBills() {
             alignItems={{ md: 'center' }}
             justifyContent="space-between"
           >
-            <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={2} alignItems={{ md: 'center' }}>
               <TextField
                 label="From"
                 type="date"
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
+                value={uiFrom}
+                onChange={(e) => setUiFrom(e.target.value)}
                 InputLabelProps={{ shrink: true }}
               />
               <TextField
                 label="To"
                 type="date"
-                value={to}
-                onChange={(e) => setTo(e.target.value)}
+                value={uiTo}
+                onChange={(e) => setUiTo(e.target.value)}
                 InputLabelProps={{ shrink: true }}
               />
+
+              <Button
+                variant="contained"
+                onClick={() => {
+                  setAppliedFrom(uiFrom)
+                  setAppliedTo(uiTo)
+                }}
+                disabled={qBills.isFetching}
+              >
+                Apply Range
+              </Button>
+
+              <Button
+                variant="outlined"
+                onClick={() => {
+                  setAppliedFrom(null)
+                  setAppliedTo(null)
+                }}
+                disabled={qBills.isFetching}
+              >
+                All Bills
+              </Button>
+
               <TextField
                 label="Search (id/item/notes)"
                 value={q}
@@ -265,6 +301,19 @@ export default function CreditBills() {
               Refresh
             </Button>
           </Stack>
+
+          {/* Optional: small hint showing whether date filter is active */}
+          <Box mt={1}>
+            {appliedFrom && appliedTo ? (
+              <Typography variant="caption" color="text.secondary">
+                Showing range: <b>{appliedFrom}</b> to <b>{appliedTo}</b>
+              </Typography>
+            ) : (
+              <Typography variant="caption" color="text.secondary">
+                Showing: <b>All bills</b>
+              </Typography>
+            )}
+          </Box>
         </Paper>
 
         <Paper sx={{ p: 2 }}>
@@ -272,6 +321,7 @@ export default function CreditBills() {
             <table className="table">
               <thead>
                 <tr>
+                  <th style={{ minWidth: 160 }}>Name</th>
                   <th>Bill ID</th>
                   <th>Date/Time</th>
                   <th>Total</th>
@@ -288,6 +338,18 @@ export default function CreditBills() {
 
                   return (
                     <tr key={`cb-${r.id}`}>
+                      <td>
+                        {r.notes ? (
+                          <Tooltip title={r.notes} arrow placement="top">
+                            <span>{r.notes}</span>
+                          </Tooltip>
+                        ) : (
+                          <Typography variant="body2" color="text.secondary">
+                            —
+                          </Typography>
+                        )}
+                      </td>
+
                       <td>
                         <Tooltip title={r.itemsPreview} arrow placement="top">
                           <Link component="button" onClick={() => openBillDetail(r)} underline="hover">
@@ -309,11 +371,7 @@ export default function CreditBills() {
                             —
                           </Typography>
                         ) : (
-                          <Button
-                            size="small"
-                            variant="contained"
-                            onClick={() => openReceivePayment(r)}
-                          >
+                          <Button size="small" variant="contained" onClick={() => openReceivePayment(r)}>
                             Receive Payment
                           </Button>
                         )}
@@ -324,7 +382,7 @@ export default function CreditBills() {
 
                 {creditRows.length === 0 && (
                   <tr>
-                    <td colSpan={8}>
+                    <td colSpan={9}>
                       <Box p={2} color="text.secondary">
                         No credit bills.
                       </Box>

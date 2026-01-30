@@ -321,8 +321,8 @@ export default function CreditBills() {
             <table className="table">
               <thead>
                 <tr>
-                  <th style={{ minWidth: 160 }}>Name</th>
                   <th>Bill ID</th>
+                  <th style={{ minWidth: 160 }}>Name</th>
                   <th>Date/Time</th>
                   <th>Total</th>
                   <th>Paid</th>
@@ -339,6 +339,13 @@ export default function CreditBills() {
                   return (
                     <tr key={`cb-${r.id}`}>
                       <td>
+                        <Tooltip title={r.itemsPreview} arrow placement="top">
+                          <Link component="button" onClick={() => openBillDetail(r)} underline="hover">
+                            {r.id}
+                          </Link>
+                        </Tooltip>
+                      </td>
+                       <td>
                         {r.notes ? (
                           <Tooltip title={r.notes} arrow placement="top">
                             <span>{r.notes}</span>
@@ -348,14 +355,6 @@ export default function CreditBills() {
                             —
                           </Typography>
                         )}
-                      </td>
-
-                      <td>
-                        <Tooltip title={r.itemsPreview} arrow placement="top">
-                          <Link component="button" onClick={() => openBillDetail(r)} underline="hover">
-                            {r.id}
-                          </Link>
-                        </Tooltip>
                       </td>
                       <td>{r.date}</td>
                       <td>{r.total}</td>

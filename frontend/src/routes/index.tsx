@@ -6,7 +6,7 @@ import Inventory from '../pages/Inventory'
 import Billing from '../pages/Billing'
 import Returns from '../pages/Returns'
 import Exchange from '../pages/Returns/Exchange'
-import Reports from '../pages/Reports'
+import Reports from '../pages/Reports/index'
 import Settings from '../pages/Settings'
 import RequestedItems from '../pages/RequestedItems/index'
 import CreditBills from '../pages/CreditBills' // ✅ NEW

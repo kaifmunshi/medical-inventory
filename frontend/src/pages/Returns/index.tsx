@@ -26,9 +26,15 @@ type Row = {
 type RefundMode = 'cash' | 'online'
 
 // helpers
-function round2(n: number) { return Math.round(n * 100) / 100 }
-function round5Nearest(n: number) { return Math.round(n / 5) * 5 }
-function clamp2(x: number) { return Math.round(x * 100) / 100 }
+function round2(n: number) {
+  return Math.round(n * 100) / 100
+}
+function round5Nearest(n: number) {
+  return Math.round(n / 5) * 5
+}
+function clamp2(x: number) {
+  return Math.round(x * 100) / 100
+}
 
 export default function Returns() {
   const toast = useToast()
@@ -58,9 +64,9 @@ export default function Returns() {
 
     const items = (bill.items || []) as any[]
     const sub = items.reduce((s, it) => s + Number(it.mrp) * Number(it.quantity), 0)
-    const discAmt = sub * Number(bill.discount_percent || 0) / 100
+    const discAmt = (sub * Number(bill.discount_percent || 0)) / 100
     const afterDisc = sub - discAmt
-    const taxAmt = afterDisc * Number(bill.tax_percent || 0) / 100
+    const taxAmt = (afterDisc * Number(bill.tax_percent || 0)) / 100
     const computedTotal = afterDisc + taxAmt
 
     const finalTotal = Number(bill.total_amount ?? computedTotal)
@@ -69,7 +75,7 @@ export default function Returns() {
     return { computedTotal, finalTotal, factor }
   }, [bill])
 
-  // charged share for a line (partial only)
+  // charged share for a line (partial only / also used for per-line display always)
   const chargedLine = (mrp: number, qty: number) => {
     if (!bill) return 0
     const sub = Number(mrp) * Number(qty)
@@ -78,10 +84,42 @@ export default function Returns() {
     return round2(afterTax * proration.factor)
   }
 
-  // refund computation
+  // refund computation (TOTAL)
   const refund = isFullReturn
     ? Number(proration.finalTotal)
     : rows.reduce((s, r) => s + chargedLine(r.mrp, r.qty), 0)
+
+  // ✅ FIX: always compute per-line refund values (even for full return)
+  // If full return, adjust last non-zero line so sum(lines) == finalTotal exactly.
+  const lineRefunds = useMemo(() => {
+    if (!bill || rows.length === 0) return rows.map(() => 0)
+
+    const base = rows.map(r => (r.qty > 0 ? chargedLine(r.mrp, r.qty) : 0))
+
+    if (!isFullReturn) return base
+
+    const target = round2(Number(proration.finalTotal))
+    const sum = round2(base.reduce((a, b) => a + b, 0))
+    const diff = round2(target - sum)
+
+    if (diff === 0) return base
+
+    // add diff to the last non-zero line (so totals match exactly)
+    const lastIdx = (() => {
+      for (let i = base.length - 1; i >= 0; i--) {
+        if (base[i] !== 0) return i
+      }
+      return -1
+    })()
+
+    if (lastIdx >= 0) {
+      const copy = [...base]
+      copy[lastIdx] = round2(copy[lastIdx] + diff)
+      return copy
+    }
+
+    return base
+  }, [bill, rows, isFullReturn, proration.finalTotal])
 
   useEffect(() => {
     if (!finalTouched) setFinalRefund(round5Nearest(refund))
@@ -112,7 +150,7 @@ export default function Returns() {
 
       const lines: BillLine[] = (b.items || []).map((it: any): BillLine => ({
         item_id: Number(it.item_id),
-        name: it.item_name || it.name || (it.item?.name) || `#${it.item_id}`,
+        name: it.item_name || it.name || it.item?.name || `#${it.item_id}`,
         soldQty: Number(it.quantity),
         mrp: Number(it.mrp),
       }))
@@ -120,9 +158,7 @@ export default function Returns() {
       let remById: Record<number, number> = {}
       try {
         const summary = await getReturnSummary(Number(b.id))
-        remById = Object.fromEntries(
-          (summary || []).map((s: any) => [Number(s.item_id), Number(s.remaining)])
-        )
+        remById = Object.fromEntries((summary || []).map((s: any) => [Number(s.item_id), Number(s.remaining)]))
       } catch (e) {
         remById = {}
         console.error('getReturnSummary failed', e)
@@ -164,7 +200,6 @@ export default function Returns() {
   const handleLoadClick = async () => {
     const res = await loadBill()
     if (!res.ok) {
-      // Only show an error if user explicitly clicked load
       toast.push(res.error || 'Failed to load bill', 'error')
       return
     }
@@ -194,15 +229,12 @@ export default function Returns() {
       })
     },
     onSuccess: () => {
-      // ✅ ONLY this toast after submit
       toast.push('Return created', 'success')
 
-      // clear quantities & final box
       setRows(prev => prev.map(r => ({ ...r, qty: 0 })))
       setFinalRefund(0)
       setFinalTouched(false)
 
-      // silent refresh of remaining quantities (no toast)
       void loadBill()
     },
     onError: (err: any) => {
@@ -231,23 +263,11 @@ export default function Returns() {
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
-          <TextField
-            label="Bill ID"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            fullWidth
-          />
-          <Button
-            variant="contained"
-            onClick={handleLoadClick}
-            disabled={!query || isFetching}
-          >
+          <TextField label="Bill ID" value={query} onChange={e => setQuery(e.target.value)} fullWidth />
+          <Button variant="contained" onClick={handleLoadClick} disabled={!query || isFetching}>
             Load Bill
           </Button>
-          <Button
-            variant="outlined"
-            onClick={() => setBillPickerOpen(true)}
-          >
+          <Button variant="outlined" onClick={() => setBillPickerOpen(true)}>
             Find Bill
           </Button>
         </Stack>
@@ -286,11 +306,7 @@ export default function Returns() {
                       />
                     </td>
                     <td>{r.mrp}</td>
-                    <td>
-                      {isFullReturn
-                        ? (r.qty ? Number(proration.finalTotal).toFixed(2) : '0.00')
-                        : chargedLine(r.mrp, r.qty).toFixed(2)}
-                    </td>
+                    <td>{(lineRefunds[i] ?? 0).toFixed(2)}</td>
                     <td>
                       <IconButton
                         onClick={() => {
@@ -335,9 +351,7 @@ export default function Returns() {
                 <option value="online">Online</option>
               </TextField>
 
-              <Typography sx={{ minWidth: 180 }}>
-                Computed: ₹{refund.toFixed(2)}
-              </Typography>
+              <Typography sx={{ minWidth: 180 }}>Computed: ₹{refund.toFixed(2)}</Typography>
 
               <TextField
                 label="Final Refund (₹)"
@@ -416,7 +430,7 @@ export default function Returns() {
         onPick={(b: any) => {
           setQuery(String(b.id))
           setTimeout(() => {
-            handleLoadClick()    // manual bill load, with toast
+            handleLoadClick()
           }, 0)
         }}
       />

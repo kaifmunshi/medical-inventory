@@ -15,6 +15,10 @@ import {
   DialogActions,
   FormControlLabel,
   Checkbox,
+  Chip,
+  useMediaQuery,
+  Divider,
+  MenuItem,
 } from '@mui/material'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient, useMutation } from '@tanstack/react-query'
@@ -25,6 +29,7 @@ import {
   updateItem,
   deleteItem,
   adjustStock,
+  getItemLedger, // ✅ NEW: ledger API
 } from '../../services/inventory'
 
 import Loading from '../../components/ui/Loading'
@@ -35,6 +40,9 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp'
+import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
+import CloseIcon from '@mui/icons-material/Close'
+
 import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
 
@@ -59,8 +67,33 @@ function buildGroupKey(it: any) {
   return `${name}__${brand}`
 }
 
+// ✅ tiny helper for default dates + CSV
+function pad2(n: number) {
+  return n < 10 ? `0${n}` : String(n)
+}
+function toISODate(d: Date) {
+  const y = d.getFullYear()
+  const m = pad2(d.getMonth() + 1)
+  const day = pad2(d.getDate())
+  return `${y}-${m}-${day}`
+}
+function toCSV(rows: string[][]) {
+  return rows
+    .map((r) =>
+      r
+        .map((cell) => {
+          const s = String(cell ?? '')
+          return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+        })
+        .join(',')
+    )
+    .join('\n')
+}
+
 export default function Inventory() {
   const toast = useToast()
+  const isSm = useMediaQuery('(max-width:900px)')
+  const isXs = useMediaQuery('(max-width:600px)')
 
   const [q, setQ] = useState('')
   const [debouncedQ, setDebouncedQ] = useState('') // ✅ debounce search input
@@ -79,6 +112,13 @@ export default function Inventory() {
   // ✅ Show/Hide out-of-stock items (default: hide)
   const [showOutOfStock, setShowOutOfStock] = useState(false)
 
+  // ✅ LEDGER DIALOG STATE
+  const [ledgerOpen, setLedgerOpen] = useState(false)
+  const [ledgerItem, setLedgerItem] = useState<any | null>(null)
+  const [ledgerFrom, setLedgerFrom] = useState('')
+  const [ledgerTo, setLedgerTo] = useState('')
+  const [ledgerReason, setLedgerReason] = useState<string>('') // empty = all
+
   // ✅ Debounce typing to avoid calling API on every keystroke
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(q.trim()), 600)
@@ -92,7 +132,7 @@ export default function Inventory() {
 
   const qc = useQueryClient()
 
-  // ✅ pagination size (you can change to 100 later if you want)
+  // ✅ pagination size
   const LIMIT = 60
 
   // ✅ Infinite query (offset-based pagination)
@@ -102,18 +142,15 @@ export default function Inventory() {
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
+    isFetching,
   } = useInfiniteQuery({
     queryKey: ['inventory-items', debouncedQ],
     initialPageParam: 0, // offset starts at 0
     queryFn: async ({ pageParam }) => {
       try {
-        // pageParam is offset
         return await listItemsPage(debouncedQ, LIMIT, pageParam)
       } catch (err: any) {
-        const msg =
-          err?.response?.data?.detail ||
-          err?.message ||
-          'Failed to load inventory'
+        const msg = err?.response?.data?.detail || err?.message || 'Failed to load inventory'
         toast.push(String(msg), 'error')
         throw err
       }
@@ -144,7 +181,6 @@ export default function Inventory() {
     }
 
     const list = Array.from(map.entries()).map(([key, items]) => {
-      // sort batches by expiry (earliest first). If expiry missing, push last.
       const sorted = [...items].sort((a, b) => {
         const da = toIsoDateOnly(a?.expiry_date)
         const db = toIsoDateOnly(b?.expiry_date)
@@ -154,23 +190,15 @@ export default function Inventory() {
         return da.localeCompare(db)
       })
 
-      const totalStock = sorted.reduce(
-        (sum, x) => sum + (Number(x.stock) || 0),
-        0
-      )
+      const totalStock = sorted.reduce((sum, x) => sum + (Number(x.stock) || 0), 0)
 
-      // rack label: if different across batches, show '-'
       const racks = new Set(sorted.map((x) => String(x.rack_number ?? 0)))
       const rackLabel = racks.size === 1 ? (sorted[0]?.rack_number ?? 0) : '-'
 
-      // expiry label: earliest expiry for quick checking
       const earliestExpiryIso = toIsoDateOnly(sorted[0]?.expiry_date)
       const expiryLabel = earliestExpiryIso ? formatExpiry(earliestExpiryIso) : '-'
 
-      // MRP: single or range
-      const mrpNums = sorted
-        .map((x) => Number(x.mrp))
-        .filter((n) => Number.isFinite(n))
+      const mrpNums = sorted.map((x) => Number(x.mrp)).filter((n) => Number.isFinite(n))
 
       let mrpLabel: string | number = '-'
       if (mrpNums.length > 0) {
@@ -192,7 +220,6 @@ export default function Inventory() {
       }
     })
 
-    // stable ordering: by name then brand
     list.sort((a, b) => {
       const an = String(a.name ?? '').toLowerCase()
       const bn = String(b.name ?? '').toLowerCase()
@@ -231,26 +258,23 @@ export default function Inventory() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
-      toast.push('Item created', 'success')
+      toast.push('Saved', 'success')
     },
     onError: (err: any) => {
-      const msg =
-        err?.response?.data?.detail || err?.message || 'Create failed'
+      const msg = err?.response?.data?.detail || err?.message || 'Create failed'
       toast.push(String(msg), 'error')
     },
   })
 
   const mUpdate = useMutation({
-    mutationFn: ({ id, payload }: { id: number; payload: ItemFormValues }) =>
-      updateItem(id, payload),
+    mutationFn: ({ id, payload }: { id: number; payload: ItemFormValues }) => updateItem(id, payload),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
       toast.push('Item updated', 'success')
     },
     onError: (err: any) => {
-      const msg =
-        err?.response?.data?.detail || err?.message || 'Update failed'
+      const msg = err?.response?.data?.detail || err?.message || 'Update failed'
       toast.push(String(msg), 'error')
     },
   })
@@ -264,23 +288,20 @@ export default function Inventory() {
       setDeleteTarget(null)
     },
     onError: (err: any) => {
-      const msg =
-        err?.response?.data?.detail || err?.message || 'Delete failed'
+      const msg = err?.response?.data?.detail || err?.message || 'Delete failed'
       toast.push(String(msg), 'error')
     },
   })
 
   const mAdjust = useMutation({
-    mutationFn: ({ id, delta }: { id: number; delta: number }) =>
-      adjustStock(id, delta),
+    mutationFn: ({ id, delta }: { id: number; delta: number }) => adjustStock(id, delta),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
       toast.push('Stock adjusted', 'success')
     },
     onError: (err: any) => {
-      const msg =
-        err?.response?.data?.detail || err?.message || 'Adjust stock failed'
+      const msg = err?.response?.data?.detail || err?.message || 'Adjust stock failed'
       toast.push(String(msg), 'error')
     },
   })
@@ -315,30 +336,97 @@ export default function Inventory() {
     setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
+  // ✅ Open ledger dialog from any item/batch row
+  function openLedgerForItem(it: any) {
+    if (!it?.id) return
+    const now = new Date()
+    const past = new Date()
+    past.setDate(now.getDate() - 30)
+
+    setLedgerItem(it)
+    setLedgerFrom(toISODate(past))
+    setLedgerTo(toISODate(now))
+    setLedgerReason('')
+    setLedgerOpen(true)
+  }
+
+  const LEDGER_LIMIT = 50
+
+  const qLedger = useInfiniteQuery({
+    queryKey: ['inventory-ledger', ledgerItem?.id, ledgerFrom, ledgerTo, ledgerReason],
+    enabled: ledgerOpen && !!ledgerItem?.id && !!ledgerFrom && !!ledgerTo,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
+      return await getItemLedger({
+        item_id: Number(ledgerItem.id),
+        from_date: ledgerFrom,
+        to_date: ledgerTo,
+        reason: ledgerReason ? ledgerReason : undefined,
+        limit: LEDGER_LIMIT,
+        offset: pageParam,
+      })
+    },
+    getNextPageParam: (lastPage: any) => lastPage?.next_offset ?? undefined,
+  })
+
+  const ledgerRows = useMemo(() => {
+    const pages: any[] = ((qLedger.data as any)?.pages ?? []) as any[]
+    const out: any[] = []
+    for (const p of pages) if (p && Array.isArray(p.items)) out.push(...p.items)
+    return out
+  }, [qLedger.data])
+
+  const ledgerDetail = useMemo(() => {
+    return ledgerRows.map((m: any) => ({
+      id: m.id,
+      ts: m.ts,
+      delta: Number(m.delta || 0),
+      reason: m.reason || '',
+      ref_type: m.ref_type || '',
+      ref_id: m.ref_id ?? '',
+      note: m.note || '',
+      before: Number(m.balance_before ?? 0),
+      after: Number(m.balance_after ?? 0),
+    }))
+  }, [ledgerRows])
+
+  const ledgerCurrentStock =
+    qLedger.data?.pages?.[0]?.current_stock ?? ledgerItem?.stock ?? '-'
+
+  function exportLedgerCSV() {
+    const header = ['ID', 'TS', 'Delta', 'Reason', 'Ref Type', 'Ref ID', 'Before', 'After', 'Note']
+    const body = ledgerDetail.map((r: any) => [
+      String(r.id),
+      String(r.ts),
+      String(r.delta),
+      String(r.reason),
+      String(r.ref_type ?? ''),
+      String(r.ref_id ?? ''),
+      String(r.before ?? ''),
+      String(r.after ?? ''),
+      String(r.note ?? ''),
+    ])
+
+    const csv = toCSV([header, ...body])
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `stock-ledger_item-${ledgerItem?.id ?? 'item'}_${ledgerFrom}_to_${ledgerTo}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <Stack gap={2}>
       <Typography variant="h5">Inventory</Typography>
 
       <Paper sx={{ p: 2 }}>
-        <Stack
-          direction={{ xs: 'column', sm: 'row' }}
-          gap={2}
-          alignItems={{ sm: 'center' }}
-        >
-          <TextField
-            label="Search (name/brand)"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            fullWidth
-          />
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2} alignItems={{ sm: 'center' }}>
+          <TextField label="Search (name/brand)" value={q} onChange={(e) => setQ(e.target.value)} fullWidth />
 
           <FormControlLabel
-            control={
-              <Checkbox
-                checked={showOutOfStock}
-                onChange={(e) => setShowOutOfStock(e.target.checked)}
-              />
-            }
+            control={<Checkbox checked={showOutOfStock} onChange={(e) => setShowOutOfStock(e.target.checked)} />}
             label="Show out of stock"
           />
 
@@ -363,7 +451,7 @@ export default function Inventory() {
                     <th>Expiry</th>
                     <th>MRP</th>
                     <th>Stock</th>
-                    <th style={{ width: 140 }}>Actions</th>
+                    <th style={{ width: 200 }}>Actions</th>
                   </tr>
                 </thead>
 
@@ -376,20 +464,28 @@ export default function Inventory() {
                       <Fragment key={g.key}>
                         {/* GROUP ROW */}
                         <tr
-                          style={{ cursor: isMulti ? 'pointer' : 'default' }}
+                          style={{
+                            cursor: isMulti ? 'pointer' : 'default',
+                            background: isOpen ? '#f2fbf6' : undefined,
+                          }}
                           onClick={() => {
                             if (!isMulti) return
                             toggleGroup(g.key)
                           }}
                         >
-                          <td>
-                            <Stack direction="row" alignItems="center" gap={1}>
+                          <td style={{ padding: isSm ? '10px 8px' : undefined }}>
+                            <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
                               {isMulti && (
                                 <IconButton
                                   size="small"
                                   onClick={(e) => {
                                     e.stopPropagation()
                                     toggleGroup(g.key)
+                                  }}
+                                  sx={{
+                                    border: '1px solid',
+                                    borderColor: 'divider',
+                                    borderRadius: 2,
                                   }}
                                 >
                                   {isOpen ? (
@@ -400,19 +496,14 @@ export default function Inventory() {
                                 </IconButton>
                               )}
 
-                              <span>{g.name}</span>
+                              <span style={{ fontWeight: 600 }}>{g.name}</span>
 
                               {isMulti && (
-                                <span
-                                  style={{
-                                    fontSize: 12,
-                                    padding: '2px 8px',
-                                    borderRadius: 999,
-                                    border: '1px solid #ddd',
-                                  }}
-                                >
-                                  {g.count} batches
-                                </span>
+                                <Chip
+                                  size="small"
+                                  label={isOpen ? `${g.count} batches • Hide` : `${g.count} batches • View`}
+                                  sx={{ fontWeight: 600, borderRadius: 999 }}
+                                />
                               )}
                             </Stack>
                           </td>
@@ -421,12 +512,30 @@ export default function Inventory() {
                           <td>{g.brand || '-'}</td>
                           <td>{g.expiryLabel}</td>
                           <td>{g.mrpLabel}</td>
-                          <td>{g.totalStock}</td>
+                          <td>
+                            <Chip size="small" label={String(g.totalStock)} sx={{ fontWeight: 700 }} />
+                          </td>
 
                           <td>
-                            {/* For single batch, keep old actions */}
                             {!isMulti ? (
                               <Stack direction="row" gap={1}>
+                                <Tooltip title="Ledger">
+                                  <IconButton
+                                    size="small"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      openLedgerForItem(g.items[0])
+                                    }}
+                                    sx={{
+                                      border: '1px solid',
+                                      borderColor: 'divider',
+                                      borderRadius: 2,
+                                    }}
+                                  >
+                                    <ReceiptLongIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+
                                 <Tooltip title="Edit">
                                   <IconButton
                                     size="small"
@@ -466,59 +575,96 @@ export default function Inventory() {
                                 </Tooltip>
                               </Stack>
                             ) : (
-                              <Typography variant="body2" sx={{ opacity: 0.7 }}>
-                                {isOpen ? 'Hide' : 'View'}
-                              </Typography>
+                              <Stack direction="row" justifyContent="flex-end">
+                                <Typography variant="body2" sx={{ opacity: 0.75 }}>
+                                  {isOpen ? 'Showing batches' : 'Tap to view batches'}
+                                </Typography>
+                              </Stack>
                             )}
                           </td>
                         </tr>
 
                         {/* EXPANDED BATCH ROWS */}
                         {isOpen &&
-                          g.items.map((it: any) => (
-                            <tr key={it.id} style={{ background: '#fafafa' }}>
-                              <td style={{ paddingLeft: 24 }}>
-                                <span style={{ opacity: 0.7 }}>↳</span> {it.name}
-                              </td>
-                              <td>{it.rack_number ?? 0}</td>
-                              <td>{it.brand || '-'}</td>
-                              <td>{formatExpiry(it.expiry_date)}</td>
-                              <td>{it.mrp}</td>
-                              <td>{it.stock}</td>
-                              <td>
-                                <Stack direction="row" gap={1}>
-                                  <Tooltip title="Edit">
-                                    <IconButton
-                                      size="small"
-                                      onClick={() => handleEdit(it)}
-                                    >
-                                      <EditIcon fontSize="small" />
-                                    </IconButton>
-                                  </Tooltip>
+                          g.items.map((it: any, idx: number) => {
+                            const isFirst = idx === 0
+                            const expiry = formatExpiry(it.expiry_date)
+                            const mrp = it.mrp
+                            const stock = it.stock
+                            const rack = it.rack_number ?? 0
 
-                                  <Tooltip title="Adjust Stock">
-                                    <IconButton
-                                      size="small"
-                                      onClick={() => handleAdjust(it)}
-                                    >
-                                      <AddCircleOutlineIcon fontSize="small" />
-                                    </IconButton>
-                                  </Tooltip>
+                            return (
+                              <tr
+                                key={it.id}
+                                style={{
+                                  background: '#fbfffd',
+                                  borderLeft: '4px solid #2e7d32',
+                                }}
+                              >
+                                <td style={{ paddingLeft: 24 }}>
+                                  <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
+                                    <span style={{ opacity: 0.6 }}>↳</span>
+                                    <span style={{ fontWeight: 600 }}>{it.name}</span>
 
-                                  <Tooltip title="Delete">
-                                    <IconButton
-                                      size="small"
-                                      color="error"
-                                      onClick={() => handleDeleteClick(it)}
-                                      disabled={mDelete.isPending}
-                                    >
-                                      <DeleteIcon fontSize="small" />
-                                    </IconButton>
-                                  </Tooltip>
-                                </Stack>
-                              </td>
-                            </tr>
-                          ))}
+                                    <Chip size="small" label={`Exp: ${expiry}`} />
+                                    <Chip size="small" label={`MRP: ${mrp}`} />
+                                    <Chip size="small" label={`Stock: ${stock}`} sx={{ fontWeight: 700 }} />
+
+                                    {isFirst && <Chip size="small" label="Earliest expiry" sx={{ fontWeight: 700 }} />}
+                                  </Stack>
+                                </td>
+
+                                <td>{rack}</td>
+                                <td>{it.brand || '-'}</td>
+                                <td>{expiry}</td>
+                                <td>{mrp}</td>
+                                <td>
+                                  <Chip size="small" label={String(stock)} sx={{ fontWeight: 700 }} />
+                                </td>
+
+                                <td>
+                                  <Stack direction="row" gap={1}>
+                                    <Tooltip title="Ledger">
+                                      <IconButton
+                                        size="small"
+                                        onClick={() => openLedgerForItem(it)}
+                                        sx={{
+                                          border: '1px solid',
+                                          borderColor: 'divider',
+                                          borderRadius: 2,
+                                        }}
+                                      >
+                                        <ReceiptLongIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+
+                                    <Tooltip title="Edit">
+                                      <IconButton size="small" onClick={() => handleEdit(it)}>
+                                        <EditIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+
+                                    <Tooltip title="Adjust Stock">
+                                      <IconButton size="small" onClick={() => handleAdjust(it)}>
+                                        <AddCircleOutlineIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+
+                                    <Tooltip title="Delete">
+                                      <IconButton
+                                        size="small"
+                                        color="error"
+                                        onClick={() => handleDeleteClick(it)}
+                                        disabled={mDelete.isPending}
+                                      >
+                                        <DeleteIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+                                  </Stack>
+                                </td>
+                              </tr>
+                            )
+                          })}
                       </Fragment>
                     )
                   })}
@@ -540,6 +686,14 @@ export default function Inventory() {
                 <Typography variant="body2">End of list</Typography>
               </Box>
             )}
+
+            {!isFetching && rows.length === 0 && (
+              <Box sx={{ py: 3, textAlign: 'center' }}>
+                <Typography variant="body2" color="text.secondary">
+                  No items found.
+                </Typography>
+              </Box>
+            )}
           </>
         )}
       </Paper>
@@ -547,7 +701,7 @@ export default function Inventory() {
       <ItemForm
         open={openForm}
         initial={editing}
-        items={rows} // ✅ still pass existing items for suggestions
+        items={rows}
         onClose={() => setOpenForm(false)}
         onSubmit={(values) => {
           if (editing?.id) mUpdate.mutate({ id: editing.id, payload: values })
@@ -571,30 +725,218 @@ export default function Inventory() {
       />
 
       {/* Delete confirmation dialog */}
-      <Dialog
-        open={Boolean(deleteTarget)}
-        onClose={handleCancelDelete}
-        maxWidth="xs"
-        fullWidth
-      >
+      <Dialog open={Boolean(deleteTarget)} onClose={handleCancelDelete} maxWidth="xs" fullWidth>
         <DialogTitle>Delete Item</DialogTitle>
         <DialogContent dividers>
           <Typography variant="body2">
-            {deleteTarget
-              ? `Delete item "${deleteTarget.name}"? This action cannot be undone.`
-              : ''}
+            {deleteTarget ? `Delete item "${deleteTarget.name}"? This action cannot be undone.` : ''}
           </Typography>
         </DialogContent>
         <DialogActions>
           <Button onClick={handleCancelDelete}>Cancel</Button>
-          <Button
-            onClick={handleConfirmDelete}
-            color="error"
-            variant="contained"
-            disabled={mDelete.isPending}
-          >
+          <Button onClick={handleConfirmDelete} color="error" variant="contained" disabled={mDelete.isPending}>
             Delete
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ✅ LEDGER DIALOG (beautiful, filter + export) */}
+      <Dialog
+        open={ledgerOpen}
+        onClose={() => setLedgerOpen(false)}
+        fullWidth
+        maxWidth="lg"
+        fullScreen={isXs}
+      >
+        <DialogTitle
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 2,
+          }}
+        >
+          <Stack spacing={0.3}>
+            <Typography variant="h6" sx={{ fontWeight: 800, lineHeight: 1.1 }}>
+              Stock Ledger
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {ledgerItem ? `${ledgerItem.name} (${ledgerItem.brand || '-'}) • #${ledgerItem.id}` : ''}
+            </Typography>
+          </Stack>
+
+          <IconButton onClick={() => setLedgerOpen(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 1.5,
+                borderRadius: 2,
+                background: '#fbfffd',
+              }}
+            >
+              <Stack
+                direction={{ xs: 'column', md: 'row' }}
+                gap={1.5}
+                alignItems={{ md: 'center' }}
+                justifyContent="space-between"
+              >
+                <Stack direction="row" gap={1} flexWrap="wrap" alignItems="center">
+                  <Chip
+                    label={`Current Stock: ${String(ledgerCurrentStock)}`}
+                    sx={{ fontWeight: 800 }}
+                  />
+                  {ledgerItem?.expiry_date && (
+                    <Chip
+                      label={`Exp: ${formatExpiry(ledgerItem.expiry_date)}`}
+                      variant="outlined"
+                      sx={{ fontWeight: 700 }}
+                    />
+                  )}
+                  {ledgerItem?.mrp != null && (
+                    <Chip
+                      label={`MRP: ${ledgerItem.mrp}`}
+                      variant="outlined"
+                      sx={{ fontWeight: 700 }}
+                    />
+                  )}
+                </Stack>
+
+                <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.2} alignItems={{ sm: 'center' }}>
+                  <TextField
+                    label="From"
+                    type="date"
+                    value={ledgerFrom}
+                    onChange={(e) => setLedgerFrom(e.target.value)}
+                    InputLabelProps={{ shrink: true }}
+                    size="small"
+                    sx={{ width: 165 }}
+                  />
+                  <TextField
+                    label="To"
+                    type="date"
+                    value={ledgerTo}
+                    onChange={(e) => setLedgerTo(e.target.value)}
+                    InputLabelProps={{ shrink: true }}
+                    size="small"
+                    sx={{ width: 165 }}
+                  />
+                  <TextField
+                    select
+                    label="Reason"
+                    value={ledgerReason}
+                    onChange={(e) => setLedgerReason(e.target.value)}
+                    size="small"
+                    sx={{ width: 170 }}
+                  >
+                    <MenuItem value="">All</MenuItem>
+                    <MenuItem value="OPENING">OPENING</MenuItem>
+                    <MenuItem value="ADJUST">ADJUST</MenuItem>
+                    <MenuItem value="BILL">BILL</MenuItem>
+                    <MenuItem value="RETURN">RETURN</MenuItem>
+                    <MenuItem value="EXCHANGE_IN">EXCHANGE_IN</MenuItem>
+                    <MenuItem value="EXCHANGE_OUT">EXCHANGE_OUT</MenuItem>
+                  </TextField>
+
+                  <Button
+                    variant="contained"
+                    onClick={exportLedgerCSV}
+                    disabled={ledgerDetail.length === 0}
+                    sx={{ fontWeight: 800, borderRadius: 999, px: 2 }}
+                  >
+                    Export CSV
+                  </Button>
+                </Stack>
+              </Stack>
+            </Paper>
+
+            <Divider />
+
+            <Box sx={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>TS</th>
+                    <th>Delta</th>
+                    <th>Reason</th>
+                    <th>Ref</th>
+                    <th>Before</th>
+                    <th>After</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {qLedger.isLoading && (
+                    <tr>
+                      <td colSpan={8}>
+                        <Box p={2} color="text.secondary">
+                          Loading…
+                        </Box>
+                      </td>
+                    </tr>
+                  )}
+
+                  {!qLedger.isLoading && ledgerDetail.length === 0 && (
+                    <tr>
+                      <td colSpan={8}>
+                        <Box p={2} color="text.secondary">
+                          No ledger rows for this date range.
+                        </Box>
+                      </td>
+                    </tr>
+                  )}
+
+                  {ledgerDetail.map((r: any) => (
+                    <tr key={`lg-${r.id}`}>
+                      <td>{r.id}</td>
+                      <td>{r.ts}</td>
+                      <td style={{ fontWeight: 800 }}>{r.delta}</td>
+                      <td>{r.reason}</td>
+                      <td>{r.ref_type ? `${r.ref_type}${r.ref_id ? ` #${r.ref_id}` : ''}` : '-'}</td>
+                      <td>{r.before}</td>
+                      <td>{r.after}</td>
+                      <td>{r.note || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Box>
+
+            {qLedger.isError && (
+              <Box sx={{ py: 2, textAlign: 'center' }}>
+                <Typography variant="body2" color="error">
+                  Failed to load ledger.
+                </Typography>
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+
+        <DialogActions sx={{ justifyContent: 'space-between' }}>
+          <Button onClick={() => setLedgerOpen(false)} variant="outlined">
+            Close
+          </Button>
+
+          <Stack direction="row" gap={1} alignItems="center">
+            <Typography variant="body2" color="text.secondary">
+              Rows: {ledgerDetail.length}
+            </Typography>
+
+            <Button
+              variant="contained"
+              onClick={() => qLedger.fetchNextPage()}
+              disabled={!qLedger.hasNextPage || qLedger.isFetchingNextPage}
+              sx={{ fontWeight: 800, borderRadius: 999, px: 2 }}
+            >
+              {qLedger.isFetchingNextPage ? 'Loading…' : qLedger.hasNextPage ? 'Load more' : 'No more'}
+            </Button>
+          </Stack>
         </DialogActions>
       </Dialog>
     </Stack>

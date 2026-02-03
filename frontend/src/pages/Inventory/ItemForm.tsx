@@ -7,6 +7,9 @@ import {
   Typography,
   Autocomplete,
   CircularProgress,
+  Box,
+  Chip,
+  Divider,
 } from '@mui/material'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -26,10 +29,25 @@ type ItemFormProps = {
   items?: any[] // kept for backward compatibility (not used for pagination anymore)
 }
 
-function buildUniqueKey(it: any) {
-  const name = String(it?.name ?? '').trim().toLowerCase()
-  const brand = String(it?.brand ?? '').trim().toLowerCase()
-  return `${name}__${brand}`
+function norm(s: any) {
+  return String(s ?? '').trim().toLowerCase()
+}
+function toIsoDateOnly(exp?: string | null) {
+  if (!exp) return ''
+  const s = String(exp)
+  return s.length > 10 ? s.slice(0, 10) : s
+}
+function formatExpiry(exp?: string | null) {
+  if (!exp) return '-'
+  const iso = toIsoDateOnly(exp)
+  const [y, m, d] = iso.split('-')
+  if (!y || !m || !d) return iso
+  return `${d}-${m}-${y}`
+}
+function formatMoney(n: any) {
+  const x = Number(n)
+  if (!Number.isFinite(x)) return String(n ?? '')
+  return String(x)
 }
 
 export default function ItemForm({
@@ -39,13 +57,14 @@ export default function ItemForm({
   onSubmit,
   items = [],
 }: ItemFormProps) {
-  // YYYY-MM-DD for today's date (used to block past expiries; remove if not needed)
+  // YYYY-MM-DD for today's date (used to block past expiries for brand-new entries)
   const today = React.useMemo(() => new Date().toISOString().slice(0, 10), [])
 
   const {
     register,
     handleSubmit,
     reset,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<ItemFormValues>({
     resolver: zodResolver(itemSchema),
@@ -55,57 +74,80 @@ export default function ItemForm({
       expiry_date: (initial?.expiry_date as any) ?? '',
       mrp: Number((initial as any)?.mrp ?? 0),
       stock: Number((initial as any)?.stock ?? 0),
-
-      // ✅ NEW
       rack_number: Number((initial as any)?.rack_number ?? 0),
     },
   })
 
-  // 1️⃣ When editing an item: fill form from `initial`
+  const isEditMode = Boolean(initial?.name)
+
+  // Track selection from picker (Add mode only)
+  const [pickedExisting, setPickedExisting] = React.useState<any | null>(null)
+
+  // 1️⃣ When editing: fill from initial
   React.useEffect(() => {
     if (!initial) return
+    setPickedExisting(null)
     reset({
       name: initial.name ?? '',
       brand: (initial.brand as any) ?? '',
       expiry_date: (initial.expiry_date as any) ?? '',
       mrp: Number((initial as any).mrp ?? 0),
       stock: Number((initial as any).stock ?? 0),
-
-      // ✅ NEW
       rack_number: Number((initial as any).rack_number ?? 0),
     })
   }, [initial, reset])
 
-  // 2️⃣ When opening in "Add Item" mode: clear the form every time
+  // 2️⃣ When opening "Add Item": clear every time
   React.useEffect(() => {
     if (open && !initial) {
+      setPickedExisting(null)
       reset({
         name: '',
         brand: '',
         expiry_date: '',
         mrp: '' as any,
         stock: '' as any,
-
-        // ✅ NEW: default 0 for new items
         rack_number: 0 as any,
       })
     }
   }, [open, initial, reset])
 
-  // helper to pre-fill from an existing item
+  // Prefill from existing batch
   function applyFromExisting(it: any) {
-    if (!it) return
+    if (!it) {
+      setPickedExisting(null)
+      return
+    }
+    setPickedExisting(it)
     reset({
       name: it.name ?? '',
       brand: it.brand ?? '',
-      expiry_date: '',
+      expiry_date: toIsoDateOnly(it.expiry_date) as any,
       mrp: Number(it.mrp ?? 0),
-      stock: '' as any,
-
-      // ✅ NEW
+      stock: '' as any, // user enters quantity
       rack_number: Number(it.rack_number ?? 0),
     })
   }
+
+  // Watch fields to decide behavior
+  const wName = watch('name')
+  const wBrand = watch('brand')
+  const wExpiry = watch('expiry_date')
+  const wMrp = watch('mrp')
+
+  // ✅ Decide if this is "merge into existing" or "new batch"
+  const willMergeIntoPicked = React.useMemo(() => {
+    if (!pickedExisting || isEditMode) return false
+    const sameName = norm(wName) === norm(pickedExisting?.name)
+    const sameBrand = norm(wBrand) === norm(pickedExisting?.brand)
+    const sameExpiry = toIsoDateOnly(wExpiry) === toIsoDateOnly(pickedExisting?.expiry_date)
+    const sameMrp = Number(wMrp) === Number(pickedExisting?.mrp)
+    return sameName && sameBrand && sameExpiry && sameMrp
+  }, [pickedExisting, isEditMode, wName, wBrand, wExpiry, wMrp])
+
+  // ✅ Lock only Name/Brand when batch is picked (so user never has to retype),
+  // but allow changing Expiry/MRP to create a new batch.
+  const lockNameBrand = Boolean(pickedExisting) && !isEditMode
 
   // -----------------------------
   // ✅ Infinite scroll autocomplete
@@ -130,61 +172,54 @@ export default function ItemForm({
     initialPageParam: 0,
     queryFn: ({ pageParam }) => listItemsPage(debouncedSearch, LIMIT, pageParam),
     getNextPageParam: (lastPage) => lastPage?.next_offset ?? undefined,
-    enabled: open, // only fetch when drawer open
+    enabled: open && !isEditMode,
   })
 
-  // Flatten pages -> options
   const options = React.useMemo(() => {
     const all = data?.pages.flatMap((p) => p.items) ?? []
 
-    // ✅ de-duplicate by (name + brand) so expiry-based duplicates don't appear
-    // Pick the "best" representative per group:
-    // - higher stock wins
-    // - if tie, higher id wins (newer row)
-    const map = new Map<string, any>()
-
+    // de-dupe by id only
+    const seen = new Set<number>()
+    const out: any[] = []
     for (const it of all) {
-      const key = buildUniqueKey(it)
-      if (!key || key === '__') continue
-
-      const prev = map.get(key)
-      if (!prev) {
-        map.set(key, it)
-        continue
-      }
-
-      const s1 = Number(prev?.stock) || 0
-      const s2 = Number(it?.stock) || 0
-      if (s2 > s1) {
-        map.set(key, it)
-        continue
-      }
-
-      const id1 = Number(prev?.id) || 0
-      const id2 = Number(it?.id) || 0
-      if (s2 === s1 && id2 > id1) {
-        map.set(key, it)
-      }
+      const id = Number(it?.id)
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      out.push(it)
     }
 
-    const uniq = Array.from(map.values())
-
-    // fallback to passed items if nothing loaded yet
-    if (uniq.length === 0 && Array.isArray(items) && items.length > 0) {
-      // also de-dup fallback items
-      const map2 = new Map<string, any>()
+    // fallback if nothing loaded yet
+    if (out.length === 0 && Array.isArray(items) && items.length > 0) {
+      const seen2 = new Set<number>()
+      const out2: any[] = []
       for (const it of items) {
-        const key = buildUniqueKey(it)
-        if (!key || key === '__') continue
-        if (!map2.has(key)) map2.set(key, it)
+        const id = Number(it?.id)
+        if (!id || seen2.has(id)) continue
+        seen2.add(id)
+        out2.push(it)
       }
-      return Array.from(map2.values())
+      return out2
     }
 
-    return uniq
+    out.sort((a, b) => {
+      const an = norm(a?.name)
+      const bn = norm(b?.name)
+      if (an !== bn) return an.localeCompare(bn)
+      const ab = norm(a?.brand)
+      const bb = norm(b?.brand)
+      if (ab !== bb) return ab.localeCompare(bb)
+
+      const da = toIsoDateOnly(a?.expiry_date)
+      const db = toIsoDateOnly(b?.expiry_date)
+      if (!da && !db) return 0
+      if (!da) return 1
+      if (!db) return -1
+      return da.localeCompare(db)
+    })
+
+    return out
   }, [data, items])
 
-  // Load more on dropdown scroll bottom
   const handleListboxScroll = (event: React.UIEvent<HTMLUListElement>) => {
     const listboxNode = event.currentTarget
     const nearBottom =
@@ -206,52 +241,123 @@ export default function ItemForm({
       <form onSubmit={handleSubmit(onSubmit)}>
         <Stack gap={2} p={3}>
           <Typography variant="h6">
-            {initial?.name ? 'Edit Item' : 'Add Item'}
+            {isEditMode ? 'Edit Item' : 'Add Item'}
           </Typography>
 
-          {/* ✅ Infinite scroll + server-side search */}
-          <Autocomplete
-            options={options}
-            loading={isLoading || isFetchingNextPage}
-            onChange={(_, value) => applyFromExisting(value)}
-            onInputChange={(_, value) => setSearchText(value)}
-            ListboxProps={{
-              onScroll: handleListboxScroll,
-              style: { maxHeight: 280, overflow: 'auto' },
-            }}
-            disablePortal
-            isOptionEqualToValue={(opt: any, val: any) =>
-              buildUniqueKey(opt) === buildUniqueKey(val)
-            }
-            getOptionLabel={(option: any) =>
-              option?.name
-                ? `${option.name}${option.brand ? ` (${option.brand})` : ''}`
-                : ''
-            }
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                label="Search existing (name/brand)"
-                placeholder="Type to search"
-                size="small"
-                InputProps={{
-                  ...params.InputProps,
-                  endAdornment: (
-                    <>
-                      {isLoading || isFetchingNextPage ? (
-                        <CircularProgress size={18} />
-                      ) : null}
-                      {params.InputProps.endAdornment}
-                    </>
-                  ),
+          {/* ✅ Smart picker (only in Add mode) */}
+          {!isEditMode && (
+            <>
+              <Autocomplete
+                options={options}
+                loading={isLoading || isFetchingNextPage}
+                value={pickedExisting}
+                onChange={(_, value) => applyFromExisting(value)}
+                onInputChange={(_, value) => setSearchText(value)}
+                ListboxProps={{
+                  onScroll: handleListboxScroll,
+                  style: { maxHeight: 320, overflow: 'auto' },
                 }}
-              />
-            )}
-          />
+                disablePortal
+                isOptionEqualToValue={(opt: any, val: any) => Number(opt?.id) === Number(val?.id)}
+                groupBy={(option: any) => {
+                  const n = option?.name ? String(option.name) : ''
+                  const b = option?.brand ? String(option.brand) : ''
+                  return `${n}${b ? ` • ${b}` : ''}`
+                }}
+                getOptionLabel={(option: any) =>
+                  option?.name
+                    ? `${option.name}${option.brand ? ` (${option.brand})` : ''}`
+                    : ''
+                }
+                renderOption={(props, option: any) => {
+                  const expiry = formatExpiry(option?.expiry_date)
+                  const mrp = formatMoney(option?.mrp)
+                  const stock = Number(option?.stock ?? 0) || 0
+                  const rack = option?.rack_number ?? 0
 
-          <Typography variant="caption" color="text.secondary">
-            Scroll the dropdown to load more items. Type to search.
-          </Typography>
+                  return (
+                    <li {...props} key={option?.id}>
+                      <Box sx={{ width: '100%' }}>
+                        <Stack direction="row" justifyContent="space-between" gap={1}>
+                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                            Exp: {expiry}
+                          </Typography>
+
+                          <Stack direction="row" gap={1} alignItems="center">
+                            <Chip size="small" label={`MRP: ${mrp}`} sx={{ height: 20 }} />
+                            <Chip size="small" label={`Stock: ${stock}`} sx={{ height: 20 }} />
+                          </Stack>
+                        </Stack>
+
+                        <Typography variant="caption" color="text.secondary">
+                          Rack: {rack} • ID: {option?.id}
+                        </Typography>
+                      </Box>
+                    </li>
+                  )
+                }}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Find existing batch (recommended)"
+                    placeholder="Type item name / brand"
+                    size="small"
+                    InputProps={{
+                      ...params.InputProps,
+                      endAdornment: (
+                        <>
+                          {isLoading || isFetchingNextPage ? (
+                            <CircularProgress size={18} />
+                          ) : null}
+                          {params.InputProps.endAdornment}
+                        </>
+                      ),
+                    }}
+                  />
+                )}
+              />
+
+              <Typography variant="caption" color="text.secondary">
+                Tip: Select a batch to add stock into it. If you change expiry/MRP, it becomes a new batch.
+              </Typography>
+
+              {pickedExisting && (
+                <Box
+                  sx={{
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    borderRadius: 2,
+                    p: 1.25,
+                    bgcolor: 'background.paper',
+                  }}
+                >
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    {willMergeIntoPicked ? 'Existing batch selected' : 'New batch (from selected)'}
+                  </Typography>
+
+                  <Typography variant="caption" color="text.secondary">
+                    {willMergeIntoPicked
+                      ? 'Saving will add stock to this batch (same name + brand + expiry + MRP).'
+                      : 'You changed expiry/MRP. Saving will create a NEW batch with same name/brand.'}
+                  </Typography>
+
+                  <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1 }}>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        // Clear selection but keep whatever user already typed in the form
+                        setPickedExisting(null)
+                      }}
+                    >
+                      Clear selection
+                    </Button>
+                  </Stack>
+                </Box>
+              )}
+
+              <Divider />
+            </>
+          )}
 
           <TextField
             label="Name"
@@ -259,12 +365,14 @@ export default function ItemForm({
             InputLabelProps={{ shrink: true }}
             error={!!errors.name}
             helperText={errors.name?.message}
+            disabled={lockNameBrand}
           />
 
           <TextField
             label="Brand"
             {...register('brand')}
             InputLabelProps={{ shrink: true }}
+            disabled={lockNameBrand}
           />
 
           <TextField
@@ -272,9 +380,12 @@ export default function ItemForm({
             type="date"
             {...register('expiry_date')}
             InputLabelProps={{ shrink: true }}
-            inputProps={{ min: today }}
+            // For totally new entries, block past; for pickedExisting we allow editing freely
+            inputProps={{
+              min: !isEditMode && !pickedExisting ? today : undefined,
+            }}
             error={!!errors.expiry_date}
-            helperText={errors.expiry_date?.message || 'Format: DD-MM-YYYY'}
+            helperText={errors.expiry_date?.message || 'Select expiry date'}
           />
 
           <TextField
@@ -287,7 +398,6 @@ export default function ItemForm({
             helperText={errors.mrp?.message}
           />
 
-          {/* ✅ NEW: Rack Number */}
           <TextField
             label="Rack Number"
             type="number"
@@ -299,16 +409,33 @@ export default function ItemForm({
           />
 
           <TextField
-            label="Stock"
+            label={
+              pickedExisting && !isEditMode && willMergeIntoPicked ? 'Add Stock (+)' : 'Stock'
+            }
             type="number"
             {...register('stock', { valueAsNumber: true })}
             InputLabelProps={{ shrink: true }}
             error={!!errors.stock}
-            helperText={errors.stock?.message}
+            helperText={
+              errors.stock?.message ||
+              (pickedExisting && !isEditMode
+                ? willMergeIntoPicked
+                  ? 'Enter quantity to add into selected batch'
+                  : 'Opening stock for NEW batch'
+                : '')
+            }
           />
 
           <Stack direction="row" gap={1} justifyContent="flex-end">
-            <Button onClick={onClose}>Cancel</Button>
+            <Button
+              onClick={() => {
+                setPickedExisting(null)
+                onClose()
+              }}
+            >
+              Cancel
+            </Button>
+
             <Button type="submit" variant="contained" disabled={isSubmitting}>
               Save
             </Button>

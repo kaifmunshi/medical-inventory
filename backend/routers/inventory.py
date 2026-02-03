@@ -1,6 +1,6 @@
 # F:\medical-inventory\backend\routers\inventory.py
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from sqlmodel import select
 from datetime import datetime
 from typing import List, Optional
@@ -116,6 +116,13 @@ def add_movement(
     )
 
 
+def _norm_str(s: Optional[str]) -> Optional[str]:
+    if s is None:
+        return None
+    v = str(s).strip()
+    return v if v != "" else None
+
+
 # ---------- Endpoints ----------
 @router.get("/", response_model=ItemPageOut)
 def list_items(
@@ -173,7 +180,11 @@ def get_item(item_id: int):
 
 
 @router.post("/", response_model=ItemOut, status_code=201)
-def create_item(payload: ItemIn):
+def create_item(
+    payload: ItemIn,
+    response: Response,
+    force_new: bool = Query(False, description="If true, always create a new row (no merge)"),
+):
     if payload.mrp <= 0:
         raise HTTPException(status_code=400, detail="MRP must be > 0")
     if payload.stock is not None and payload.stock < 0:
@@ -181,15 +192,62 @@ def create_item(payload: ItemIn):
     if payload.rack_number is not None and int(payload.rack_number) < 0:
         raise HTTPException(status_code=400, detail="Rack number cannot be negative")
 
+    name = _norm_str(payload.name) or ""
+    brand = _norm_str(payload.brand)
+    expiry = _norm_str(payload.expiry_date)
+    mrp = float(payload.mrp)
+    delta_stock = int(payload.stock or 0)
+    rack_no = int(payload.rack_number or 0)
+
     with get_session() as session:
         try:
+            # ✅ MERGE: same name + brand + expiry + mrp  => add stock to existing row
+            existing = None
+            if not force_new:
+                stmt = select(Item).where(
+                    func.lower(Item.name) == func.lower(name),
+                    func.coalesce(func.lower(Item.brand), "") == func.coalesce(func.lower(brand), ""),
+                    func.coalesce(Item.expiry_date, "") == (expiry or ""),
+                    Item.mrp == mrp,
+                )
+                existing = session.exec(stmt).first()
+
+            if existing:
+                existing.stock = int(existing.stock or 0) + delta_stock
+
+                # (optional) update rack if old rack is 0 and user provided a rack
+                if rack_no and int(existing.rack_number or 0) == 0:
+                    existing.rack_number = rack_no
+
+                existing.updated_at = now_ts()
+                session.add(existing)
+
+                if delta_stock != 0:
+                    add_movement(
+                        session,
+                        item_id=existing.id,
+                        delta=delta_stock,
+                        reason="OPENING",  # keep your existing reason style
+                        ref_type="ITEM_MERGE",
+                        ref_id=existing.id,
+                        note="Merged add into existing batch (same name/brand/expiry/MRP)",
+                    )
+
+                session.commit()
+                session.refresh(existing)
+
+                # ✅ This was an update, not a create
+                response.status_code = 200
+                return existing
+
+            # ✅ NEW ROW (new batch)
             item = Item(
-                name=payload.name,
-                brand=payload.brand,
-                expiry_date=payload.expiry_date,
-                mrp=payload.mrp,
-                stock=payload.stock,
-                rack_number=int(payload.rack_number or 0),
+                name=name,
+                brand=brand,
+                expiry_date=expiry,
+                mrp=mrp,
+                stock=delta_stock,
+                rack_number=rack_no,
                 created_at=now_ts(),
                 updated_at=now_ts(),
             )
@@ -217,6 +275,8 @@ def create_item(payload: ItemIn):
 
             return item
 
+        except HTTPException:
+            raise
         except Exception as e:
             session.rollback()
             raise HTTPException(status_code=500, detail=f"Failed to create item: {e}")

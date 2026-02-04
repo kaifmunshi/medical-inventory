@@ -6,6 +6,8 @@ from datetime import datetime
 from pydantic import BaseModel
 from sqlmodel import select
 from sqlalchemy import or_, exists, func
+from sqlalchemy import or_, exists, func, cast
+from sqlalchemy.types import Integer, Float
 
 from backend.db import get_session
 from backend.models import (
@@ -93,6 +95,19 @@ class BillPageOut(BaseModel):
     ✅ Paginated response for reports/infinite scroll
     """
     items: List[BillOut]
+    next_offset: Optional[int] = None
+
+class ItemSalesRowOut(BaseModel):
+    item_id: int
+    item_name: str
+    brand: Optional[str] = None
+    qty_sold: int
+    gross_sales: float
+    last_sold_at: Optional[str] = None
+
+
+class ItemSalesPageOut(BaseModel):
+    items: List[ItemSalesRowOut]
     next_offset: Optional[int] = None
 
 
@@ -229,6 +244,98 @@ def list_bills_paged(
 
         next_offset = (offset + limit) if has_more else None
         return {"items": out, "next_offset": next_offset}
+
+@router.get("/reports/item-sales", response_model=ItemSalesPageOut)
+def report_item_sales(
+    from_date: str = Query(..., description="YYYY-MM-DD"),
+    to_date: str = Query(..., description="YYYY-MM-DD (inclusive)"),
+    q: Optional[str] = Query(None, description="Search by item name or brand"),
+    limit: int = Query(60, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """
+    ✅ Items Sold Report (for re-order decisions)
+    - Groups by (item_id + item_name + brand)
+    - Sums quantity sold in bills
+    - Filters by bill date_time
+    - Supports search + pagination
+    - Sorted by qty_sold DESC (top selling first)
+    """
+
+    start_ts = f"{from_date}T00:00:00"
+    end_ts = f"{to_date}T23:59:59"
+
+    qq = (q or "").strip().lower()
+    like = f"%{qq}%"
+
+    with get_session() as session:
+        try:
+            qty_expr = func.coalesce(func.sum(cast(BillItem.quantity, Integer)), 0)
+            gross_expr = func.coalesce(
+                func.sum(cast(BillItem.quantity, Float) * cast(BillItem.mrp, Float)),
+                0
+            )
+
+            stmt = (
+                select(
+                    BillItem.item_id.label("item_id"),
+                    func.coalesce(BillItem.item_name, "").label("item_name"),
+                    func.nullif(func.trim(func.coalesce(Item.brand, "")), "").label("brand"),
+                    qty_expr.label("qty_sold"),
+                    gross_expr.label("gross_sales"),
+                    func.max(Bill.date_time).label("last_sold_at"),
+                )
+                .select_from(BillItem)
+                .join(Bill, Bill.id == BillItem.bill_id)
+                .join(Item, Item.id == BillItem.item_id, isouter=True)
+                .where(Bill.date_time >= start_ts)
+                .where(Bill.date_time <= end_ts)
+            )
+
+            if qq:
+                stmt = stmt.where(
+                    or_(
+                        func.lower(func.coalesce(BillItem.item_name, "")).like(like),
+                        func.lower(func.coalesce(Item.brand, "")).like(like),
+                    )
+                )
+
+            stmt = (
+                stmt.group_by(BillItem.item_id, BillItem.item_name, Item.brand)
+                .order_by(
+                    qty_expr.desc(),
+                    func.coalesce(BillItem.item_name, "").asc(),
+                    func.coalesce(Item.brand, "").asc(),
+                )
+                .limit(limit + 1)
+                .offset(offset)
+            )
+
+            rows = session.exec(stmt).all()
+
+            has_more = len(rows) > limit
+            if has_more:
+                rows = rows[:limit]
+
+            out: List[ItemSalesRowOut] = []
+            for r in rows:
+                out.append(
+                    ItemSalesRowOut(
+                        item_id=int(r.item_id or 0),
+                        item_name=str(r.item_name or ""),
+                        brand=(str(r.brand) if r.brand else None),
+                        qty_sold=int(r.qty_sold or 0),
+                        gross_sales=round2(as_f(r.gross_sales)),
+                        last_sold_at=r.last_sold_at,
+                    )
+                )
+
+            next_offset = (offset + limit) if has_more else None
+            return {"items": out, "next_offset": next_offset}
+
+        except Exception as e:
+            # ✅ so Swagger + frontend can show the real reason
+            raise HTTPException(status_code=500, detail=f"item-sales failed: {e}")
 
 
 @router.get("/{bill_id}", response_model=BillOut)

@@ -1,29 +1,31 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Box, Button, Paper, Stack, TextField, Typography, MenuItem } from '@mui/material'
 
 import SalesReport from './SalesReport'
 import ReturnsReport from './ReturnsReport'
 import StockLedgerReport from './StockLedgerReport'
-import { todayRange } from '../../lib/date'
+import ItemSalesReport from './ItemSalesReport'
+import { last15DaysRange } from '../../lib/date'
 
-type Tab = 'sales' | 'returns' | 'stock'
+type Tab = 'sales' | 'returns' | 'stock' | 'item_sales'
 type ViewMode = 'details' | 'aggregate'
 type GroupBy = 'day' | 'month'
 
 export default function Reports() {
-  const { from: todayFrom, to: todayTo } = todayRange()
+  // ✅ default = last 15 days
+  const { from: defaultFrom, to: defaultTo } = last15DaysRange()
 
   const [tab, setTab] = useState<Tab>('sales')
   const [viewMode, setViewMode] = useState<ViewMode>('details')
   const [groupBy, setGroupBy] = useState<GroupBy>('day')
 
-  const [from, setFrom] = useState(todayFrom)
-  const [to, setTo] = useState(todayTo)
+  const [from, setFrom] = useState(defaultFrom)
+  const [to, setTo] = useState(defaultTo)
 
   const [q, setQ] = useState('')
 
   // child-controlled extras + export
-  const [extraControls, setExtraControls] = useState<React.ReactNode>(null)
+  const [extraControls, setExtraControls] = useState<ReactNode>(null)
   const [exportDisabled, setExportDisabled] = useState(true)
   const [exportFn, setExportFn] = useState<() => void>(() => () => {})
 
@@ -55,11 +57,12 @@ export default function Reports() {
               label="Report"
               value={tab}
               onChange={(e) => setTab(e.target.value as Tab)}
-              sx={{ width: 180 }}
+              sx={{ width: 200 }}
             >
               <MenuItem value="sales">Sales</MenuItem>
               <MenuItem value="returns">Returns</MenuItem>
-              <MenuItem value="stock">Stock Ledger</MenuItem>
+              {/* <MenuItem value="stock">Stock Ledger</MenuItem> */}
+              <MenuItem value="item_sales">Item Sales</MenuItem>
             </TextField>
 
             {tab === 'sales' && (
@@ -112,6 +115,14 @@ export default function Reports() {
               />
             )}
 
+            {tab === 'item_sales' && (
+              <TextField
+                label="Search (name/brand)"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+            )}
+
             {/* Stock-only extra controls live here, injected by StockLedgerReport */}
             {tab === 'stock' ? extraControls : null}
           </Stack>
@@ -144,13 +155,21 @@ export default function Reports() {
             setExportFn={setExportFn}
             setExportDisabled={setExportDisabled}
           />
-        ) : (
+        ) : tab === 'stock' ? (
           <StockLedgerReport
             from={from}
             to={to}
             setExportFn={setExportFn}
             setExportDisabled={setExportDisabled}
             setExtraControls={setExtraControls}
+          />
+        ) : (
+          <ItemSalesReport
+            from={from}
+            to={to}
+            q={q}
+            setExportFn={setExportFn}
+            setExportDisabled={setExportDisabled}
           />
         )}
       </Paper>

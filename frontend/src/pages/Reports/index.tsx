@@ -61,7 +61,7 @@ export default function Reports() {
             >
               <MenuItem value="sales">Sales</MenuItem>
               <MenuItem value="returns">Returns</MenuItem>
-              {/* <MenuItem value="stock">Stock Ledger</MenuItem> */}
+              <MenuItem value="stock">Stock Ledger</MenuItem> 
               <MenuItem value="item_sales">Item Sales</MenuItem>
             </TextField>
 

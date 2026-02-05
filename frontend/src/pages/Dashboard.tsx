@@ -20,6 +20,8 @@ import {
   MenuItem,
   IconButton,
   Chip,
+  TableContainer,
+  TablePagination,
 } from '@mui/material'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -64,6 +66,15 @@ export default function Dashboard() {
 
   // ✅ NEW: zero stock dialog state
   const [openZeroStock, setOpenZeroStock] = useState(false)
+
+  // ✅ Zero stock pagination
+  const [zeroPage, setZeroPage] = useState(0)
+  const [zeroRowsPerPage, setZeroRowsPerPage] = useState(10)
+
+  // reset to first page whenever dialog opens
+  useEffect(() => {
+    if (openZeroStock) setZeroPage(0)
+  }, [openZeroStock])
 
   // ✅ CHANGED: default HIDDEN (privacy)
   const [showMoneyCards, setShowMoneyCards] = useState(false)
@@ -207,6 +218,13 @@ export default function Dashboard() {
       zeroStockTypesList: zeroList,
     }
   }, [qInv.data])
+
+  // ✅ Zero stock paged list (MUST be after zeroStockTypesList is defined)
+  const zeroPagedList = useMemo(() => {
+    const start = zeroPage * zeroRowsPerPage
+    const end = start + zeroRowsPerPage
+    return zeroStockTypesList.slice(start, end)
+  }, [zeroStockTypesList, zeroPage, zeroRowsPerPage])
 
   // Collected Today MUST come from BillPayment rows
   const qCollected = useQuery({
@@ -709,7 +727,7 @@ export default function Dashboard() {
         </Grid>
       </Grid>
 
-      {/* ✅ NEW: Zero Stock dialog (opened by clicking Inventory card) */}
+      {/* ✅ Zero Stock dialog with pagination */}
       <Dialog open={openZeroStock} onClose={() => setOpenZeroStock(false)} fullWidth maxWidth="sm">
         <DialogTitle>Zero Stock Items</DialogTitle>
         <DialogContent>
@@ -718,26 +736,44 @@ export default function Dashboard() {
               No zero stock items.
             </Typography>
           ) : (
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Name</TableCell>
-                  <TableCell>Brand</TableCell>
-                  <TableCell align="right">Stock</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {zeroStockTypesList.map((it) => (
-                  <TableRow key={it._key}>
-                    <TableCell>{it.name}</TableCell>
-                    <TableCell>{it.brand || '-'}</TableCell>
-                    <TableCell align="right" sx={{ color: 'error.main', fontWeight: 700 }}>
-                      0
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <>
+              <TableContainer sx={{ maxHeight: 360, borderRadius: 1, border: '1px solid rgba(0,0,0,0.08)' }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Name</TableCell>
+                      <TableCell>Brand</TableCell>
+                      <TableCell align="right">Stock</TableCell>
+                    </TableRow>
+                  </TableHead>
+
+                  <TableBody>
+                    {zeroPagedList.map((it) => (
+                      <TableRow key={it._key} hover>
+                        <TableCell>{it.name}</TableCell>
+                        <TableCell>{it.brand || '-'}</TableCell>
+                        <TableCell align="right" sx={{ color: 'error.main', fontWeight: 800 }}>
+                          0
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+
+              <TablePagination
+                component="div"
+                count={zeroStockTypesList.length}
+                page={zeroPage}
+                onPageChange={(_, nextPage) => setZeroPage(nextPage)}
+                rowsPerPage={zeroRowsPerPage}
+                onRowsPerPageChange={(e) => {
+                  setZeroRowsPerPage(Number(e.target.value))
+                  setZeroPage(0)
+                }}
+                rowsPerPageOptions={[5, 10, 25, 50]}
+              />
+            </>
           )}
 
           <Stack alignItems="flex-end" p={1}>
@@ -823,6 +859,7 @@ export default function Dashboard() {
                 </Typography>
               </Stack>
             </Paper>
+
             {qCashbookHistory.isLoading ? (
               <Typography color="text.secondary">Loading…</Typography>
             ) : (qCashbookHistory.data || []).length === 0 ? (

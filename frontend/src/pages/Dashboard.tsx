@@ -27,7 +27,7 @@ import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { listBills, getPaymentsSummary } from '../services/billing'
 import { listReturns } from '../services/returns'
-import { listItems } from '../services/inventory'
+import { listItemsPage } from '../services/inventory'
 import { todayRange } from '../lib/date'
 import {
   createCashbookEntry,
@@ -55,7 +55,20 @@ const to2 = (n: any) => Math.round(Number(n || 0) * 100) / 100
 
 // ✅ Persist key (we will force it back to hidden on leaving dashboard)
 const MONEY_TOGGLE_KEY = 'dash_show_money_cards'
+async function fetchAllInventoryRows() {
+  const limit = 500
+  let offset = 0
+  const out: any[] = []
 
+  while (true) {
+    const res = await listItemsPage('', limit, offset)
+    out.push(...(res.items || []))
+    if (res.next_offset == null) break
+    offset = res.next_offset
+  }
+
+  return out
+}
 export default function Dashboard() {
   const { from, to } = todayRange()
   const qc = useQueryClient()
@@ -161,11 +174,11 @@ export default function Dashboard() {
   })
 
   // Inventory for low-stock + expiry
-  const qInv = useQuery({
-    queryKey: ['dash-inventory'],
-    queryFn: () => listItems(''),
-  })
-
+ const qInv = useQuery({
+  queryKey: ['dash-inventory'],
+  queryFn: () => fetchAllInventoryRows(),
+  staleTime: 60 * 1000, // 1 minute
+})
   // ✅ Inventory totals (Total Qty + Total Types) + ✅ Zero stock types list
   const {
     inventoryTotalQty,

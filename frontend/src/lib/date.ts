@@ -15,7 +15,6 @@ export function last15DaysRange() {
   const from = new Date()
   from.setDate(from.getDate() - 15)
 
-  const fmt = (d: Date) => d.toISOString().slice(0, 10) // YYYY-MM-DD
-  return { from: fmt(from), to: fmt(to) }
+  return { from: toYMD(from), to: toYMD(to) }
 }
 

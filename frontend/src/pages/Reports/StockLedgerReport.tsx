@@ -16,19 +16,16 @@ import {
   DialogTitle,
   DialogContent,
   Tooltip,
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
-  Badge,
   Skeleton,
+  FormControlLabel,
+  Switch,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import SearchIcon from '@mui/icons-material/Search'
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { useTheme } from '@mui/material/styles'
 
-import { listItemsPage, getItemLedger } from '../../services/inventory'
+import { listItemsPage, getGroupLedger } from '../../services/inventory'
 
 function toCSV(rows: string[][]) {
   return rows
@@ -64,6 +61,17 @@ function groupKey(it: any) {
   return `${name}__${brand}`
 }
 
+type GroupRow = {
+  key: string
+  name: string
+  brand: string
+  totalStock: number
+  count: number // ✅ only non-zero batches count
+  batches: any[] // ✅ all batches
+  nonZeroBatches: any[] // ✅ stock > 0 batches
+  earliestExpiry: string
+}
+
 export default function StockLedgerReport(props: {
   from: string
   to: string
@@ -81,19 +89,16 @@ export default function StockLedgerReport(props: {
   const [itemSearch, setItemSearch] = useState('')
   const [debouncedItemSearch, setDebouncedItemSearch] = useState('')
 
-  // selected batch
-  const [pickedItem, setPickedItem] = useState<any | null>(null)
+  // ✅ hide out-of-stock groups by default
+  const [showOutOfStock, setShowOutOfStock] = useState(false)
+
+  // selected group
+  const [pickedGroup, setPickedGroup] = useState<GroupRow | null>(null)
 
   // ledger filters
   const [ledgerReason, setLedgerReason] = useState<string>('') // empty = all
-
-  // open/close ledger CARD (dialog)
   const [ledgerOpen, setLedgerOpen] = useState(false)
 
-  // expand group
-  const [expandedGroup, setExpandedGroup] = useState<string | false>(false)
-
-  // list scroll ref for auto-load
   const listRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -119,19 +124,8 @@ export default function StockLedgerReport(props: {
   }, [qItems.data])
 
   // ✅ Group items by (name+brand)
-  const grouped = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        key: string
-        name: string
-        brand: string
-        totalStock: number
-        count: number
-        batches: any[]
-        earliestExpiry: string
-      }
-    >()
+  const groupedAll = useMemo<GroupRow[]>(() => {
+    const map = new Map<string, GroupRow>()
 
     for (const it of itemRows) {
       const key = groupKey(it)
@@ -147,30 +141,39 @@ export default function StockLedgerReport(props: {
           name,
           brand,
           totalStock: stock,
-          count: 1,
+          count: stock > 0 ? 1 : 0,
           batches: [it],
+          nonZeroBatches: stock > 0 ? [it] : [],
           earliestExpiry: expIso || '',
         })
       } else {
         existing.totalStock += stock
-        existing.count += 1
         existing.batches.push(it)
+
+        if (stock > 0) {
+          existing.count += 1
+          existing.nonZeroBatches.push(it)
+        }
+
         if (!existing.earliestExpiry) existing.earliestExpiry = expIso || ''
         else if (expIso && expIso < existing.earliestExpiry) existing.earliestExpiry = expIso
       }
     }
 
-    const list = Array.from(map.values()).map((g) => {
-      const batches = [...g.batches].sort((a, b) => {
-        const da = toIsoDateOnly(a?.expiry_date)
-        const db = toIsoDateOnly(b?.expiry_date)
-        if (!da && !db) return 0
-        if (!da) return 1
-        if (!db) return -1
-        return da.localeCompare(db)
-      })
-      return { ...g, batches }
-    })
+    const sortByExp = (a: any, b: any) => {
+      const da = toIsoDateOnly(a?.expiry_date)
+      const db = toIsoDateOnly(b?.expiry_date)
+      if (!da && !db) return 0
+      if (!da) return 1
+      if (!db) return -1
+      return da.localeCompare(db)
+    }
+
+    const list = Array.from(map.values()).map((g) => ({
+      ...g,
+      batches: [...g.batches].sort(sortByExp),
+      nonZeroBatches: [...g.nonZeroBatches].sort(sortByExp),
+    }))
 
     list.sort((a, b) => {
       const an = a.name.toLowerCase()
@@ -182,14 +185,26 @@ export default function StockLedgerReport(props: {
     return list
   }, [itemRows])
 
-  // ✅ Ledger query (only when dialog open and item picked)
+  const outCount = useMemo(
+    () => groupedAll.filter((g) => Number(g.totalStock || 0) <= 0).length,
+    [groupedAll]
+  )
+
+  const grouped = useMemo(() => {
+    if (showOutOfStock) return groupedAll
+    return groupedAll.filter((g) => Number(g.totalStock || 0) > 0)
+  }, [groupedAll, showOutOfStock])
+
+  // ✅ Ledger query (GROUP)
   const qLedger = useInfiniteQuery({
-    queryKey: ['rpt-stock-ledger', pickedItem?.id, from, to, ledgerReason],
-    enabled: !!pickedItem?.id && ledgerOpen,
+    queryKey: ['rpt-stock-ledger-group', pickedGroup?.key, from, to, ledgerReason],
+    enabled: !!pickedGroup?.key && ledgerOpen,
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
-      return await getItemLedger({
-        item_id: Number(pickedItem.id),
+      if (!pickedGroup) throw new Error('No group')
+      return await getGroupLedger({
+        name: pickedGroup.name,
+        brand: pickedGroup.brand ?? '',
         from_date: from,
         to_date: to,
         reason: ledgerReason ? ledgerReason : undefined,
@@ -218,13 +233,46 @@ export default function StockLedgerReport(props: {
       note: m.note || '',
       before: Number(m.balance_before ?? 0),
       after: Number(m.balance_after ?? 0),
+
+      item_id: m.item_id,
+      expiry_date: m.expiry_date ?? null,
+      mrp: m.mrp ?? null,
+      rack_number: m.rack_number ?? null,
     }))
   }, [ledgerRaw])
 
-  // ✅ Header controls
+  // ✅ IMPORTANT: find earliest ITEM_CREATE inside this group (for "OPENING only once" rule)
+  const firstCreateKey = useMemo(() => {
+    // Find earliest ts among ITEM_CREATE rows
+    const creates = detailRows
+      .filter((r) => String(r.ref_type || '').toUpperCase() === 'ITEM_CREATE')
+      .filter((r) => Number(r.delta || 0) > 0)
+
+    if (creates.length === 0) return null
+
+    let best = creates[0]
+    for (const r of creates) {
+      // ISO timestamps compare lexicographically fine if they are ISO-like, but we will still fallback:
+      if (String(r.ts) < String(best.ts)) best = r
+    }
+    return `${best.ts}__${best.item_id ?? ''}`
+  }, [detailRows])
+
+  // ✅ Header controls (Reports top bar)
   useEffect(() => {
     setExtraControls(
       <>
+        <FormControlLabel
+          sx={{ ml: 0, userSelect: 'none' }}
+          control={<Switch checked={showOutOfStock} onChange={(e) => setShowOutOfStock(e.target.checked)} />}
+          label={
+            <Stack direction="row" gap={1} alignItems="center">
+              <span>Show out-of-stock</span>
+              <Chip size="small" label={`${outCount}`} variant="outlined" sx={{ borderRadius: 999, fontWeight: 900 }} />
+            </Stack>
+          }
+        />
+
         <TextField
           select
           label="Reason"
@@ -233,6 +281,11 @@ export default function StockLedgerReport(props: {
           sx={{ width: 180 }}
         >
           <MenuItem value="">All</MenuItem>
+
+          {/* ✅ include these two so user can filter properly */}
+          <MenuItem value="PURCHASE">PURCHASE</MenuItem>
+          <MenuItem value="SALE">SALE</MenuItem>
+
           <MenuItem value="OPENING">OPENING</MenuItem>
           <MenuItem value="ADJUST">ADJUST</MenuItem>
           <MenuItem value="BILL">BILL</MenuItem>
@@ -249,19 +302,37 @@ export default function StockLedgerReport(props: {
       </>
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ledgerReason, ledgerOpen])
+  }, [ledgerReason, ledgerOpen, showOutOfStock, outCount])
 
-  // ✅ Export
+  // ✅ Export (include batch details)
   useEffect(() => {
-    setExportDisabled(!(ledgerOpen && pickedItem?.id && detailRows.length > 0))
+    setExportDisabled(!(ledgerOpen && pickedGroup?.key && detailRows.length > 0))
     setExportFn(() => () => {
-      if (!pickedItem?.id) return
-      const header = ['ID', 'TS', 'Delta', 'Reason', 'Ref Type', 'Ref ID', 'Before', 'After', 'Note']
+      if (!pickedGroup?.key) return
+      const header = [
+        'ID',
+        'TS',
+        'Delta',
+        'Reason',
+        'Batch Item ID',
+        'Expiry',
+        'MRP',
+        'Rack',
+        'Ref Type',
+        'Ref ID',
+        'Before',
+        'After',
+        'Note',
+      ]
       const body = detailRows.map((r: any) => [
         String(r.id),
         String(r.ts),
         String(r.delta),
-        String(r.reason),
+        String(displayReason(r)), // ✅ export the corrected label
+        String(r.item_id ?? ''),
+        String(r.expiry_date ?? ''),
+        String(r.mrp ?? ''),
+        String(r.rack_number ?? ''),
         String(r.ref_type ?? ''),
         String(r.ref_id ?? ''),
         String(r.before ?? ''),
@@ -273,13 +344,23 @@ export default function StockLedgerReport(props: {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `stock-ledger_${pickedItem?.id ?? 'item'}_${from}_to_${to}.csv`
+      a.download = `stock-ledger_${pickedGroup.name}_${pickedGroup.brand || 'no-brand'}_${from}_to_${to}.csv`
       a.click()
       URL.revokeObjectURL(url)
     })
-  }, [setExportDisabled, setExportFn, detailRows, pickedItem?.id, from, to, ledgerOpen])
+  }, [
+    setExportDisabled,
+    setExportFn,
+    detailRows,
+    pickedGroup?.key,
+    pickedGroup?.name,
+    pickedGroup?.brand,
+    from,
+    to,
+    ledgerOpen,
+  ])
 
-  const currentStock = qLedger.data?.pages?.[0]?.current_stock ?? pickedItem?.stock ?? '-'
+  const currentStock = qLedger.data?.pages?.[0]?.current_stock ?? pickedGroup?.totalStock ?? '-'
 
   const deltaChip = (delta: number) => {
     const isPos = delta > 0
@@ -306,12 +387,33 @@ export default function StockLedgerReport(props: {
     <Chip size="small" label={reason || '-'} variant="outlined" sx={{ borderRadius: 999, fontWeight: 800 }} />
   )
 
-  function openLedgerFor(item: any) {
-    setPickedItem(item)
+  // ✅ FIXED RULES:
+  // 1) OPENING should appear ONLY for the very first ITEM_CREATE of this (name+brand) group.
+  // 2) If backend logs OPENING for ITEM_MERGE (adding stock into existing batch), show PURCHASE.
+  // 3) If backend logs OPENING for later ITEM_CREATE (new batch created later), show PURCHASE.
+  function displayReason(r: any) {
+    const reason = String(r?.reason ?? '').toUpperCase()
+    const refType = String(r?.ref_type ?? '').toUpperCase()
+
+    // merge into existing batch should never be "OPENING" in UI
+    if (reason === 'OPENING' && refType === 'ITEM_MERGE') return 'PURCHASE'
+
+    // Item create: only first-ever create is OPENING; all later creates are PURCHASE
+    if (reason === 'OPENING' && refType === 'ITEM_CREATE') {
+      const key = `${String(r?.ts ?? '')}__${String(r?.item_id ?? '')}`
+      if (firstCreateKey && key === firstCreateKey) return 'OPENING'
+      return 'PURCHASE'
+    }
+
+    return r?.reason || ''
+  }
+
+  function openLedgerForGroup(g: GroupRow) {
+    setPickedGroup(g)
     setLedgerOpen(true)
   }
 
-  // ✅ Auto-load list (no button)
+  // ✅ Auto-load list
   const maybeLoadMore = () => {
     if (!qItems.hasNextPage) return
     if (qItems.isFetchingNextPage) return
@@ -321,7 +423,11 @@ export default function StockLedgerReport(props: {
     if (nearBottom) qItems.fetchNextPage()
   }
 
-  // ✅ Ledger “Card” content (inside a centered dialog)
+  // ✅ Only non-zero batches for the picked group (used in ledger header chips)
+  const nonZeroBatches = useMemo(() => {
+    return (pickedGroup?.nonZeroBatches ?? []).filter((b: any) => Number(b?.stock ?? 0) > 0)
+  }, [pickedGroup])
+
   const LedgerCard = (
     <Paper
       elevation={0}
@@ -332,15 +438,14 @@ export default function StockLedgerReport(props: {
         overflow: 'hidden',
       }}
     >
-      {/* header */}
       <Box sx={{ p: 2, pb: 1.5 }}>
         <Stack direction="row" alignItems="flex-start" justifyContent="space-between" gap={1.5}>
           <Box sx={{ minWidth: 0 }}>
             <Typography variant="h6" sx={{ fontWeight: 950, lineHeight: 1.15 }} noWrap>
-              {pickedItem?.name ?? 'Ledger'}
+              {pickedGroup?.name ?? 'Ledger'}
             </Typography>
             <Typography variant="body2" color="text.secondary" noWrap>
-              Brand: {pickedItem?.brand || '-'} • Exp: {formatExpiry(pickedItem?.expiry_date)} • #{pickedItem?.id ?? '-'}
+              Brand: {pickedGroup?.brand || '-'} • Batches: {pickedGroup?.count ?? 0}
             </Typography>
           </Box>
 
@@ -351,11 +456,30 @@ export default function StockLedgerReport(props: {
             </IconButton>
           </Stack>
         </Stack>
+
+        {/* ✅ Show batch chips (ONLY stock>0) */}
+        {nonZeroBatches.length > 0 && (
+          <Box mt={1.25}>
+            <Stack direction="row" gap={1} flexWrap="wrap">
+              {nonZeroBatches.slice(0, 8).map((b: any) => (
+                <Chip
+                  key={b.id}
+                  size="small"
+                  variant="outlined"
+                  sx={{ borderRadius: 999 }}
+                  label={`#${b.id} • Exp ${formatExpiry(b.expiry_date)} • MRP ${b.mrp} • Stock ${b.stock}`}
+                />
+              ))}
+              {nonZeroBatches.length > 8 && (
+                <Chip size="small" sx={{ borderRadius: 999 }} label={`+${nonZeroBatches.length - 8} more`} />
+              )}
+            </Stack>
+          </Box>
+        )}
       </Box>
 
       <Divider />
 
-      {/* table */}
       <Box sx={{ p: 2 }}>
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
@@ -365,6 +489,7 @@ export default function StockLedgerReport(props: {
                 <th>TS</th>
                 <th>Delta</th>
                 <th>Reason</th>
+                <th>Batch</th>
                 <th>Ref</th>
                 <th>Before</th>
                 <th>After</th>
@@ -376,7 +501,7 @@ export default function StockLedgerReport(props: {
               {qLedger.isLoading ? (
                 Array.from({ length: 8 }).map((_, i) => (
                   <tr key={`sk-${i}`}>
-                    <td colSpan={8}>
+                    <td colSpan={9}>
                       <Box py={0.75}>
                         <Skeleton variant="rounded" height={32} />
                       </Box>
@@ -385,7 +510,7 @@ export default function StockLedgerReport(props: {
                 ))
               ) : detailRows.length === 0 ? (
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={9}>
                     <Box p={2} color="text.secondary">
                       No ledger rows for this date range.
                     </Box>
@@ -397,7 +522,17 @@ export default function StockLedgerReport(props: {
                     <td>{r.id}</td>
                     <td>{r.ts}</td>
                     <td>{deltaChip(r.delta)}</td>
-                    <td>{reasonChip(r.reason)}</td>
+                    <td>{reasonChip(displayReason(r))}</td>
+
+                    <td>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span style={{ fontWeight: 800 }}>#{r.item_id}</span>
+                        <span style={{ fontSize: 12, opacity: 0.8 }}>
+                          Exp: {formatExpiry(r.expiry_date)} • MRP: {r.mrp ?? '-'} • Rack: {r.rack_number ?? '-'}
+                        </span>
+                      </div>
+                    </td>
+
                     <td>{r.ref_type ? `${r.ref_type}${r.ref_id ? ` #${r.ref_id}` : ''}` : '-'}</td>
                     <td>{r.before}</td>
                     <td>{r.after}</td>
@@ -445,7 +580,6 @@ export default function StockLedgerReport(props: {
 
   return (
     <>
-      {/* ✅ Ledger shown as CENTER CARD (dialog), not right drawer */}
       <Dialog
         open={ledgerOpen}
         onClose={() => setLedgerOpen(false)}
@@ -460,14 +594,10 @@ export default function StockLedgerReport(props: {
           },
         }}
       >
-        {/* keep title minimal (we have our own header inside card) */}
         <DialogTitle sx={{ p: isMobile ? 0 : 1.5 }} />
-        <DialogContent sx={{ p: isMobile ? 0 : 1.5 }}>
-          {LedgerCard}
-        </DialogContent>
+        <DialogContent sx={{ p: isMobile ? 0 : 1.5 }}>{LedgerCard}</DialogContent>
       </Dialog>
 
-      {/* Main UI: Item list always visible */}
       <Stack gap={2}>
         <Paper sx={{ p: 2, borderRadius: 3 }}>
           <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} alignItems={{ md: 'center' }}>
@@ -519,110 +649,68 @@ export default function StockLedgerReport(props: {
 
             {!qItems.isLoading &&
               grouped.map((g) => {
-                const isOpen = expandedGroup === g.key
+                const selected = pickedGroup?.key === g.key
+                const isOut = Number(g.totalStock || 0) <= 0
 
                 return (
-                  <Accordion
+                  <Paper
                     key={g.key}
-                    expanded={isOpen}
-                    onChange={() => setExpandedGroup((prev) => (prev === g.key ? false : g.key))}
-                    disableGutters
                     sx={{
                       mb: 1,
+                      p: 1.5,
                       borderRadius: 2,
-                      overflow: 'hidden',
                       border: '1px solid',
-                      borderColor: 'divider',
-                      '&:before': { display: 'none' },
+                      borderColor: selected ? 'primary.main' : 'divider',
+                      bgcolor: selected
+                        ? 'rgba(25,118,210,0.06)'
+                        : isOut
+                          ? 'rgba(0,0,0,0.03)'
+                          : 'background.paper',
+                      opacity: isOut ? 0.8 : 1,
                     }}
                   >
-                    <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                      <Stack direction="row" justifyContent="space-between" width="100%" gap={1}>
-                        <Stack sx={{ minWidth: 0 }}>
-                          <Typography sx={{ fontWeight: 950 }} noWrap>
-                            {g.name}
-                          </Typography>
-                          <Typography variant="caption" color="text.secondary" noWrap>
-                            Brand: {g.brand || '-'} • Earliest exp:{' '}
-                            {g.earliestExpiry ? formatExpiry(g.earliestExpiry) : '-'}
-                          </Typography>
-                        </Stack>
-
-                        <Stack direction="row" gap={1} alignItems="center">
-                          <Chip
-                            size="small"
-                            label={`Total Stock: ${g.totalStock}`}
-                            sx={{ fontWeight: 900, borderRadius: 999 }}
-                          />
-                          <Badge color="primary" badgeContent={g.count} sx={{ '& .MuiBadge-badge': { fontWeight: 900 } }}>
-                            <Chip size="small" label="Batches" variant="outlined" sx={{ borderRadius: 999 }} />
-                          </Badge>
-                        </Stack>
+                    <Stack
+                      direction={{ xs: 'column', sm: 'row' }}
+                      gap={1}
+                      justifyContent="space-between"
+                      alignItems={{ sm: 'center' }}
+                    >
+                      <Stack sx={{ minWidth: 0 }}>
+                        <Typography sx={{ fontWeight: 950 }} noWrap>
+                          {g.name}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" noWrap>
+                          Brand: {g.brand || '-'} • Earliest exp: {g.earliestExpiry ? formatExpiry(g.earliestExpiry) : '-'}
+                        </Typography>
                       </Stack>
-                    </AccordionSummary>
 
-                    <AccordionDetails sx={{ pt: 0 }}>
-                      <Stack gap={1}>
-                        {g.batches.map((it: any) => {
-                          const stock = Number(it?.stock ?? 0)
-                          const isOut = stock <= 0
-                          const selected = pickedItem?.id === it.id
+                      <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap" justifyContent="flex-end">
+                        <Chip
+                          size="small"
+                          label={`Total Stock: ${g.totalStock}`}
+                          sx={{ fontWeight: 900, borderRadius: 999 }}
+                        />
 
-                          return (
-                            <Paper
-                              key={it.id}
-                              sx={{
-                                p: 1.25,
-                                borderRadius: 2,
-                                border: '1px solid',
-                                borderColor: selected ? 'primary.main' : 'divider',
-                                bgcolor: selected ? 'rgba(25,118,210,0.06)' : 'background.paper',
-                              }}
-                            >
-                              <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} justifyContent="space-between">
-                                <Stack spacing={0.2}>
-                                  <Typography sx={{ fontWeight: 900 }}>Exp: {formatExpiry(it.expiry_date)}</Typography>
-                                  <Typography variant="caption" color="text.secondary">
-                                    MRP: {it.mrp ?? '-'} • Rack: {it.rack_number ?? '-'} • #{it.id}
-                                  </Typography>
-                                </Stack>
-
-                                <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
-                                  {/* ✅ 0 stock should be seen */}
-                                  <Chip
-                                    size="small"
-                                    label={`Stock: ${stock}`}
-                                    sx={{
-                                      fontWeight: 900,
-                                      borderRadius: 999,
-                                      ...(isOut ? { bgcolor: 'rgba(0,0,0,0.06)' } : undefined),
-                                    }}
-                                  />
-                                  <Button
-                                    variant={selected ? 'contained' : 'outlined'}
-                                    onClick={() => openLedgerFor(it)}
-                                    sx={{ borderRadius: 999, fontWeight: 950 }}
-                                  >
-                                    View Ledger
-                                  </Button>
-                                </Stack>
-                              </Stack>
-                            </Paper>
-                          )
-                        })}
-
-                        {qItems.isFetchingNextPage && (
-                          <Stack gap={1} sx={{ mt: 1 }}>
-                            {Array.from({ length: 2 }).map((_, i) => (
-                              <Skeleton key={`np-${i}`} variant="rounded" height={62} />
-                            ))}
-                          </Stack>
-                        )}
+                        <Button
+                          variant={selected ? 'contained' : 'outlined'}
+                          onClick={() => openLedgerForGroup(g)}
+                          sx={{ borderRadius: 999, fontWeight: 950 }}
+                        >
+                          View Ledger
+                        </Button>
                       </Stack>
-                    </AccordionDetails>
-                  </Accordion>
+                    </Stack>
+                  </Paper>
                 )
               })}
+
+            {qItems.isFetchingNextPage && (
+              <Stack gap={1} sx={{ mt: 1 }}>
+                {Array.from({ length: 2 }).map((_, i) => (
+                  <Skeleton key={`np-${i}`} variant="rounded" height={62} />
+                ))}
+              </Stack>
+            )}
 
             {qItems.hasNextPage && !qItems.isFetchingNextPage && (
               <Box sx={{ py: 1.5, textAlign: 'center', color: 'text.secondary', fontSize: 12 }}>

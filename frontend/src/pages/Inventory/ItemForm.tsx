@@ -1,4 +1,4 @@
-// F:\medical-inventory\frontend\src\pages\Inventory\ItemForm.tsx
+// frontend/src/pages/Inventory/ItemForm.tsx
 import {
   Drawer,
   Stack,
@@ -10,6 +10,8 @@ import {
   Box,
   Chip,
   Divider,
+  FormControlLabel,
+  Switch,
 } from '@mui/material'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -83,6 +85,9 @@ export default function ItemForm({
   // Track selection from picker (Add mode only)
   const [pickedExisting, setPickedExisting] = React.useState<any | null>(null)
 
+  // ✅ UX toggle: hide zero/out-of-stock batches by default
+  const [showOutOfStock, setShowOutOfStock] = React.useState(false)
+
   // 1️⃣ When editing: fill from initial
   React.useEffect(() => {
     if (!initial) return
@@ -101,6 +106,7 @@ export default function ItemForm({
   React.useEffect(() => {
     if (open && !initial) {
       setPickedExisting(null)
+      setShowOutOfStock(false) // ✅ reset toggle every time add opens (keeps UX consistent)
       reset({
         name: '',
         brand: '',
@@ -201,7 +207,14 @@ export default function ItemForm({
       return out2
     }
 
+    // ✅ sort: in-stock first, then out-of-stock; then name/brand/expiry
     out.sort((a, b) => {
+      const sa = Number(a?.stock ?? 0)
+      const sb = Number(b?.stock ?? 0)
+      const aOut = sa <= 0
+      const bOut = sb <= 0
+      if (aOut !== bOut) return aOut ? 1 : -1
+
       const an = norm(a?.name)
       const bn = norm(b?.name)
       if (an !== bn) return an.localeCompare(bn)
@@ -217,19 +230,25 @@ export default function ItemForm({
       return da.localeCompare(db)
     })
 
+    // ✅ filter out-of-stock unless toggled ON
+    if (!showOutOfStock) {
+      return out.filter((it) => Number(it?.stock ?? 0) > 0)
+    }
+
     return out
-  }, [data, items])
+  }, [data, items, showOutOfStock])
 
   const handleListboxScroll = (event: React.UIEvent<HTMLUListElement>) => {
     const listboxNode = event.currentTarget
     const nearBottom =
-      listboxNode.scrollTop + listboxNode.clientHeight >=
-      listboxNode.scrollHeight - 40
+      listboxNode.scrollTop + listboxNode.clientHeight >= listboxNode.scrollHeight - 40
 
     if (nearBottom && hasNextPage && !isFetchingNextPage) {
       fetchNextPage()
     }
   }
+
+  const pickedStock = Number(pickedExisting?.stock ?? 0)
 
   return (
     <Drawer
@@ -247,6 +266,28 @@ export default function ItemForm({
           {/* ✅ Smart picker (only in Add mode) */}
           {!isEditMode && (
             <>
+              <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                <Typography variant="body2" sx={{ fontWeight: 800 }}>
+                  Find existing batch
+                </Typography>
+
+                <FormControlLabel
+                  sx={{ m: 0 }}
+                  control={
+                    <Switch
+                      size="small"
+                      checked={showOutOfStock}
+                      onChange={(e) => setShowOutOfStock(e.target.checked)}
+                    />
+                  }
+                  label={
+                    <Typography variant="caption" sx={{ fontWeight: 800 }}>
+                      Show out-of-stock
+                    </Typography>
+                  }
+                />
+              </Stack>
+
               <Autocomplete
                 options={options}
                 loading={isLoading || isFetchingNextPage}
@@ -274,18 +315,33 @@ export default function ItemForm({
                   const mrp = formatMoney(option?.mrp)
                   const stock = Number(option?.stock ?? 0) || 0
                   const rack = option?.rack_number ?? 0
+                  const out = stock <= 0
 
                   return (
-                    <li {...props} key={option?.id}>
+                    <li {...props} key={option?.id} style={{ ...(props as any).style, opacity: out ? 0.72 : 1 }}>
                       <Box sx={{ width: '100%' }}>
                         <Stack direction="row" justifyContent="space-between" gap={1}>
-                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          <Typography variant="body2" sx={{ fontWeight: 700 }}>
                             Exp: {expiry}
                           </Typography>
 
                           <Stack direction="row" gap={1} alignItems="center">
                             <Chip size="small" label={`MRP: ${mrp}`} sx={{ height: 20 }} />
-                            <Chip size="small" label={`Stock: ${stock}`} sx={{ height: 20 }} />
+                            <Chip
+                              size="small"
+                              label={`Stock: ${stock}`}
+                              sx={{ height: 20, fontWeight: 900 }}
+                              color={out ? 'default' : 'success'}
+                              variant={out ? 'outlined' : 'filled'}
+                            />
+                            {out && (
+                              <Chip
+                                size="small"
+                                label="OUT"
+                                variant="outlined"
+                                sx={{ height: 20, fontWeight: 900 }}
+                              />
+                            )}
                           </Stack>
                         </Stack>
 
@@ -299,7 +355,7 @@ export default function ItemForm({
                 renderInput={(params) => (
                   <TextField
                     {...params}
-                    label="Find existing batch (recommended)"
+                    label={showOutOfStock ? 'Search batches (incl. out-of-stock)' : 'Search in-stock batches'}
                     placeholder="Type item name / brand"
                     size="small"
                     InputProps={{
@@ -318,7 +374,7 @@ export default function ItemForm({
               />
 
               <Typography variant="caption" color="text.secondary">
-                Tip: Select a batch to add stock into it. If you change expiry/MRP, it becomes a new batch.
+                Tip: Default shows only stock &gt; 0 batches. Turn ON “Show out-of-stock” only when needed.
               </Typography>
 
               {pickedExisting && (
@@ -328,10 +384,10 @@ export default function ItemForm({
                     borderColor: 'divider',
                     borderRadius: 2,
                     p: 1.25,
-                    bgcolor: 'background.paper',
+                    bgcolor: pickedStock <= 0 ? 'rgba(255, 193, 7, 0.12)' : 'background.paper',
                   }}
                 >
-                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  <Typography variant="body2" sx={{ fontWeight: 800 }}>
                     {willMergeIntoPicked ? 'Existing batch selected' : 'New batch (from selected)'}
                   </Typography>
 
@@ -340,6 +396,12 @@ export default function ItemForm({
                       ? 'Saving will add stock to this batch (same name + brand + expiry + MRP).'
                       : 'You changed expiry/MRP. Saving will create a NEW batch with same name/brand.'}
                   </Typography>
+
+                  {pickedStock <= 0 && (
+                    <Typography variant="caption" sx={{ display: 'block', mt: 0.75, fontWeight: 800 }}>
+                      Note: Selected batch is currently out-of-stock (stock = 0). Adding stock is OK.
+                    </Typography>
+                  )}
 
                   <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1 }}>
                     <Button

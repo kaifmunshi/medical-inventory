@@ -177,7 +177,9 @@ export default function Dashboard() {
  const qInv = useQuery({
   queryKey: ['dash-inventory'],
   queryFn: () => fetchAllInventoryRows(),
-  staleTime: 60 * 1000, // 1 minute
+  staleTime: 0,                 // ✅ always treat as stale
+  refetchOnMount: 'always',     // ✅ when you go to dashboard, always refresh
+  refetchOnWindowFocus: true,   // ✅ if you tab back, refresh
 })
   // ✅ Inventory totals (Total Qty + Total Types) + ✅ Zero stock types list
   const {
@@ -789,9 +791,16 @@ export default function Dashboard() {
             </>
           )}
 
-          <Stack alignItems="flex-end" p={1}>
-            <Button onClick={() => setOpenZeroStock(false)}>Close</Button>
-          </Stack>
+          <Stack direction="row" justifyContent="flex-end" gap={1} p={1}>
+  <Button
+    variant="outlined"
+    onClick={() => qc.invalidateQueries({ queryKey: ['dash-inventory'] })}
+  >
+    Refresh
+  </Button>
+
+  <Button onClick={() => setOpenZeroStock(false)}>Close</Button>
+</Stack>
         </DialogContent>
       </Dialog>
 

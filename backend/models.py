@@ -12,6 +12,8 @@ class Item(SQLModel, table=True):
     mrp: float
     stock: int = 0
     rack_number: int = Field(default=0, index=True)
+    # ✅ NEW: soft-archive sold-out duplicate batches
+    is_archived: bool = Field(default=False, index=True)
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 

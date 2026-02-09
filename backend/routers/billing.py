@@ -8,7 +8,7 @@ from sqlmodel import select
 from sqlalchemy import or_, exists, func
 from sqlalchemy import or_, exists, func, cast
 from sqlalchemy.types import Integer, Float
-
+from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
     Item, Bill, BillItem, BillPayment,
@@ -470,7 +470,8 @@ def create_bill(payload: BillCreate):
 
                 itm.stock = as_i(itm.stock) - qty
                 session.add(itm)
-
+                # ✅ archive sold-out duplicate batches
+                apply_archive_rules(session, itm)
                 bi = BillItem(
                     bill_id=b.id,
                     item_id=itm.id,

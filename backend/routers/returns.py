@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional, Dict
 from sqlmodel import select
 from datetime import datetime
-
+from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
     Item, Bill, BillItem,
@@ -315,7 +315,8 @@ def create_return(payload: ReturnCreate):
                 # restock
                 itm.stock += qty
                 session.add(itm)
-
+                # ✅ unarchive if stock came back
+                apply_archive_rules(session, itm)
                 # Ledger: RETURN (stock IN)
                 add_movement(
                     session,

@@ -6,14 +6,15 @@ from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel
 import logging
-from sqlalchemy import func
-from sqlalchemy.sql import or_
+from backend.utils.archive_rules import apply_archive_rules
+from sqlalchemy import func, or_
 
 from backend.db import get_session
 from backend.models import Item, StockMovement
 
 logger = logging.getLogger("api.items")
 router = APIRouter()
+
 
 # ---------- Local Schemas ----------
 class ItemIn(BaseModel):
@@ -86,6 +87,40 @@ class StockLedgerPageOut(BaseModel):
     next_offset: Optional[int] = None
 
 
+# ---------- Group Ledger Response Models ----------
+class StockMovementGroupOut(BaseModel):
+    id: int
+    ts: str
+    delta: int
+    reason: str
+    ref_type: Optional[str] = None
+    ref_id: Optional[int] = None
+    note: Optional[str] = None
+    actor: Optional[str] = None
+
+    # ✅ batch info
+    item_id: int
+    expiry_date: Optional[str] = None
+    mrp: Optional[float] = None
+    rack_number: Optional[int] = None
+
+    balance_after: int
+    balance_before: int
+
+    class Config:
+        from_attributes = True
+
+
+class StockLedgerGroupPageOut(BaseModel):
+    key: str
+    name: str
+    brand: Optional[str] = None
+    current_stock: int
+    item_ids: List[int]
+    items: List[StockMovementGroupOut]
+    next_offset: Optional[int] = None
+
+
 # ---------- Helpers ----------
 def now_ts():
     return datetime.now().isoformat(timespec="seconds")
@@ -130,9 +165,16 @@ def list_items(
     q: Optional[str] = Query(None, description="Search in name/brand"),
     limit: Optional[int] = Query(None, ge=1, le=500),
     offset: Optional[int] = Query(None, ge=0),
+
+    # ✅ NEW
+    include_archived: bool = Query(False, description="If true, include archived batches"),
 ):
     with get_session() as session:
         base_stmt = select(Item)
+
+        # ✅ hide archived by default
+        if not include_archived:
+            base_stmt = base_stmt.where(or_(Item.is_archived == False, Item.is_archived.is_(None)))
 
         if q:
             like = f"%{q.strip()}%"
@@ -142,6 +184,8 @@ def list_items(
                     Item.brand.ilike(like),
                 )
             )
+
+        ...
 
         # If ONLY q is present (client didn't pass limit/offset), return ALL matches
         if q and limit is None and offset is None:
@@ -158,16 +202,119 @@ def list_items(
         total = session.exec(count_stmt).one()
 
         page_stmt = (
-            base_stmt
-            .order_by(Item.name, Item.id)
-            .limit(page_limit)
-            .offset(page_offset)
+            base_stmt.order_by(Item.name, Item.id).limit(page_limit).offset(page_offset)
         )
         items = session.exec(page_stmt).all()
 
-        next_offset = (page_offset + page_limit) if (page_offset + page_limit) < total else None
+        next_offset = (
+            (page_offset + page_limit)
+            if (page_offset + page_limit) < total
+            else None
+        )
 
         return {"items": items, "total": total, "next_offset": next_offset}
+
+
+# ✅✅ IMPORTANT: THIS MUST BE BEFORE /{item_id}
+@router.get("/ledger/group", response_model=StockLedgerGroupPageOut)
+def group_ledger(
+    name: str = Query(..., description="Item name (exact match, case-insensitive)"),
+    brand: Optional[str] = Query(None, description="Brand (case-insensitive); pass empty for None"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
+    reason: Optional[str] = Query(None, description="Filter by reason"),
+):
+    with get_session() as session:
+        n = _norm_str(name)
+        if not n:
+            raise HTTPException(status_code=400, detail="name is required")
+
+        b = _norm_str(brand)  # None allowed
+
+        stmt_items = select(Item).where(func.lower(Item.name) == func.lower(n))
+
+        # brand handling:
+        # - if brand missing/empty -> match NULL/empty brand
+        # - else match lower(brand)
+        if b is None:
+            stmt_items = stmt_items.where(
+                or_(Item.brand.is_(None), func.trim(Item.brand) == "")
+            )
+        else:
+            stmt_items = stmt_items.where(
+                func.lower(func.coalesce(Item.brand, "")) == func.lower(b)
+            )
+
+        batches = session.exec(stmt_items).all()
+        if not batches:
+            raise HTTPException(status_code=404, detail="No items found for this (name+brand)")
+
+        item_ids = [int(x.id) for x in batches]
+        items_by_id = {int(x.id): x for x in batches}
+
+        current_stock = sum(int(x.stock or 0) for x in batches)
+        key = f"{n.strip().lower()}__{(b or '').strip().lower()}"
+
+        stmt = select(StockMovement).where(StockMovement.item_id.in_(item_ids))
+
+        if from_date:
+            stmt = stmt.where(StockMovement.ts >= f"{from_date}T00:00:00")
+        if to_date:
+            stmt = stmt.where(StockMovement.ts <= f"{to_date}T23:59:59")
+
+        if reason:
+            stmt = stmt.where(func.lower(StockMovement.reason) == reason.strip().lower())
+
+        stmt = stmt.order_by(StockMovement.id.desc()).limit(limit + 1).offset(offset)
+        rows = session.exec(stmt).all()
+
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        running = int(current_stock)
+        out: List[StockMovementGroupOut] = []
+
+        for m in rows:
+            after = running
+            before = after - int(m.delta or 0)
+
+            it = items_by_id.get(int(m.item_id))
+
+            out.append(
+                StockMovementGroupOut(
+                    id=m.id,
+                    ts=m.ts,
+                    delta=int(m.delta or 0),
+                    reason=m.reason,
+                    ref_type=getattr(m, "ref_type", None),
+                    ref_id=getattr(m, "ref_id", None),
+                    note=getattr(m, "note", None),
+                    actor=getattr(m, "actor", None),
+                    item_id=int(m.item_id),
+                    expiry_date=getattr(it, "expiry_date", None) if it else None,
+                    mrp=float(getattr(it, "mrp", 0) or 0) if it else None,
+                    rack_number=int(getattr(it, "rack_number", 0) or 0) if it else None,
+                    balance_after=after,
+                    balance_before=before,
+                )
+            )
+
+            running = before
+
+        next_offset = (offset + limit) if has_more else None
+
+        return {
+            "key": key,
+            "name": str(batches[0].name),
+            "brand": getattr(batches[0], "brand", None),
+            "current_stock": int(current_stock),
+            "item_ids": item_ids,
+            "items": out,
+            "next_offset": next_offset,
+        }
 
 
 @router.get("/{item_id}", response_model=ItemOut)
@@ -201,7 +348,6 @@ def create_item(
 
     with get_session() as session:
         try:
-            # ✅ MERGE: same name + brand + expiry + mrp  => add stock to existing row
             existing = None
             if not force_new:
                 stmt = select(Item).where(
@@ -215,7 +361,6 @@ def create_item(
             if existing:
                 existing.stock = int(existing.stock or 0) + delta_stock
 
-                # (optional) update rack if old rack is 0 and user provided a rack
                 if rack_no and int(existing.rack_number or 0) == 0:
                     existing.rack_number = rack_no
 
@@ -227,7 +372,7 @@ def create_item(
                         session,
                         item_id=existing.id,
                         delta=delta_stock,
-                        reason="OPENING",  # keep your existing reason style
+                        reason="OPENING",
                         ref_type="ITEM_MERGE",
                         ref_id=existing.id,
                         note="Merged add into existing batch (same name/brand/expiry/MRP)",
@@ -235,12 +380,9 @@ def create_item(
 
                 session.commit()
                 session.refresh(existing)
-
-                # ✅ This was an update, not a create
                 response.status_code = 200
                 return existing
 
-            # ✅ NEW ROW (new batch)
             item = Item(
                 name=name,
                 brand=brand,
@@ -255,7 +397,6 @@ def create_item(
             session.commit()
             session.refresh(item)
 
-            # Ledger: opening stock entry (ONLY if non-zero)
             if int(item.stock or 0) != 0:
                 try:
                     add_movement(
@@ -263,14 +404,13 @@ def create_item(
                         item_id=item.id,
                         delta=int(item.stock),
                         reason="OPENING",
-                        ref_type="ITEM_CREATE",  # matches your DB screenshot style
+                        ref_type="ITEM_CREATE",
                         ref_id=item.id,
                         note="Initial stock on item creation",
                     )
                     session.commit()
                 except Exception as e:
                     session.rollback()
-                    # Don't break item creation; just log clearly
                     logger.exception("Ledger insert failed (ignored). Error: %s", e)
 
             return item
@@ -341,7 +481,8 @@ def adjust_stock(
             item.stock = new_stock
             item.updated_at = now_ts()
             session.add(item)
-
+            # ✅ archive/unarchive logic
+            apply_archive_rules(session, item)
             if int(delta) != 0:
                 add_movement(
                     session,

@@ -27,6 +27,25 @@ def migrate_db():
             ))
             session.commit()
 
+        # ✅ NEW: soft-archive fields (so 0-stock batches can be hidden safely)
+        # NOTE: We do NOT hard-delete rows because BillItem/ReturnItem references can break later.
+        if "is_archived" not in col_names:
+            session.exec(text(
+                "ALTER TABLE item ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0"
+            ))
+
+        if "archived_at" not in col_names:
+            session.exec(text(
+                "ALTER TABLE item ADD COLUMN archived_at TEXT"
+            ))
+
+        session.commit()
+
+        # ✅ helpful indexes (safe to run repeatedly)
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_item_is_archived ON item (is_archived)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_item_stock ON item (stock)"))
+        session.commit()
+
         # ---------- bill table migration ----------
         bill_cols = session.exec(text("PRAGMA table_info(bill)")).all()
         bill_col_names = {c[1] for c in bill_cols}

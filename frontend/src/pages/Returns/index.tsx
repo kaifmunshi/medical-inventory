@@ -23,7 +23,7 @@ type Row = {
   mrp: number
 }
 
-type RefundMode = 'cash' | 'online'
+type RefundMode = 'cash' | 'online' | 'credit'
 
 // helpers
 function round2(n: number) {
@@ -349,6 +349,7 @@ export default function Returns() {
               >
                 <option value="cash">Cash</option>
                 <option value="online">Online</option>
+                <option value="credit">Credit (adjust bill)</option>
               </TextField>
 
               <Typography sx={{ minWidth: 180 }}>Computed: ₹{refund.toFixed(2)}</Typography>

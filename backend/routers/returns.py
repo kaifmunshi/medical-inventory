@@ -191,7 +191,7 @@ def get_return(return_id: int):
 def create_return(payload: ReturnCreate):
     if not payload.items:
         raise HTTPException(status_code=400, detail="Return must have at least one item")
-    if payload.refund_mode not in {"cash", "online", "split"}:
+    if payload.refund_mode not in {"cash", "online", "split", "credit"}:
         raise HTTPException(status_code=400, detail="Invalid refund_mode")
 
     with get_session() as session:
@@ -272,7 +272,10 @@ def create_return(payload: ReturnCreate):
         subtotal_return = round2(subtotal_return)
 
         # ----- validate refund with tolerance -----
-        if payload.refund_mode == "cash":
+        if payload.refund_mode == "credit":
+            # credit mode: don't expect immediate cash/online refund here.
+            rc, ro = 0.0, 0.0
+        elif payload.refund_mode == "cash":
             rc, ro = round2(payload.refund_cash), 0.0
             if abs(rc - subtotal_return) > ROUND_TOLERANCE:
                 raise HTTPException(
@@ -349,6 +352,30 @@ def create_return(payload: ReturnCreate):
             raise HTTPException(status_code=500, detail=f"Failed to create return: {e}")
 
         items = session.exec(select(ReturnItem).where(ReturnItem.return_id == r.id)).all()
+        # If refund was credited to the source bill (bill on credit), adjust that bill's outstanding
+        try:
+            if payload.refund_mode == "credit" and payload.source_bill_id:
+                bill = session.get(Bill, payload.source_bill_id)
+                if bill:
+                    # reduce total_amount by returned subtotal
+                    new_total = round2(float(getattr(bill, "total_amount", 0.0)) - float(subtotal_return))
+                    if new_total < 0:
+                        new_total = 0.0
+                    bill.total_amount = new_total
+
+                    # recompute payment_status based on paid_amount
+                    paid = float(getattr(bill, "paid_amount", 0.0) or 0.0)
+                    if paid >= bill.total_amount:
+                        bill.payment_status = "PAID"
+                    elif paid > 0:
+                        bill.payment_status = "PARTIAL"
+                    else:
+                        bill.payment_status = "UNPAID"
+
+                    session.add(bill)
+                    session.commit()
+        except Exception:
+            session.rollback()
         return ReturnOut(
             id=r.id,
             date_time=r.date_time,

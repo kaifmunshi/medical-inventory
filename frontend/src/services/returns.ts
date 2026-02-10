@@ -7,7 +7,7 @@ export type ReturnLine = { item_id: number; quantity: number }
 export type CreateReturnBody = {
   source_bill_id: number
   items: ReturnLine[]
-  refund_mode: 'cash' | 'online'      // required by backend
+  refund_mode: 'cash' | 'online' | 'credit'      // required by backend; 'credit' adjusts the bill outstanding
   refund_cash: number                 // required by backend
   refund_online: number               // required by backend
   notes?: string
@@ -25,7 +25,7 @@ export type ReturnRecord = {
   id: number
   source_bill_id: number
   items: Array<{ item_id: number; quantity: number; mrp?: number; item_name?: string }>
-  refund_mode: 'cash' | 'online'
+  refund_mode: 'cash' | 'online' | 'credit' | 'split'
   refund_cash: number
   refund_online: number
   notes?: string

@@ -186,7 +186,7 @@ class ReturnItemIn(SQLModel):
 class ReturnCreate(SQLModel):
     source_bill_id: Optional[int] = None
     items: List[ReturnItemIn]
-    refund_mode: str                        # "cash" | "online" | "split"
+    refund_mode: str                        # "cash" | "online" | "split" | "credit"
     refund_cash: float = 0.0
     refund_online: float = 0.0
     notes: Optional[str] = None

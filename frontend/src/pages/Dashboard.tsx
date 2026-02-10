@@ -283,11 +283,12 @@ export default function Dashboard() {
   const cashOutTodayWithdrawals = to2(qCashbook.data?.withdrawals)
   const cashOutTodayExpenses = to2(qCashbook.data?.expenses)
 
-  const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal } = useMemo(() => {
+  const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCredit } = useMemo(() => {
     const rets = (qReturns.data || []) as any[]
     let cash = 0
     let online = 0
     let total = 0
+    let credit = 0
 
     for (const r of rets) {
       const rc = Number(r.refund_cash ?? 0)
@@ -305,6 +306,7 @@ export default function Dashboard() {
           ? Number(r.subtotal_return)
           : (r.items || []).reduce((s: number, it: any) => s + Number(it.mrp) * Number(it.quantity), 0)
 
+      credit += Number(sub || 0)
       total += Number(sub || 0)
     }
 
@@ -312,6 +314,7 @@ export default function Dashboard() {
       returnsTodayCash: to2(cash),
       returnsTodayOnline: to2(online),
       returnsTodayTotal: to2(total),
+      returnsTodayCredit: to2(credit),
     }
   }, [qReturns.data])
 
@@ -566,7 +569,7 @@ export default function Dashboard() {
                   ₹{returnsTodayTotal.toFixed(2)}
                 </Typography>
                 <Typography variant="caption" color="text.secondary">
-                  Refunds: Cash ₹{returnsTodayCash.toFixed(2)} • Online ₹{returnsTodayOnline.toFixed(2)}
+                  Refunds: Cash ₹{returnsTodayCash.toFixed(2)} • Online ₹{returnsTodayOnline.toFixed(2)} • Credit ₹{(returnsTodayCredit || 0).toFixed(2)}
                 </Typography>
               </Paper>
             </Grid>
@@ -1035,6 +1038,15 @@ export default function Dashboard() {
             <Stack direction="row" justifyContent="space-between" mt={1}>
               <Typography variant="body2" color="text.secondary">
                 Returns Today (Refunds)
+              </Typography>
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                ₹{(returnsTodayCredit || 0).toFixed(2)}
+              </Typography>
+            </Stack>
+
+            <Stack direction="row" justifyContent="space-between" mt={1}>
+              <Typography variant="body2" color="text.secondary">
+                Returns Today (Refunds + Credit)
               </Typography>
               <Typography variant="body2" sx={{ fontWeight: 700 }}>
                 ₹{returnsTodayTotal.toFixed(2)}

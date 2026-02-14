@@ -6,6 +6,7 @@ export interface BillItemIn {
   item_id: number
   quantity: number
   mrp: number
+  custom_unit_price?: number
 }
 
 export interface BillCreate {
@@ -15,12 +16,29 @@ export interface BillCreate {
   payment_mode: 'cash' | 'online' | 'split' | 'credit'
   payment_cash?: number
   payment_online?: number
+  payment_credit?: number
+  notes?: string
+}
+
+export interface BillUpdate {
+  items: Array<{ item_id: number; quantity: number; custom_unit_price?: number }>
+  discount_percent?: number
+  payment_mode: 'cash' | 'online' | 'split' | 'credit'
+  payment_cash?: number
+  payment_online?: number
+  payment_credit?: number
+  final_amount?: number
   notes?: string
 }
 
 export async function createBill(payload: BillCreate) {
   const { data } = await api.post('/billing/', payload)
   return data
+}
+
+export async function updateBill(id: number, payload: BillUpdate) {
+  const { data } = await api.put(`/billing/${id}`, payload)
+  return data as Bill
 }
 
 // ---------- Read single Bill (response) ----------
@@ -48,6 +66,8 @@ export interface Bill {
   payment_status: 'PAID' | 'UNPAID' | 'PARTIAL'
   paid_amount: number
   paid_at: string | null
+  is_deleted: boolean
+  deleted_at: string | null
 
   items: BillItem[]
 }
@@ -64,9 +84,20 @@ export async function listBills(params: {
   to_date?: string
   limit?: number
   offset?: number
+  deleted_filter?: 'active' | 'deleted' | 'all'
 }) {
   const { data } = await api.get<Bill[]>('/billing/', { params })
   return data
+}
+
+export async function softDeleteBill(billId: number) {
+  const { data } = await api.delete(`/billing/${billId}`)
+  return data as { bill_id: number; is_deleted: boolean; deleted_at: string | null }
+}
+
+export async function recoverBill(billId: number) {
+  const { data } = await api.post(`/billing/${billId}/recover`)
+  return data as { bill_id: number; is_deleted: boolean; deleted_at: string | null }
 }
 
 // ---------- Receive Payment on Credit Bill ----------
@@ -123,6 +154,7 @@ export async function listBillsPaged(params: {
   q?: string
   limit?: number
   offset?: number
+  deleted_filter?: 'active' | 'deleted' | 'all'
 }) {
   const res = await api.get('/billing/paged', { params })
   return res.data as { items: any[]; next_offset?: number | null }
@@ -145,6 +177,7 @@ export async function getSalesAggregate(params: {
   from_date: string
   to_date: string
   group_by: 'day' | 'month'
+  deleted_filter?: 'active' | 'deleted' | 'all'
 }) {
   const res = await api.get('/billing/summary/aggregate', { params })
   return res.data as Array<{

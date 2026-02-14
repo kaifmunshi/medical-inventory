@@ -29,6 +29,10 @@ def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def is_deleted_bill(b: Bill) -> bool:
+    return bool(getattr(b, "is_deleted", False))
+
+
 def add_movement(
     session,
     *,
@@ -137,6 +141,8 @@ def bill_return_summary(bill_id: int):
         bill = session.get(Bill, bill_id)
         if not bill:
             raise HTTPException(status_code=404, detail="Bill not found")
+        if is_deleted_bill(bill):
+            raise HTTPException(status_code=400, detail="Returns are not allowed for deleted bills")
 
         sold = sold_map_for_bill(session, bill_id)
         already = already_returned_map_for_bill(session, bill_id)
@@ -206,6 +212,8 @@ def create_return(payload: ReturnCreate):
             bill = session.get(Bill, payload.source_bill_id)
             if not bill:
                 raise HTTPException(status_code=404, detail="Source bill not found")
+            if is_deleted_bill(bill):
+                raise HTTPException(status_code=400, detail="Returns are not allowed for deleted bills")
 
             sold_lookup = sold_map_for_bill(session, bill.id)
             returned_lookup = already_returned_map_for_bill(session, bill.id)
@@ -430,6 +438,8 @@ def create_exchange(payload: ExchangeCreate):
             bill = session.get(Bill, payload.source_bill_id)
             if not bill:
                 raise HTTPException(status_code=404, detail="Source bill not found")
+            if is_deleted_bill(bill):
+                raise HTTPException(status_code=400, detail="Exchange is not allowed for deleted bills")
 
             sold_lookup = sold_map_for_bill(session, bill.id)
             returned_lookup = already_returned_map_for_bill(session, bill.id)

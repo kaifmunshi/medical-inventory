@@ -66,6 +66,15 @@ def migrate_db():
             session.exec(text(
                 "ALTER TABLE bill ADD COLUMN paid_at TEXT"
             ))
+        if "is_deleted" not in bill_col_names:
+            session.exec(text(
+                "ALTER TABLE bill ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0"
+            ))
+        if "deleted_at" not in bill_col_names:
+            session.exec(text(
+                "ALTER TABLE bill ADD COLUMN deleted_at TEXT"
+            ))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_bill_is_deleted ON bill (is_deleted)"))
         session.commit()
 
         # ---------- billpayment table migration ----------

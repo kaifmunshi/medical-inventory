@@ -49,6 +49,10 @@ export default function Exchange() {
     if (!data) return
 
     if (Array.isArray(data)) { setBillPickerOpen(true); return }
+    if (Boolean((data as any).is_deleted)) {
+      toast.push('Deleted bill cannot be used for exchange', 'error')
+      return
+    }
 
     setBill(data)
 

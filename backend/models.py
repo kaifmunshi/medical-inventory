@@ -38,6 +38,8 @@ class Bill(SQLModel, table=True):
     payment_status: str = Field(default="PAID", index=True)         # "PAID"|"UNPAID"|"PARTIAL"
     paid_amount: float = 0.0                                        # total paid so far
     paid_at: Optional[str] = None                                   # keep plain Optional[str]
+    is_deleted: bool = Field(default=False, index=True)
+    deleted_at: Optional[str] = None
 
 
 class BillItem(SQLModel, table=True):
@@ -138,6 +140,7 @@ class ItemOut(SQLModel):
 class BillItemIn(SQLModel):
     item_id: int
     quantity: int
+    custom_unit_price: Optional[float] = None
 
 
 class BillCreate(SQLModel):
@@ -146,6 +149,7 @@ class BillCreate(SQLModel):
     payment_mode: str                 # "cash" | "online" | "split" | "credit"
     payment_cash: float = 0.0
     payment_online: float = 0.0
+    payment_credit: float = 0.0
     final_amount: Optional[float] = None
     notes: Optional[str] = None
 
@@ -173,6 +177,8 @@ class BillOut(SQLModel):
     payment_status: str = "PAID"
     paid_amount: float = 0.0
     paid_at: Optional[str] = None
+    is_deleted: bool = False
+    deleted_at: Optional[str] = None
 
     items: List[BillItemOut]
 

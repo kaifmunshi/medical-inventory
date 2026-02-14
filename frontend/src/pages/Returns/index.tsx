@@ -148,6 +148,10 @@ export default function Returns() {
         return { ok: false, error: 'Multiple bills found' }
       }
 
+      if (Boolean((b as any).is_deleted)) {
+        return { ok: false, error: 'Deleted bill cannot be used for return' }
+      }
+
       const lines: BillLine[] = (b.items || []).map((it: any): BillLine => ({
         item_id: Number(it.item_id),
         name: it.item_name || it.name || it.item?.name || `#${it.item_id}`,

@@ -10,6 +10,7 @@ import { last15DaysRange } from '../../lib/date'
 type Tab = 'sales' | 'returns' | 'stock' | 'item_sales'
 type ViewMode = 'details' | 'aggregate'
 type GroupBy = 'day' | 'month'
+type DeletedFilter = 'active' | 'deleted' | 'all'
 
 export default function Reports() {
   // ✅ default = last 15 days
@@ -18,6 +19,7 @@ export default function Reports() {
   const [tab, setTab] = useState<Tab>('sales')
   const [viewMode, setViewMode] = useState<ViewMode>('details')
   const [groupBy, setGroupBy] = useState<GroupBy>('day')
+  const [deletedFilter, setDeletedFilter] = useState<DeletedFilter>('active')
 
   const [from, setFrom] = useState(defaultFrom)
   const [to, setTo] = useState(defaultTo)
@@ -88,6 +90,20 @@ export default function Reports() {
               >
                 <MenuItem value="day">Daily</MenuItem>
                 <MenuItem value="month">Monthly</MenuItem>
+                </TextField>
+              )}
+
+            {tab === 'sales' && viewMode === 'details' && (
+              <TextField
+                select
+                label="Bills"
+                value={deletedFilter}
+                onChange={(e) => setDeletedFilter(e.target.value as DeletedFilter)}
+                sx={{ width: 180 }}
+              >
+                <MenuItem value="active">Active only</MenuItem>
+                <MenuItem value="deleted">Deleted only</MenuItem>
+                <MenuItem value="all">All (active + deleted)</MenuItem>
               </TextField>
             )}
 
@@ -145,6 +161,7 @@ export default function Reports() {
             q={q}
             viewMode={viewMode}
             groupBy={groupBy}
+            deletedFilter={deletedFilter}
             setExportFn={setExportFn}
             setExportDisabled={setExportDisabled}
           />

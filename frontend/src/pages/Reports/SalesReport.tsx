@@ -1,23 +1,44 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box,
+  Button,
   Dialog,
+  DialogActions,
   DialogTitle,
   DialogContent,
   Divider,
   IconButton,
   Link,
+  MenuItem,
+  Paper,
   Stack,
+  TextField,
   Tooltip,
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import EditIcon from '@mui/icons-material/Edit'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useToast } from '../../components/ui/Toaster'
+import { listItems } from '../../services/inventory'
 
-import { listBillsPaged, getBill, getSalesAggregate } from '../../services/billing'
+import { listBillsPaged, getBill, getSalesAggregate, softDeleteBill, recoverBill, updateBill } from '../../services/billing'
 
 type ViewMode = 'details' | 'aggregate'
 type GroupBy = 'day' | 'month'
+type DeletedFilter = 'active' | 'deleted' | 'all'
+type EditMode = 'cash' | 'online' | 'split' | 'credit'
+
+type EditLine = {
+  item_id: number
+  item_name: string
+  mrp: number
+  quantity: number
+  custom_unit_price: number
+  item_discount_percent: number
+  stock?: number
+  existed_in_bill?: boolean
+}
 
 function toCSV(rows: string[][]) {
   return rows
@@ -50,6 +71,23 @@ function money(n: number | string | undefined | null) {
 function round2(n: number) {
   return Math.round(n * 100) / 100
 }
+
+function parseNumText(v: string): number | '' {
+  const s = String(v ?? '').trim()
+  if (!s) return ''
+  const n = Number(s)
+  return Number.isFinite(n) ? n : ''
+}
+
+function blurOnWheel(e: any) {
+  e.currentTarget.blur()
+}
+
+const GRID_INPUT_SX = {
+  '& .MuiInputBase-root': {
+    height: 38,
+  },
+} as const
 
 function computeBillProration(bill: any) {
   const items = (bill?.items || []) as any[]
@@ -89,10 +127,13 @@ export default function SalesReport(props: {
   q: string
   viewMode: ViewMode
   groupBy: GroupBy
+  deletedFilter: DeletedFilter
   setExportFn: (fn: () => void) => void
   setExportDisabled: (v: boolean) => void
 }) {
-  const { from, to, q, viewMode, groupBy, setExportFn, setExportDisabled } = props
+  const { from, to, q, viewMode, groupBy, deletedFilter, setExportFn, setExportDisabled } = props
+  const toast = useToast()
+  const queryClient = useQueryClient()
 
   const [debouncedQ, setDebouncedQ] = useState('')
   useEffect(() => {
@@ -105,10 +146,47 @@ export default function SalesReport(props: {
   // Detail dialog
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState<any | null>(null)
+  const [editOpen, setEditOpen] = useState(false)
+  const [editBillId, setEditBillId] = useState<number | null>(null)
+  const [editItems, setEditItems] = useState<EditLine[]>([])
+  const [editPaymentMode, setEditPaymentMode] = useState<EditMode>('cash')
+  const [editSplitCombination, setEditSplitCombination] = useState<
+    'cash-online' | 'cash-credit' | 'online-credit'
+  >('cash-online')
+  const [editCash, setEditCash] = useState<number>(0)
+  const [editOnline, setEditOnline] = useState<number>(0)
+  const [editNotes, setEditNotes] = useState<string>('')
+  const [editItemQuery, setEditItemQuery] = useState('')
+  const [editPriceDraftByRow, setEditPriceDraftByRow] = useState<Record<number, string>>({})
+  const [editDiscountDraftByRow, setEditDiscountDraftByRow] = useState<Record<number, string>>({})
+  const [editSuggestionPage, setEditSuggestionPage] = useState(0)
+
+  const qEditItems = useQuery({
+    queryKey: ['edit-bill-items', editItemQuery],
+    enabled: editOpen,
+    queryFn: () => listItems(editItemQuery),
+  })
+
+  const EDIT_SUGGESTIONS_PAGE_SIZE = 8
+  const editSuggestionItems = (qEditItems.data || []) as any[]
+  const editSuggestionTotalPages = Math.max(
+    1,
+    Math.ceil(editSuggestionItems.length / EDIT_SUGGESTIONS_PAGE_SIZE)
+  )
+  const editSuggestionPageClamped = Math.min(editSuggestionPage, editSuggestionTotalPages - 1)
+  const editSuggestionStart = editSuggestionPageClamped * EDIT_SUGGESTIONS_PAGE_SIZE
+  const editSuggestionVisible = editSuggestionItems.slice(
+    editSuggestionStart,
+    editSuggestionStart + EDIT_SUGGESTIONS_PAGE_SIZE
+  )
+
+  useEffect(() => {
+    setEditSuggestionPage(0)
+  }, [editItemQuery, editOpen])
 
   // SALES DETAILS (paged)
   const qSales = useInfiniteQuery({
-    queryKey: ['rpt-sales', 'details', from, to, debouncedQ],
+    queryKey: ['rpt-sales', 'details', from, to, debouncedQ, deletedFilter],
     enabled: viewMode === 'details',
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
@@ -116,6 +194,7 @@ export default function SalesReport(props: {
         from_date: from,
         to_date: to,
         q: debouncedQ,
+        deleted_filter: deletedFilter,
         limit: LIMIT,
         offset: pageParam,
       })
@@ -125,9 +204,131 @@ export default function SalesReport(props: {
 
   // SALES AGGREGATE
   const qAgg = useQuery({
-    queryKey: ['rpt-sales', 'aggregate', from, to, groupBy],
+    queryKey: ['rpt-sales', 'aggregate', from, to, groupBy, deletedFilter],
     enabled: viewMode === 'aggregate',
-    queryFn: () => getSalesAggregate({ from_date: from, to_date: to, group_by: groupBy }),
+    queryFn: () =>
+      getSalesAggregate({
+        from_date: from,
+        to_date: to,
+        group_by: groupBy,
+        deleted_filter: deletedFilter,
+      }),
+  })
+
+  const mSoftDelete = useMutation({
+    mutationFn: softDeleteBill,
+    onSuccess: async (_data, billId) => {
+      toast.push(`Bill #${billId} deleted`, 'warning')
+      await qSales.refetch()
+      if (detail?.id === billId) {
+        try {
+          const b = await getBill(billId)
+          setDetail(b)
+        } catch {}
+      }
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to delete bill'
+      toast.push(String(msg), 'error')
+    },
+  })
+
+  const mRecover = useMutation({
+    mutationFn: recoverBill,
+    onSuccess: async (_data, billId) => {
+      toast.push(`Bill #${billId} recovered`, 'success')
+      await qSales.refetch()
+      if (detail?.id === billId) {
+        try {
+          const b = await getBill(billId)
+          setDetail(b)
+        } catch {}
+      }
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to recover bill'
+      toast.push(String(msg), 'error')
+    },
+  })
+
+  const mEdit = useMutation({
+    mutationFn: async () => {
+      if (!editBillId) throw new Error('Bill not selected')
+      if (editPaymentMode === 'credit' && editNotes.trim().length === 0) {
+        throw new Error('Notes required for credit')
+      }
+      const cleanedItems = editItems
+        .map((it) => ({
+          item_id: Number(it.item_id),
+          quantity: Number(it.quantity || 0),
+          custom_unit_price: Number(it.custom_unit_price || it.mrp || 0),
+        }))
+        .filter((it) => it.quantity > 0)
+      if (cleanedItems.length === 0) throw new Error('At least one item quantity must be > 0')
+
+      const payload: any = {
+        items: cleanedItems,
+        discount_percent: 0,
+        payment_mode: editPaymentMode,
+        payment_cash: Number(editCash || 0),
+        payment_online: Number(editOnline || 0),
+        final_amount: editChosenFinal,
+        notes: editNotes || undefined,
+      }
+
+      if (editPaymentMode === 'credit') {
+        payload.payment_cash = 0
+        payload.payment_online = 0
+      } else if (editPaymentMode === 'cash') {
+        payload.payment_cash = editChosenFinal
+        payload.payment_online = 0
+      } else if (editPaymentMode === 'online') {
+        payload.payment_cash = 0
+        payload.payment_online = editChosenFinal
+      } else if (editSplitCombination === 'cash-online') {
+        const sum = round2(Number(payload.payment_cash || 0) + Number(payload.payment_online || 0))
+        if (sum !== editChosenFinal) {
+          throw new Error(`Cash + Online must equal Final Amount (₹${money(editChosenFinal)})`)
+        }
+      } else if (editSplitCombination === 'cash-credit') {
+        payload.payment_online = 0
+        payload.payment_credit = round2(editChosenFinal - Number(payload.payment_cash || 0))
+        if (payload.payment_credit < 0) throw new Error('Cash amount cannot be greater than final amount')
+      } else {
+        payload.payment_cash = 0
+        payload.payment_credit = round2(editChosenFinal - Number(payload.payment_online || 0))
+        if (payload.payment_credit < 0) throw new Error('Online amount cannot be greater than final amount')
+      }
+
+      return updateBill(editBillId, payload)
+    },
+    onSuccess: async (updated) => {
+      toast.push(`Bill #${updated.id} updated`, 'success')
+      setEditOpen(false)
+      queryClient.setQueryData(
+        ['rpt-sales', 'details', from, to, debouncedQ, deletedFilter],
+        (old: any) => {
+          if (!old?.pages) return old
+          return {
+            ...old,
+            pages: old.pages.map((p: any) => ({
+              ...p,
+              items: Array.isArray(p?.items)
+                ? p.items.map((it: any) => (Number(it.id) === Number(updated.id) ? updated : it))
+                : p?.items,
+            })),
+          }
+        }
+      )
+      await qSales.refetch()
+      if (detail?.id === updated.id) {
+        setDetail(updated)
+      }
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to edit bill'
+      toast.push(String(msg), 'error')
+    },
   })
 
   const salesRaw = useMemo(() => {
@@ -174,6 +375,8 @@ export default function SalesReport(props: {
         pending: money(pendingAmount),
         status,
         mode: b.payment_mode || '',
+        isDeleted: Boolean(b.is_deleted),
+        deletedAt: b.deleted_at || '',
       }
     })
   }, [salesRaw])
@@ -188,6 +391,249 @@ export default function SalesReport(props: {
     setDetail(b)
     setOpen(true)
   }
+
+  function handleDelete(row: any) {
+    if (!row?.id || row?.isDeleted) return
+    const ok = window.confirm(`Delete bill #${row.id}? This is a soft delete and can be recovered.`)
+    if (!ok) return
+    mSoftDelete.mutate(Number(row.id))
+  }
+
+  function handleRecover(row: any) {
+    if (!row?.id || !row?.isDeleted) return
+    const ok = window.confirm(`Recover bill #${row.id}?`)
+    if (!ok) return
+    mRecover.mutate(Number(row.id))
+  }
+
+  function openEdit(row: any) {
+    if (row?.isDeleted) {
+      toast.push('Deleted bill cannot be edited', 'warning')
+      return
+    }
+    const b = row?.raw || detail
+    if (!b?.id) return
+    const lines: EditLine[] = (b.items || []).map((it: any) => ({
+      item_id: Number(it.item_id),
+      item_name: String(it.item_name || it.name || `#${it.item_id}`),
+      mrp: Number(it.mrp || 0),
+      quantity: Number(it.quantity || 0),
+      custom_unit_price: Number(it.mrp || 0),
+      item_discount_percent: 0,
+      existed_in_bill: true,
+    }))
+    setEditBillId(Number(b.id))
+    setEditItems(lines)
+    setEditPaymentMode((b.payment_mode || 'cash') as EditMode)
+    setEditSplitCombination('cash-online')
+    setEditCash(Number(b.payment_cash || 0))
+    setEditOnline(Number(b.payment_online || 0))
+    setEditNotes(String(b.notes || ''))
+    setEditItemQuery('')
+    setEditPriceDraftByRow({})
+    setEditDiscountDraftByRow({})
+    setEditSuggestionPage(0)
+    setEditOpen(true)
+  }
+
+  function addItemToEdit(it: any) {
+    const itemId = Number(it.id)
+    if (!itemId) return
+    setEditPriceDraftByRow({})
+    setEditItems((prev) => {
+      const ix = prev.findIndex((x) => Number(x.item_id) === itemId)
+      if (ix >= 0) {
+        return prev.map((x, i) => (i === ix ? { ...x, quantity: Number(x.quantity || 0) + 1 } : x))
+      }
+      return [
+        ...prev,
+        {
+          item_id: itemId,
+          item_name: String(it.name || `#${itemId}`),
+          mrp: Number(it.mrp || 0),
+          quantity: 1,
+          custom_unit_price: Number(it.mrp || 0),
+          item_discount_percent: 0,
+          stock: Number(it.stock || 0),
+          existed_in_bill: false,
+        },
+      ]
+    })
+  }
+
+  function removeEditItem(idx: number) {
+    const row = editItems[idx]
+    if (!row) return
+    if (row.existed_in_bill) {
+      const ok = window.confirm(`Remove existing bill item "${row.item_name}"?`)
+      if (!ok) return
+    }
+    setEditPriceDraftByRow({})
+    setEditDiscountDraftByRow({})
+    setEditItems((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  function setEditUnitPrice(idx: number, v: number) {
+    const n = Math.max(0, Number(v) || 0)
+    setEditItems((prev) =>
+      prev.map((x, i) => {
+        if (i !== idx) return x
+        const nextPrice = Number(n.toFixed(2))
+        const base = Number(x.mrp || 0)
+        const pct = base > 0 ? ((base - nextPrice) / base) * 100 : 0
+        return {
+          ...x,
+          custom_unit_price: nextPrice,
+          item_discount_percent: Number(Math.min(100, Math.max(0, pct)).toFixed(2)),
+        }
+      })
+    )
+  }
+
+  function handleEditCustomPriceChange(idx: number, raw: string) {
+    setEditPriceDraftByRow((prev) => ({ ...prev, [idx]: raw }))
+  }
+
+  function commitEditCustomPrice(idx: number) {
+    const raw = String(editPriceDraftByRow[idx] ?? '').trim()
+    if (raw === '') {
+      setEditPriceDraftByRow((prev) => {
+        const next = { ...prev }
+        delete next[idx]
+        return next
+      })
+      return
+    }
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed)) {
+      setEditPriceDraftByRow((prev) => {
+        const next = { ...prev }
+        delete next[idx]
+        return next
+      })
+      return
+    }
+    const safe = Math.max(0, parsed)
+    setEditUnitPrice(idx, safe)
+    setEditPriceDraftByRow((prev) => {
+      const next = { ...prev }
+      delete next[idx]
+      return next
+    })
+  }
+
+  function setEditItemDiscountPercent(idx: number, v: number) {
+    setEditItems((prev) =>
+      prev.map((x, i) => {
+        if (i !== idx) return x
+        const base = Number(x.mrp || 0)
+        const safePct = Math.min(100, Math.max(0, Number(v) || 0))
+        const nextPrice = base > 0 ? base * (1 - safePct / 100) : 0
+        return {
+          ...x,
+          item_discount_percent: Number(safePct.toFixed(2)),
+          custom_unit_price: Number(nextPrice.toFixed(2)),
+        }
+      })
+    )
+  }
+
+  function handleEditDiscountChange(idx: number, raw: string) {
+    setEditDiscountDraftByRow((prev) => ({ ...prev, [idx]: raw }))
+  }
+
+  function commitEditDiscount(idx: number) {
+    const raw = String(editDiscountDraftByRow[idx] ?? '').trim()
+    if (raw === '') {
+      setEditDiscountDraftByRow((prev) => {
+        const next = { ...prev }
+        delete next[idx]
+        return next
+      })
+      return
+    }
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed)) {
+      setEditDiscountDraftByRow((prev) => {
+        const next = { ...prev }
+        delete next[idx]
+        return next
+      })
+      return
+    }
+    setEditItemDiscountPercent(idx, parsed)
+    setEditDiscountDraftByRow((prev) => {
+      const next = { ...prev }
+      delete next[idx]
+      return next
+    })
+  }
+
+  const editSubtotal = useMemo(
+    () => round2(editItems.reduce((s, it) => s + Number(it.mrp || 0) * Number(it.quantity || 0), 0)),
+    [editItems]
+  )
+
+  const editFinalByRows = useMemo(
+    () => round2(editItems.reduce((s, it) => s + Number(it.custom_unit_price || 0) * Number(it.quantity || 0), 0)),
+    [editItems]
+  )
+
+  const editChosenFinal = editFinalByRows
+
+  const editDiscountAmount = useMemo(() => Math.max(0, round2(editSubtotal - editFinalByRows)), [editSubtotal, editFinalByRows])
+  const editEffectiveDiscountPercent = useMemo(() => (editSubtotal > 0 ? (editDiscountAmount / editSubtotal) * 100 : 0), [editSubtotal, editDiscountAmount])
+  const editSplitCreditAmount = useMemo(
+    () =>
+      round2(
+        editSplitCombination === 'cash-credit'
+          ? editChosenFinal - Number(editCash || 0)
+          : editSplitCombination === 'online-credit'
+            ? editChosenFinal - Number(editOnline || 0)
+            : 0
+      ),
+    [editSplitCombination, editChosenFinal, editCash, editOnline]
+  )
+  const editPaymentsOk = useMemo(() => {
+    const c = Number(editCash || 0)
+    const o = Number(editOnline || 0)
+    if (editPaymentMode === 'credit') return true
+    if (editPaymentMode === 'cash') return round2(c) === round2(editChosenFinal)
+    if (editPaymentMode === 'online') return round2(o) === round2(editChosenFinal)
+    if (editSplitCombination === 'cash-online') return round2(c + o) === round2(editChosenFinal)
+    if (editSplitCombination === 'cash-credit') return c >= 0 && c <= editChosenFinal
+    return o >= 0 && o <= editChosenFinal
+  }, [editPaymentMode, editCash, editOnline, editChosenFinal, editSplitCombination])
+  const editNotesOkForCredit = editPaymentMode !== 'credit' || editNotes.trim().length > 0
+
+  useEffect(() => {
+    if (!editOpen) return
+    if (editPaymentMode === 'credit') {
+      setEditCash(0)
+      setEditOnline(0)
+      return
+    }
+    if (editPaymentMode === 'cash') {
+      setEditCash(editChosenFinal)
+      setEditOnline(0)
+      return
+    }
+    if (editPaymentMode === 'online') {
+      setEditCash(0)
+      setEditOnline(editChosenFinal)
+      return
+    }
+  }, [editOpen, editPaymentMode, editChosenFinal])
+
+  const noSpinnerSx = {
+    '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': {
+      WebkitAppearance: 'none',
+      margin: 0,
+    },
+    '& input[type=number]': {
+      MozAppearance: 'textfield',
+    },
+  } as const
 
   // export
   useEffect(() => {
@@ -234,6 +680,7 @@ export default function SalesReport(props: {
         'Pending',
         'Status',
         'Payment Mode',
+        'Deleted',
       ]
 
       const body = detailRows.map((r: any) => [
@@ -248,6 +695,7 @@ export default function SalesReport(props: {
         r.pending,
         r.status,
         r.mode,
+        r.isDeleted ? 'YES' : 'NO',
       ])
 
       const csv = toCSV([header, ...body])
@@ -341,11 +789,17 @@ export default function SalesReport(props: {
                   <th>Pending</th>
                   <th>Status</th>
                   <th>Mode</th>
+                  <th>Deleted</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
                 {detailRows.map((r: any) => (
-                  <tr key={`b-${r.id}`}>
+                  <tr
+                    key={`b-${r.id}`}
+                    onDoubleClick={() => openEdit(r)}
+                    style={r.isDeleted ? { backgroundColor: '#ffe9e9' } : undefined}
+                  >
                     <td>
                       <Tooltip title={r.itemsPreview} arrow placement="top">
                         <Link component="button" onClick={() => openDetail(r)} underline="hover">
@@ -363,12 +817,48 @@ export default function SalesReport(props: {
                     <td>{r.pending}</td>
                     <td>{r.status}</td>
                     <td>{r.mode}</td>
+                    <td>{r.isDeleted ? 'Yes' : 'No'}</td>
+                    <td>
+                      <Stack direction="row" gap={1}>
+                        <Tooltip title="Edit bill" arrow>
+                          <span>
+                            <IconButton
+                              size="small"
+                              onClick={() => openEdit(r)}
+                              disabled={r.isDeleted}
+                            >
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                        {r.isDeleted ? (
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            onClick={() => handleRecover(r)}
+                            disabled={mRecover.isPending}
+                          >
+                            Recover
+                          </Button>
+                        ) : (
+                          <Button
+                            size="small"
+                            color="error"
+                            variant="outlined"
+                            onClick={() => handleDelete(r)}
+                            disabled={mSoftDelete.isPending}
+                          >
+                            Delete
+                          </Button>
+                        )}
+                      </Stack>
+                    </td>
                   </tr>
                 ))}
 
                 {detailRows.length === 0 && !isLoading && (
                   <tr>
-                    <td colSpan={11}>
+                    <td colSpan={13}>
                       <Box p={2} color="text.secondary">
                         No data.
                       </Box>
@@ -484,6 +974,14 @@ export default function SalesReport(props: {
                   Payment Mode: <b>{detail.payment_mode || '-'}</b>
                 </Typography>
                 <Typography>
+                  Deleted: <b>{detail.is_deleted ? 'Yes' : 'No'}</b>
+                </Typography>
+                {detail.is_deleted ? (
+                  <Typography>
+                    Deleted At: <b>{detail.deleted_at || '-'}</b>
+                  </Typography>
+                ) : null}
+                <Typography>
                   Payment Status: <b>{detail.payment_status || (detail.is_credit ? 'UNPAID' : 'PAID')}</b>
                 </Typography>
                 <Typography>
@@ -498,10 +996,314 @@ export default function SalesReport(props: {
                     Notes: <i>{detail.notes}</i>
                   </Typography>
                 ) : null}
+                {!detail.is_deleted ? (
+                  <Box sx={{ pt: 1 }}>
+                    <Button size="small" variant="outlined" startIcon={<EditIcon />} onClick={() => openEdit({ raw: detail })}>
+                      Edit Bill
+                    </Button>
+                  </Box>
+                ) : null}
               </Stack>
             </Stack>
           )}
         </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        fullWidth
+        maxWidth="xl"
+        PaperProps={{ sx: { minHeight: '82vh' } }}
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Edit Bill #{editBillId || ''}
+          <IconButton onClick={() => setEditOpen(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Paper sx={{ p: 2 }}>
+              <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
+                <TextField
+                  label="Add item (name/brand)"
+                  value={editItemQuery}
+                  onChange={(e) => setEditItemQuery(e.target.value)}
+                  fullWidth
+                />
+                <Stack gap={0.5} sx={{ minWidth: 240 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    Subtotal: ₹{money(editSubtotal)}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Discount: ₹{money(editDiscountAmount)}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Computed Total: ₹{money(editFinalByRows)}
+                  </Typography>
+                  <Typography variant="h6">Final Amount: ₹{money(editChosenFinal)}</Typography>
+                </Stack>
+              </Stack>
+
+              <Box sx={{ mt: 1, maxHeight: 185, overflowY: 'auto', border: '1px solid #eee', borderRadius: 1, p: 1 }}>
+                {editSuggestionVisible.map((it: any) => (
+                  <Stack
+                    key={`edit-add-${it.id}`}
+                    direction="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                    sx={{ py: 0.5 }}
+                  >
+                    <Box>
+                      <Typography variant="body2">{it.name}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Brand: {it.brand || '-'} | Stock: {Number(it.stock || 0)} | MRP: {money(it.mrp)}
+                      </Typography>
+                    </Box>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => addItemToEdit(it)}
+                      disabled={Number(it.stock || 0) <= 0}
+                    >
+                      Add
+                    </Button>
+                  </Stack>
+                ))}
+                {editSuggestionItems.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    No items found.
+                  </Typography>
+                ) : null}
+              </Box>
+              {editSuggestionItems.length > EDIT_SUGGESTIONS_PAGE_SIZE && (
+                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 1 }}>
+                  <Typography variant="caption" color="text.secondary">
+                    Showing {editSuggestionStart + 1}-
+                    {Math.min(editSuggestionStart + EDIT_SUGGESTIONS_PAGE_SIZE, editSuggestionItems.length)} of{' '}
+                    {editSuggestionItems.length}
+                  </Typography>
+                  <Stack direction="row" gap={1}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => setEditSuggestionPage((p) => Math.max(0, p - 1))}
+                      disabled={editSuggestionPageClamped <= 0}
+                    >
+                      Prev
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() =>
+                        setEditSuggestionPage((p) => Math.min(editSuggestionTotalPages - 1, p + 1))
+                      }
+                      disabled={editSuggestionPageClamped >= editSuggestionTotalPages - 1}
+                    >
+                      Next
+                    </Button>
+                  </Stack>
+                </Stack>
+              )}
+            </Paper>
+
+            <Paper sx={{ p: 2 }}>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table" style={{ tableLayout: 'fixed', width: '100%' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ width: '42%' }}>Item</th>
+                      <th style={{ width: '10%' }}>MRP</th>
+                      <th style={{ width: '8%' }}>Qty</th>
+                      <th style={{ width: '12%' }}>Custom Price</th>
+                      <th style={{ width: '10%' }}>Discount %</th>
+                      <th style={{ width: '12%' }}>Line Total</th>
+                      <th style={{ width: '6%' }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {editItems.map((it, idx) => (
+                      <tr key={`${it.item_id}-${idx}`}>
+                        <td>{it.item_name}</td>
+                        <td>{money(it.mrp)}</td>
+                        <td style={{ textAlign: 'center' }}>
+                          <TextField
+                            size="small"
+                            type="number"
+                            value={it.quantity}
+                            onChange={(e) => {
+                              const qty = Number(e.target.value || 0)
+                              setEditItems((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, quantity: qty } : x))
+                              )
+                            }}
+                            onWheel={blurOnWheel}
+                            onFocus={(e) => e.target.select()}
+                            sx={{ width: 72, ...GRID_INPUT_SX, ...noSpinnerSx }}
+                            inputProps={{ min: 0, step: 1, inputMode: 'numeric' }}
+                          />
+                        </td>
+                        <td style={{ textAlign: 'center' }}>
+                          <TextField
+                            size="small"
+                            type="text"
+                            value={
+                              Object.prototype.hasOwnProperty.call(editPriceDraftByRow, idx)
+                                ? editPriceDraftByRow[idx]
+                                : String(Number(it.custom_unit_price || 0).toFixed(2))
+                            }
+                            onChange={(e) => handleEditCustomPriceChange(idx, e.target.value)}
+                            onBlur={() => commitEditCustomPrice(idx)}
+                            onWheel={blurOnWheel}
+                            onFocus={(e) => e.target.select()}
+                            sx={{ width: 108, ...GRID_INPUT_SX, ...noSpinnerSx }}
+                            inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                          />
+                        </td>
+                        <td style={{ textAlign: 'center' }}>
+                          <TextField
+                            size="small"
+                            type="text"
+                            value={
+                              Object.prototype.hasOwnProperty.call(editDiscountDraftByRow, idx)
+                                ? editDiscountDraftByRow[idx]
+                                : String(Number(it.item_discount_percent || 0).toFixed(2))
+                            }
+                            onChange={(e) => handleEditDiscountChange(idx, e.target.value)}
+                            onBlur={() => commitEditDiscount(idx)}
+                            onWheel={blurOnWheel}
+                            onFocus={(e) => e.target.select()}
+                            sx={{ width: 96, ...GRID_INPUT_SX, ...noSpinnerSx }}
+                            inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                          />
+                        </td>
+                        <td>{money(Number(it.custom_unit_price || 0) * Number(it.quantity || 0))}</td>
+                        <td>
+                          <Button size="small" color="error" onClick={() => removeEditItem(idx)}>
+                            Remove
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Box>
+            </Paper>
+
+            <Paper sx={{ p: 2 }}>
+              <Stack gap={2}>
+                <Stack direction={{ xs: 'column', md: 'row' }} gap={2} alignItems={{ md: 'flex-start' }}>
+                  <TextField
+                    select
+                    label="Payment Mode"
+                    value={editPaymentMode}
+                    onChange={(e) => {
+                      const v = e.target.value as EditMode
+                      setEditPaymentMode(v)
+                      if (v === 'credit') {
+                        setEditCash(0)
+                        setEditOnline(0)
+                      }
+                    }}
+                    sx={{ width: 180 }}
+                  >
+                    <MenuItem value="cash">Cash</MenuItem>
+                    <MenuItem value="online">Online</MenuItem>
+                    <MenuItem value="split">Split</MenuItem>
+                    <MenuItem value="credit">Credit</MenuItem>
+                  </TextField>
+
+                  {editPaymentMode === 'split' && (
+                    <TextField
+                      select
+                      label="Split Combination"
+                      value={editSplitCombination}
+                      onChange={(e) => {
+                        const v = e.target.value as 'cash-online' | 'cash-credit' | 'online-credit'
+                        setEditSplitCombination(v)
+                        if (v === 'cash-credit') setEditOnline(0)
+                        if (v === 'online-credit') setEditCash(0)
+                      }}
+                      sx={{ width: 220 }}
+                    >
+                      <MenuItem value="cash-online">Cash + Online</MenuItem>
+                      <MenuItem value="cash-credit">Cash + Credit</MenuItem>
+                      <MenuItem value="online-credit">Online + Credit</MenuItem>
+                    </TextField>
+                  )}
+                </Stack>
+
+                <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+                  {(editPaymentMode === 'cash' ||
+                    (editPaymentMode === 'split' && editSplitCombination !== 'online-credit')) && (
+                    <TextField
+                      label="Payment Cash"
+                      type="text"
+                      value={String(editCash)}
+                      onChange={(e) => setEditCash(Number(parseNumText(e.target.value) || 0))}
+                      onWheel={blurOnWheel}
+                      sx={{ width: 170, ...noSpinnerSx }}
+                      inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                    />
+                  )}
+
+                  {(editPaymentMode === 'online' ||
+                    (editPaymentMode === 'split' && editSplitCombination !== 'cash-credit')) && (
+                    <TextField
+                      label="Payment Online"
+                      type="text"
+                      value={String(editOnline)}
+                      onChange={(e) => setEditOnline(Number(parseNumText(e.target.value) || 0))}
+                      onWheel={blurOnWheel}
+                      sx={{ width: 170, ...noSpinnerSx }}
+                      inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                    />
+                  )}
+                  {editPaymentMode === 'split' &&
+                    (editSplitCombination === 'cash-credit' || editSplitCombination === 'online-credit') && (
+                      <TextField
+                        label="Credit Amount"
+                        type="text"
+                        value={money(Math.max(0, editSplitCreditAmount))}
+                        sx={{ width: 170, ...noSpinnerSx }}
+                        inputProps={{ inputMode: 'decimal' }}
+                        disabled
+                      />
+                    )}
+                </Stack>
+
+                <Typography variant="caption" color="text.secondary">
+                  Discount Given: +{editEffectiveDiscountPercent.toFixed(2)}%
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Final Amount (sum of line totals): ₹{money(editChosenFinal)}
+                </Typography>
+              </Stack>
+            </Paper>
+
+            <TextField
+              label={editPaymentMode === 'credit' ? 'Notes (Required for Credit)' : 'Notes'}
+              value={editNotes}
+              onChange={(e) => setEditNotes(e.target.value)}
+              fullWidth
+              multiline
+              minRows={2}
+              required={editPaymentMode === 'credit'}
+              error={editPaymentMode === 'credit' && editNotes.trim().length === 0}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => mEdit.mutate()}
+            disabled={mEdit.isPending || !editPaymentsOk || !editNotesOkForCredit}
+          >
+            Save
+          </Button>
+        </DialogActions>
       </Dialog>
     </>
   )

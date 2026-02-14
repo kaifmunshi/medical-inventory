@@ -5,7 +5,6 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
 from sqlmodel import select
-from sqlalchemy import or_, exists, func
 from sqlalchemy import or_, exists, func, cast
 from sqlalchemy.types import Integer, Float
 from backend.utils.archive_rules import apply_archive_rules
@@ -59,6 +58,10 @@ def iso_date(s: Optional[str]) -> str:
 
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def is_deleted_bill(b: Bill) -> bool:
+    return bool(getattr(b, "is_deleted", False))
 
 
 def add_movement(
@@ -118,14 +121,20 @@ def list_bills(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)")
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
+    deleted_filter: str = Query("active", pattern="^(active|deleted|all)$")
 ):
     """
     Backward-compatible endpoint (returns plain array).
     Keep this as-is because other frontend screens may already rely on it.
     """
     with get_session() as session:
-        stmt = select(Bill).order_by(Bill.id.desc()).limit(limit).offset(offset)
+        stmt = select(Bill)
+        if deleted_filter == "active":
+            stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
+        stmt = stmt.order_by(Bill.id.desc()).limit(limit).offset(offset)
         rows = session.exec(stmt).all()
 
         # simple date filter (string compare is fine with ISO if provided)
@@ -153,6 +162,8 @@ def list_bills(
                 payment_status=b.payment_status,
                 paid_amount=b.paid_amount,
                 paid_at=b.paid_at,
+                is_deleted=b.is_deleted,
+                deleted_at=b.deleted_at,
 
                 items=[BillItemOut(
                     item_id=i.item_id,
@@ -172,12 +183,18 @@ def list_bills_paged(
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
     q: Optional[str] = Query(None, description="Search by id/item/notes"),
+    deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
 ):
     """
     ✅ Paged endpoint for Reports infinite scroll.
     """
     with get_session() as session:
         stmt = select(Bill)
+
+        if deleted_filter == "active":
+            stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
 
         # ✅ Date filtering in SQL (ISO strings compare correctly)
         if from_date:
@@ -232,6 +249,8 @@ def list_bills_paged(
                 payment_status=b.payment_status,
                 paid_amount=b.paid_amount,
                 paid_at=b.paid_at,
+                is_deleted=b.is_deleted,
+                deleted_at=b.deleted_at,
 
                 items=[BillItemOut(
                     item_id=i.item_id,
@@ -250,6 +269,7 @@ def report_item_sales(
     from_date: str = Query(..., description="YYYY-MM-DD"),
     to_date: str = Query(..., description="YYYY-MM-DD (inclusive)"),
     q: Optional[str] = Query(None, description="Search by item name or brand"),
+    deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
     limit: int = Query(60, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -291,6 +311,11 @@ def report_item_sales(
                 .where(Bill.date_time >= start_ts)
                 .where(Bill.date_time <= end_ts)
             )
+
+            if deleted_filter == "active":
+                stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
+            elif deleted_filter == "deleted":
+                stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
 
             if qq:
                 stmt = stmt.where(
@@ -360,6 +385,8 @@ def get_bill(bill_id: int):
             payment_status=b.payment_status,
             paid_amount=b.paid_amount,
             paid_at=b.paid_at,
+            is_deleted=b.is_deleted,
+            deleted_at=b.deleted_at,
 
             items=[BillItemOut(
                 item_id=i.item_id,
@@ -395,6 +422,7 @@ def create_bill(payload: BillCreate):
     with get_session() as session:
         # 1) Load items and validate stock
         db_items: Dict[int, Item] = {}
+        line_price_by_item: Dict[int, float] = {}
         subtotal = 0.0
 
         for line in payload.items:
@@ -407,7 +435,11 @@ def create_bill(payload: BillCreate):
                 raise HTTPException(status_code=400, detail=f"Insufficient stock for {itm.name}")
 
             db_items[line.item_id] = itm
-            subtotal += (as_i(line.quantity) * as_f(itm.mrp))
+            line_price = as_f(getattr(line, "custom_unit_price", None))
+            if line_price <= 0:
+                line_price = as_f(itm.mrp)
+            line_price_by_item[line.item_id] = line_price
+            subtotal += (as_i(line.quantity) * line_price)
 
         subtotal = round2(subtotal)
         computed_total = round2(subtotal * (1 - as_f(payload.discount_percent) / 100.0))
@@ -418,29 +450,44 @@ def create_bill(payload: BillCreate):
         # 3) Validate payment split (against chosen total) — hardened for None inputs
         pay_cash_in = round2(as_f(getattr(payload, "payment_cash", 0.0)))
         pay_online_in = round2(as_f(getattr(payload, "payment_online", 0.0)))
+        pay_credit_in = round2(as_f(getattr(payload, "payment_credit", 0.0)))
 
         if payload.payment_mode == "credit":
-            cash, online = 0.0, 0.0
+            cash, online, credit = 0.0, 0.0, total
         elif payload.payment_mode == "cash":
             if round2(pay_cash_in) != total:
                 raise HTTPException(status_code=400, detail="payment_cash must equal total_amount")
-            cash, online = total, 0.0
+            cash, online, credit = total, 0.0, 0.0
         elif payload.payment_mode == "online":
             if round2(pay_online_in) != total:
                 raise HTTPException(status_code=400, detail="payment_online must equal total_amount")
-            cash, online = 0.0, total
+            cash, online, credit = 0.0, total, 0.0
         else:  # split
-            if round2(pay_cash_in + pay_online_in) != total:
-                raise HTTPException(status_code=400, detail="Cash + Online must equal total_amount")
-            cash, online = round2(pay_cash_in), round2(pay_online_in)
+            if pay_credit_in < 0:
+                raise HTTPException(status_code=400, detail="payment_credit cannot be negative")
+            if round2(pay_cash_in + pay_online_in + pay_credit_in) != total:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cash + Online + Credit must equal total_amount"
+                )
+            cash, online, credit = round2(pay_cash_in), round2(pay_online_in), round2(pay_credit_in)
 
         # 4) Create Bill + BillItems and deduct stock (✅ single transaction)
         now_iso = now_ts()
 
-        is_credit = payload.payment_mode == "credit"
-        status = "UNPAID" if is_credit else "PAID"
-        paid_amount = 0.0 if is_credit else total
-        paid_at = None if is_credit else now_iso
+        paid_now = round2(cash + online)
+        has_credit_component = round2(total - paid_now) > 0
+        is_credit = payload.payment_mode == "credit" or has_credit_component
+        if paid_now <= 0:
+            status = "UNPAID"
+            paid_at = None
+        elif paid_now + 0.0001 < total:
+            status = "PARTIAL"
+            paid_at = now_iso
+        else:
+            status = "PAID"
+            paid_at = now_iso
+        paid_amount = paid_now
 
         try:
             b = Bill(
@@ -457,7 +504,9 @@ def create_bill(payload: BillCreate):
                 is_credit=is_credit,
                 payment_status=status,
                 paid_amount=paid_amount,
-                paid_at=paid_at
+                paid_at=paid_at,
+                is_deleted=False,
+                deleted_at=None,
             )
 
             session.add(b)
@@ -476,9 +525,9 @@ def create_bill(payload: BillCreate):
                     bill_id=b.id,
                     item_id=itm.id,
                     item_name=itm.name,
-                    mrp=itm.mrp,
+                    mrp=as_f(line_price_by_item.get(itm.id, itm.mrp)),
                     quantity=qty,
-                    line_total=round2(qty * as_f(itm.mrp))
+                    line_total=round2(qty * as_f(line_price_by_item.get(itm.id, itm.mrp)))
                 )
                 session.add(bi)
 
@@ -494,7 +543,7 @@ def create_bill(payload: BillCreate):
                 )
 
             # ✅ If not credit, create a BillPayment for reporting "Collected Today"
-            if not is_credit:
+            if paid_now > 0:
                 p = BillPayment(
                     bill_id=b.id,
                     received_at=now_iso,
@@ -531,6 +580,8 @@ def create_bill(payload: BillCreate):
             payment_status=b.payment_status,
             paid_amount=b.paid_amount,
             paid_at=b.paid_at,
+            is_deleted=b.is_deleted,
+            deleted_at=b.deleted_at,
 
             items=[BillItemOut(
                 item_id=i.item_id,
@@ -540,6 +591,268 @@ def create_bill(payload: BillCreate):
                 line_total=i.line_total
             ) for i in items]
         )
+
+
+class BillEditItemIn(BaseModel):
+    item_id: int
+    quantity: int
+    custom_unit_price: Optional[float] = None
+
+
+class BillUpdateIn(BaseModel):
+    items: List[BillEditItemIn]
+    discount_percent: float = 0.0
+    payment_mode: str  # "cash" | "online" | "split" | "credit"
+    payment_cash: float = 0.0
+    payment_online: float = 0.0
+    payment_credit: float = 0.0
+    final_amount: Optional[float] = None
+    notes: Optional[str] = None
+
+
+@router.put("/{bill_id}", response_model=BillOut)
+def update_bill(bill_id: int, payload: BillUpdateIn):
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Bill must have at least one item")
+    if payload.discount_percent < 0 or payload.discount_percent > 100:
+        raise HTTPException(status_code=400, detail="Discount must be between 0 and 100")
+    if payload.payment_mode not in {"cash", "online", "split", "credit"}:
+        raise HTTPException(status_code=400, detail="Invalid payment_mode")
+
+    manual_final = payload.final_amount
+    if manual_final is not None:
+        try:
+            manual_final = round2(float(manual_final))
+            if manual_final < 0:
+                raise HTTPException(status_code=400, detail="final_amount cannot be negative")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid final_amount")
+
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+        if is_deleted_bill(b):
+            raise HTTPException(status_code=400, detail="Deleted bill cannot be edited")
+
+        existing_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+        old_qty_by_item: Dict[int, int] = {}
+        for it in existing_items:
+            old_qty_by_item[it.item_id] = old_qty_by_item.get(it.item_id, 0) + as_i(it.quantity)
+
+        new_qty_by_item: Dict[int, int] = {}
+        for line in payload.items:
+            qty = as_i(line.quantity)
+            if qty <= 0:
+                raise HTTPException(status_code=400, detail="Quantity must be > 0")
+            new_qty_by_item[line.item_id] = new_qty_by_item.get(line.item_id, 0) + qty
+
+        touched_item_ids = set(old_qty_by_item.keys()) | set(new_qty_by_item.keys())
+        db_items: Dict[int, Item] = {}
+        for iid in touched_item_ids:
+            itm = session.get(Item, iid)
+            if not itm:
+                raise HTTPException(status_code=404, detail=f"Item {iid} not found")
+            db_items[iid] = itm
+
+        line_price_by_item: Dict[int, float] = {}
+        subtotal = 0.0
+        for iid, qty in new_qty_by_item.items():
+            payload_line = next((x for x in payload.items if int(x.item_id) == int(iid)), None)
+            custom_price = as_f(getattr(payload_line, "custom_unit_price", None) if payload_line else None)
+            if custom_price <= 0:
+                custom_price = as_f(db_items[iid].mrp)
+            line_price_by_item[iid] = custom_price
+            subtotal += custom_price * as_i(qty)
+        subtotal = round2(subtotal)
+        computed_total = round2(subtotal * (1 - as_f(payload.discount_percent) / 100.0))
+        total = manual_final if manual_final is not None else computed_total
+
+        pay_cash_in = round2(as_f(payload.payment_cash))
+        pay_online_in = round2(as_f(payload.payment_online))
+        pay_credit_in = round2(as_f(getattr(payload, "payment_credit", 0.0)))
+        if payload.payment_mode == "credit":
+            cash, online, credit = 0.0, 0.0, total
+        elif payload.payment_mode == "cash":
+            if pay_cash_in != total:
+                raise HTTPException(status_code=400, detail="payment_cash must equal total_amount")
+            cash, online, credit = total, 0.0, 0.0
+        elif payload.payment_mode == "online":
+            if pay_online_in != total:
+                raise HTTPException(status_code=400, detail="payment_online must equal total_amount")
+            cash, online, credit = 0.0, total, 0.0
+        else:
+            if pay_credit_in < 0:
+                raise HTTPException(status_code=400, detail="payment_credit cannot be negative")
+            if round2(pay_cash_in + pay_online_in + pay_credit_in) != total:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cash + Online + Credit must equal total_amount"
+                )
+            cash, online, credit = pay_cash_in, pay_online_in, pay_credit_in
+
+        # Preserve payment history integrity: allow edit only when no manual receipts exist.
+        pays = session.exec(select(BillPayment).where(BillPayment.bill_id == b.id)).all()
+        manual_receipts = [
+            p for p in pays
+            if str(getattr(p, "note", "") or "") != "auto: payment at bill creation"
+        ]
+        if manual_receipts:
+            raise HTTPException(
+                status_code=400,
+                detail="Bill has received payments. Edit is blocked to prevent payment history mismatch."
+            )
+
+        for iid, itm in db_items.items():
+            old_qty = old_qty_by_item.get(iid, 0)
+            new_qty = new_qty_by_item.get(iid, 0)
+            available_for_edit = as_i(itm.stock) + old_qty
+            if new_qty > available_for_edit:
+                raise HTTPException(status_code=400, detail=f"Insufficient stock for {itm.name}")
+
+        now_iso = now_ts()
+        paid_now = round2(cash + online)
+        has_credit_component = round2(total - paid_now) > 0
+        is_credit = payload.payment_mode == "credit" or has_credit_component
+        if paid_now <= 0:
+            status = "UNPAID"
+            paid_at = None
+        elif paid_now + 0.0001 < total:
+            status = "PARTIAL"
+            paid_at = now_iso
+        else:
+            status = "PAID"
+            paid_at = now_iso
+        paid_amount = paid_now
+
+        try:
+            # Update stock and append stock ledger correction entries.
+            for iid, itm in db_items.items():
+                old_qty = old_qty_by_item.get(iid, 0)
+                new_qty = new_qty_by_item.get(iid, 0)
+                stock_delta = old_qty - new_qty
+                if stock_delta == 0:
+                    continue
+
+                itm.stock = as_i(itm.stock) + stock_delta
+                session.add(itm)
+                apply_archive_rules(session, itm)
+
+                add_movement(
+                    session,
+                    item_id=itm.id,
+                    delta=stock_delta,
+                    reason="BILL_EDIT",
+                    ref_type="BILL",
+                    ref_id=b.id,
+                    note=f"Bill #{b.id} edited (qty correction)",
+                )
+
+            for it in existing_items:
+                session.delete(it)
+            session.flush()
+
+            for iid, qty in new_qty_by_item.items():
+                itm = db_items[iid]
+                session.add(BillItem(
+                    bill_id=b.id,
+                    item_id=iid,
+                    item_name=itm.name,
+                    mrp=as_f(line_price_by_item.get(iid, itm.mrp)),
+                    quantity=as_i(qty),
+                    line_total=round2(as_f(line_price_by_item.get(iid, itm.mrp)) * as_i(qty)),
+                ))
+
+            for p in pays:
+                session.delete(p)
+            if paid_now > 0:
+                session.add(BillPayment(
+                    bill_id=b.id,
+                    received_at=now_iso,
+                    mode=payload.payment_mode,
+                    cash_amount=cash,
+                    online_amount=online,
+                    note="auto: payment at bill creation",
+                ))
+
+            b.discount_percent = payload.discount_percent
+            b.subtotal = subtotal
+            b.total_amount = total
+            b.payment_mode = payload.payment_mode
+            b.payment_cash = cash
+            b.payment_online = online
+            b.notes = payload.notes
+            b.is_credit = is_credit
+            b.payment_status = status
+            b.paid_amount = paid_amount
+            b.paid_at = paid_at
+
+            session.add(b)
+            session.commit()
+            session.refresh(b)
+        except HTTPException:
+            session.rollback()
+            raise
+        except Exception as e:
+            session.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to edit bill: {e}")
+
+        items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+        return BillOut(
+            id=b.id,
+            date_time=b.date_time,
+            discount_percent=b.discount_percent,
+            subtotal=b.subtotal,
+            total_amount=b.total_amount,
+            payment_mode=b.payment_mode,
+            payment_cash=b.payment_cash,
+            payment_online=b.payment_online,
+            notes=b.notes,
+            is_credit=b.is_credit,
+            payment_status=b.payment_status,
+            paid_amount=b.paid_amount,
+            paid_at=b.paid_at,
+            is_deleted=b.is_deleted,
+            deleted_at=b.deleted_at,
+            items=[BillItemOut(
+                item_id=i.item_id,
+                item_name=i.item_name,
+                mrp=i.mrp,
+                quantity=i.quantity,
+                line_total=i.line_total,
+            ) for i in items]
+        )
+
+
+@router.delete("/{bill_id}")
+def soft_delete_bill(bill_id: int):
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+
+        if is_deleted_bill(b):
+            return {"bill_id": b.id, "is_deleted": True, "deleted_at": b.deleted_at}
+
+        b.is_deleted = True
+        b.deleted_at = now_ts()
+        session.add(b)
+        session.commit()
+        return {"bill_id": b.id, "is_deleted": True, "deleted_at": b.deleted_at}
+
+
+@router.post("/{bill_id}/recover")
+def recover_bill(bill_id: int):
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+
+        b.is_deleted = False
+        b.deleted_at = None
+        session.add(b)
+        session.commit()
+        return {"bill_id": b.id, "is_deleted": False, "deleted_at": None}
 
 
 # ------------------ Receive Payment on Credit Bill ------------------
@@ -578,6 +891,8 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
         b = session.get(Bill, bill_id)
         if not b:
             raise HTTPException(status_code=404, detail="Bill not found")
+        if is_deleted_bill(b):
+            raise HTTPException(status_code=400, detail="Cannot receive payment on deleted bill")
 
         # 1) Insert payment record (THIS is the source of truth for "Collected Today")
         p = BillPayment(
@@ -665,7 +980,8 @@ def list_bill_payments(bill_id: int):
 @router.get("/payments/summary")
 def payments_summary(
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)")
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
+    deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
 ) -> Dict[str, Any]:
     """
     Dashboard "Collected Today" MUST include:
@@ -674,7 +990,17 @@ def payments_summary(
     So we aggregate from BillPayment.received_at (NOT from Bill rows).
     """
     with get_session() as session:
-        pays = session.exec(select(BillPayment).order_by(BillPayment.id.desc())).all()
+        stmt = (
+            select(BillPayment)
+            .join(Bill, Bill.id == BillPayment.bill_id)
+            .order_by(BillPayment.id.desc())
+        )
+        if deleted_filter == "active":
+            stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
+
+        pays = session.exec(stmt).all()
 
         if from_date:
             pays = [p for p in pays if iso_date(p.received_at) >= from_date]
@@ -700,6 +1026,7 @@ def payments_aggregate(
     from_date: str = Query(..., description="YYYY-MM-DD"),
     to_date: str = Query(..., description="YYYY-MM-DD"),
     group_by: str = Query("day", pattern="^(day|month)$"),
+    deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
 ) -> List[Dict[str, Any]]:
     """
     ✅ NEW: Aggregate REAL collections (cash/online actually received) by day or month.
@@ -725,11 +1052,18 @@ def payments_aggregate(
                 func.coalesce(func.sum(BillPayment.cash_amount), 0).label("cash_total"),
                 func.coalesce(func.sum(BillPayment.online_amount), 0).label("online_total"),
             )
+            .select_from(BillPayment)
+            .join(Bill, Bill.id == BillPayment.bill_id)
             .where(BillPayment.received_at >= start_ts)
             .where(BillPayment.received_at <= end_ts)
             .group_by(period_expr)
             .order_by(period_expr.asc())
         )
+
+        if deleted_filter == "active":
+            stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
 
         rows = session.exec(stmt).all()
 
@@ -757,6 +1091,7 @@ def sales_aggregate(
     from_date: str = Query(..., description="YYYY-MM-DD"),
     to_date: str = Query(..., description="YYYY-MM-DD"),
     group_by: str = Query("day", pattern="^(day|month)$"),
+    deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
 ) -> List[Dict[str, Any]]:
     """
     Returns aggregates grouped by day or month.
@@ -790,6 +1125,11 @@ def sales_aggregate(
             .group_by(period_expr)
             .order_by(period_expr.asc())
         )
+
+        if deleted_filter == "active":
+            stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
 
         rows = session.exec(stmt).all()
 

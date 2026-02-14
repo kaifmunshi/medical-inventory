@@ -122,6 +122,8 @@ export default function Billing() {
   const [online, setOnline] = useState<number | ''>('')
 
   const [notes, setNotes] = useState('')
+  const [finalAmount, setFinalAmount] = useState<number>(0)
+  const [finalManuallyEdited, setFinalManuallyEdited] = useState(false)
 
   // ✅ Beautiful confirm dialog for CASH
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
@@ -178,7 +180,23 @@ export default function Billing() {
     [rows]
   )
 
-  const chosenFinal = Number(finalByRows.toFixed(2))
+  useEffect(() => {
+    if (!finalManuallyEdited) {
+      setFinalAmount(Number(finalByRows.toFixed(2)))
+    }
+  }, [finalByRows, finalManuallyEdited])
+
+  function roundNearest10(x: number) {
+    return Math.round(x / 10) * 10
+  }
+  function roundUp10(x: number) {
+    return Math.ceil(x / 10) * 10
+  }
+  function roundDown10(x: number) {
+    return Math.floor(x / 10) * 10
+  }
+
+  const chosenFinal = Number(Number(finalAmount || 0).toFixed(2))
   const splitCreditAmount = Number(
     (
       splitCombination === 'cash-credit'
@@ -291,6 +309,8 @@ export default function Billing() {
       setCash('')
       setOnline('')
       setNotes('')
+      setFinalAmount(0)
+      setFinalManuallyEdited(false)
       toast.push('Bill created successfully. Inventory and payment entries were updated.', 'success')
     },
     onError: (err: any) => {
@@ -655,13 +675,13 @@ export default function Billing() {
           <table className="table" style={{ tableLayout: 'fixed', width: '100%' }}>
             <thead>
               <tr>
-                <th style={{ width: '31%' }}>Item</th>
+                <th style={{ width: '29%' }}>Item</th>
                 <th style={{ width: '10%' }}>MRP</th>
                 <th style={{ width: '13%' }}>Expiry</th>
                 <th style={{ width: '8%' }}>Qty</th>
-                <th style={{ width: '11%' }}>Custom Price</th>
-                <th style={{ width: '11%' }}>Discount %</th>
-                <th style={{ width: '10%' }}>Line Total</th>
+                <th style={{ width: '10%' }}>Discount %</th>
+                <th style={{ width: '12%' }}>Custom Price</th>
+                <th style={{ width: '12%' }}>Line Total</th>
                 <th style={{ width: '6%' }}></th>
               </tr>
             </thead>
@@ -694,7 +714,15 @@ export default function Billing() {
                       onChange={(_e, val) => selectItemAtRow(i, val)}
                       ListboxProps={{ style: { maxHeight: 300 } }}
                       renderOption={(props, option: any) => (
-                        <li {...props} key={`inv-opt-${option.id}`}>
+                        <li
+                          {...props}
+                          key={`inv-opt-${option.id}`}
+                          style={{
+                            ...(props as any).style,
+                            backgroundColor:
+                              Number(option?.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.12)' : undefined,
+                          }}
+                        >
                           <Stack sx={{ py: 0.5, width: '100%' }}>
                             <Typography variant="body2" sx={{ fontWeight: 600 }}>
                               {option.name}
@@ -746,24 +774,6 @@ export default function Billing() {
                       size="small"
                       type="text"
                       value={
-                        Object.prototype.hasOwnProperty.call(priceDraftByRow, i)
-                          ? priceDraftByRow[i]
-                          : String(Number(r.custom_unit_price || 0).toFixed(2))
-                      }
-                      onChange={(e) => handleCustomPriceChange(i, e.target.value)}
-                      onBlur={() => commitCustomPrice(i)}
-                      onWheel={blurOnWheel}
-                      onFocus={(e) => e.target.select()}
-                      sx={{ width: 108, ...GRID_INPUT_SX, ...noSpinnerSx }}
-                      inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
-                      disabled={Number(r.item_id) <= 0}
-                    />
-                  </td>
-                  <td style={{ textAlign: 'center' }}>
-                    <TextField
-                      size="small"
-                      type="text"
-                      value={
                         Object.prototype.hasOwnProperty.call(discountDraftByRow, i)
                           ? discountDraftByRow[i]
                           : String(Number(r.item_discount_percent || 0).toFixed(2))
@@ -773,6 +783,24 @@ export default function Billing() {
                       onWheel={blurOnWheel}
                       onFocus={(e) => e.target.select()}
                       sx={{ width: 96, ...GRID_INPUT_SX, ...noSpinnerSx }}
+                      inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                      disabled={Number(r.item_id) <= 0}
+                    />
+                  </td>
+                  <td style={{ textAlign: 'center' }}>
+                    <TextField
+                      size="small"
+                      type="text"
+                      value={
+                        Object.prototype.hasOwnProperty.call(priceDraftByRow, i)
+                          ? priceDraftByRow[i]
+                          : String(Number(r.custom_unit_price || 0).toFixed(2))
+                      }
+                      onChange={(e) => handleCustomPriceChange(i, e.target.value)}
+                      onBlur={() => commitCustomPrice(i)}
+                      onWheel={blurOnWheel}
+                      onFocus={(e) => e.target.select()}
+                      sx={{ width: 108, ...GRID_INPUT_SX, ...noSpinnerSx }}
                       inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
                       disabled={Number(r.item_id) <= 0}
                     />
@@ -804,91 +832,99 @@ export default function Billing() {
         <Stack
           direction={{ xs: 'column', md: 'row' }}
           gap={2}
-          alignItems={{ md: 'center' }}
+          alignItems={{ md: 'flex-start' }}
           justifyContent="space-between"
         >
-          <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
-            <TextField
-              select
-              label="Payment Mode"
-              value={mode}
-              onChange={(e) => {
-                const v = e.target.value as any
-                setMode(v)
-                if (v === 'credit') {
-                  setCash('')
-                  setOnline('')
-                }
-              }}
-              sx={{ width: 160 }}
-            >
-              <MenuItem value="cash">Cash</MenuItem>
-              <MenuItem value="online">Online</MenuItem>
-              <MenuItem value="split">Split</MenuItem>
-              <MenuItem value="credit">Credit</MenuItem>
-            </TextField>
-
-            {mode === 'split' && (
+          <Stack gap={1.25} sx={{ flex: 1, minWidth: 0 }}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={2} flexWrap="wrap" useFlexGap>
               <TextField
                 select
-                label="Split Combination"
-                value={splitCombination}
+                label="Payment Mode"
+                value={mode}
                 onChange={(e) => {
-                  const v = e.target.value as 'cash-online' | 'cash-credit' | 'online-credit'
-                  setSplitCombination(v)
-                  if (v === 'cash-online') return
-                  if (v === 'cash-credit') setOnline('')
-                  if (v === 'online-credit') setCash('')
+                  const v = e.target.value as any
+                  setMode(v)
+                  if (v === 'credit') {
+                    setCash('')
+                    setOnline('')
+                  }
                 }}
-                sx={{ width: 220 }}
+                sx={{ width: 170 }}
               >
-                <MenuItem value="cash-online">Cash + Online</MenuItem>
-                <MenuItem value="cash-credit">Cash + Credit</MenuItem>
-                <MenuItem value="online-credit">Online + Credit</MenuItem>
+                <MenuItem value="cash">Cash</MenuItem>
+                <MenuItem value="online">Online</MenuItem>
+                <MenuItem value="split">Split</MenuItem>
+                <MenuItem value="credit">Credit</MenuItem>
               </TextField>
-            )}
 
-            {(mode === 'cash' ||
-              (mode === 'split' && splitCombination !== 'online-credit')) && (
-              <TextField
-                label="Cash Amount"
-                type="text"
-                value={cash === '' ? '' : String(cash)}
-                onChange={(e) => setCash(parseNumText(e.target.value) as any)}
-                onWheel={blurOnWheel}
-                sx={{ width: 160, ...noSpinnerSx }}
-                inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
-              />
-            )}
+              {mode === 'split' && (
+                <TextField
+                  select
+                  label="Split Combination"
+                  value={splitCombination}
+                  onChange={(e) => {
+                    const v = e.target.value as 'cash-online' | 'cash-credit' | 'online-credit'
+                    setSplitCombination(v)
+                    if (v === 'cash-online') return
+                    if (v === 'cash-credit') setOnline('')
+                    if (v === 'online-credit') setCash('')
+                  }}
+                  sx={{ width: 230 }}
+                >
+                  <MenuItem value="cash-online">Cash + Online</MenuItem>
+                  <MenuItem value="cash-credit">Cash + Credit</MenuItem>
+                  <MenuItem value="online-credit">Online + Credit</MenuItem>
+                </TextField>
+              )}
+            </Stack>
 
-            {(mode === 'online' ||
-              (mode === 'split' && splitCombination !== 'cash-credit')) && (
-              <TextField
-                label="Online Amount"
-                type="text"
-                value={online === '' ? '' : String(online)}
-                onChange={(e) => setOnline(parseNumText(e.target.value) as any)}
-                onWheel={blurOnWheel}
-                sx={{ width: 160, ...noSpinnerSx }}
-                inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
-              />
-            )}
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={2} flexWrap="wrap" useFlexGap>
+              {(mode === 'cash' ||
+                (mode === 'split' && splitCombination !== 'online-credit')) && (
+                <TextField
+                  label="Cash Amount"
+                  type="text"
+                  value={cash === '' ? '' : String(cash)}
+                  onChange={(e) => setCash(parseNumText(e.target.value) as any)}
+                  onWheel={blurOnWheel}
+                  sx={{ width: 170, ...noSpinnerSx }}
+                  inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                />
+              )}
 
-            {mode === 'split' && (splitCombination === 'cash-credit' || splitCombination === 'online-credit') && (
-              <TextField
-                label="Credit Amount"
-                type="text"
-                value={Math.max(0, splitCreditAmount).toFixed(2)}
-                sx={{ width: 160, ...noSpinnerSx }}
-                inputProps={{ inputMode: 'decimal' }}
-                disabled
-              />
-            )}
+              {(mode === 'online' ||
+                (mode === 'split' && splitCombination !== 'cash-credit')) && (
+                <TextField
+                  label="Online Amount"
+                  type="text"
+                  value={online === '' ? '' : String(online)}
+                  onChange={(e) => setOnline(parseNumText(e.target.value) as any)}
+                  onWheel={blurOnWheel}
+                  sx={{ width: 170, ...noSpinnerSx }}
+                  inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                />
+              )}
+
+              {mode === 'split' && (splitCombination === 'cash-credit' || splitCombination === 'online-credit') && (
+                <TextField
+                  label="Credit Amount"
+                  type="text"
+                  value={Math.max(0, splitCreditAmount).toFixed(2)}
+                  sx={{ width: 170, ...noSpinnerSx }}
+                  inputProps={{ inputMode: 'decimal' }}
+                  disabled
+                />
+              )}
+            </Stack>
           </Stack>
 
           <Divider flexItem orientation="vertical" sx={{ display: { xs: 'none', md: 'block' } }} />
 
-          <Stack gap={0.5} alignItems={{ md: 'flex-end' }}>
+          <Stack
+            gap={0.5}
+            alignItems={{ md: 'flex-end' }}
+            sx={{ minWidth: { xs: '100%', md: 280 }, flexShrink: 0 }}
+          >
             <Typography variant="body2" color="text.secondary">
               Subtotal: ₹{totals.subtotal.toFixed(2)}
             </Typography>
@@ -902,9 +938,50 @@ export default function Billing() {
             <Typography variant="body2" color="text.secondary">
               Final From Item Prices: ₹{finalByRows.toFixed(2)}
             </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Final Amount (sum of line totals): ₹{chosenFinal.toFixed(2)}
-            </Typography>
+            <Stack gap={0.5} alignItems={{ xs: 'flex-start', sm: 'flex-end' }} sx={{ mt: 1 }}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems="center" justifyContent="flex-end">
+                <TextField
+                  label="Final Amount (you charge)"
+                  type="text"
+                  value={String(finalAmount)}
+                  onChange={(e) => {
+                    const v = parseNumText(e.target.value)
+                    setFinalAmount(Number(v || 0))
+                    setFinalManuallyEdited(true)
+                  }}
+                  onWheel={blurOnWheel}
+                  sx={{ width: 220, ...noSpinnerSx }}
+                  inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                />
+                <Button
+                  size="small"
+                  onClick={() => {
+                    setFinalAmount(roundNearest10(totals.total))
+                    setFinalManuallyEdited(true)
+                  }}
+                >
+                  Round ±10
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => {
+                    setFinalAmount(roundDown10(totals.total))
+                    setFinalManuallyEdited(true)
+                  }}
+                >
+                  Round ↓10
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => {
+                    setFinalAmount(roundUp10(totals.total))
+                    setFinalManuallyEdited(true)
+                  }}
+                >
+                  Round ↑10
+                </Button>
+              </Stack>
+            </Stack>
             <Typography variant="caption" color="text.secondary">
               Discount Given: +{effectiveDiscountPercent.toFixed(2)}%
             </Typography>

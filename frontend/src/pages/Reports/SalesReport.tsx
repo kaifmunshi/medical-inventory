@@ -156,6 +156,8 @@ export default function SalesReport(props: {
   const [editCash, setEditCash] = useState<number>(0)
   const [editOnline, setEditOnline] = useState<number>(0)
   const [editNotes, setEditNotes] = useState<string>('')
+  const [editFinalAmount, setEditFinalAmount] = useState<number>(0)
+  const [editFinalManuallyEdited, setEditFinalManuallyEdited] = useState(false)
   const [editItemQuery, setEditItemQuery] = useState('')
   const [editPriceDraftByRow, setEditPriceDraftByRow] = useState<Record<number, string>>({})
   const [editDiscountDraftByRow, setEditDiscountDraftByRow] = useState<Record<number, string>>({})
@@ -429,6 +431,10 @@ export default function SalesReport(props: {
     setEditCash(Number(b.payment_cash || 0))
     setEditOnline(Number(b.payment_online || 0))
     setEditNotes(String(b.notes || ''))
+    const sumByRows = round2(lines.reduce((s, it) => s + Number(it.custom_unit_price || 0) * Number(it.quantity || 0), 0))
+    const billedTotal = Number.isFinite(Number(b.total_amount)) ? Number(b.total_amount) : sumByRows
+    setEditFinalAmount(billedTotal)
+    setEditFinalManuallyEdited(Math.abs(round2(billedTotal - sumByRows)) > 0.009)
     setEditItemQuery('')
     setEditPriceDraftByRow({})
     setEditDiscountDraftByRow({})
@@ -579,7 +585,14 @@ export default function SalesReport(props: {
     [editItems]
   )
 
-  const editChosenFinal = editFinalByRows
+  useEffect(() => {
+    if (!editOpen) return
+    if (!editFinalManuallyEdited) {
+      setEditFinalAmount(editFinalByRows)
+    }
+  }, [editOpen, editFinalByRows, editFinalManuallyEdited])
+
+  const editChosenFinal = round2(Number(editFinalAmount || 0))
 
   const editDiscountAmount = useMemo(() => Math.max(0, round2(editSubtotal - editFinalByRows)), [editSubtotal, editFinalByRows])
   const editEffectiveDiscountPercent = useMemo(() => (editSubtotal > 0 ? (editDiscountAmount / editSubtotal) * 100 : 0), [editSubtotal, editDiscountAmount])
@@ -605,6 +618,16 @@ export default function SalesReport(props: {
     return o >= 0 && o <= editChosenFinal
   }, [editPaymentMode, editCash, editOnline, editChosenFinal, editSplitCombination])
   const editNotesOkForCredit = editPaymentMode !== 'credit' || editNotes.trim().length > 0
+
+  function roundNearest10(x: number) {
+    return Math.round(x / 10) * 10
+  }
+  function roundUp10(x: number) {
+    return Math.ceil(x / 10) * 10
+  }
+  function roundDown10(x: number) {
+    return Math.floor(x / 10) * 10
+  }
 
   useEffect(() => {
     if (!editOpen) return
@@ -1053,7 +1076,12 @@ export default function SalesReport(props: {
                     direction="row"
                     justifyContent="space-between"
                     alignItems="center"
-                    sx={{ py: 0.5 }}
+                    sx={{
+                      py: 0.5,
+                      px: 0.75,
+                      borderRadius: 1,
+                      bgcolor: Number(it.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.12)' : 'transparent',
+                    }}
                   >
                     <Box>
                       <Typography variant="body2">{it.name}</Typography>
@@ -1116,8 +1144,8 @@ export default function SalesReport(props: {
                       <th style={{ width: '42%' }}>Item</th>
                       <th style={{ width: '10%' }}>MRP</th>
                       <th style={{ width: '8%' }}>Qty</th>
-                      <th style={{ width: '12%' }}>Custom Price</th>
                       <th style={{ width: '10%' }}>Discount %</th>
+                      <th style={{ width: '12%' }}>Custom Price</th>
                       <th style={{ width: '12%' }}>Line Total</th>
                       <th style={{ width: '6%' }}></th>
                     </tr>
@@ -1149,23 +1177,6 @@ export default function SalesReport(props: {
                             size="small"
                             type="text"
                             value={
-                              Object.prototype.hasOwnProperty.call(editPriceDraftByRow, idx)
-                                ? editPriceDraftByRow[idx]
-                                : String(Number(it.custom_unit_price || 0).toFixed(2))
-                            }
-                            onChange={(e) => handleEditCustomPriceChange(idx, e.target.value)}
-                            onBlur={() => commitEditCustomPrice(idx)}
-                            onWheel={blurOnWheel}
-                            onFocus={(e) => e.target.select()}
-                            sx={{ width: 108, ...GRID_INPUT_SX, ...noSpinnerSx }}
-                            inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
-                          />
-                        </td>
-                        <td style={{ textAlign: 'center' }}>
-                          <TextField
-                            size="small"
-                            type="text"
-                            value={
                               Object.prototype.hasOwnProperty.call(editDiscountDraftByRow, idx)
                                 ? editDiscountDraftByRow[idx]
                                 : String(Number(it.item_discount_percent || 0).toFixed(2))
@@ -1175,6 +1186,23 @@ export default function SalesReport(props: {
                             onWheel={blurOnWheel}
                             onFocus={(e) => e.target.select()}
                             sx={{ width: 96, ...GRID_INPUT_SX, ...noSpinnerSx }}
+                            inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                          />
+                        </td>
+                        <td style={{ textAlign: 'center' }}>
+                          <TextField
+                            size="small"
+                            type="text"
+                            value={
+                              Object.prototype.hasOwnProperty.call(editPriceDraftByRow, idx)
+                                ? editPriceDraftByRow[idx]
+                                : String(Number(it.custom_unit_price || 0).toFixed(2))
+                            }
+                            onChange={(e) => handleEditCustomPriceChange(idx, e.target.value)}
+                            onBlur={() => commitEditCustomPrice(idx)}
+                            onWheel={blurOnWheel}
+                            onFocus={(e) => e.target.select()}
+                            sx={{ width: 108, ...GRID_INPUT_SX, ...noSpinnerSx }}
                             inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
                           />
                         </td>
@@ -1193,7 +1221,7 @@ export default function SalesReport(props: {
 
             <Paper sx={{ p: 2 }}>
               <Stack gap={2}>
-                <Stack direction={{ xs: 'column', md: 'row' }} gap={2} alignItems={{ md: 'flex-start' }}>
+                <Stack direction={{ xs: 'column', sm: 'row' }} gap={2} flexWrap="wrap" useFlexGap>
                   <TextField
                     select
                     label="Payment Mode"
@@ -1206,7 +1234,7 @@ export default function SalesReport(props: {
                         setEditOnline(0)
                       }
                     }}
-                    sx={{ width: 180 }}
+                    sx={{ width: 170 }}
                   >
                     <MenuItem value="cash">Cash</MenuItem>
                     <MenuItem value="online">Online</MenuItem>
@@ -1225,7 +1253,7 @@ export default function SalesReport(props: {
                         if (v === 'cash-credit') setEditOnline(0)
                         if (v === 'online-credit') setEditCash(0)
                       }}
-                      sx={{ width: 220 }}
+                      sx={{ width: 230 }}
                     >
                       <MenuItem value="cash-online">Cash + Online</MenuItem>
                       <MenuItem value="cash-credit">Cash + Credit</MenuItem>
@@ -1234,11 +1262,11 @@ export default function SalesReport(props: {
                   )}
                 </Stack>
 
-                <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+                <Stack direction={{ xs: 'column', sm: 'row' }} gap={2} flexWrap="wrap" useFlexGap>
                   {(editPaymentMode === 'cash' ||
                     (editPaymentMode === 'split' && editSplitCombination !== 'online-credit')) && (
                     <TextField
-                      label="Payment Cash"
+                      label="Cash Amount"
                       type="text"
                       value={String(editCash)}
                       onChange={(e) => setEditCash(Number(parseNumText(e.target.value) || 0))}
@@ -1251,7 +1279,7 @@ export default function SalesReport(props: {
                   {(editPaymentMode === 'online' ||
                     (editPaymentMode === 'split' && editSplitCombination !== 'cash-credit')) && (
                     <TextField
-                      label="Payment Online"
+                      label="Online Amount"
                       type="text"
                       value={String(editOnline)}
                       onChange={(e) => setEditOnline(Number(parseNumText(e.target.value) || 0))}
@@ -1277,8 +1305,50 @@ export default function SalesReport(props: {
                   Discount Given: +{editEffectiveDiscountPercent.toFixed(2)}%
                 </Typography>
                 <Typography variant="caption" color="text.secondary">
-                  Final Amount (sum of line totals): ₹{money(editChosenFinal)}
+                  Final Amount (sum of line totals): ₹{money(editFinalByRows)}
                 </Typography>
+                <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+                  <TextField
+                    label="Final Amount (you charge)"
+                    type="text"
+                    value={String(editFinalAmount)}
+                    onChange={(e) => {
+                      const v = parseNumText(e.target.value)
+                      setEditFinalAmount(Number(v || 0))
+                      setEditFinalManuallyEdited(true)
+                    }}
+                    onWheel={blurOnWheel}
+                    sx={{ width: 220, ...noSpinnerSx }}
+                    inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                  />
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setEditFinalAmount(roundNearest10(editFinalByRows))
+                      setEditFinalManuallyEdited(true)
+                    }}
+                  >
+                    Round ±10
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setEditFinalAmount(roundDown10(editFinalByRows))
+                      setEditFinalManuallyEdited(true)
+                    }}
+                  >
+                    Round ↓10
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => {
+                      setEditFinalAmount(roundUp10(editFinalByRows))
+                      setEditFinalManuallyEdited(true)
+                    }}
+                  >
+                    Round ↑10
+                  </Button>
+                </Stack>
               </Stack>
             </Paper>
 

@@ -18,7 +18,7 @@ import {
   Divider,
   MenuItem,
 } from '@mui/material'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useInfiniteQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 
 import {
@@ -101,6 +101,7 @@ export default function Inventory() {
 
   // which item is pending delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null)
+  const [groupPage, setGroupPage] = useState(0)
 
   // ✅ LEDGER DIALOG STATE (GROUP-BASED)
   const [ledgerOpen, setLedgerOpen] = useState(false)
@@ -129,6 +130,9 @@ export default function Inventory() {
     const t = setTimeout(() => setDebouncedQ(q.trim()), 600)
     return () => clearTimeout(t)
   }, [q])
+  useEffect(() => {
+    setGroupPage(0)
+  }, [debouncedQ])
 
   const qc = useQueryClient()
   const LIMIT = 60
@@ -229,26 +233,18 @@ export default function Inventory() {
     return list
   }, [rows])
 
-  // ✅ Sentinel-based infinite scroll
-  const loadMoreRef = useRef<HTMLDivElement | null>(null)
-
+  const GROUP_PAGE_SIZE = 50
+  const groupPageCount = Math.max(1, Math.ceil(groups.length / GROUP_PAGE_SIZE))
   useEffect(() => {
-    const el = loadMoreRef.current
-    if (!el) return
-
-    const obs = new IntersectionObserver(
-      (entries) => {
-        const first = entries[0]
-        if (first.isIntersecting && hasNextPage && !isFetchingNextPage && !isLoading) {
-          fetchNextPage()
-        }
-      },
-      { root: null, rootMargin: '200px', threshold: 0 }
-    )
-
-    obs.observe(el)
-    return () => obs.disconnect()
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage, isLoading])
+    setGroupPage((p) => Math.min(p, Math.max(0, groupPageCount - 1)))
+  }, [groupPageCount])
+  const pagedGroups = useMemo(() => {
+    const start = groupPage * GROUP_PAGE_SIZE
+    return groups.slice(start, start + GROUP_PAGE_SIZE)
+  }, [groups, groupPage])
+  const canPrevGroupPage = groupPage > 0
+  const hasLoadedNextGroupPage = (groupPage + 1) * GROUP_PAGE_SIZE < groups.length
+  const canNextGroupPage = hasLoadedNextGroupPage || !!hasNextPage
 
   const mCreate = useMutation({
     mutationFn: (payload: ItemFormValues) => createItem(payload),
@@ -346,6 +342,18 @@ export default function Inventory() {
     setLedgerReason('')
     setLedgerOpen(true)
   }
+  function openLedgerForBatch(g: any, item: any) {
+    const now = new Date()
+    const past = new Date()
+    past.setDate(now.getDate() - 30)
+
+    setLedgerGroup(g)
+    setLedgerItem(item ?? g?.items?.[0] ?? null)
+    setLedgerFrom(toISODate(past))
+    setLedgerTo(toISODate(now))
+    setLedgerReason('')
+    setLedgerOpen(true)
+  }
 
   const LEDGER_LIMIT = 50
 
@@ -432,7 +440,7 @@ export default function Inventory() {
         </Stack>
 
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-          Inventory shows only 1 row per item (name + brand). Ledger shows batch-wise expiry details.
+          Inventory is grouped by item (name + brand). Batch rows below show each MRP/expiry for direct editing.
         </Typography>
       </Paper>
 
@@ -441,8 +449,38 @@ export default function Inventory() {
           <Loading />
         ) : (
           <>
-            <Box component="div" sx={{ overflowX: 'auto' }}>
-              <table className="table">
+            <Box
+              component="div"
+              sx={{
+                overflowX: 'auto',
+                '& .inventory-grid': {
+                  borderCollapse: 'collapse',
+                  minWidth: 980,
+                },
+                '& .inventory-grid thead th': {
+                  borderBottom: '1px solid rgba(0,0,0,0.14)',
+                  background: 'rgba(255,255,255,0.98)',
+                },
+                '& .inventory-grid tbody tr > td': {
+                  background: '#fff',
+                  borderBottom: '1px solid rgba(0,0,0,0.08)',
+                },
+                '& .inventory-grid tbody tr.parent-row > td': {
+                  background: 'rgba(20,92,59,0.06)',
+                  borderTop: '2px solid rgba(20,92,59,0.35)',
+                  borderBottom: '1px solid rgba(20,92,59,0.20)',
+                },
+                '& .inventory-grid tbody tr.batch-row > td': {
+                  background: 'rgba(255,255,255,0.98)',
+                  borderBottom: '1px dashed rgba(20,92,59,0.22)',
+                },
+                '& .inventory-grid tbody tr.batch-row.out-row > td': {
+                  background: 'rgba(244,67,54,0.08)',
+                  borderBottom: '1px dashed rgba(211,47,47,0.32)',
+                },
+              }}
+            >
+              <table className="table inventory-grid">
                 <thead>
                   <tr>
                     <th>Name</th>
@@ -456,12 +494,13 @@ export default function Inventory() {
                 </thead>
 
                 <tbody>
-                  {groups.map((g: any) => {
+                  {pagedGroups.flatMap((g: any) => {
                     const isOut = Number(g.totalStock || 0) <= 0
 
-                    return (
+                    const parentRow = (
                       <tr
                         key={g.key}
+                        className="parent-row"
                         style={{
                           background: isOut ? '#fafafa' : undefined,
                           opacity: isOut ? 0.75 : 1,
@@ -547,25 +586,121 @@ export default function Inventory() {
                         </td>
                       </tr>
                     )
+                    const batchRows =
+                      Number(g.count || 0) > 1
+                        ? g.items.map((it: any) => {
+                            const batchOut = Number(it?.stock || 0) <= 0
+                            return (
+                              <tr
+                                key={`${g.key}-batch-${it.id}`}
+                                className={`batch-row${batchOut ? ' out-row' : ''}`}
+                              >
+                                <td style={{ paddingLeft: isSm ? 8 : 24 }}>
+                                  <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
+                                    <span style={{ fontWeight: 600 }}>
+                                      Batch #{it.id}
+                                    </span>
+                                    {batchOut && (
+                                      <Chip size="small" label="Out of stock" variant="outlined" sx={{ borderRadius: 999 }} />
+                                    )}
+                                  </Stack>
+                                </td>
+                                <td>{it.rack_number ?? 0}</td>
+                                <td>{g.brand || '-'}</td>
+                                <td>{formatExpiry(it.expiry_date)}</td>
+                                <td>{Number(it.mrp || 0)}</td>
+                                <td>
+                                  <Chip
+                                    size="small"
+                                    label={String(Number(it.stock || 0))}
+                                    sx={{ fontWeight: 900, borderRadius: 999 }}
+                                  />
+                                </td>
+                                <td>
+                                  <Stack direction="row" gap={1}>
+                                    <Tooltip title="Ledger (this batch)">
+                                      <IconButton
+                                        size="small"
+                                        onClick={() => openLedgerForBatch(g, it)}
+                                        sx={{
+                                          border: '1px solid',
+                                          borderColor: 'divider',
+                                          borderRadius: 2,
+                                        }}
+                                      >
+                                        <ReceiptLongIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+
+                                    <Tooltip title="Edit this batch">
+                                      <IconButton size="small" onClick={() => handleEdit(it)}>
+                                        <EditIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+
+                                    <Tooltip title="Adjust stock">
+                                      <IconButton size="small" onClick={() => handleAdjust(it)}>
+                                        <AddCircleOutlineIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+
+                                    <Tooltip title="Delete this batch">
+                                      <IconButton
+                                        size="small"
+                                        color="error"
+                                        onClick={() => handleDeleteClick(it)}
+                                        disabled={mDelete.isPending}
+                                      >
+                                        <DeleteIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+                                  </Stack>
+                                </td>
+                              </tr>
+                            )
+                          })
+                        : []
+
+                    return [parentRow, ...batchRows]
                   })}
                 </tbody>
               </table>
             </Box>
 
-            {/* ✅ sentinel for loading next page */}
-            <div ref={loadMoreRef} style={{ height: 1 }} />
-
-            {isFetchingNextPage && (
-              <Box sx={{ py: 2, textAlign: 'center' }}>
-                <Typography variant="body2">Loading more...</Typography>
-              </Box>
-            )}
-
-            {!hasNextPage && rows.length > 0 && (
-              <Box sx={{ py: 2, textAlign: 'center' }}>
-                <Typography variant="body2">End of list</Typography>
-              </Box>
-            )}
+            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ pt: 1.5 }}>
+              <Typography variant="body2" color="text.secondary">
+                Page {groupPage + 1} {groups.length > 0 ? `of ${groupPageCount}` : ''} • Showing{' '}
+                {groups.length > 0 ? groupPage * GROUP_PAGE_SIZE + 1 : 0}-
+                {Math.min((groupPage + 1) * GROUP_PAGE_SIZE, groups.length)} grouped products
+              </Typography>
+              <Stack direction="row" gap={1}>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  disabled={!canPrevGroupPage}
+                  onClick={() => setGroupPage((p) => Math.max(0, p - 1))}
+                >
+                  Prev
+                </Button>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  disabled={!canNextGroupPage || isFetchingNextPage}
+                  onClick={async () => {
+                    if (hasLoadedNextGroupPage) {
+                      setGroupPage((p) => p + 1)
+                      return
+                    }
+                    if (hasNextPage) {
+                      await fetchNextPage()
+                      setGroupPage((p) => p + 1)
+                    }
+                  }}
+                >
+                  {isFetchingNextPage ? 'Loading...' : 'Next'}
+                </Button>
+              </Stack>
+            </Stack>
 
             {!isFetching && rows.length === 0 && (
               <Box sx={{ py: 3, textAlign: 'center' }}>

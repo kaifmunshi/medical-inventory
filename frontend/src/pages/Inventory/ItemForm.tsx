@@ -163,6 +163,10 @@ export default function ItemForm({
   const [debouncedSearch, setDebouncedSearch] = React.useState('')
 
   React.useEffect(() => {
+    if (!searchText.trim()) {
+      setDebouncedSearch('')
+      return
+    }
     const t = setTimeout(() => setDebouncedSearch(searchText.trim()), 250)
     return () => clearTimeout(t)
   }, [searchText])
@@ -292,8 +296,23 @@ export default function ItemForm({
                 options={options}
                 loading={isLoading || isFetchingNextPage}
                 value={pickedExisting}
-                onChange={(_, value) => applyFromExisting(value)}
-                onInputChange={(_, value) => setSearchText(value)}
+                onChange={(_, value) => {
+                  applyFromExisting(value)
+                  setSearchText('')
+                  setDebouncedSearch('')
+                }}
+                onInputChange={(_, value, reason) => {
+                  if (reason === 'clear' || reason === 'reset') {
+                    setSearchText('')
+                    setDebouncedSearch('')
+                    return
+                  }
+                  setSearchText(value)
+                }}
+                onClose={() => {
+                  setSearchText('')
+                  setDebouncedSearch('')
+                }}
                 ListboxProps={{
                   onScroll: handleListboxScroll,
                   style: { maxHeight: 320, overflow: 'auto' },

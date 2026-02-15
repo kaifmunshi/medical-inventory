@@ -772,9 +772,17 @@ export default function Billing() {
                       isOptionEqualToValue={(a: any, b: any) => Number(a?.id) === Number(b?.id)}
                       filterOptions={(options) => options}
                       onInputChange={(_e, val, reason) => {
-                        if (reason === 'input' || reason === 'clear') setGridSearch(val || '')
+                        if (reason === 'clear' || reason === 'reset') {
+                          setGridSearch('')
+                          return
+                        }
+                        if (reason === 'input') setGridSearch(val || '')
                       }}
-                      onChange={(_e, val) => selectItemAtRow(i, val)}
+                      onChange={(_e, val) => {
+                        selectItemAtRow(i, val)
+                        setGridSearch('')
+                      }}
+                      onClose={() => setGridSearch('')}
                       ListboxProps={{ style: { maxHeight: 300 } }}
                       renderOption={(props, option: any) => (
                         <li

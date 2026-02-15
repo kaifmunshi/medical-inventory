@@ -1,5 +1,5 @@
 // F:\medical-inventory\frontend\src\components\billing\ItemPicker.tsx
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Box,
   Dialog,
@@ -59,13 +59,7 @@ export default function ItemPicker({
     },
   })
 
-  const rawItems = (data || []) as PickerItem[]
-
-  // ✅ NEW: hide stock=0 items from billing picker
-  const items = useMemo(
-    () => rawItems.filter((it) => Number(it.stock ?? 0) > 0),
-    [rawItems]
-  )
+  const items = (data || []) as PickerItem[]
 
   useEffect(() => {
     if (!open) setQ('')
@@ -98,12 +92,19 @@ export default function ItemPicker({
 
         <List>
           {items.map((it) => (
-            <ListItemButton key={it.id} onClick={() => handlePick(it)}>
+            <ListItemButton
+              key={it.id}
+              onClick={() => handlePick(it)}
+              disabled={Number(it.stock ?? 0) <= 0}
+              sx={{
+                bgcolor: Number(it.stock ?? 0) <= 0 ? 'rgba(244, 67, 54, 0.12)' : undefined,
+              }}
+            >
               <ListItemText
                 primary={`${it.name} — ₹${it.mrp}`}
                 secondary={`Stock: ${it.stock}${it.brand ? ` • ${it.brand}` : ''} • Exp: ${formatExpiry(
                   it.expiry_date
-                )}`}
+                )}${Number(it.stock ?? 0) <= 0 ? ' • Out of stock' : ''}`}
               />
             </ListItemButton>
           ))}

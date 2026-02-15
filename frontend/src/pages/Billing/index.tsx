@@ -100,6 +100,10 @@ function normalizeRows(input: CartRow[]): CartRow[] {
   return out
 }
 
+function round2(n: number) {
+  return Number(Number(n || 0).toFixed(2))
+}
+
 export default function Billing() {
   const toast = useToast()
 
@@ -185,6 +189,65 @@ export default function Billing() {
       setFinalAmount(Number(finalByRows.toFixed(2)))
     }
   }, [finalByRows, finalManuallyEdited])
+
+  function applyFinalAmountToRows(targetFinal: number) {
+    const safeTarget = round2(Math.max(0, Number(targetFinal || 0)))
+    setPriceDraftByRow({})
+    setDiscountDraftByRow({})
+    setRows((prev) => {
+      const active = prev
+        .map((r, idx) => ({ r, idx }))
+        .filter(({ r }) => Number(r.item_id) > 0 && Number(r.quantity) > 0)
+      if (active.length === 0) return prev
+
+      const currentLineTotal = round2(
+        active.reduce((s, { r }) => s + Number(r.quantity || 0) * Number(r.custom_unit_price || 0), 0)
+      )
+      const mrpLineTotal = round2(
+        active.reduce((s, { r }) => s + Number(r.quantity || 0) * Number(r.mrp || 0), 0)
+      )
+      const baseTotal = currentLineTotal > 0 ? currentLineTotal : mrpLineTotal
+      if (baseTotal <= 0) return prev
+
+      const factor = safeTarget / baseTotal
+      let running = 0
+
+      const next = prev.map((row, rowIdx) => {
+        const hit = active.find((x) => x.idx === rowIdx)
+        if (!hit) return row
+        const qty = Math.max(1, Math.floor(Number(row.quantity || 0)))
+        const baseUnit = currentLineTotal > 0 ? Number(row.custom_unit_price || 0) : Number(row.mrp || 0)
+        const unit = round2(Math.max(0, baseUnit * factor))
+        running = round2(running + unit * qty)
+        const mrp = Number(row.mrp || 0)
+        const pct = mrp > 0 ? ((mrp - unit) / mrp) * 100 : 0
+        const safePct = Math.min(100, Math.max(0, pct))
+        return {
+          ...row,
+          custom_unit_price: unit,
+          item_discount_percent: round2(safePct),
+        }
+      })
+
+      const lastIdx = active[active.length - 1].idx
+      const lastRow = next[lastIdx]
+      const lastQty = Math.max(1, Math.floor(Number(lastRow.quantity || 0)))
+      const residual = round2(safeTarget - running)
+      if (Math.abs(residual) > 0.0001) {
+        const adjusted = round2(Math.max(0, Number(lastRow.custom_unit_price || 0) + residual / lastQty))
+        const mrp = Number(lastRow.mrp || 0)
+        const pct = mrp > 0 ? ((mrp - adjusted) / mrp) * 100 : 0
+        const safePct = Math.min(100, Math.max(0, pct))
+        next[lastIdx] = {
+          ...lastRow,
+          custom_unit_price: adjusted,
+          item_discount_percent: round2(safePct),
+        }
+      }
+
+      return normalizeRows(next)
+    })
+  }
 
   function roundNearest10(x: number) {
     return Math.round(x / 10) * 10
@@ -938,6 +1001,9 @@ export default function Billing() {
             <Typography variant="body2" color="text.secondary">
               Final From Item Prices: ₹{finalByRows.toFixed(2)}
             </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Total From MRP: ₹{totals.subtotal.toFixed(2)}
+            </Typography>
             <Stack gap={0.5} alignItems={{ xs: 'flex-start', sm: 'flex-end' }} sx={{ mt: 1 }}>
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems="center" justifyContent="flex-end">
                 <TextField
@@ -949,6 +1015,7 @@ export default function Billing() {
                     setFinalAmount(Number(v || 0))
                     setFinalManuallyEdited(true)
                   }}
+                  onBlur={() => applyFinalAmountToRows(finalAmount)}
                   onWheel={blurOnWheel}
                   sx={{ width: 220, ...noSpinnerSx }}
                   inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
@@ -956,8 +1023,10 @@ export default function Billing() {
                 <Button
                   size="small"
                   onClick={() => {
-                    setFinalAmount(roundNearest10(totals.total))
+                    const target = roundNearest10(totals.total)
+                    setFinalAmount(target)
                     setFinalManuallyEdited(true)
+                    applyFinalAmountToRows(target)
                   }}
                 >
                   Round ±10
@@ -965,8 +1034,10 @@ export default function Billing() {
                 <Button
                   size="small"
                   onClick={() => {
-                    setFinalAmount(roundDown10(totals.total))
+                    const target = roundDown10(totals.total)
+                    setFinalAmount(target)
                     setFinalManuallyEdited(true)
+                    applyFinalAmountToRows(target)
                   }}
                 >
                   Round ↓10
@@ -974,8 +1045,10 @@ export default function Billing() {
                 <Button
                   size="small"
                   onClick={() => {
-                    setFinalAmount(roundUp10(totals.total))
+                    const target = roundUp10(totals.total)
+                    setFinalAmount(target)
                     setFinalManuallyEdited(true)
+                    applyFinalAmountToRows(target)
                   }}
                 >
                   Round ↑10

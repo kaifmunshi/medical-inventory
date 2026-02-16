@@ -283,40 +283,41 @@ export default function Dashboard() {
   const cashOutTodayWithdrawals = to2(qCashbook.data?.withdrawals)
   const cashOutTodayExpenses = to2(qCashbook.data?.expenses)
 
-  const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCredit } = useMemo(() => {
-    const rets = (qReturns.data || []) as any[]
-    let cash = 0
-    let online = 0
-    let total = 0
-    let credit = 0
+const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCredit } = useMemo(() => {
+  const rets = (qReturns.data || []) as any[]
+  let cash = 0
+  let online = 0
+  let total = 0
+  let credit = 0
 
-    for (const r of rets) {
-      const rc = Number(r.refund_cash ?? 0)
-      const ro = Number(r.refund_online ?? 0)
+  for (const r of rets) {
+    const rc = Number(r.refund_cash ?? 0)
+    const ro = Number(r.refund_online ?? 0)
 
-      if (rc !== 0 || ro !== 0) {
-        cash += rc
-        online += ro
-        total += rc + ro
-        continue
-      }
-
-      const sub =
-        typeof r.subtotal_return === 'number'
-          ? Number(r.subtotal_return)
-          : (r.items || []).reduce((s: number, it: any) => s + Number(it.mrp) * Number(it.quantity), 0)
-
-      credit += Number(sub || 0)
-      total += Number(sub || 0)
+    if (rc !== 0 || ro !== 0) {
+      cash += rc
+      online += ro
+      total += rc + ro   // only real money refunds
+      continue
     }
 
-    return {
-      returnsTodayCash: to2(cash),
-      returnsTodayOnline: to2(online),
-      returnsTodayTotal: to2(total),
-      returnsTodayCredit: to2(credit),
-    }
-  }, [qReturns.data])
+    const sub =
+      typeof r.subtotal_return === 'number'
+        ? Number(r.subtotal_return)
+        : (r.items || []).reduce((s: number, it: any) => s + Number(it.mrp) * Number(it.quantity), 0)
+
+    credit += Number(sub || 0)
+
+    // ✅ DO NOT add credit to total
+  }
+
+  return {
+    returnsTodayCash: to2(cash),
+    returnsTodayOnline: to2(online),
+    returnsTodayTotal: to2(total),   // now only cash + online
+    returnsTodayCredit: to2(credit),
+  }
+}, [qReturns.data])
 
   const netCashInHandToday = useMemo(() => {
     return to2(collectedTodayCash - returnsTodayCash - cashOutTodayTotal)

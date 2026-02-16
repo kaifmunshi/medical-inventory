@@ -34,8 +34,6 @@ import {
   getCashbookSummary,
   listCashbookEntries,
   type CashbookEntry,
-  // keep imports as-is (you already have these in your service)
-  clearCashbookLast,
   deleteCashbookEntry,
 } from '../services/cashbook'
 
@@ -124,7 +122,7 @@ export default function Dashboard() {
 
   // -------------------- Cashbook UI --------------------
   const [openCashbook, setOpenCashbook] = useState(false)
-  const [cbType, setCbType] = useState<'WITHDRAWAL' | 'EXPENSE'>('EXPENSE')
+  const [cbType, setCbType] = useState<'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE'>('EXPENSE')
   const [cbAmount, setCbAmount] = useState<string>('')
   const [cbNote, setCbNote] = useState<string>('')
 
@@ -143,16 +141,23 @@ export default function Dashboard() {
     setSelectedCb(null)
   }
 
-  const typeLabel = (t?: string) => (String(t || '').toUpperCase() === 'WITHDRAWAL' ? 'Withdrawal' : 'Expense')
+  const typeLabel = (t?: string) => {
+    const et = String(t || '').toUpperCase()
+    if (et === 'RECEIPT') return 'Receipt'
+    if (et === 'WITHDRAWAL') return 'Withdrawal'
+    return 'Expense'
+  }
 
   const typeChipSx = (t?: string) => {
-    const isW = String(t || '').toUpperCase() === 'WITHDRAWAL'
+    const et = String(t || '').toUpperCase()
     return {
       fontWeight: 800,
       borderRadius: 999,
-      ...(isW
-        ? { bgcolor: 'rgba(25,118,210,0.12)', color: 'primary.main' }
-        : { bgcolor: 'rgba(211,47,47,0.12)', color: 'error.main' }),
+      ...(et === 'RECEIPT'
+        ? { bgcolor: 'rgba(46,125,50,0.12)', color: 'success.main' }
+        : et === 'WITHDRAWAL'
+          ? { bgcolor: 'rgba(25,118,210,0.12)', color: 'primary.main' }
+          : { bgcolor: 'rgba(211,47,47,0.12)', color: 'error.main' }),
     }
   }
 
@@ -473,16 +478,6 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       setCbAmount('')
       setCbNote('')
       setOpenCashbook(false)
-      qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
-      qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
-      qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
-    },
-  })
-
-  // keep as-is even if button is not used (no harm)
-  const mClearCashbookLast = useMutation({
-    mutationFn: () => clearCashbookLast({ from_date: from, to_date: to }),
-    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
@@ -810,7 +805,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
 
       {/* Cashbook Add Dialog */}
       <Dialog open={openCashbook} onClose={() => setOpenCashbook(false)} fullWidth maxWidth="xs">
-        <DialogTitle>Add Withdrawal / Expense</DialogTitle>
+        <DialogTitle>Add Cashbook Entry</DialogTitle>
         <DialogContent>
           <Stack spacing={1.5} mt={1}>
             <TextField
@@ -820,6 +815,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
               onChange={(e) => setCbType((e.target.value as any) || 'EXPENSE')}
               fullWidth
             >
+              <MenuItem value="RECEIPT">Receipt (Cash received)</MenuItem>
               <MenuItem value="EXPENSE">Expense (Tea, etc.)</MenuItem>
               <MenuItem value="WITHDRAWAL">Withdrawal (Cash taken out)</MenuItem>
             </TextField>

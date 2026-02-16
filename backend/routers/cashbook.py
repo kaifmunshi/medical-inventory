@@ -1,5 +1,5 @@
 # backend/routers/cashbook.py
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Query
@@ -7,7 +7,7 @@ from sqlmodel import select
 from sqlalchemy import text  # ✅ use sqlalchemy.text (NOT sqlmodel.text)
 
 from backend.db import get_session
-from backend.models import CashbookEntry, CashbookCreate, CashbookOut
+from backend.models import CashbookEntry, CashbookCreate, CashbookOut, Bill
 
 router = APIRouter()
 
@@ -31,11 +31,60 @@ def _range_bounds(from_date: Optional[str], to_date: Optional[str]):
     return start_iso, end_iso
 
 
+def _sum_rows(rows: List[CashbookEntry]):
+    receipts = 0.0
+    withdrawals = 0.0
+    expenses = 0.0
+    for r in rows:
+        et = (r.entry_type or "").upper()
+        amt = float(r.amount or 0)
+        if et == "RECEIPT":
+            receipts += amt
+        elif et == "WITHDRAWAL":
+            withdrawals += amt
+        else:
+            expenses += amt
+
+    cash_out = withdrawals + expenses
+    net_change = receipts - cash_out
+    return {
+        "cash_out": round(cash_out, 2),
+        "withdrawals": round(withdrawals, 2),
+        "expenses": round(expenses, 2),
+        "receipts": round(receipts, 2),
+        "net_change": round(net_change, 2),
+        "count": len(rows),
+    }
+
+
+def _parse_ymd(date_str: str) -> datetime:
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d")
+    except Exception:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+
+def _sum_bill_cash(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
+    stmt = select(Bill).where(Bill.is_deleted == False)  # noqa: E712
+    if start_iso:
+        stmt = stmt.where(Bill.date_time >= start_iso)
+    if end_iso:
+        stmt = stmt.where(Bill.date_time <= end_iso)
+    rows = session.exec(stmt).all()
+    total = 0.0
+    for b in rows:
+        total += float(getattr(b, "payment_cash", 0) or 0)
+    return round(total, 2)
+
+
 @router.post("/", response_model=CashbookOut)
 def create_entry(payload: CashbookCreate):
     et = (payload.entry_type or "").strip().upper()
-    if et not in ("WITHDRAWAL", "EXPENSE"):
-        raise HTTPException(status_code=400, detail="entry_type must be WITHDRAWAL or EXPENSE")
+    if et not in ("RECEIPT", "WITHDRAWAL", "EXPENSE"):
+        raise HTTPException(
+            status_code=400,
+            detail="entry_type must be RECEIPT, WITHDRAWAL or EXPENSE",
+        )
 
     amt = float(payload.amount or 0)
     if amt <= 0:
@@ -86,20 +135,43 @@ def summary(
 
         rows = session.exec(base).all()
 
-        withdrawals = 0.0
-        expenses = 0.0
-        for r in rows:
-            if (r.entry_type or "").upper() == "WITHDRAWAL":
-                withdrawals += float(r.amount or 0)
-            else:
-                expenses += float(r.amount or 0)
+        return _sum_rows(rows)
 
-        cash_out = withdrawals + expenses
+
+@router.get("/day")
+def day_cashbook(date: str = Query(..., description="YYYY-MM-DD")):
+    day_dt = _parse_ymd(date)
+    prev_date = (day_dt - timedelta(days=1)).date().isoformat()
+
+    day_start = f"{date}T00:00:00"
+    day_end = f"{date}T23:59:59"
+    prev_end = f"{prev_date}T23:59:59"
+
+    with get_session() as session:
+        opening_rows = session.exec(
+            select(CashbookEntry).where(CashbookEntry.created_at <= prev_end)
+        ).all()
+        opening_balance = _sum_rows(opening_rows)["net_change"] + _sum_bill_cash(session, end_iso=prev_end)
+
+        day_rows = session.exec(
+            select(CashbookEntry)
+            .where(CashbookEntry.created_at >= day_start)
+            .where(CashbookEntry.created_at <= day_end)
+            .order_by(CashbookEntry.id.desc())
+        ).all()
+        day_summary = _sum_rows(day_rows)
+        bill_cash_today = _sum_bill_cash(session, start_iso=day_start, end_iso=day_end)
+        day_summary["receipts"] = round(float(day_summary["receipts"]) + bill_cash_today, 2)
+        day_summary["net_change"] = round(float(day_summary["receipts"]) - float(day_summary["cash_out"]), 2)
+
+        closing_balance = round(opening_balance + day_summary["net_change"], 2)
+
         return {
-            "cash_out": round(cash_out, 2),
-            "withdrawals": round(withdrawals, 2),
-            "expenses": round(expenses, 2),
-            "count": len(rows),
+            "date": date,
+            "opening_balance": round(opening_balance, 2),
+            "closing_balance": closing_balance,
+            "summary": day_summary,
+            "entries": day_rows,
         }
 
 

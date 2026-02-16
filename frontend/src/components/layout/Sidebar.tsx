@@ -16,6 +16,7 @@ import {
   Dashboard,
   PlaylistAddCheck,
   CreditCard, // ✅ NEW ICON
+  AccountBalanceWallet,
 } from '@mui/icons-material'
 import { NavLink, useLocation } from 'react-router-dom'
 
@@ -26,6 +27,7 @@ const links = [
   { to: '/returns', label: 'Returns', icon: <AssignmentReturn /> },
   { to: '/exchange', label: 'Exchange', icon: <SwapHoriz /> },
   { to: '/reports', label: 'Reports', icon: <BarChart /> },
+  { to: '/cashbook', label: 'Cashbook', icon: <AccountBalanceWallet /> },
 
   // ✅ NEW
   { to: '/credit-bills', label: 'Credit Bills', icon: <CreditCard /> },

@@ -10,6 +10,7 @@ import Reports from '../pages/Reports/index'
 import Settings from '../pages/Settings'
 import RequestedItems from '../pages/RequestedItems/index'
 import CreditBills from '../pages/CreditBills' // ✅ NEW
+import CashbookPage from '../pages/Cashbook'
 
 export default function AppRoutes() {
   return (
@@ -22,6 +23,7 @@ export default function AppRoutes() {
         <Route path="exchange" element={<Exchange />} />
         <Route path="reports" element={<Reports />} />
         <Route path="credit-bills" element={<CreditBills />} /> {/* ✅ NEW */}
+        <Route path="cashbook" element={<CashbookPage />} />
         <Route path="settings" element={<Settings />} />
         <Route path="requested-items" element={<RequestedItems />} />
       </Route>

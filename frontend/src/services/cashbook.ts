@@ -1,7 +1,7 @@
 // frontend/src/services/cashbook.ts
 import api from './api'
 
-export type CashbookType = 'WITHDRAWAL' | 'EXPENSE'
+export type CashbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE'
 
 export type CashbookCreate = {
   entry_type: CashbookType
@@ -13,6 +13,8 @@ export type CashbookSummary = {
   cash_out: number
   withdrawals: number
   expenses: number
+  receipts: number
+  net_change: number
   count: number
 }
 
@@ -31,6 +33,19 @@ export async function createCashbookEntry(payload: CashbookCreate) {
 
 export async function getCashbookSummary(params: { from_date?: string; to_date?: string }) {
   const { data } = await api.get<CashbookSummary>('/cashbook/summary', { params })
+  return data
+}
+
+export type CashbookDay = {
+  date: string
+  opening_balance: number
+  closing_balance: number
+  summary: CashbookSummary
+  entries: CashbookEntry[]
+}
+
+export async function getCashbookDay(params: { date: string }) {
+  const { data } = await api.get<CashbookDay>('/cashbook/day', { params })
   return data
 }
 

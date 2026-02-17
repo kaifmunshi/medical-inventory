@@ -92,14 +92,13 @@ def list_returns(
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
 ):
     with get_session() as session:
-        stmt = select(Return).order_by(Return.id.desc()).limit(limit).offset(offset)
-        rows = session.exec(stmt).all()
-
-        # lightweight filter (keeps your old behavior)
+        stmt = select(Return)
         if from_date:
-            rows = [r for r in rows if r.date_time[:10] >= from_date]
+            stmt = stmt.where(Return.date_time >= f"{from_date}T00:00:00")
         if to_date:
-            rows = [r for r in rows if r.date_time[:10] <= to_date]
+            stmt = stmt.where(Return.date_time <= f"{to_date}T23:59:59")
+        stmt = stmt.order_by(Return.id.desc()).limit(limit).offset(offset)
+        rows = session.exec(stmt).all()
 
         out: List[ReturnOut] = []
         for r in rows:
@@ -288,21 +287,30 @@ def create_return(payload: ReturnCreate):
             if abs(rc - subtotal_return) > ROUND_TOLERANCE:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"refund_cash deviates from computed subtotal by more than ₹{int(ROUND_TOLERANCE)}"
+                    detail=(
+                        f"refund_cash ₹{rc:.2f} deviates from computed subtotal ₹{subtotal_return:.2f} "
+                        f"by more than ₹{int(ROUND_TOLERANCE)}"
+                    )
                 )
         elif payload.refund_mode == "online":
             rc, ro = 0.0, round2(payload.refund_online)
             if abs(ro - subtotal_return) > ROUND_TOLERANCE:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"refund_online deviates from computed subtotal by more than ₹{int(ROUND_TOLERANCE)}"
+                    detail=(
+                        f"refund_online ₹{ro:.2f} deviates from computed subtotal ₹{subtotal_return:.2f} "
+                        f"by more than ₹{int(ROUND_TOLERANCE)}"
+                    )
                 )
         else:
             rc, ro = round2(payload.refund_cash), round2(payload.refund_online)
             if abs(round2(rc + ro) - subtotal_return) > ROUND_TOLERANCE:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Cash + Online deviates from computed subtotal by more than ₹{int(ROUND_TOLERANCE)}"
+                    detail=(
+                        f"cash+online ₹{round2(rc + ro):.2f} deviates from computed subtotal ₹{subtotal_return:.2f} "
+                        f"by more than ₹{int(ROUND_TOLERANCE)}"
+                    )
                 )
 
         # ----- save Return header -----

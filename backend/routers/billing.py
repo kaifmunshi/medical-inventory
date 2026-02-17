@@ -363,6 +363,47 @@ def report_item_sales(
             raise HTTPException(status_code=500, detail=f"item-sales failed: {e}")
 
 
+@router.get("/payments")
+def list_payments(
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
+    limit: int = Query(500, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+    deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
+):
+    with get_session() as session:
+        stmt = (
+            select(BillPayment, Bill)
+            .join(Bill, Bill.id == BillPayment.bill_id)
+        )
+        if deleted_filter == "active":
+            stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
+
+        if from_date:
+            stmt = stmt.where(BillPayment.received_at >= f"{from_date}T00:00:00")
+        if to_date:
+            stmt = stmt.where(BillPayment.received_at <= f"{to_date}T23:59:59")
+
+        stmt = stmt.order_by(BillPayment.id.desc()).offset(offset).limit(limit)
+        rows = session.exec(stmt).all()
+
+        out: List[Dict[str, Any]] = []
+        for p, b in rows:
+            out.append({
+                "id": p.id,
+                "bill_id": p.bill_id,
+                "bill_date_time": b.date_time,
+                "received_at": p.received_at,
+                "mode": p.mode,
+                "cash_amount": round2(as_f(p.cash_amount)),
+                "online_amount": round2(as_f(p.online_amount)),
+                "note": p.note,
+            })
+        return out
+
+
 @router.get("/{bill_id}", response_model=BillOut)
 def get_bill(bill_id: int):
     with get_session() as session:
@@ -525,7 +566,7 @@ def create_bill(payload: BillCreate):
                     bill_id=b.id,
                     item_id=itm.id,
                     item_name=itm.name,
-                    mrp=as_f(line_price_by_item.get(itm.id, itm.mrp)),
+                    mrp=as_f(itm.mrp),
                     quantity=qty,
                     line_total=round2(qty * as_f(line_price_by_item.get(itm.id, itm.mrp)))
                 )
@@ -758,7 +799,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                     bill_id=b.id,
                     item_id=iid,
                     item_name=itm.name,
-                    mrp=as_f(line_price_by_item.get(iid, itm.mrp)),
+                    mrp=as_f(itm.mrp),
                     quantity=as_i(qty),
                     line_total=round2(as_f(line_price_by_item.get(iid, itm.mrp)) * as_i(qty)),
                 ))

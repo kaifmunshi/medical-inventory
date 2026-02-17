@@ -253,13 +253,69 @@ export default function SalesReport(props: {
     },
   })
 
+  function distributeEditLinesByFinal(lines: EditLine[], targetFinal: number): EditLine[] {
+    const safeTarget = round2(Math.max(0, Number(targetFinal || 0)))
+    const active = lines
+      .map((r, idx) => ({ r, idx }))
+      .filter(({ r }) => Number(r.item_id) > 0 && Number(r.quantity) > 0)
+    if (active.length === 0) return lines
+
+    const currentLineTotal = round2(
+      active.reduce((s, { r }) => s + Number(r.quantity || 0) * Number(r.custom_unit_price || 0), 0)
+    )
+    const mrpLineTotal = round2(
+      active.reduce((s, { r }) => s + Number(r.quantity || 0) * Number(r.mrp || 0), 0)
+    )
+    const baseTotal = currentLineTotal > 0 ? currentLineTotal : mrpLineTotal
+    if (baseTotal <= 0) return lines
+
+    const factor = safeTarget / baseTotal
+    let running = 0
+
+    const next = lines.map((row, rowIdx) => {
+      const hit = active.find((x) => x.idx === rowIdx)
+      if (!hit) return row
+      const qty = Math.max(1, Math.floor(Number(row.quantity || 0)))
+      const baseUnit = currentLineTotal > 0 ? Number(row.custom_unit_price || 0) : Number(row.mrp || 0)
+      const unit = round2(Math.max(0, baseUnit * factor))
+      running = round2(running + unit * qty)
+      const mrp = Number(row.mrp || 0)
+      const pct = mrp > 0 ? ((mrp - unit) / mrp) * 100 : 0
+      const safePct = Math.min(100, Math.max(0, pct))
+      return {
+        ...row,
+        custom_unit_price: unit,
+        item_discount_percent: round2(safePct),
+      }
+    })
+
+    const lastIdx = active[active.length - 1].idx
+    const lastRow = next[lastIdx]
+    const lastQty = Math.max(1, Math.floor(Number(lastRow.quantity || 0)))
+    const residual = round2(safeTarget - running)
+    if (Math.abs(residual) > 0.0001) {
+      const adjusted = round2(Math.max(0, Number(lastRow.custom_unit_price || 0) + residual / lastQty))
+      const mrp = Number(lastRow.mrp || 0)
+      const pct = mrp > 0 ? ((mrp - adjusted) / mrp) * 100 : 0
+      const safePct = Math.min(100, Math.max(0, pct))
+      next[lastIdx] = {
+        ...lastRow,
+        custom_unit_price: adjusted,
+        item_discount_percent: round2(safePct),
+      }
+    }
+
+    return next
+  }
+
   const mEdit = useMutation({
     mutationFn: async () => {
       if (!editBillId) throw new Error('Bill not selected')
       if (editPaymentMode === 'credit' && editNotes.trim().length === 0) {
         throw new Error('Notes required for credit')
       }
-      const cleanedItems = editItems
+      const adjustedItems = distributeEditLinesByFinal(editItems, editChosenFinal)
+      const cleanedItems = adjustedItems
         .map((it) => ({
           item_id: Number(it.item_id),
           quantity: Number(it.quantity || 0),
@@ -415,15 +471,24 @@ export default function SalesReport(props: {
     }
     const b = row?.raw || detail
     if (!b?.id) return
-    const lines: EditLine[] = (b.items || []).map((it: any) => ({
-      item_id: Number(it.item_id),
-      item_name: String(it.item_name || it.name || `#${it.item_id}`),
-      mrp: Number(it.mrp || 0),
-      quantity: Number(it.quantity || 0),
-      custom_unit_price: Number(it.mrp || 0),
-      item_discount_percent: 0,
-      existed_in_bill: true,
-    }))
+    const lines: EditLine[] = (b.items || []).map((it: any) => {
+      const mrp = Number(it.mrp || 0)
+      const qty = Number(it.quantity || 0)
+      const custom =
+        qty > 0
+          ? round2(Number(it.line_total || 0) / qty)
+          : mrp
+      const pct = mrp > 0 ? ((mrp - custom) / mrp) * 100 : 0
+      return {
+        item_id: Number(it.item_id),
+        item_name: String(it.item_name || it.name || `#${it.item_id}`),
+        mrp,
+        quantity: qty,
+        custom_unit_price: custom,
+        item_discount_percent: Number(Math.min(100, Math.max(0, pct)).toFixed(2)),
+        existed_in_bill: true,
+      }
+    })
     setEditBillId(Number(b.id))
     setEditItems(lines)
     setEditPaymentMode((b.payment_mode || 'cash') as EditMode)
@@ -584,6 +649,12 @@ export default function SalesReport(props: {
     () => round2(editItems.reduce((s, it) => s + Number(it.custom_unit_price || 0) * Number(it.quantity || 0), 0)),
     [editItems]
   )
+
+  function applyEditFinalAmountToRows(targetFinal: number) {
+    setEditPriceDraftByRow({})
+    setEditDiscountDraftByRow({})
+    setEditItems((prev) => distributeEditLinesByFinal(prev, targetFinal))
+  }
 
   useEffect(() => {
     if (!editOpen) return
@@ -1145,7 +1216,7 @@ export default function SalesReport(props: {
                       <th style={{ width: '10%' }}>MRP</th>
                       <th style={{ width: '8%' }}>Qty</th>
                       <th style={{ width: '10%' }}>Discount %</th>
-                      <th style={{ width: '12%' }}>Custom Price</th>
+                      <th style={{ width: '12%' }}>Selling Price</th>
                       <th style={{ width: '12%' }}>Line Total</th>
                       <th style={{ width: '6%' }}></th>
                     </tr>
@@ -1317,6 +1388,7 @@ export default function SalesReport(props: {
                       setEditFinalAmount(Number(v || 0))
                       setEditFinalManuallyEdited(true)
                     }}
+                    onBlur={() => applyEditFinalAmountToRows(editFinalAmount)}
                     onWheel={blurOnWheel}
                     sx={{ width: 220, ...noSpinnerSx }}
                     inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
@@ -1324,8 +1396,10 @@ export default function SalesReport(props: {
                   <Button
                     size="small"
                     onClick={() => {
-                      setEditFinalAmount(roundNearest10(editFinalByRows))
+                      const target = roundNearest10(editFinalByRows)
+                      setEditFinalAmount(target)
                       setEditFinalManuallyEdited(true)
+                      applyEditFinalAmountToRows(target)
                     }}
                   >
                     Round ±10
@@ -1333,8 +1407,10 @@ export default function SalesReport(props: {
                   <Button
                     size="small"
                     onClick={() => {
-                      setEditFinalAmount(roundDown10(editFinalByRows))
+                      const target = roundDown10(editFinalByRows)
+                      setEditFinalAmount(target)
                       setEditFinalManuallyEdited(true)
+                      applyEditFinalAmountToRows(target)
                     }}
                   >
                     Round ↓10
@@ -1342,8 +1418,10 @@ export default function SalesReport(props: {
                   <Button
                     size="small"
                     onClick={() => {
-                      setEditFinalAmount(roundUp10(editFinalByRows))
+                      const target = roundUp10(editFinalByRows)
+                      setEditFinalAmount(target)
                       setEditFinalManuallyEdited(true)
+                      applyEditFinalAmountToRows(target)
                     }}
                   >
                     Round ↑10

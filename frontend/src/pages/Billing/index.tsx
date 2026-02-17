@@ -743,7 +743,7 @@ export default function Billing() {
                 <th style={{ width: '13%' }}>Expiry</th>
                 <th style={{ width: '8%' }}>Qty</th>
                 <th style={{ width: '10%' }}>Discount %</th>
-                <th style={{ width: '12%' }}>Custom Price</th>
+                <th style={{ width: '12%' }}>Selling Price</th>
                 <th style={{ width: '12%' }}>Line Total</th>
                 <th style={{ width: '6%' }}></th>
               </tr>

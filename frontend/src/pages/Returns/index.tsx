@@ -88,6 +88,7 @@ export default function Returns() {
   const refund = isFullReturn
     ? Number(proration.finalTotal)
     : rows.reduce((s, r) => s + chargedLine(r.mrp, r.qty), 0)
+  const computedRefund = clamp2(refund)
 
   // ✅ FIX: always compute per-line refund values (even for full return)
   // If full return, adjust last non-zero line so sum(lines) == finalTotal exactly.
@@ -418,6 +419,10 @@ export default function Returns() {
                 }
                 if (finalRefund <= 0) {
                   toast.push('Final refund must be > 0', 'warning')
+                  return
+                }
+                if (mode !== 'credit' && Math.abs(clamp2(finalRefund) - computedRefund) > 5) {
+                  toast.push(`Final refund must be within ±₹5 of computed ₹${computedRefund.toFixed(2)}`, 'warning')
                   return
                 }
                 mCreate.mutate()

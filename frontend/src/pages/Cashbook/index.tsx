@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -26,7 +26,8 @@ import {
   listCashbookEntries,
   type CashbookType,
 } from '../../services/cashbook'
-import { listBills } from '../../services/billing'
+import { listPayments } from '../../services/billing'
+import { listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
 
 function money(n: number | string | null | undefined) {
@@ -50,18 +51,51 @@ function addDays(ymd: string, days: number) {
   return toYMD(dt)
 }
 
+function addMonths(ymd: string, months: number) {
+  const [y, m, d] = ymd.split('-').map(Number)
+  const dt = new Date(y, (m || 1) - 1, d || 1)
+  dt.setMonth(dt.getMonth() + months)
+  return toYMD(dt)
+}
+
+function weekRange(ymd: string) {
+  const [y, m, d] = ymd.split('-').map(Number)
+  const dt = new Date(y, (m || 1) - 1, d || 1)
+  const day = dt.getDay() // 0 Sun ... 6 Sat
+  const diffToMonday = day === 0 ? -6 : 1 - day
+  const start = new Date(dt)
+  start.setDate(dt.getDate() + diffToMonday)
+  const end = new Date(start)
+  end.setDate(start.getDate() + 6)
+  return { from: toYMD(start), to: toYMD(end) }
+}
+
+function monthRange(ymd: string) {
+  const [y, m] = ymd.split('-').map(Number)
+  const start = new Date(y, (m || 1) - 1, 1)
+  const end = new Date(y, (m || 1), 0)
+  return { from: toYMD(start), to: toYMD(end) }
+}
+
 function typeChipProps(type: string) {
+  const baseSx = { minWidth: 84, height: 24, fontWeight: 700, justifyContent: 'center' as const }
   const t = String(type || '').toUpperCase()
   if (t === 'OPENING') {
-    return { label: 'Opening', sx: { bgcolor: 'info.light', color: 'info.dark', fontWeight: 700 } }
+    return { label: 'Opening', sx: { ...baseSx, bgcolor: 'info.light', color: 'info.dark' } }
+  }
+  if (t === 'RETURN') {
+    return { label: 'Return', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
+  }
+  if (t === 'SPLIT') {
+    return { label: 'Split', sx: { ...baseSx, bgcolor: '#9fe3b0', color: '#124b19' } }
   }
   if (t === 'RECEIPT') {
-    return { label: 'Receipt', sx: { bgcolor: 'success.light', color: 'success.dark', fontWeight: 700 } }
+    return { label: 'Receipt', sx: { ...baseSx, bgcolor: 'success.light', color: 'success.dark' } }
   }
   if (t === 'WITHDRAWAL') {
-    return { label: 'Withdrawal', sx: { bgcolor: 'warning.light', color: 'warning.dark', fontWeight: 700 } }
+    return { label: 'Withdrawal', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
   }
-  return { label: 'Expense', sx: { bgcolor: 'error.light', color: 'error.dark', fontWeight: 700 } }
+  return { label: 'Expense', sx: { ...baseSx, bgcolor: 'error.light', color: 'error.dark' } }
 }
 
 export default function CashbookPage() {
@@ -69,10 +103,24 @@ export default function CashbookPage() {
   const today = useMemo(() => toYMD(new Date()), [])
   const [selectedDate, setSelectedDate] = useState(today)
   const [recordsFilter, setRecordsFilter] = useState<'DAY' | 'ALL'>('DAY')
+  const [allView, setAllView] = useState<'ALL' | 'WEEK' | 'MONTH'>('ALL')
+  const [allAnchorDate, setAllAnchorDate] = useState(today)
+  const [debouncedAllAnchorDate, setDebouncedAllAnchorDate] = useState(today)
 
   const [entryType, setEntryType] = useState<CashbookType>('RECEIPT')
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedAllAnchorDate(allAnchorDate), 250)
+    return () => clearTimeout(t)
+  }, [allAnchorDate])
+
+  const allRange = useMemo(() => {
+    if (allView === 'WEEK') return weekRange(debouncedAllAnchorDate)
+    if (allView === 'MONTH') return monthRange(debouncedAllAnchorDate)
+    return { from: undefined as string | undefined, to: undefined as string | undefined }
+  }, [allView, debouncedAllAnchorDate])
 
   const qDay = useQuery({
     queryKey: ['cashbook-day', selectedDate],
@@ -80,20 +128,26 @@ export default function CashbookPage() {
     enabled: recordsFilter === 'DAY',
   })
 
-  const qDayBills = useQuery({
-    queryKey: ['cashbook-bills-day', selectedDate],
-    queryFn: () => listBills({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+  const qDayPayments = useQuery({
+    queryKey: ['cashbook-payments-day', selectedDate],
+    queryFn: () => listPayments({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    enabled: recordsFilter === 'DAY',
+  })
+
+  const qDayReturns = useQuery({
+    queryKey: ['cashbook-returns-day', selectedDate],
+    queryFn: () => listReturns({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
     enabled: recordsFilter === 'DAY',
   })
 
   const qAllCashbook = useQuery({
-    queryKey: ['cashbook-all-entries'],
+    queryKey: ['cashbook-all-entries', allView, allRange.from, allRange.to],
     queryFn: async () => {
       const out: any[] = []
       let offset = 0
       const limit = 500
       while (true) {
-        const rows = await listCashbookEntries({ limit, offset })
+        const rows = await listCashbookEntries({ from_date: allRange.from, to_date: allRange.to, limit, offset })
         out.push(...(rows || []))
         if (!rows || rows.length < limit) break
         offset += limit
@@ -103,14 +157,31 @@ export default function CashbookPage() {
     enabled: recordsFilter === 'ALL',
   })
 
-  const qAllBills = useQuery({
-    queryKey: ['cashbook-all-bills'],
+  const qAllPayments = useQuery({
+    queryKey: ['cashbook-all-payments', allView, allRange.from, allRange.to],
     queryFn: async () => {
       const out: any[] = []
       let offset = 0
       const limit = 500
       while (true) {
-        const rows = await listBills({ limit, offset, deleted_filter: 'active' })
+        const rows = await listPayments({ from_date: allRange.from, to_date: allRange.to, limit, offset })
+        out.push(...(rows || []))
+        if (!rows || rows.length < limit) break
+        offset += limit
+      }
+      return out
+    },
+    enabled: recordsFilter === 'ALL',
+  })
+
+  const qAllReturns = useQuery({
+    queryKey: ['cashbook-all-returns', allView, allRange.from, allRange.to],
+    queryFn: async () => {
+      const out: any[] = []
+      let offset = 0
+      const limit = 500
+      while (true) {
+        const rows = await listReturns({ from_date: allRange.from, to_date: allRange.to, limit, offset })
         out.push(...(rows || []))
         if (!rows || rows.length < limit) break
         offset += limit
@@ -152,34 +223,65 @@ export default function CashbookPage() {
   const day = qDay.data
   const canGoNext = selectedDate < today
   const canSave = Number(amount) > 0 && !mCreate.isPending
+  const canGoAllNext = allAnchorDate < today
 
   const billCashRowsDay = useMemo(() => {
-    const bills = (qDayBills.data || []) as any[]
-    return bills
-      .filter((b) => Number(b?.payment_cash || 0) > 0)
-      .map((b) => ({
-        id: `bill-${b.id}`,
-        created_at: b.date_time,
+    const payments = (qDayPayments.data || []) as any[]
+    return payments
+      .filter((p) => Number(p?.cash_amount || 0) > 0)
+      .map((p) => ({
+        id: `pay-${p.id}`,
+        created_at: p.received_at,
         entry_type: 'RECEIPT',
-        amount: Number(b.payment_cash || 0),
-        note: `Cash bill #${b.id}`,
+        pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
+        amount: Number(p.cash_amount || 0),
+        note: `Cash payment for bill #${p.bill_id}`,
         source: 'BILL' as const,
       }))
-  }, [qDayBills.data])
+  }, [qDayPayments.data])
 
   const billCashRowsAll = useMemo(() => {
-    const bills = (qAllBills.data || []) as any[]
-    return bills
-      .filter((b) => Number(b?.payment_cash || 0) > 0)
-      .map((b) => ({
-        id: `bill-${b.id}`,
-        created_at: b.date_time,
+    const payments = (qAllPayments.data || []) as any[]
+    return payments
+      .filter((p) => Number(p?.cash_amount || 0) > 0)
+      .map((p) => ({
+        id: `pay-${p.id}`,
+        created_at: p.received_at,
         entry_type: 'RECEIPT',
-        amount: Number(b.payment_cash || 0),
-        note: `Cash bill #${b.id}`,
+        pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
+        amount: Number(p.cash_amount || 0),
+        note: `Cash payment for bill #${p.bill_id}`,
         source: 'BILL' as const,
       }))
-  }, [qAllBills.data])
+  }, [qAllPayments.data])
+
+  const returnCashRowsDay = useMemo(() => {
+    const returns = (qDayReturns.data || []) as any[]
+    return returns
+      .filter((r) => Number(r?.refund_cash || 0) > 0)
+      .map((r) => ({
+        id: `return-${r.id}`,
+        created_at: r.date_time,
+        entry_type: 'WITHDRAWAL',
+        amount: Number(r.refund_cash || 0),
+        note: `Cash return #${r.id}`,
+        source: 'RETURN' as const,
+      }))
+  }, [qDayReturns.data])
+
+  const returnCashRowsAll = useMemo(() => {
+    const returns = (qAllReturns.data || []) as any[]
+    return returns
+      .filter((r) => Number(r?.refund_cash || 0) > 0)
+      .map((r) => ({
+        id: `return-${r.id}`,
+        created_at: r.date_time,
+        entry_type: 'WITHDRAWAL',
+        amount: Number(r.refund_cash || 0),
+        note: `Cash return #${r.id}`,
+        source: 'RETURN' as const,
+      }))
+  }, [qAllReturns.data])
 
   const manualRowsDay = useMemo(() => {
     const rows = (day?.entries || []) as any[]
@@ -205,10 +307,22 @@ export default function CashbookPage() {
             },
             ...manualRowsDay,
             ...billCashRowsDay,
+            ...returnCashRowsDay,
           ]
-        : [...manualRowsAll, ...billCashRowsAll]
+        : [...manualRowsAll, ...billCashRowsAll, ...returnCashRowsAll]
     return rows.sort((a: any, b: any) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
-  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, manualRowsAll, billCashRowsAll])
+  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, returnCashRowsAll])
+
+  const dayColorMap = useMemo(() => {
+    if (recordsFilter !== 'ALL') return {} as Record<string, string>
+    const palette = ['#f6fbff', '#eef6ff']
+    const dates = Array.from(new Set((visibleRows || []).map((r: any) => isoDate(r.created_at))))
+    const out: Record<string, string> = {}
+    dates.forEach((d, i) => {
+      out[d] = palette[i % palette.length]
+    })
+    return out
+  }, [recordsFilter, visibleRows])
 
   const computed = useMemo(() => {
     let receipts = 0
@@ -267,11 +381,74 @@ export default function CashbookPage() {
             </Button>
           </Stack>
         </Stack>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          {recordsFilter === 'DAY'
-            ? `Date: ${selectedDate}. Opening balance is carried from previous day closing.`
-            : 'Showing full cashbook history (all records).'}
-        </Typography>
+        {recordsFilter === 'DAY' ? (
+          <Stack sx={{ mt: 1 }} spacing={0.25}>
+            <Typography variant="body2" sx={{ fontWeight: 700 }}>
+              Date: {selectedDate}
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'error.main' }}>
+              Note : Opening balance is carried from previous day closing.
+            </Typography>
+          </Stack>
+        ) : (
+          <Stack sx={{ mt: 1 }} spacing={1}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} sx={{ width: '100%' }}>
+              <Stack direction="row" spacing={1}>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => setAllView('ALL')}
+                  sx={allView === 'ALL' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
+                >
+                  All
+                </Button>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => setAllView('WEEK')}
+                  sx={allView === 'WEEK' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
+                >
+                  Week
+                </Button>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => setAllView('MONTH')}
+                  sx={allView === 'MONTH' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
+                >
+                  Month
+                </Button>
+              </Stack>
+              {allView !== 'ALL' ? (
+                <Stack direction="row" spacing={1} sx={{ ml: { sm: 'auto' }, justifyContent: { sm: 'flex-end' } }}>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => setAllAnchorDate(allView === 'WEEK' ? addDays(allAnchorDate, -7) : addMonths(allAnchorDate, -1))}
+                >
+                  Previous {allView === 'WEEK' ? 'Week' : 'Month'}
+                </Button>
+                <Button variant="outlined" size="small" onClick={() => setAllAnchorDate(today)} disabled={allAnchorDate === today}>
+                  Today
+                </Button>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => setAllAnchorDate(allView === 'WEEK' ? addDays(allAnchorDate, 7) : addMonths(allAnchorDate, 1))}
+                  disabled={!canGoAllNext}
+                >
+                  Next {allView === 'WEEK' ? 'Week' : 'Month'}
+                </Button>
+                </Stack>
+              ) : null}
+            </Stack>
+            <Typography variant="body2" color="text.secondary">
+              {allView === 'ALL'
+                ? 'Showing full cashbook history (all records).'
+                : `Showing ${allView.toLowerCase()} view: ${allRange.from} to ${allRange.to}`}
+            </Typography>
+          </Stack>
+        )}
       </Paper>
 
       <Paper sx={{ p: 2 }}>
@@ -347,7 +524,7 @@ export default function CashbookPage() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {(recordsFilter === 'DAY' ? qDay.isLoading || qDayBills.isLoading : qAllCashbook.isLoading || qAllBills.isLoading) ? (
+              {(recordsFilter === 'DAY' ? qDay.isLoading || qDayPayments.isLoading || qDayReturns.isLoading : qAllCashbook.isLoading || qAllPayments.isLoading || qAllReturns.isLoading) ? (
                 <TableRow>
                   <TableCell colSpan={6}>Loading...</TableCell>
                 </TableRow>
@@ -358,12 +535,27 @@ export default function CashbookPage() {
                   </TableCell>
                 </TableRow>
               ) : (
-                (visibleRows || []).map((row: any) => {
+                (visibleRows || []).map((row: any, idx: number) => {
                   const t = String(row.entry_type || '').toUpperCase()
+                  const chipType = row.source === 'RETURN' ? 'RETURN' : String(row.pill_type || t).toUpperCase()
                   const isIn = t === 'RECEIPT'
-                  const chip = typeChipProps(t)
+                  const chip = typeChipProps(chipType)
+                  const date = isoDate(row.created_at)
+                  const prevDate = idx > 0 ? isoDate((visibleRows as any[])[idx - 1]?.created_at) : date
+                  const isNewDay = recordsFilter === 'ALL' && idx > 0 && date !== prevDate
                   return (
-                    <TableRow key={row.id} hover>
+                    <TableRow
+                      key={row.id}
+                      hover
+                      sx={
+                        recordsFilter === 'ALL'
+                          ? {
+                              bgcolor: dayColorMap[date],
+                              ...(isNewDay ? { '& td': { borderTop: '2px solid rgba(0,0,0,0.65)' } } : {}),
+                            }
+                          : undefined
+                      }
+                    >
                       <TableCell>{isoDate(row.created_at)}</TableCell>
                       <TableCell>{isoTime(row.created_at)}</TableCell>
                       <TableCell>
@@ -381,7 +573,7 @@ export default function CashbookPage() {
                       >
                         {t === 'OPENING' ? '' : isIn ? '+' : '-'}Rs {money(row.amount)}
                       </TableCell>
-                      <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
+                      <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'RETURN' ? 'Return' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
                       <TableCell align="right">
                         {row.source === 'CASHBOOK' ? (
                           <IconButton

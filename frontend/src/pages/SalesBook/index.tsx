@@ -68,7 +68,7 @@ function BreakdownCell(props: {
   const totalSize = props.compact ? 14 : 15
   const lineSize = props.compact ? 11 : 12
   return (
-    <Stack alignItems="flex-end" spacing={props.compact ? 0.125 : 0.25}>
+    <Stack alignItems="flex-start" spacing={props.compact ? 0.125 : 0.25}>
       <Typography sx={{ fontSize: totalSize, fontWeight: 800, color: props.totalColor || 'text.primary' }}>
         {props.totalLabel}: ₹{money(props.total)}
       </Typography>
@@ -367,11 +367,25 @@ export default function SalesBookPage() {
           <Typography color="text.secondary">Loading sales book...</Typography>
         ) : (
           <TableContainer sx={{ maxHeight: 560 }}>
-            <Table size="small" stickyHeader>
+            <Table
+              size="small"
+              stickyHeader
+              sx={{
+                tableLayout: 'fixed',
+                width: '100%',
+                '& th, & td': { px: 2 },
+              }}
+            >
+              <colgroup>
+                <col style={{ width: '18%' }} />
+                <col style={{ width: '24%' }} />
+                <col style={{ width: '29%' }} />
+                <col style={{ width: '29%' }} />
+              </colgroup>
               <TableHead>
                 <TableRow>
                   <TableCell
-                    sx={{ bgcolor: '#f3f6f9', fontWeight: 800, position: 'sticky', left: 0, zIndex: 4, minWidth: 120 }}
+                    sx={{ bgcolor: '#f3f6f9', fontWeight: 800, position: 'sticky', left: 0, zIndex: 4 }}
                   >
                     <TableSortLabel
                       active
@@ -381,13 +395,13 @@ export default function SalesBookPage() {
                       Date
                     </TableSortLabel>
                   </TableCell>
-                  <TableCell align="right" sx={{ bgcolor: '#eef5ff', fontWeight: 800, minWidth: 320 }}>
-                    Sales & Collection
+                  <TableCell sx={{ bgcolor: '#eef5ff', fontWeight: 800 }}>
+                    Sales/Collection
                   </TableCell>
-                  <TableCell align="right" sx={{ bgcolor: '#fff8e8', fontWeight: 800, minWidth: 260 }}>
+                  <TableCell sx={{ bgcolor: '#fff8e8', fontWeight: 800 }}>
                     Outflow
                   </TableCell>
-                  <TableCell align="right" sx={{ bgcolor: '#edf4ff', fontWeight: 800, minWidth: 230 }}>
+                  <TableCell sx={{ bgcolor: '#edf4ff', fontWeight: 800 }}>
                     Net
                   </TableCell>
                 </TableRow>
@@ -420,7 +434,7 @@ export default function SalesBookPage() {
                         </Typography>
                       </Stack>
                     </TableCell>
-                    <TableCell align="right">
+                    <TableCell>
                       <BreakdownCell
                         totalLabel="Sales"
                         total={r0.billed}
@@ -433,7 +447,7 @@ export default function SalesBookPage() {
                         ]}
                       />
                     </TableCell>
-                    <TableCell align="right">
+                    <TableCell>
                       <BreakdownCell
                         totalLabel="Outflow"
                         total={r0.outflow}
@@ -445,8 +459,8 @@ export default function SalesBookPage() {
                         ]}
                       />
                     </TableCell>
-                    <TableCell align="right">
-                      <Stack alignItems="flex-end" spacing={density === 'compact' ? 0.125 : 0.25}>
+                    <TableCell>
+                      <Stack alignItems="flex-start" spacing={density === 'compact' ? 0.125 : 0.25}>
                         <Chip
                           size="small"
                           label={r0.net < 0 ? 'LOSS' : 'PROFIT'}
@@ -477,7 +491,7 @@ export default function SalesBookPage() {
                   <TableCell sx={{ position: 'sticky', left: 0, zIndex: 3, bgcolor: '#e8edf2', fontWeight: 900 }}>
                     Total
                   </TableCell>
-                  <TableCell align="right" sx={{ bgcolor: '#e8edf2' }}>
+                  <TableCell sx={{ bgcolor: '#e8edf2' }}>
                     <BreakdownCell
                       totalLabel="Sales"
                       total={totals.billed}
@@ -490,7 +504,7 @@ export default function SalesBookPage() {
                       ]}
                     />
                   </TableCell>
-                  <TableCell align="right" sx={{ bgcolor: '#e8edf2' }}>
+                  <TableCell sx={{ bgcolor: '#e8edf2' }}>
                     <BreakdownCell
                       totalLabel="Outflow"
                       total={totals.outflow}
@@ -502,7 +516,7 @@ export default function SalesBookPage() {
                       ]}
                     />
                   </TableCell>
-                  <TableCell align="right" sx={{ bgcolor: '#e8edf2' }}>
+                  <TableCell sx={{ bgcolor: '#e8edf2' }}>
                     <BreakdownCell
                       totalLabel="Net"
                       total={totals.net}

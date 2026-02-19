@@ -807,7 +807,22 @@ export default function Billing() {
                       )}
                       sx={GRID_INPUT_SX}
                       renderInput={(params) => (
-                        <TextField {...params} size="small" placeholder="Search medicine..." sx={GRID_INPUT_SX} />
+                        <TextField
+                          {...params}
+                          size="small"
+                          placeholder="Search medicine..."
+                          sx={GRID_INPUT_SX}
+                          helperText={Number(r.item_id) > 0 && String(r.brand || '').trim() ? `${r.brand}` : ''}
+                          FormHelperTextProps={{
+                            sx: {
+                              color: 'text.secondary',
+                              fontSize: '0.72rem',
+                              lineHeight: 1.1,
+                              ml: 0.5,
+                              mt: 0.25,
+                            },
+                          }}
+                        />
                       )}
                     />
                   </td>

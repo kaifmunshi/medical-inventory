@@ -32,6 +32,7 @@ type EditMode = 'cash' | 'online' | 'split' | 'credit'
 type EditLine = {
   item_id: number
   item_name: string
+  brand?: string | null
   mrp: number
   quantity: number
   custom_unit_price: number
@@ -185,6 +186,22 @@ export default function SalesReport(props: {
   useEffect(() => {
     setEditSuggestionPage(0)
   }, [editItemQuery, editOpen])
+
+  useEffect(() => {
+    if (!editOpen) return
+    if (!editSuggestionItems.length) return
+    const brandByItemId = new Map<number, string | null>()
+    for (const it of editSuggestionItems) {
+      brandByItemId.set(Number(it.id), it.brand ?? null)
+    }
+    setEditItems((prev) =>
+      prev.map((row) =>
+        String(row.brand || '').trim()
+          ? row
+          : { ...row, brand: brandByItemId.get(Number(row.item_id)) ?? null }
+      )
+    )
+  }, [editOpen, editSuggestionItems])
 
   // SALES DETAILS (paged)
   const qSales = useInfiniteQuery({
@@ -482,6 +499,7 @@ export default function SalesReport(props: {
       return {
         item_id: Number(it.item_id),
         item_name: String(it.item_name || it.name || `#${it.item_id}`),
+        brand: it.brand ?? null,
         mrp,
         quantity: qty,
         custom_unit_price: custom,
@@ -521,6 +539,7 @@ export default function SalesReport(props: {
         {
           item_id: itemId,
           item_name: String(it.name || `#${itemId}`),
+          brand: it.brand ?? null,
           mrp: Number(it.mrp || 0),
           quantity: 1,
           custom_unit_price: Number(it.mrp || 0),
@@ -1224,7 +1243,16 @@ export default function SalesReport(props: {
                   <tbody>
                     {editItems.map((it, idx) => (
                       <tr key={`${it.item_id}-${idx}`}>
-                        <td>{it.item_name}</td>
+                        <td>
+                          <Stack gap={0.25}>
+                            <Typography variant="body2">{it.item_name}</Typography>
+                            {String(it.brand || '').trim() ? (
+                              <Typography variant="caption" color="text.secondary">
+                                {it.brand}
+                              </Typography>
+                            ) : null}
+                          </Stack>
+                        </td>
                         <td>{money(it.mrp)}</td>
                         <td style={{ textAlign: 'center' }}>
                           <TextField

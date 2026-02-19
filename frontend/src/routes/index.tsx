@@ -11,6 +11,7 @@ import Settings from '../pages/Settings'
 import RequestedItems from '../pages/RequestedItems/index'
 import CreditBills from '../pages/CreditBills' // ✅ NEW
 import CashbookPage from '../pages/Cashbook'
+import SalesBookPage from '../pages/SalesBook'
 
 export default function AppRoutes() {
   return (
@@ -24,6 +25,7 @@ export default function AppRoutes() {
         <Route path="reports" element={<Reports />} />
         <Route path="credit-bills" element={<CreditBills />} /> {/* ✅ NEW */}
         <Route path="cashbook" element={<CashbookPage />} />
+        <Route path="sales-book" element={<SalesBookPage />} />
         <Route path="settings" element={<Settings />} />
         <Route path="requested-items" element={<RequestedItems />} />
       </Route>

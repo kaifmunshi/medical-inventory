@@ -45,3 +45,12 @@ export interface RequestedItem {
   created_at?: string
   updated_at?: string
 }
+
+export interface Customer {
+  id: ID
+  name: string
+  phone?: string | null
+  address_line?: string | null
+  created_at?: string
+  updated_at?: string
+}

@@ -9,7 +9,8 @@ import Exchange from '../pages/Returns/Exchange'
 import Reports from '../pages/Reports/index'
 import Settings from '../pages/Settings'
 import RequestedItems from '../pages/RequestedItems/index'
-import CreditBills from '../pages/CreditBills' // ✅ NEW
+import Customers from '../pages/Customers'
+import CreditBills from '../pages/CreditBills' 
 import CashbookPage from '../pages/Cashbook'
 import SalesBookPage from '../pages/SalesBook'
 
@@ -28,6 +29,7 @@ export default function AppRoutes() {
         <Route path="sales-book" element={<SalesBookPage />} />
         <Route path="settings" element={<Settings />} />
         <Route path="requested-items" element={<RequestedItems />} />
+        <Route path="customers" element={<Customers />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

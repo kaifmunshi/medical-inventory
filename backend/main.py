@@ -7,6 +7,7 @@ from backend.db import engine
 from backend.routers import inventory, billing
 from backend.routers import returns as returns_router
 from backend.routers import requested_items  # 👈 NEW
+from backend.routers import customers
 from backend.routers import cashbook
 app = FastAPI(title="Ayurvedic Medical Inventory System")
 
@@ -41,6 +42,7 @@ app.include_router(
     prefix="/requested-items",
     tags=["Requested Items"],   # 👈 NEW
 )
+app.include_router(customers.router, prefix="/customers", tags=["Customers"])
 
 
 @app.get("/")

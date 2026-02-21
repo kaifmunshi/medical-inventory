@@ -19,7 +19,7 @@ import {
   Autocomplete,
   Tooltip,
 } from '@mui/material'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import DeleteIcon from '@mui/icons-material/Delete'
 import AddIcon from '@mui/icons-material/Add'
 import PaymentsIcon from '@mui/icons-material/Payments'
@@ -27,6 +27,8 @@ import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 
 import ItemPicker from '../../components/billing/ItemPicker'
 import { createBill } from '../../services/billing'
+import { createCustomer, fetchCustomers } from '../../services/customers'
+import type { Customer } from '../../lib/types'
 import { listItems } from '../../services/inventory'
 import { useToast } from '../../components/ui/Toaster'
 
@@ -106,6 +108,7 @@ function round2(n: number) {
 
 export default function Billing() {
   const toast = useToast()
+  const queryClient = useQueryClient()
 
   const [rows, setRows] = useState<CartRow[]>(normalizeRows(createEmptyRows(5)))
   const [priceDraftByRow, setPriceDraftByRow] = useState<Record<number, string>>({})
@@ -117,6 +120,12 @@ export default function Billing() {
   const [pickerOpen, setPickerOpen] = useState(false)
 
   const [tax, setTax] = useState(0)
+  const [customerQ, setCustomerQ] = useState('')
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null)
+  const [addCustomerOpen, setAddCustomerOpen] = useState(false)
+  const [newCustomerName, setNewCustomerName] = useState('')
+  const [newCustomerPhone, setNewCustomerPhone] = useState('')
+  const [newCustomerAddress, setNewCustomerAddress] = useState('')
 
   const [mode, setMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
   const [splitCombination, setSplitCombination] = useState<'cash-online' | 'cash-credit' | 'online-credit'>(
@@ -135,6 +144,38 @@ export default function Billing() {
     queryKey: ['billing-grid-items', gridSearch],
     queryFn: () => listItems(gridSearch),
   })
+  const { data: customerOptions = [] } = useQuery({
+    queryKey: ['billing-customers', customerQ],
+    queryFn: () => fetchCustomers({ q: customerQ }),
+  })
+  const customerOptionsWithSelected = useMemo(() => {
+    if (!selectedCustomer) return customerOptions
+    const hasSelected = customerOptions.some((c: any) => Number(c?.id) === Number(selectedCustomer.id))
+    return hasSelected ? customerOptions : [selectedCustomer, ...customerOptions]
+  }, [customerOptions, selectedCustomer])
+  const mAddCustomer = useMutation({
+    mutationFn: createCustomer,
+    onSuccess: (created) => {
+      setSelectedCustomer(created)
+      setAddCustomerOpen(false)
+      setNewCustomerName('')
+      setNewCustomerPhone('')
+      setNewCustomerAddress('')
+      setCustomerQ(String(created.name || ''))
+      queryClient.invalidateQueries({ queryKey: ['billing-customers'] })
+      queryClient.invalidateQueries({ queryKey: ['customers'] })
+      toast.push('Customer added.', 'success')
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to add customer'
+      toast.push(String(msg), 'error')
+    },
+  })
+
+  function handleNewCustomerPhoneChange(raw: string) {
+    const digits = raw.replace(/\D/g, '').slice(0, 10)
+    setNewCustomerPhone(digits)
+  }
 
   // ✅ Helper: count rows with actual items (item_id > 0)
   const filledRowCount = rows.filter((r) => r.item_id > 0).length
@@ -270,6 +311,19 @@ export default function Billing() {
     ).toFixed(2)
   )
   const effectiveDiscountPercent = totals.subtotal > 0 ? ((totals.discount / totals.subtotal) * 100) : 0
+  const customerNote = useMemo(() => {
+    if (!selectedCustomer) return ''
+    const parts: string[] = [String(selectedCustomer.name || '').trim()]
+    if (selectedCustomer.phone) parts.push(String(selectedCustomer.phone).trim())
+    if (selectedCustomer.address_line) parts.push(String(selectedCustomer.address_line).trim())
+    return `Customer: ${parts.filter(Boolean).join(' | ')}`
+  }, [selectedCustomer])
+  const effectiveNotes = useMemo(() => {
+    const freeText = String(notes || '').trim()
+    if (customerNote && freeText) return `${customerNote}\n${freeText}`
+    if (customerNote) return customerNote
+    return freeText
+  }, [customerNote, notes])
 
   const paymentsOk = useMemo(() => {
     const c = Number(cash || 0)
@@ -290,12 +344,12 @@ export default function Billing() {
   }, [mode, cash, online, chosenFinal, splitCombination])
 
   // ✅ Notes compulsory for CREDIT
-  const notesOkForCredit = mode !== 'credit' || notes.trim().length > 0
+  const notesOkForCredit = mode !== 'credit' || effectiveNotes.trim().length > 0
 
   const mBill = useMutation({
     mutationFn: async () => {
       // ✅ enforce notes for credit also on submit (backend safety)
-      if (mode === 'credit' && notes.trim().length === 0) {
+      if (mode === 'credit' && effectiveNotes.trim().length === 0) {
         toast.push(
           'Credit bill cannot be created without notes. Please add customer name/phone and credit details, then try again.',
           'warning'
@@ -318,7 +372,7 @@ export default function Billing() {
         payment_cash: Number(cash || 0),
         payment_online: Number(online || 0),
         final_amount: chosenFinal,
-        notes,
+        notes: effectiveNotes,
       }
 
       if (mode === 'credit') {
@@ -372,6 +426,8 @@ export default function Billing() {
       setCash('')
       setOnline('')
       setNotes('')
+      setSelectedCustomer(null)
+      setCustomerQ('')
       setFinalAmount(0)
       setFinalManuallyEdited(false)
       toast.push('Bill created successfully. Inventory and payment entries were updated.', 'success')
@@ -714,26 +770,84 @@ export default function Billing() {
       <Typography variant="h5">Billing</Typography>
 
       <Paper sx={{ p: 2 }}>
-        <Stack direction="row" justifyContent="space-between" gap={2}>
-          <Button startIcon={<AddIcon />} variant="contained" onClick={() => setPickerOpen(true)}>
-            Add Item
-          </Button>
-
-          <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
-            <TextField
-              label="Tax %"
-              type="text"
-              value={String(tax)}
-              onChange={(e) => setTax(Number(parseNumText(e.target.value) || 0))}
-              onWheel={blurOnWheel}
-              sx={{ width: 120, ...noSpinnerSx }}
-              inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+        <Stack gap={1.5}>
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} alignItems={{ md: 'flex-start' }}>
+            <Autocomplete
+              size="small"
+              options={customerOptionsWithSelected}
+              value={selectedCustomer}
+              onChange={(_e, val) => setSelectedCustomer(val)}
+              onInputChange={(_e, val, reason) => {
+                if (reason === 'input') setCustomerQ(val || '')
+                if (reason === 'clear' || reason === 'reset') setCustomerQ('')
+              }}
+              getOptionLabel={(option: any) => option?.name || ''}
+              isOptionEqualToValue={(a: any, b: any) => Number(a?.id) === Number(b?.id)}
+              filterOptions={(options) => options}
+              noOptionsText="No customers found"
+              sx={{
+                minWidth: 320,
+                flex: 1,
+                '& .MuiOutlinedInput-root': {
+                  borderRadius: 2,
+                  bgcolor: 'grey.50',
+                },
+              }}
+              renderOption={(props, option: any) => (
+                <li {...props} key={`cust-opt-${option.id}`}>
+                  <Stack sx={{ py: 0.5 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                      {option.name}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {[option.phone, option.address_line].filter(Boolean).join(' | ') || 'No phone/address'}
+                    </Typography>
+                  </Stack>
+                </li>
+              )}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Customer"
+                  placeholder="Search name / phone..."
+                  helperText={
+                    selectedCustomer
+                      ? [selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).join(' | ')
+                      : 'Select customer for this bill'
+                  }
+                  FormHelperTextProps={{
+                    sx: { color: 'text.secondary', fontSize: '0.74rem', ml: 0.25, mt: 0.25 },
+                  }}
+                />
+              )}
             />
+            <Button
+              variant="outlined"
+              onClick={() => setAddCustomerOpen(true)}
+              sx={{ minWidth: { xs: '100%', md: 148 }, height: 40 }}
+            >
+              Add Customer
+            </Button>
           </Stack>
         </Stack>
       </Paper>
 
       <Paper sx={{ p: 2 }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1.5} sx={{ mb: 1.5 }}>
+          <Button startIcon={<AddIcon />} variant="contained" onClick={() => setPickerOpen(true)}>
+            Add Item
+          </Button>
+          <TextField
+            label="Tax %"
+            type="text"
+            value={String(tax)}
+            onChange={(e) => setTax(Number(parseNumText(e.target.value) || 0))}
+            onWheel={blurOnWheel}
+            sx={{ width: { xs: '100%', sm: 130 }, ...noSpinnerSx }}
+            inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+          />
+        </Stack>
+
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table" style={{ tableLayout: 'fixed', width: '100%' }}>
             <thead>
@@ -1093,10 +1207,10 @@ export default function Billing() {
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             required={mode === 'credit'}
-            error={mode === 'credit' && notes.trim().length === 0}
+            error={mode === 'credit' && effectiveNotes.trim().length === 0}
             helperText={
               mode === 'credit'
-                ? notes.trim().length === 0
+                ? effectiveNotes.trim().length === 0
                   ? 'Please enter customer name / phone / credit details'
                   : 'Credit notes saved in bill'
                 : ''
@@ -1116,6 +1230,57 @@ export default function Billing() {
       </Paper>
 
       <ItemPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={addRow} />
+
+      <Dialog open={addCustomerOpen} onClose={() => setAddCustomerOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Add Customer</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} mt={1}>
+            <TextField
+              label="Name"
+              value={newCustomerName}
+              onChange={(e) => setNewCustomerName(e.target.value)}
+              required
+              fullWidth
+            />
+            <TextField
+              label="Phone (optional)"
+              value={newCustomerPhone}
+              onChange={(e) => handleNewCustomerPhoneChange(e.target.value)}
+              type="tel"
+              inputProps={{ maxLength: 10, inputMode: 'numeric' }}
+              helperText="Up to 10 digits"
+              fullWidth
+            />
+            <TextField
+              label="Address (optional)"
+              value={newCustomerAddress}
+              onChange={(e) => setNewCustomerAddress(e.target.value)}
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAddCustomerOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={mAddCustomer.isPending}
+            onClick={() => {
+              const nm = newCustomerName.trim()
+              if (!nm) {
+                toast.push('Customer name is required.', 'warning')
+                return
+              }
+              mAddCustomer.mutate({
+                name: nm,
+                phone: newCustomerPhone.trim() || undefined,
+                address_line: newCustomerAddress.trim() || undefined,
+              })
+            }}
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Beautiful CASH confirmation dialog */}
       <Dialog

@@ -18,6 +18,7 @@ import {
   CreditCard, // ✅ NEW ICON
   AccountBalanceWallet,
   MenuBook,
+  People,
 } from '@mui/icons-material'
 import { NavLink, useLocation } from 'react-router-dom'
 
@@ -35,6 +36,7 @@ const links = [
   { to: '/credit-bills', label: 'Credit Bills', icon: <CreditCard /> },
 
   { to: '/requested-items', label: 'Requested Items', icon: <PlaylistAddCheck /> },
+  { to: '/customers', label: 'Customers', icon: <People /> },
 ]
 
 export default function Sidebar() {

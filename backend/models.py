@@ -104,6 +104,15 @@ class RequestedItem(SQLModel, table=True):
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
+# ---------- Customers (DB) ----------
+class Customer(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    phone: Optional[str] = Field(default=None, index=True)
+    address_line: Optional[str] = None
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    updated_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+
 
 # ---------- Schemas (requests / responses) ----------
 class ItemCreate(SQLModel):
@@ -256,6 +265,27 @@ class RequestedItemOut(SQLModel):
     item_name: str
     notes: Optional[str] = None
     is_available: bool
+    created_at: str
+    updated_at: str
+
+
+# ---------- Customers (Schemas) ----------
+class CustomerCreate(SQLModel):
+    name: str
+    phone: Optional[str] = None
+    address_line: Optional[str] = None
+
+class CustomerUpdate(SQLModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    address_line: Optional[str] = None
+
+
+class CustomerOut(SQLModel):
+    id: int
+    name: str
+    phone: Optional[str] = None
+    address_line: Optional[str] = None
     created_at: str
     updated_at: str
 

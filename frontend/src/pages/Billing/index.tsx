@@ -53,6 +53,12 @@ function formatExpiry(exp?: string | null) {
   return `${d}-${m}-${y}` // "DD-MM-YYYY"
 }
 
+function toIsoDateOnly(exp?: string | null) {
+  if (!exp) return ''
+  const s = String(exp)
+  return s.length > 10 ? s.slice(0, 10) : s
+}
+
 // ✅ helper: parse numeric text safely (allows empty while typing)
 function parseNumText(v: string): number | '' {
   const s = String(v ?? '').trim()
@@ -153,6 +159,24 @@ export default function Billing() {
     const hasSelected = customerOptions.some((c: any) => Number(c?.id) === Number(selectedCustomer.id))
     return hasSelected ? customerOptions : [selectedCustomer, ...customerOptions]
   }, [customerOptions, selectedCustomer])
+  const inventoryItemsSorted = useMemo(() => {
+    const out = [...(inventoryItems as any[])]
+    out.sort((a: any, b: any) => {
+      const an = String(a?.name ?? '').toLowerCase()
+      const bn = String(b?.name ?? '').toLowerCase()
+      if (an !== bn) return an.localeCompare(bn)
+      const ab = String(a?.brand ?? '').toLowerCase()
+      const bb = String(b?.brand ?? '').toLowerCase()
+      if (ab !== bb) return ab.localeCompare(bb)
+      const da = toIsoDateOnly(a?.expiry_date)
+      const db = toIsoDateOnly(b?.expiry_date)
+      if (!da && !db) return 0
+      if (!da) return 1
+      if (!db) return -1
+      return da.localeCompare(db)
+    })
+    return out
+  }, [inventoryItems])
   const mAddCustomer = useMutation({
     mutationFn: createCustomer,
     onSuccess: (created) => {
@@ -869,9 +893,9 @@ export default function Billing() {
                   <td>
                     <Autocomplete
                       size="small"
-                      options={inventoryItems}
+                      options={inventoryItemsSorted}
                       value={
-                        inventoryItems.find((it: any) => Number(it.id) === Number(r.item_id)) ||
+                        inventoryItemsSorted.find((it: any) => Number(it.id) === Number(r.item_id)) ||
                         (Number(r.item_id) > 0
                           ? {
                               id: r.item_id,

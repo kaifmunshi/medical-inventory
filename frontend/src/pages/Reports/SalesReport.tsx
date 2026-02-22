@@ -80,6 +80,12 @@ function formatExpiry(exp?: string | null) {
   return `${d}-${m}-${y}`
 }
 
+function toIsoDateOnly(exp?: string | null) {
+  if (!exp) return ''
+  const s = String(exp)
+  return s.length > 10 ? s.slice(0, 10) : s
+}
+
 // ---------- Charged share helpers (same theory as Returns) ----------
 function round2(n: number) {
   return Math.round(n * 100) / 100
@@ -235,7 +241,24 @@ export default function SalesReport(props: {
   })
 
   const EDIT_SUGGESTIONS_PAGE_SIZE = 8
-  const editSuggestionItems = (qEditItems.data || []) as any[]
+  const editSuggestionItems = useMemo(() => {
+    const out = [...(((qEditItems.data as any[]) || []) as any[])]
+    out.sort((a: any, b: any) => {
+      const an = String(a?.name ?? '').toLowerCase()
+      const bn = String(b?.name ?? '').toLowerCase()
+      if (an !== bn) return an.localeCompare(bn)
+      const ab = String(a?.brand ?? '').toLowerCase()
+      const bb = String(b?.brand ?? '').toLowerCase()
+      if (ab !== bb) return ab.localeCompare(bb)
+      const da = toIsoDateOnly(a?.expiry_date)
+      const db = toIsoDateOnly(b?.expiry_date)
+      if (!da && !db) return 0
+      if (!da) return 1
+      if (!db) return -1
+      return da.localeCompare(db)
+    })
+    return out
+  }, [qEditItems.data])
   const editSuggestionTotalPages = Math.max(
     1,
     Math.ceil(editSuggestionItems.length / EDIT_SUGGESTIONS_PAGE_SIZE)

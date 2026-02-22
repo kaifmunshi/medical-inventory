@@ -59,6 +59,22 @@ function toIsoDateOnly(exp?: string | null) {
   return s.length > 10 ? s.slice(0, 10) : s
 }
 
+function nowLocalDateInput() {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function normalizeDateInput(v: string) {
+  const s = String(v || '').trim()
+  if (!s) return ''
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  if (s.length >= 10) return s.slice(0, 10)
+  return s
+}
+
 // ✅ helper: parse numeric text safely (allows empty while typing)
 function parseNumText(v: string): number | '' {
   const s = String(v ?? '').trim()
@@ -141,6 +157,7 @@ export default function Billing() {
   const [online, setOnline] = useState<number | ''>('')
 
   const [notes, setNotes] = useState('')
+  const [billDateTime, setBillDateTime] = useState<string>(nowLocalDateInput())
   const [finalAmount, setFinalAmount] = useState<number>(0)
   const [finalManuallyEdited, setFinalManuallyEdited] = useState(false)
 
@@ -315,13 +332,13 @@ export default function Billing() {
   }
 
   function roundNearest10(x: number) {
-    return Math.round(x / 10) * 10
+    return Math.round(Number(x || 0) / 10) * 10
   }
   function roundUp10(x: number) {
-    return Math.ceil(x / 10) * 10
+    return round2(Number(x || 0) + 10)
   }
   function roundDown10(x: number) {
-    return Math.floor(x / 10) * 10
+    return round2(Math.max(0, Number(x || 0) - 10))
   }
 
   const chosenFinal = Number(Number(finalAmount || 0).toFixed(2))
@@ -396,6 +413,7 @@ export default function Billing() {
         payment_cash: Number(cash || 0),
         payment_online: Number(online || 0),
         final_amount: chosenFinal,
+        date_time: normalizeDateInput(billDateTime),
         notes: effectiveNotes,
       }
 
@@ -452,6 +470,7 @@ export default function Billing() {
       setNotes('')
       setSelectedCustomer(null)
       setCustomerQ('')
+      setBillDateTime(nowLocalDateInput())
       setFinalAmount(0)
       setFinalManuallyEdited(false)
       toast.push('Bill created successfully. Inventory and payment entries were updated.', 'success')
@@ -863,13 +882,13 @@ export default function Billing() {
             Add Item
           </Button>
           <TextField
-            label="Tax %"
-            type="text"
-            value={String(tax)}
-            onChange={(e) => setTax(Number(parseNumText(e.target.value) || 0))}
-            onWheel={blurOnWheel}
-            sx={{ width: { xs: '100%', sm: 130 }, ...noSpinnerSx }}
-            inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+            size="small"
+            label="Bill Date"
+            type="date"
+            value={billDateTime}
+            onChange={(e) => setBillDateTime(e.target.value)}
+            sx={{ width: { xs: '100%', sm: 220 } }}
+            InputLabelProps={{ shrink: true }}
           />
         </Stack>
 
@@ -1168,24 +1187,36 @@ export default function Billing() {
             </Typography>
             <Stack gap={0.5} alignItems={{ xs: 'flex-start', sm: 'flex-end' }} sx={{ mt: 1 }}>
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems="center" justifyContent="flex-end">
+              <Stack sx={{ width: { xs: '100%', sm: 220 } }} spacing={1.5}>
                 <TextField
-                  label="Final Amount (you charge)"
+                  size="small"
+                  label="Tax %"
                   type="text"
-                  value={String(finalAmount)}
-                  onChange={(e) => {
-                    const v = parseNumText(e.target.value)
-                    setFinalAmount(Number(v || 0))
-                    setFinalManuallyEdited(true)
-                  }}
-                  onBlur={() => applyFinalAmountToRows(finalAmount)}
+                  value={String(tax)}
+                  onChange={(e) => setTax(Number(parseNumText(e.target.value) || 0))}
                   onWheel={blurOnWheel}
-                  sx={{ width: 220, ...noSpinnerSx }}
+                  sx={{ width: { xs: 110, sm: 90 }, alignSelf: 'flex-start', ...noSpinnerSx }}
                   inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
                 />
+                <TextField
+                  label="Final Amount (you charge)"
+                    type="text"
+                    value={String(finalAmount)}
+                    onChange={(e) => {
+                      const v = parseNumText(e.target.value)
+                      setFinalAmount(Number(v || 0))
+                      setFinalManuallyEdited(true)
+                    }}
+                    onBlur={() => applyFinalAmountToRows(finalAmount)}
+                    onWheel={blurOnWheel}
+                    sx={{ ...noSpinnerSx }}
+                    inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                  />
+                </Stack>
                 <Button
                   size="small"
                   onClick={() => {
-                    const target = roundNearest10(totals.total)
+                    const target = roundNearest10(chosenFinal)
                     setFinalAmount(target)
                     setFinalManuallyEdited(true)
                     applyFinalAmountToRows(target)
@@ -1196,24 +1227,24 @@ export default function Billing() {
                 <Button
                   size="small"
                   onClick={() => {
-                    const target = roundDown10(totals.total)
+                    const target = roundDown10(chosenFinal)
                     setFinalAmount(target)
                     setFinalManuallyEdited(true)
                     applyFinalAmountToRows(target)
                   }}
                 >
-                  Round ↓10
+                  Round -10
                 </Button>
                 <Button
                   size="small"
                   onClick={() => {
-                    const target = roundUp10(totals.total)
+                    const target = roundUp10(chosenFinal)
                     setFinalAmount(target)
                     setFinalManuallyEdited(true)
                     applyFinalAmountToRows(target)
                   }}
                 >
-                  Round ↑10
+                  Round +10
                 </Button>
               </Stack>
             </Stack>

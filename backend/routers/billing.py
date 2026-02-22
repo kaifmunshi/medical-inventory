@@ -59,6 +59,19 @@ def iso_date(s: Optional[str]) -> str:
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
+def normalize_bill_ts(raw: Optional[str], fallback: str) -> str:
+    if not raw:
+        return fallback
+    s = str(raw).strip()
+    if not s:
+        return fallback
+    s = s.replace(" ", "T")
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date_time. Use ISO format.")
+    return dt.isoformat(timespec="seconds")
+
 
 def is_deleted_bill(b: Bill) -> bool:
     return bool(getattr(b, "is_deleted", False))
@@ -515,6 +528,7 @@ def create_bill(payload: BillCreate):
 
         # 4) Create Bill + BillItems and deduct stock (✅ single transaction)
         now_iso = now_ts()
+        bill_ts = normalize_bill_ts(getattr(payload, "date_time", None), now_iso)
 
         paid_now = round2(cash + online)
         has_credit_component = round2(total - paid_now) > 0
@@ -524,15 +538,15 @@ def create_bill(payload: BillCreate):
             paid_at = None
         elif paid_now + 0.0001 < total:
             status = "PARTIAL"
-            paid_at = now_iso
+            paid_at = bill_ts
         else:
             status = "PAID"
-            paid_at = now_iso
+            paid_at = bill_ts
         paid_amount = paid_now
 
         try:
             b = Bill(
-                date_time=now_iso,
+                date_time=bill_ts,
                 discount_percent=payload.discount_percent,
                 subtotal=subtotal,
                 total_amount=total,
@@ -587,7 +601,7 @@ def create_bill(payload: BillCreate):
             if paid_now > 0:
                 p = BillPayment(
                     bill_id=b.id,
-                    received_at=now_iso,
+                    received_at=bill_ts,
                     mode=payload.payment_mode,  # cash/online/split
                     cash_amount=cash,
                     online_amount=online,
@@ -648,6 +662,7 @@ class BillUpdateIn(BaseModel):
     payment_online: float = 0.0
     payment_credit: float = 0.0
     final_amount: Optional[float] = None
+    date_time: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -752,6 +767,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                 raise HTTPException(status_code=400, detail=f"Insufficient stock for {itm.name}")
 
         now_iso = now_ts()
+        bill_ts = normalize_bill_ts(getattr(payload, "date_time", None), b.date_time or now_iso)
         paid_now = round2(cash + online)
         has_credit_component = round2(total - paid_now) > 0
         is_credit = payload.payment_mode == "credit" or has_credit_component
@@ -760,10 +776,10 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             paid_at = None
         elif paid_now + 0.0001 < total:
             status = "PARTIAL"
-            paid_at = now_iso
+            paid_at = bill_ts
         else:
             status = "PAID"
-            paid_at = now_iso
+            paid_at = bill_ts
         paid_amount = paid_now
 
         try:
@@ -809,13 +825,14 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             if paid_now > 0:
                 session.add(BillPayment(
                     bill_id=b.id,
-                    received_at=now_iso,
+                    received_at=bill_ts,
                     mode=payload.payment_mode,
                     cash_amount=cash,
                     online_amount=online,
                     note="auto: payment at bill creation",
                 ))
 
+            b.date_time = bill_ts
             b.discount_percent = payload.discount_percent
             b.subtotal = subtotal
             b.total_amount = total

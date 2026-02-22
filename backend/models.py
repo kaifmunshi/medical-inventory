@@ -160,6 +160,7 @@ class BillCreate(SQLModel):
     payment_online: float = 0.0
     payment_credit: float = 0.0
     final_amount: Optional[float] = None
+    date_time: Optional[str] = None
     notes: Optional[str] = None
 
 

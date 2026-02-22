@@ -86,6 +86,29 @@ function toIsoDateOnly(exp?: string | null) {
   return s.length > 10 ? s.slice(0, 10) : s
 }
 
+function nowLocalDateInput() {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function toLocalDateInput(v?: string | null) {
+  const s = String(v || '').trim()
+  if (!s) return nowLocalDateInput()
+  const normalized = s.replace(' ', 'T')
+  return normalized.length >= 10 ? normalized.slice(0, 10) : normalized
+}
+
+function normalizeDateInput(v: string) {
+  const s = String(v || '').trim()
+  if (!s) return ''
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  if (s.length >= 10) return s.slice(0, 10)
+  return s
+}
+
 // ---------- Charged share helpers (same theory as Returns) ----------
 function round2(n: number) {
   return Math.round(n * 100) / 100
@@ -190,6 +213,7 @@ export default function SalesReport(props: {
   const [editCash, setEditCash] = useState<number>(0)
   const [editOnline, setEditOnline] = useState<number>(0)
   const [editNotes, setEditNotes] = useState<string>('')
+  const [editDateTime, setEditDateTime] = useState<string>(nowLocalDateInput())
   const [editFinalAmount, setEditFinalAmount] = useState<number>(0)
   const [editFinalManuallyEdited, setEditFinalManuallyEdited] = useState(false)
   const [editItemQuery, setEditItemQuery] = useState('')
@@ -431,6 +455,7 @@ export default function SalesReport(props: {
       const payload: any = {
         items: cleanedItems,
         discount_percent: 0,
+        date_time: normalizeDateInput(editDateTime),
         payment_mode: editPaymentMode,
         payment_cash: Number(editCash || 0),
         payment_online: Number(editOnline || 0),
@@ -600,6 +625,7 @@ export default function SalesReport(props: {
     setEditSplitCombination('cash-online')
     setEditCash(Number(b.payment_cash || 0))
     setEditOnline(Number(b.payment_online || 0))
+    setEditDateTime(toLocalDateInput(b.date_time || b.created_at))
     setEditNotes(String(b.notes || ''))
     setEditSelectedCustomer(null)
     setEditCustomerQ('')
@@ -815,13 +841,13 @@ export default function SalesReport(props: {
   }
 
   function roundNearest10(x: number) {
-    return Math.round(x / 10) * 10
+    return Math.round(Number(x || 0) / 10) * 10
   }
   function roundUp10(x: number) {
-    return Math.ceil(x / 10) * 10
+    return round2(Number(x || 0) + 10)
   }
   function roundDown10(x: number) {
-    return Math.floor(x / 10) * 10
+    return round2(Math.max(0, Number(x || 0) - 10))
   }
 
   useEffect(() => {
@@ -1485,6 +1511,14 @@ export default function SalesReport(props: {
               <Stack gap={2}>
                 <Stack direction={{ xs: 'column', sm: 'row' }} gap={2} flexWrap="wrap" useFlexGap>
                   <TextField
+                    label="Bill Date"
+                    type="date"
+                    value={editDateTime}
+                    onChange={(e) => setEditDateTime(e.target.value)}
+                    sx={{ width: 230 }}
+                    InputLabelProps={{ shrink: true }}
+                  />
+                  <TextField
                     select
                     label="Payment Mode"
                     value={editPaymentMode}
@@ -1587,7 +1621,7 @@ export default function SalesReport(props: {
                   <Button
                     size="small"
                     onClick={() => {
-                      const target = roundNearest10(editFinalByRows)
+                      const target = roundNearest10(editChosenFinal)
                       setEditFinalAmount(target)
                       setEditFinalManuallyEdited(true)
                       applyEditFinalAmountToRows(target)
@@ -1598,24 +1632,24 @@ export default function SalesReport(props: {
                   <Button
                     size="small"
                     onClick={() => {
-                      const target = roundDown10(editFinalByRows)
+                      const target = roundDown10(editChosenFinal)
                       setEditFinalAmount(target)
                       setEditFinalManuallyEdited(true)
                       applyEditFinalAmountToRows(target)
                     }}
                   >
-                    Round ↓10
+                    Round -10
                   </Button>
                   <Button
                     size="small"
                     onClick={() => {
-                      const target = roundUp10(editFinalByRows)
+                      const target = roundUp10(editChosenFinal)
                       setEditFinalAmount(target)
                       setEditFinalManuallyEdited(true)
                       applyEditFinalAmountToRows(target)
                     }}
                   >
-                    Round ↑10
+                    Round +10
                   </Button>
                 </Stack>
               </Stack>

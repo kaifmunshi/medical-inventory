@@ -810,6 +810,7 @@ export default function Billing() {
                   {...params}
                   label="Customer"
                   placeholder="Search name / phone..."
+                  InputLabelProps={{ shrink: true }}
                   helperText={
                     selectedCustomer
                       ? [selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).join(' | ')

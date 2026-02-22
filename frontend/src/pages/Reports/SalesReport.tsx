@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Autocomplete,
   Box,
   Button,
   Dialog,
@@ -21,6 +22,8 @@ import EditIcon from '@mui/icons-material/Edit'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useToast } from '../../components/ui/Toaster'
 import { listItems } from '../../services/inventory'
+import { createCustomer, fetchCustomers } from '../../services/customers'
+import type { Customer } from '../../lib/types'
 
 import { listBillsPaged, getBill, getSalesAggregate, softDeleteBill, recoverBill, updateBill } from '../../services/billing'
 
@@ -82,6 +85,21 @@ function parseNumText(v: string): number | '' {
 
 function blurOnWheel(e: any) {
   e.currentTarget.blur()
+}
+
+function extractFreeNotes(raw: string): string {
+  const lines = String(raw || '').split(/\r?\n/)
+  const first = String(lines[0] || '').trim()
+  if (!/^customer\s*:/i.test(first)) return String(raw || '')
+  return lines.slice(1).join('\n').trim()
+}
+
+function buildCustomerNote(c: Customer | null): string {
+  if (!c) return ''
+  const parts: string[] = [String(c.name || '').trim()]
+  if (c.phone) parts.push(String(c.phone).trim())
+  if (c.address_line) parts.push(String(c.address_line).trim())
+  return `Customer: ${parts.filter(Boolean).join(' | ')}`
 }
 
 const GRID_INPUT_SX = {
@@ -163,11 +181,48 @@ export default function SalesReport(props: {
   const [editPriceDraftByRow, setEditPriceDraftByRow] = useState<Record<number, string>>({})
   const [editDiscountDraftByRow, setEditDiscountDraftByRow] = useState<Record<number, string>>({})
   const [editSuggestionPage, setEditSuggestionPage] = useState(0)
+  const [editCustomerQ, setEditCustomerQ] = useState('')
+  const [editSelectedCustomer, setEditSelectedCustomer] = useState<Customer | null>(null)
+  const [editAddCustomerOpen, setEditAddCustomerOpen] = useState(false)
+  const [editNewCustomerName, setEditNewCustomerName] = useState('')
+  const [editNewCustomerPhone, setEditNewCustomerPhone] = useState('')
+  const [editNewCustomerAddress, setEditNewCustomerAddress] = useState('')
 
   const qEditItems = useQuery({
     queryKey: ['edit-bill-items', editItemQuery],
     enabled: editOpen,
     queryFn: () => listItems(editItemQuery),
+  })
+  const { data: editCustomerOptions = [] } = useQuery({
+    queryKey: ['edit-billing-customers', editCustomerQ],
+    enabled: editOpen,
+    queryFn: () => fetchCustomers({ q: editCustomerQ }),
+  })
+  const editCustomerOptionsWithSelected = useMemo(() => {
+    if (!editSelectedCustomer) return editCustomerOptions
+    const hasSelected = editCustomerOptions.some(
+      (c: any) => Number(c?.id) === Number(editSelectedCustomer.id)
+    )
+    return hasSelected ? editCustomerOptions : [editSelectedCustomer, ...editCustomerOptions]
+  }, [editCustomerOptions, editSelectedCustomer])
+  const mEditAddCustomer = useMutation({
+    mutationFn: createCustomer,
+    onSuccess: (created) => {
+      setEditSelectedCustomer(created)
+      setEditAddCustomerOpen(false)
+      setEditNewCustomerName('')
+      setEditNewCustomerPhone('')
+      setEditNewCustomerAddress('')
+      setEditCustomerQ(String(created.name || ''))
+      queryClient.invalidateQueries({ queryKey: ['edit-billing-customers'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-customers'] })
+      queryClient.invalidateQueries({ queryKey: ['customers'] })
+      toast.push('Customer added.', 'success')
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to add customer'
+      toast.push(String(msg), 'error')
+    },
   })
 
   const EDIT_SUGGESTIONS_PAGE_SIZE = 8
@@ -328,7 +383,7 @@ export default function SalesReport(props: {
   const mEdit = useMutation({
     mutationFn: async () => {
       if (!editBillId) throw new Error('Bill not selected')
-      if (editPaymentMode === 'credit' && editNotes.trim().length === 0) {
+      if (editPaymentMode === 'credit' && editEffectiveNotes.trim().length === 0) {
         throw new Error('Notes required for credit')
       }
       const adjustedItems = distributeEditLinesByFinal(editItems, editChosenFinal)
@@ -348,7 +403,7 @@ export default function SalesReport(props: {
         payment_cash: Number(editCash || 0),
         payment_online: Number(editOnline || 0),
         final_amount: editChosenFinal,
-        notes: editNotes || undefined,
+        notes: editEffectiveNotes || undefined,
       }
 
       if (editPaymentMode === 'credit') {
@@ -514,6 +569,12 @@ export default function SalesReport(props: {
     setEditCash(Number(b.payment_cash || 0))
     setEditOnline(Number(b.payment_online || 0))
     setEditNotes(String(b.notes || ''))
+    setEditSelectedCustomer(null)
+    setEditCustomerQ('')
+    setEditAddCustomerOpen(false)
+    setEditNewCustomerName('')
+    setEditNewCustomerPhone('')
+    setEditNewCustomerAddress('')
     const sumByRows = round2(lines.reduce((s, it) => s + Number(it.custom_unit_price || 0) * Number(it.quantity || 0), 0))
     const billedTotal = Number.isFinite(Number(b.total_amount)) ? Number(b.total_amount) : sumByRows
     setEditFinalAmount(billedTotal)
@@ -707,7 +768,19 @@ export default function SalesReport(props: {
     if (editSplitCombination === 'cash-credit') return c >= 0 && c <= editChosenFinal
     return o >= 0 && o <= editChosenFinal
   }, [editPaymentMode, editCash, editOnline, editChosenFinal, editSplitCombination])
-  const editNotesOkForCredit = editPaymentMode !== 'credit' || editNotes.trim().length > 0
+  const editCustomerNote = useMemo(() => buildCustomerNote(editSelectedCustomer), [editSelectedCustomer])
+  const editEffectiveNotes = useMemo(() => {
+    const freeText = extractFreeNotes(editNotes).trim()
+    if (editCustomerNote && freeText) return `${editCustomerNote}\n${freeText}`
+    if (editCustomerNote) return editCustomerNote
+    return String(editNotes || '').trim()
+  }, [editCustomerNote, editNotes])
+  const editNotesOkForCredit = editPaymentMode !== 'credit' || editEffectiveNotes.trim().length > 0
+
+  function handleEditNewCustomerPhoneChange(raw: string) {
+    const digits = raw.replace(/\D/g, '').slice(0, 10)
+    setEditNewCustomerPhone(digits)
+  }
 
   function roundNearest10(x: number) {
     return Math.round(x / 10) * 10
@@ -1138,6 +1211,63 @@ export default function SalesReport(props: {
         <DialogContent dividers>
           <Stack gap={2}>
             <Paper sx={{ p: 2 }}>
+              <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} alignItems={{ md: 'flex-start' }}>
+                <Autocomplete
+                  size="small"
+                  options={editCustomerOptionsWithSelected}
+                  value={editSelectedCustomer}
+                  onChange={(_e, val) => setEditSelectedCustomer(val)}
+                  onInputChange={(_e, val, reason) => {
+                    if (reason === 'input') setEditCustomerQ(val || '')
+                    if (reason === 'clear' || reason === 'reset') setEditCustomerQ('')
+                  }}
+                  getOptionLabel={(option: any) => option?.name || ''}
+                  isOptionEqualToValue={(a: any, b: any) => Number(a?.id) === Number(b?.id)}
+                  filterOptions={(options) => options}
+                  noOptionsText="No customers found"
+                  sx={{ minWidth: 320, flex: 1 }}
+                  renderOption={(props, option: any) => (
+                    <li {...props} key={`edit-cust-opt-${option.id}`}>
+                      <Stack sx={{ py: 0.5 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          {option.name}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {[option.phone, option.address_line].filter(Boolean).join(' | ') || 'No phone/address'}
+                        </Typography>
+                      </Stack>
+                    </li>
+                  )}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Customer"
+                      placeholder="Search name / phone..."
+                      InputLabelProps={{ shrink: true }}
+                      helperText={
+                        editSelectedCustomer
+                          ? [editSelectedCustomer.phone, editSelectedCustomer.address_line]
+                              .filter(Boolean)
+                              .join(' | ')
+                          : 'Optional: attach customer details to bill notes'
+                      }
+                      FormHelperTextProps={{
+                        sx: { color: 'text.secondary', fontSize: '0.74rem', ml: 0.25, mt: 0.25 },
+                      }}
+                    />
+                  )}
+                />
+                <Button
+                  variant="outlined"
+                  onClick={() => setEditAddCustomerOpen(true)}
+                  sx={{ minWidth: { xs: '100%', md: 148 }, height: 40 }}
+                >
+                  Add Customer
+                </Button>
+              </Stack>
+            </Paper>
+
+            <Paper sx={{ p: 2 }}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
                 <TextField
                   label="Add item (name/brand)"
@@ -1466,7 +1596,7 @@ export default function SalesReport(props: {
               multiline
               minRows={2}
               required={editPaymentMode === 'credit'}
-              error={editPaymentMode === 'credit' && editNotes.trim().length === 0}
+              error={editPaymentMode === 'credit' && editEffectiveNotes.trim().length === 0}
             />
           </Stack>
         </DialogContent>
@@ -1476,6 +1606,62 @@ export default function SalesReport(props: {
             variant="contained"
             onClick={() => mEdit.mutate()}
             disabled={mEdit.isPending || !editPaymentsOk || !editNotesOkForCredit}
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={editAddCustomerOpen}
+        onClose={() => setEditAddCustomerOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Add Customer</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} mt={1}>
+            <TextField
+              label="Name"
+              value={editNewCustomerName}
+              onChange={(e) => setEditNewCustomerName(e.target.value)}
+              required
+              fullWidth
+            />
+            <TextField
+              label="Phone (optional)"
+              value={editNewCustomerPhone}
+              onChange={(e) => handleEditNewCustomerPhoneChange(e.target.value)}
+              type="tel"
+              inputProps={{ maxLength: 10, inputMode: 'numeric' }}
+              helperText="Up to 10 digits"
+              fullWidth
+            />
+            <TextField
+              label="Address (optional)"
+              value={editNewCustomerAddress}
+              onChange={(e) => setEditNewCustomerAddress(e.target.value)}
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditAddCustomerOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={mEditAddCustomer.isPending}
+            onClick={() => {
+              const nm = editNewCustomerName.trim()
+              if (!nm) {
+                toast.push('Customer name is required.', 'warning')
+                return
+              }
+              mEditAddCustomer.mutate({
+                name: nm,
+                phone: editNewCustomerPhone.trim() || undefined,
+                address_line: editNewCustomerAddress.trim() || undefined,
+              })
+            }}
           >
             Save
           </Button>

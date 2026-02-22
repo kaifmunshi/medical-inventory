@@ -36,6 +36,47 @@ function money(n: number | string | undefined | null) {
   return v.toFixed(2)
 }
 
+function round2(n: number) {
+  return Math.round(n * 100) / 100
+}
+
+function computeBillProration(bill: any) {
+  const items = (bill?.items || []) as any[]
+  const sub = items.reduce((s: number, it: any) => s + Number(it.mrp) * Number(it.quantity), 0)
+
+  const discPct = Number(bill?.discount_percent || 0)
+  const taxPct = Number(bill?.tax_percent || 0)
+
+  const discAmt = (sub * discPct) / 100
+  const afterDisc = sub - discAmt
+  const taxAmt = (afterDisc * taxPct) / 100
+  const computedTotal = afterDisc + taxAmt
+
+  const finalTotal =
+    bill?.total_amount !== undefined && bill?.total_amount !== null
+      ? Number(bill.total_amount)
+      : computedTotal
+
+  const factor = computedTotal > 0 ? finalTotal / computedTotal : 1
+  return { discPct, taxPct, computedTotal, finalTotal, factor }
+}
+
+function chargedLine(bill: any, mrp: number, qty: number) {
+  const { discPct, taxPct, factor } = computeBillProration(bill)
+
+  const lineSub = Number(mrp) * Number(qty)
+  const afterDisc = lineSub * (1 - discPct / 100)
+  const afterTax = afterDisc * (1 + taxPct / 100)
+
+  return round2(afterTax * factor)
+}
+
+function lineDiscountPercent(mrp: number, sp: number) {
+  if (Number(mrp) <= 0) return 0
+  const pct = ((Number(mrp) - Number(sp)) / Number(mrp)) * 100
+  return round2(Math.min(100, Math.max(0, pct)))
+}
+
 function isPaidStatus(s: any) {
   return String(s || '').toUpperCase() === 'PAID'
 }
@@ -149,11 +190,9 @@ export default function CreditBills() {
 
   async function openBillDetail(row: any) {
     let b = row.raw
-    if (!b?.items || !Array.isArray(b.items) || b.items.length === 0) {
-      try {
-        b = await getBill(row.id)
-      } catch {}
-    }
+    try {
+      b = await getBill(row.id)
+    } catch {}
     setDetail(b)
     setOpenDetailDlg(true)
 
@@ -426,7 +465,9 @@ export default function CreditBills() {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
-                      <th>Line Total</th>
+                      <th>SP</th>
+                      <th>Disc. %</th>
+                      <th>Computed Total</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -434,18 +475,23 @@ export default function CreditBills() {
                       const name = it.item_name || it.name || it.item?.name || `#${it.item_id}`
                       const qty = Number(it.quantity)
                       const mrp = Number(it.mrp)
+                      const lineCharged = chargedLine(detail, mrp, qty)
+                      const sp = qty > 0 ? round2(lineCharged / qty) : 0
+                      const lineDiscPct = lineDiscountPercent(mrp, sp)
                       return (
                         <tr key={idx}>
                           <td>{name}</td>
                           <td>{qty}</td>
                           <td>{money(mrp)}</td>
-                          <td>{money(qty * mrp)}</td>
+                          <td>{money(sp)}</td>
+                          <td>{money(lineDiscPct)}</td>
+                          <td>{money(lineCharged)}</td>
                         </tr>
                       )
                     })}
                     {(detail.items || []).length === 0 && (
                       <tr>
-                        <td colSpan={4}>
+                        <td colSpan={6}>
                           <Box p={2} color="text.secondary">
                             No items.
                           </Box>
@@ -458,6 +504,12 @@ export default function CreditBills() {
 
               <Stack gap={0.5} sx={{ ml: 'auto', maxWidth: 420 }}>
                 <Typography>
+                  Subtotal (MRP x Qty): <b>{money(detail.subtotal)}</b>
+                </Typography>
+                <Typography>
+                  Discount %: <b>{money(detail.discount_percent)}</b>
+                </Typography>
+                <Typography>
                   Total: <b>{money(detail.total_amount)}</b>
                 </Typography>
                 <Typography>
@@ -469,9 +521,7 @@ export default function CreditBills() {
                 </Typography>
 
                 <Stack direction="row" alignItems="center" gap={1}>
-                  <Typography>
-                    Status: <b style={{ verticalAlign: 'middle' }}>{detail.payment_status || '-'}</b>
-                  </Typography>
+                  <Typography>Status:</Typography>
                   <StatusChip status={detail.payment_status || '-'} />
                 </Stack>
 
@@ -486,13 +536,18 @@ export default function CreditBills() {
                 <Typography color="text.secondary">
                   Last Payment Mode: <b>{lastPaymentModeLabel ? lastPaymentModeLabel : '-'}</b>
                 </Typography>
-
-                {detail.notes ? (
-                  <Typography sx={{ mt: 1 }}>
-                    Notes: <i>{detail.notes}</i>
-                  </Typography>
-                ) : null}
               </Stack>
+
+              {detail.notes ? (
+                <Box sx={{ width: '100%' }}>
+                  <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                    Notes
+                  </Typography>
+                  <Typography sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {detail.notes}
+                  </Typography>
+                </Box>
+              ) : null}
 
               <Divider />
 

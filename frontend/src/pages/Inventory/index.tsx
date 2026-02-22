@@ -18,7 +18,7 @@ import {
   Divider,
   MenuItem,
 } from '@mui/material'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 
 import {
@@ -101,8 +101,6 @@ export default function Inventory() {
 
   // which item is pending delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null)
-  const [groupPage, setGroupPage] = useState(0)
-
   // ✅ LEDGER DIALOG STATE (GROUP-BASED)
   const [ledgerOpen, setLedgerOpen] = useState(false)
 
@@ -124,27 +122,25 @@ export default function Inventory() {
   const [ledgerFrom, setLedgerFrom] = useState('')
   const [ledgerTo, setLedgerTo] = useState('')
   const [ledgerReason, setLedgerReason] = useState<string>('') // empty = all
+  const loadMoreRef = useRef<HTMLDivElement | null>(null)
 
   // ✅ Debounce typing to avoid calling API on every keystroke
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(q.trim()), 600)
     return () => clearTimeout(t)
   }, [q])
-  useEffect(() => {
-    setGroupPage(0)
-  }, [debouncedQ])
 
   const qc = useQueryClient()
-  const LIMIT = 60
+  const LIMIT = 50
 
-  // ✅ Infinite query (offset-based pagination)
+  // ✅ Infinite inventory query (loads 50 at a time)
   const {
     data,
     isLoading,
+    isFetching,
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-    isFetching,
   } = useInfiniteQuery({
     queryKey: ['inventory-items', debouncedQ],
     initialPageParam: 0,
@@ -160,10 +156,24 @@ export default function Inventory() {
     getNextPageParam: (lastPage) => lastPage.next_offset ?? undefined,
   })
 
-  // ✅ Flatten pages into a single rows array
-  const rows = useMemo(() => {
-    return data?.pages.flatMap((p) => p.items) ?? []
-  }, [data])
+  const rows = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data])
+
+  useEffect(() => {
+    const el = loadMoreRef.current
+    if (!el) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0]?.isIntersecting) return
+        if (!hasNextPage || isFetchingNextPage) return
+        void fetchNextPage()
+      },
+      { root: null, rootMargin: '0px 0px 120px 0px', threshold: 0 }
+    )
+
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage])
 
   // ✅ Group rows by (name + brand) ALWAYS (includes stock=0 batches)
   const groups = useMemo(() => {
@@ -232,19 +242,6 @@ export default function Inventory() {
 
     return list
   }, [rows])
-
-  const GROUP_PAGE_SIZE = 50
-  const groupPageCount = Math.max(1, Math.ceil(groups.length / GROUP_PAGE_SIZE))
-  useEffect(() => {
-    setGroupPage((p) => Math.min(p, Math.max(0, groupPageCount - 1)))
-  }, [groupPageCount])
-  const pagedGroups = useMemo(() => {
-    const start = groupPage * GROUP_PAGE_SIZE
-    return groups.slice(start, start + GROUP_PAGE_SIZE)
-  }, [groups, groupPage])
-  const canPrevGroupPage = groupPage > 0
-  const hasLoadedNextGroupPage = (groupPage + 1) * GROUP_PAGE_SIZE < groups.length
-  const canNextGroupPage = hasLoadedNextGroupPage || !!hasNextPage
 
   const mCreate = useMutation({
     mutationFn: (payload: ItemFormValues) => createItem(payload),
@@ -494,7 +491,7 @@ export default function Inventory() {
                 </thead>
 
                 <tbody>
-                  {pagedGroups.flatMap((g: any) => {
+                  {groups.flatMap((g: any) => {
                     const isOut = Number(g.totalStock || 0) <= 0
 
                     const parentRow = (
@@ -667,47 +664,18 @@ export default function Inventory() {
               </table>
             </Box>
 
-            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ pt: 1.5 }}>
-              <Typography variant="body2" color="text.secondary">
-                Page {groupPage + 1} {groups.length > 0 ? `of ${groupPageCount}` : ''} • Showing{' '}
-                {groups.length > 0 ? groupPage * GROUP_PAGE_SIZE + 1 : 0}-
-                {Math.min((groupPage + 1) * GROUP_PAGE_SIZE, groups.length)} grouped products
-              </Typography>
-              <Stack direction="row" gap={1}>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  disabled={!canPrevGroupPage}
-                  onClick={() => setGroupPage((p) => Math.max(0, p - 1))}
-                >
-                  Prev
-                </Button>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  disabled={!canNextGroupPage || isFetchingNextPage}
-                  onClick={async () => {
-                    if (hasLoadedNextGroupPage) {
-                      setGroupPage((p) => p + 1)
-                      return
-                    }
-                    if (hasNextPage) {
-                      await fetchNextPage()
-                      setGroupPage((p) => p + 1)
-                    }
-                  }}
-                >
-                  {isFetchingNextPage ? 'Loading...' : 'Next'}
-                </Button>
-              </Stack>
-            </Stack>
-
             {!isFetching && rows.length === 0 && (
               <Box sx={{ py: 3, textAlign: 'center' }}>
                 <Typography variant="body2" color="text.secondary">
                   No items found.
                 </Typography>
               </Box>
+            )}
+            <Box ref={loadMoreRef} sx={{ height: 1 }} />
+            {isFetchingNextPage && (
+              <Typography variant="body2" color="text.secondary" sx={{ pt: 1, textAlign: 'center' }}>
+                Loading more...
+              </Typography>
             )}
           </>
         )}

@@ -915,7 +915,7 @@ export default function Billing() {
                               {option.brand ? ` (${option.brand})` : ''}
                             </Typography>
                             <Typography variant="caption" color="text.secondary">
-                              {option.brand ? `${option.brand} | ` : ''}MRP ₹{Number(option.mrp || 0).toFixed(2)} | Stock {Number(option.stock || 0)}
+                              {option.brand ? `${option.brand} | ` : ''}MRP ₹{Number(option.mrp || 0).toFixed(2)} | Stock {Number(option.stock || 0)} | Exp {formatExpiry(option.expiry_date)}
                             </Typography>
                           </Stack>
                         </li>

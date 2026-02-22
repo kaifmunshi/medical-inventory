@@ -71,6 +71,15 @@ function money(n: number | string | undefined | null) {
   return v.toFixed(2)
 }
 
+function formatExpiry(exp?: string | null) {
+  if (!exp) return '-'
+  const s = String(exp)
+  const iso = s.length > 10 ? s.slice(0, 10) : s
+  const [y, m, d] = iso.split('-')
+  if (!y || !m || !d) return iso
+  return `${d}-${m}-${y}`
+}
+
 // ---------- Charged share helpers (same theory as Returns) ----------
 function round2(n: number) {
   return Math.round(n * 100) / 100
@@ -1306,7 +1315,8 @@ export default function SalesReport(props: {
                     <Box>
                       <Typography variant="body2">{it.name}</Typography>
                       <Typography variant="caption" color="text.secondary">
-                        Brand: {it.brand || '-'} | Stock: {Number(it.stock || 0)} | MRP: {money(it.mrp)}
+                        Brand: {it.brand || '-'} | Stock: {Number(it.stock || 0)} | MRP: {money(it.mrp)} | Exp:{' '}
+                        {formatExpiry(it.expiry_date)}
                       </Typography>
                     </Box>
                     <Button

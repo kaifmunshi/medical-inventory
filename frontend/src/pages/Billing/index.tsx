@@ -59,6 +59,12 @@ function toIsoDateOnly(exp?: string | null) {
   return s.length > 10 ? s.slice(0, 10) : s
 }
 
+function buildGroupKey(it: any) {
+  const name = String(it?.name ?? '').trim().toLowerCase()
+  const brand = String(it?.brand ?? '').trim().toLowerCase()
+  return `${name}__${brand}`
+}
+
 function nowLocalDateInput() {
   const d = new Date()
   const y = d.getFullYear()
@@ -177,7 +183,31 @@ export default function Billing() {
     return hasSelected ? customerOptions : [selectedCustomer, ...customerOptions]
   }, [customerOptions, selectedCustomer])
   const inventoryItemsSorted = useMemo(() => {
-    const out = [...(inventoryItems as any[])]
+    const all = [...(inventoryItems as any[])]
+    const byGroup = new Map<string, any[]>()
+
+    for (const it of all) {
+      const key = buildGroupKey(it)
+      const arr = byGroup.get(key) ?? []
+      arr.push(it)
+      byGroup.set(key, arr)
+    }
+
+    const out: any[] = []
+    for (const group of byGroup.values()) {
+      const sorted = [...group].sort((a: any, b: any) => {
+        const da = toIsoDateOnly(a?.expiry_date)
+        const db = toIsoDateOnly(b?.expiry_date)
+        if (!da && !db) return 0
+        if (!da) return 1
+        if (!db) return -1
+        return da.localeCompare(db)
+      })
+      const inStock = sorted.filter((x: any) => Number(x?.stock ?? 0) > 0)
+      const visible = inStock.length > 0 ? inStock : sorted.slice(0, 1)
+      out.push(...visible)
+    }
+
     out.sort((a: any, b: any) => {
       const an = String(a?.name ?? '').toLowerCase()
       const bn = String(b?.name ?? '').toLowerCase()

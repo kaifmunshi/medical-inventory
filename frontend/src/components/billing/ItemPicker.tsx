@@ -34,6 +34,18 @@ function formatExpiry(exp?: string | null) {
   return `${d}-${m}-${y}` // "DD-MM-YYYY"
 }
 
+function toIsoDateOnly(exp?: string | null) {
+  if (!exp) return ''
+  const s = String(exp)
+  return s.length > 10 ? s.slice(0, 10) : s
+}
+
+function buildGroupKey(it: any) {
+  const name = String(it?.name ?? '').trim().toLowerCase()
+  const brand = String(it?.brand ?? '').trim().toLowerCase()
+  return `${name}__${brand}`
+}
+
 export default function ItemPicker({
   open,
   onClose,
@@ -59,7 +71,49 @@ export default function ItemPicker({
     },
   })
 
-  const items = (data || []) as PickerItem[]
+  const items = ((() => {
+    const all = (data || []) as PickerItem[]
+    const byGroup = new Map<string, PickerItem[]>()
+
+    for (const it of all) {
+      const key = buildGroupKey(it)
+      const arr = byGroup.get(key) ?? []
+      arr.push(it)
+      byGroup.set(key, arr)
+    }
+
+    const out: PickerItem[] = []
+    for (const group of byGroup.values()) {
+      const sorted = [...group].sort((a, b) => {
+        const da = toIsoDateOnly(a?.expiry_date)
+        const db = toIsoDateOnly(b?.expiry_date)
+        if (!da && !db) return 0
+        if (!da) return 1
+        if (!db) return -1
+        return da.localeCompare(db)
+      })
+      const inStock = sorted.filter((x) => Number(x?.stock ?? 0) > 0)
+      const visible = inStock.length > 0 ? inStock : sorted.slice(0, 1)
+      out.push(...visible)
+    }
+
+    out.sort((a, b) => {
+      const an = String(a?.name ?? '').toLowerCase()
+      const bn = String(b?.name ?? '').toLowerCase()
+      if (an !== bn) return an.localeCompare(bn)
+      const ab = String(a?.brand ?? '').toLowerCase()
+      const bb = String(b?.brand ?? '').toLowerCase()
+      if (ab !== bb) return ab.localeCompare(bb)
+      const da = toIsoDateOnly(a?.expiry_date)
+      const db = toIsoDateOnly(b?.expiry_date)
+      if (!da && !db) return 0
+      if (!da) return 1
+      if (!db) return -1
+      return da.localeCompare(db)
+    })
+
+    return out
+  })()) as PickerItem[]
 
   useEffect(() => {
     if (!open) setQ('')

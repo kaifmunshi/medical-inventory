@@ -70,9 +70,13 @@ export async function listItems(q: string = ''): Promise<Item[]> {
 export async function listItemsPage(
   q: string = '',
   limit: number = 50,
-  offset: number = 0
+  offset: number = 0,
+  rackNumber?: number
 ): Promise<ItemsPage> {
-  const params = { q, limit, offset }
+  const params: Record<string, string | number> = { q, limit, offset }
+  if (typeof rackNumber === 'number' && Number.isFinite(rackNumber)) {
+    params.rack_number = rackNumber
+  }
   const { data } = await api.get('/inventory', { params })
   return data as ItemsPage
 }

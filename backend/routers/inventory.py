@@ -163,6 +163,7 @@ def _norm_str(s: Optional[str]) -> Optional[str]:
 def list_items(
     request: Request,
     q: Optional[str] = Query(None, description="Search in name/brand"),
+    rack_number: Optional[int] = Query(None, ge=0, description="Filter by exact rack number"),
     limit: Optional[int] = Query(None, ge=1, le=500),
     offset: Optional[int] = Query(None, ge=0),
 
@@ -184,6 +185,8 @@ def list_items(
                     Item.brand.ilike(like),
                 )
             )
+        if rack_number is not None:
+            base_stmt = base_stmt.where(Item.rack_number == rack_number)
 
         ...
 

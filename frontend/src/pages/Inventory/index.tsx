@@ -4,6 +4,7 @@ import {
   Box,
   Button,
   IconButton,
+  InputAdornment,
   Paper,
   Stack,
   TextField,
@@ -38,6 +39,8 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
 import CloseIcon from '@mui/icons-material/Close'
+import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
+import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 
 import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
@@ -93,6 +96,8 @@ export default function Inventory() {
 
   const [q, setQ] = useState('')
   const [debouncedQ, setDebouncedQ] = useState('') // ✅ debounce search input
+  const [rackQ, setRackQ] = useState('')
+  const [debouncedRackQ, setDebouncedRackQ] = useState('')
 
   const [openForm, setOpenForm] = useState(false)
   const [editing, setEditing] = useState<any | null>(null)
@@ -129,6 +134,10 @@ export default function Inventory() {
     const t = setTimeout(() => setDebouncedQ(q.trim()), 600)
     return () => clearTimeout(t)
   }, [q])
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedRackQ(rackQ.trim()), 600)
+    return () => clearTimeout(t)
+  }, [rackQ])
 
   const qc = useQueryClient()
   const LIMIT = 50
@@ -142,11 +151,15 @@ export default function Inventory() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['inventory-items', debouncedQ],
+    queryKey: ['inventory-items', debouncedQ, debouncedRackQ],
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
       try {
-        return await listItemsPage(debouncedQ, LIMIT, pageParam)
+        const rackFilter =
+          debouncedRackQ !== '' && /^\d+$/.test(debouncedRackQ)
+            ? Number(debouncedRackQ)
+            : undefined
+        return await listItemsPage(debouncedQ, LIMIT, pageParam, rackFilter)
       } catch (err: any) {
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load inventory'
         toast.push(String(msg), 'error')
@@ -157,6 +170,7 @@ export default function Inventory() {
   })
 
   const rows = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data])
+  const hasFilters = q.trim() !== '' || rackQ.trim() !== ''
 
   useEffect(() => {
     const el = loadMoreRef.current
@@ -422,23 +436,103 @@ export default function Inventory() {
     <Stack gap={2}>
       <Typography variant="h5">Inventory</Typography>
 
-      <Paper sx={{ p: 2 }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} gap={2} alignItems={{ sm: 'center' }}>
+      <Paper
+        sx={{
+          p: { xs: 1.5, sm: 2 },
+          borderRadius: 3,
+          border: '1px solid rgba(20,92,59,0.14)',
+          background: 'linear-gradient(180deg, #ffffff 0%, #f8fcfa 100%)',
+        }}
+      >
+        <Stack direction={{ xs: 'column', md: 'row' }} gap={1.25} alignItems={{ md: 'center' }}>
           <TextField
-            label="Search (name/brand)"
+            placeholder="Search by medicine name or brand"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             fullWidth
+            size="small"
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchRoundedIcon sx={{ fontSize: 20, color: 'text.secondary' }} />
+                </InputAdornment>
+              ),
+              endAdornment: q ? (
+                <InputAdornment position="end">
+                  <IconButton size="small" onClick={() => setQ('')} edge="end">
+                    <CloseIcon fontSize="small" />
+                  </IconButton>
+                </InputAdornment>
+              ) : undefined,
+            }}
+            sx={{
+              '& .MuiOutlinedInput-root': {
+                borderRadius: 2.5,
+                background: '#fff',
+                minHeight: 46,
+              },
+            }}
           />
 
-          <Button variant="contained" onClick={handleAdd}>
+          <TextField
+            placeholder="Rack no."
+            value={rackQ}
+            onChange={(e) => setRackQ(e.target.value.replace(/[^\d]/g, ''))}
+            type="text"
+            size="small"
+            inputProps={{ inputMode: 'numeric', pattern: '[0-9]*' }}
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <GridViewRoundedIcon sx={{ fontSize: 18, color: 'text.secondary' }} />
+                </InputAdornment>
+              ),
+              endAdornment: rackQ ? (
+                <InputAdornment position="end">
+                  <IconButton size="small" onClick={() => setRackQ('')} edge="end">
+                    <CloseIcon fontSize="small" />
+                  </IconButton>
+                </InputAdornment>
+              ) : undefined,
+            }}
+            sx={{
+              width: { xs: '100%', md: 180 },
+              '& .MuiOutlinedInput-root': {
+                borderRadius: 2.5,
+                background: '#fff',
+                minHeight: 46,
+              },
+            }}
+          />
+
+          <Button variant="contained" onClick={handleAdd} sx={{ minWidth: { md: 132 }, height: 46 }}>
             Add Item
           </Button>
         </Stack>
 
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-          Inventory is grouped by item (name + brand). Batch rows below show each MRP/expiry for direct editing.
-        </Typography>
+        <Stack
+          direction={{ xs: 'column', sm: 'row' }}
+          gap={0.75}
+          justifyContent="space-between"
+          alignItems={{ sm: 'center' }}
+          sx={{ mt: 1.25 }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            Inventory is grouped by item (name + brand). Batch rows below show each MRP/expiry for direct editing.
+          </Typography>
+          {hasFilters && (
+            <Button
+              size="small"
+              onClick={() => {
+                setQ('')
+                setRackQ('')
+              }}
+              sx={{ alignSelf: { xs: 'flex-start', sm: 'center' } }}
+            >
+              Clear filters
+            </Button>
+          )}
+        </Stack>
       </Paper>
 
       <Paper sx={{ p: 2 }}>

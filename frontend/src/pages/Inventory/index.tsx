@@ -600,8 +600,8 @@ export default function Inventory() {
                         key={g.key}
                         className="parent-row"
                         style={{
-                          background: isOut ? '#fafafa' : undefined,
-                          opacity: isOut ? 0.75 : 1,
+                          background: isOut ? 'rgba(244,67,54,0.10)' : undefined,
+                          opacity: 1,
                         }}
                       >
                         <td style={{ padding: isSm ? '10px 8px' : undefined }}>
@@ -685,7 +685,7 @@ export default function Inventory() {
                       </tr>
                     )
                     const batchRows =
-                      Number(g.totalBatchCount || 0) > 1
+                      Number(g.displayItems?.length || 0) > 1
                         ? g.displayItems.map((it: any) => {
                             const batchOut = Number(it?.stock || 0) <= 0
                             return (

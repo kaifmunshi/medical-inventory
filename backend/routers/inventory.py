@@ -7,7 +7,8 @@ from typing import List, Optional
 from pydantic import BaseModel
 import logging
 from backend.utils.archive_rules import apply_archive_rules
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, exists
+from sqlalchemy.orm import aliased
 
 from backend.db import get_session
 from backend.models import Item, StockMovement
@@ -158,6 +159,17 @@ def _norm_str(s: Optional[str]) -> Optional[str]:
     return v if v != "" else None
 
 
+def _same_group_stmt(name: Optional[str], brand: Optional[str]):
+    n = _norm_str(name) or ""
+    b = _norm_str(brand)
+    stmt = select(Item).where(func.lower(Item.name) == func.lower(n))
+    if b is None:
+        stmt = stmt.where(or_(Item.brand.is_(None), func.trim(Item.brand) == ""))
+    else:
+        stmt = stmt.where(func.lower(func.coalesce(Item.brand, "")) == func.lower(b))
+    return stmt
+
+
 # ---------- Endpoints ----------
 @router.get("/", response_model=ItemPageOut)
 def list_items(
@@ -173,9 +185,21 @@ def list_items(
     with get_session() as session:
         base_stmt = select(Item)
 
-        # ✅ hide archived by default
+        # ✅ hide archived by default, but keep at least one row visible per (name+brand) group.
+        # This prevents fully sold-out groups from disappearing when every batch became archived.
         if not include_archived:
-            base_stmt = base_stmt.where(or_(Item.is_archived == False, Item.is_archived.is_(None)))
+            peer = aliased(Item)
+            visible_row = or_(Item.is_archived == False, Item.is_archived.is_(None))
+            same_group_visible_exists = exists(
+                select(peer.id).where(
+                    func.lower(func.trim(func.coalesce(peer.name, "")))
+                    == func.lower(func.trim(func.coalesce(Item.name, ""))),
+                    func.lower(func.trim(func.coalesce(peer.brand, "")))
+                    == func.lower(func.trim(func.coalesce(Item.brand, ""))),
+                    or_(peer.is_archived == False, peer.is_archived.is_(None)),
+                )
+            )
+            base_stmt = base_stmt.where(or_(visible_row, ~same_group_visible_exists))
 
         if q:
             like = f"%{q.strip()}%"
@@ -369,6 +393,7 @@ def create_item(
 
                 existing.updated_at = now_ts()
                 session.add(existing)
+                apply_archive_rules(session, existing)
 
                 if delta_stock != 0:
                     add_movement(
@@ -397,6 +422,7 @@ def create_item(
                 updated_at=now_ts(),
             )
             session.add(item)
+            apply_archive_rules(session, item)
             session.commit()
             session.refresh(item)
 
@@ -432,6 +458,9 @@ def update_item(item_id: int, payload: ItemUpdateIn):
         if not item:
             raise HTTPException(status_code=404, detail="Item not found")
 
+        old_name = item.name
+        old_brand = item.brand
+
         data = payload.model_dump(exclude_unset=True)
 
         if "mrp" in data and data["mrp"] is not None and data["mrp"] <= 0:
@@ -449,6 +478,17 @@ def update_item(item_id: int, payload: ItemUpdateIn):
 
         item.updated_at = now_ts()
         session.add(item)
+        apply_archive_rules(session, item)
+
+        old_name_norm = _norm_str(old_name) or ""
+        old_brand_norm = _norm_str(old_brand)
+        new_name_norm = _norm_str(item.name) or ""
+        new_brand_norm = _norm_str(item.brand)
+        if old_name_norm != new_name_norm or old_brand_norm != new_brand_norm:
+            old_peer = session.exec(_same_group_stmt(old_name, old_brand).limit(1)).first()
+            if old_peer:
+                apply_archive_rules(session, old_peer)
+
         session.commit()
         session.refresh(item)
         return item

@@ -211,15 +211,20 @@ export default function Inventory() {
       })
 
       const totalStock = sorted.reduce((sum, x) => sum + (Number(x.stock) || 0), 0)
+      const inStock = sorted.filter((x) => Number(x?.stock ?? 0) > 0)
+      // UI rule:
+      // - if any in-stock batch exists, hide zero-stock batches in table rows
+      // - if all batches are zero, show exactly one batch row (earliest expiry)
+      const displayItems = inStock.length > 0 ? inStock : sorted.slice(0, 1)
 
-      const racks = new Set(sorted.map((x) => String(x.rack_number ?? 0)))
-      const rackLabel = racks.size === 1 ? (sorted[0]?.rack_number ?? 0) : '-'
+      const racks = new Set(displayItems.map((x) => String(x.rack_number ?? 0)))
+      const rackLabel = racks.size === 1 ? (displayItems[0]?.rack_number ?? 0) : '-'
 
-      const earliestExpiryIso = toIsoDateOnly(sorted[0]?.expiry_date)
+      const earliestExpiryIso = toIsoDateOnly(displayItems[0]?.expiry_date)
       const expiryLabel = earliestExpiryIso ? formatExpiry(earliestExpiryIso) : '-'
 
       // ✅ MRP label + show "batches" ONLY if MRP varies
-      const mrpNums = sorted.map((x) => Number(x.mrp)).filter((n) => Number.isFinite(n))
+      const mrpNums = displayItems.map((x) => Number(x.mrp)).filter((n) => Number.isFinite(n))
 
       let mrpLabel: string | number = '-'
       let hasMrpVariance = false
@@ -240,8 +245,10 @@ export default function Inventory() {
         mrpLabel,
         hasMrpVariance, // ✅ NEW
         totalStock,
-        count: sorted.length,
-        items: sorted, // batches, including 0 stock
+        count: displayItems.length, // visible batch rows only
+        totalBatchCount: sorted.length, // all batches
+        items: sorted, // all batches (ledger)
+        displayItems, // visible in table
       }
     })
 
@@ -651,23 +658,23 @@ export default function Inventory() {
                               </IconButton>
                             </Tooltip>
 
-                            <Tooltip title="Edit (earliest batch)">
-                              <IconButton size="small" onClick={() => handleEdit(g.items[0])}>
+                            <Tooltip title="Edit (earliest visible batch)">
+                              <IconButton size="small" onClick={() => handleEdit(g.displayItems[0])}>
                                 <EditIcon fontSize="small" />
                               </IconButton>
                             </Tooltip>
 
-                            <Tooltip title="Adjust Stock (pick batch in Ledger)">
-                              <IconButton size="small" onClick={() => openLedgerForGroup(g)}>
+                            <Tooltip title="Adjust Stock (earliest visible batch)">
+                              <IconButton size="small" onClick={() => handleAdjust(g.displayItems[0])}>
                                 <AddCircleOutlineIcon fontSize="small" />
                               </IconButton>
                             </Tooltip>
 
-                            <Tooltip title="Delete (earliest batch)">
+                            <Tooltip title="Delete (earliest visible batch)">
                               <IconButton
                                 size="small"
                                 color="error"
-                                onClick={() => handleDeleteClick(g.items[0])}
+                                onClick={() => handleDeleteClick(g.displayItems[0])}
                                 disabled={mDelete.isPending}
                               >
                                 <DeleteIcon fontSize="small" />
@@ -678,8 +685,8 @@ export default function Inventory() {
                       </tr>
                     )
                     const batchRows =
-                      Number(g.count || 0) > 1
-                        ? g.items.map((it: any) => {
+                      Number(g.totalBatchCount || 0) > 1
+                        ? g.displayItems.map((it: any) => {
                             const batchOut = Number(it?.stock || 0) <= 0
                             return (
                               <tr

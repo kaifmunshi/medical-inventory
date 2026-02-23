@@ -1,7 +1,7 @@
-# backend/utils/archive_rules.py
 from typing import Optional
-from sqlmodel import select
+
 from sqlalchemy import func, or_
+from sqlmodel import select
 
 from backend.models import Item
 
@@ -12,43 +12,48 @@ def _norm(s: Optional[str]) -> str:
 
 def apply_archive_rules(session, item: Item) -> bool:
     """
-    Rules:
-    - If item.stock > 0 => ALWAYS unarchive (is_archived = False)
-    - If item.stock == 0:
-        - Check how many batches exist for same (name+brand)
-        - If more than 1 batch exists => archive this batch
-        - If only 1 batch => keep it unarchived (so item isn't lost)
-    Returns True if it changed anything.
+    Deterministic visibility rules for a (name+brand) group:
+    - If any batch has stock > 0:
+      - show only in-stock batches (unarchive them)
+      - hide zero-stock batches (archive them)
+    - If all batches have stock == 0:
+      - show exactly one batch (earliest expiry; tie by lowest id)
+      - archive all other zero-stock batches
+    Returns True if anything changed.
     """
 
     changed = False
 
-    # ✅ always unarchive if stock comes back
-    if int(item.stock or 0) > 0:
-        if getattr(item, "is_archived", False):
-            item.is_archived = False
-            session.add(item)
-            changed = True
-        return changed
-
-    # stock == 0 case
     n = _norm(item.name)
     b = _norm(item.brand)  # treat None/"" same
 
-    stmt = select(func.count(Item.id)).where(func.lower(Item.name) == func.lower(n))
-
+    group_stmt = select(Item).where(func.lower(Item.name) == func.lower(n))
     if b == "":
-        stmt = stmt.where(or_(Item.brand.is_(None), func.trim(Item.brand) == ""))
+        group_stmt = group_stmt.where(or_(Item.brand.is_(None), func.trim(Item.brand) == ""))
     else:
-        stmt = stmt.where(func.lower(func.coalesce(Item.brand, "")) == func.lower(b))
+        group_stmt = group_stmt.where(func.lower(func.coalesce(Item.brand, "")) == func.lower(b))
 
-    total_batches = session.exec(stmt).one() or 0
+    group = session.exec(group_stmt).all()
+    if not group:
+        return changed
 
-    # ✅ only archive if there are other batches
-    if total_batches > 1:
-        if not getattr(item, "is_archived", False):
-            item.is_archived = True
-            session.add(item)
+    in_stock = [x for x in group if int(getattr(x, "stock", 0) or 0) > 0]
+    if in_stock:
+        visible_ids = {int(x.id) for x in in_stock}
+    else:
+        def _exp_key(x: Item):
+            exp = str(getattr(x, "expiry_date", "") or "").strip()
+            # date text is YYYY-MM-DD; blank expiry goes last
+            return (exp == "", exp, int(getattr(x, "id", 0) or 0))
+
+        chosen = sorted(group, key=_exp_key)[0]
+        visible_ids = {int(chosen.id)}
+
+    for x in group:
+        should_archive = int(x.id) not in visible_ids
+        if bool(getattr(x, "is_archived", False)) != should_archive:
+            x.is_archived = should_archive
+            session.add(x)
             changed = True
 
     return changed

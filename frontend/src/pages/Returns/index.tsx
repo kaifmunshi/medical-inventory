@@ -417,8 +417,8 @@ export default function Returns() {
                   toast.push('Enter at least one return quantity', 'warning')
                   return
                 }
-                if (finalRefund <= 0) {
-                  toast.push('Final refund must be > 0', 'warning')
+                if (finalRefund < 0) {
+                  toast.push('Final refund cannot be negative', 'warning')
                   return
                 }
                 if (mode !== 'credit' && Math.abs(clamp2(finalRefund) - computedRefund) > 5) {

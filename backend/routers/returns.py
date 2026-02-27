@@ -198,6 +198,8 @@ def create_return(payload: ReturnCreate):
         raise HTTPException(status_code=400, detail="Return must have at least one item")
     if payload.refund_mode not in {"cash", "online", "split", "credit"}:
         raise HTTPException(status_code=400, detail="Invalid refund_mode")
+    if payload.refund_cash < 0 or payload.refund_online < 0:
+        raise HTTPException(status_code=400, detail="Refund amounts cannot be negative")
 
     with get_session() as session:
         sold_lookup: Dict[int, int] = {}
@@ -236,7 +238,8 @@ def create_return(payload: ReturnCreate):
 
                 after_disc_bill = subtotal_bill * (1 - disc_pct / 100.0)
                 computed_total = after_disc_bill * (1 + tax_pct / 100.0)
-                final_total = float(getattr(bill, "total_amount", computed_total) or computed_total)
+                raw_final_total = getattr(bill, "total_amount", None)
+                final_total = computed_total if raw_final_total is None else float(raw_final_total)
                 factor = (final_total / computed_total) if computed_total > 0 else 1.0
             except Exception:
                 factor = 1.0
@@ -433,6 +436,13 @@ def create_exchange(payload: ExchangeCreate):
         raise HTTPException(status_code=400, detail="Discount must be between 0 and 100")
     if payload.payment_mode not in {"cash", "online", "split"}:
         raise HTTPException(status_code=400, detail="Invalid payment_mode")
+    if (
+        payload.payment_cash < 0
+        or payload.payment_online < 0
+        or payload.refund_cash < 0
+        or payload.refund_online < 0
+    ):
+        raise HTTPException(status_code=400, detail="Payment/refund amounts cannot be negative")
 
     with get_session() as session:
         sold_lookup = {}
@@ -470,7 +480,8 @@ def create_exchange(payload: ExchangeCreate):
 
                 after_disc_bill = subtotal_bill * (1 - disc_pct / 100.0)
                 computed_total = after_disc_bill * (1 + tax_pct / 100.0)
-                final_total = float(getattr(bill, "total_amount", computed_total) or computed_total)
+                raw_final_total = getattr(bill, "total_amount", None)
+                final_total = computed_total if raw_final_total is None else float(raw_final_total)
                 factor = (final_total / computed_total) if computed_total > 0 else 1.0
             except Exception:
                 factor = 1.0

@@ -6,7 +6,7 @@ from sqlalchemy import or_, func
 from sqlmodel import select
 
 from backend.db import get_session
-from backend.models import Customer, CustomerCreate, CustomerUpdate, CustomerOut
+from backend.models import Bill, Customer, CustomerCreate, CustomerUpdate, CustomerOut
 
 router = APIRouter()
 
@@ -22,9 +22,46 @@ def _normalize_phone(v: Optional[str]) -> Optional[str]:
     return digits if digits else None
 
 
+def _normalize_name(v: Optional[str]) -> str:
+    return " ".join(str(v or "").strip().split())
+
+
+def _name_exists(session, name: str, exclude_customer_id: Optional[int] = None) -> bool:
+    normalized = _normalize_name(name).lower()
+    if not normalized:
+        return False
+
+    stmt = select(Customer.id).where(
+        func.lower(func.trim(func.coalesce(Customer.name, ""))) == normalized
+    )
+    if exclude_customer_id is not None:
+        stmt = stmt.where(Customer.id != int(exclude_customer_id))
+
+    return session.exec(stmt.limit(1)).first() is not None
+
+
+def _has_bills_for_customer(session, customer_name: str) -> bool:
+    normalized = _normalize_name(customer_name).lower()
+    if not normalized:
+        return False
+
+    # Customer note format in billing flows:
+    # "Customer: <name>" OR "Customer: <name> | ..." (first line of bill notes)
+    note = func.lower(func.ltrim(func.coalesce(Bill.notes, "")))
+    base = f"customer: {normalized}"
+    stmt = select(Bill.id).where(
+        or_(
+            note == base,
+            note.like(f"{base} |%"),
+            note.like(f"{base}\n%"),
+        )
+    )
+    return session.exec(stmt.limit(1)).first() is not None
+
+
 @router.post("/", response_model=CustomerOut, status_code=201)
 def create_customer(payload: CustomerCreate) -> CustomerOut:
-    name = str(payload.name or "").strip()
+    name = _normalize_name(payload.name)
     if not name:
         raise HTTPException(status_code=400, detail="Customer name is required")
 
@@ -37,6 +74,9 @@ def create_customer(payload: CustomerCreate) -> CustomerOut:
     now = datetime.now().isoformat(timespec="seconds")
 
     with get_session() as session:
+        if _name_exists(session, name):
+            raise HTTPException(status_code=400, detail="Customer name already exists")
+
         row = Customer(
             name=name,
             phone=phone,
@@ -88,9 +128,11 @@ def update_customer(customer_id: int, payload: CustomerUpdate) -> CustomerOut:
 
         data = payload.dict(exclude_unset=True)
         if "name" in data:
-            nm = str(data.get("name") or "").strip()
+            nm = _normalize_name(data.get("name"))
             if not nm:
                 raise HTTPException(status_code=400, detail="Customer name is required")
+            if _name_exists(session, nm, exclude_customer_id=customer_id):
+                raise HTTPException(status_code=400, detail="Customer name already exists")
             row.name = nm
         if "phone" in data:
             row.phone = _normalize_phone(data.get("phone"))
@@ -111,6 +153,11 @@ def delete_customer(customer_id: int) -> Response:
         row = session.get(Customer, customer_id)
         if not row:
             raise HTTPException(status_code=404, detail="Customer not found")
+        if _has_bills_for_customer(session, row.name):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete customer because bills already exist for this customer",
+            )
         session.delete(row)
         session.commit()
         return Response(status_code=204)

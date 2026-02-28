@@ -140,6 +140,37 @@ function buildCustomerNote(c: Customer | null): string {
   return `Customer: ${parts.filter(Boolean).join(' | ')}`
 }
 
+function parseCustomerFromNotes(raw: string): Customer | null {
+  const first = String(String(raw || '').split(/\r?\n/)[0] || '').trim()
+  const m = /^customer\s*:\s*(.+)$/i.exec(first)
+  if (!m) return null
+  const parts = String(m[1] || '')
+    .split('|')
+    .map((x) => x.trim())
+    .filter(Boolean)
+  const name = String(parts[0] || '').trim()
+  if (!name) return null
+  const phone = String(parts[1] || '').trim() || null
+  const address = parts.slice(2).join(' | ').trim() || null
+  return {
+    id: -1,
+    name,
+    phone,
+    address_line: address,
+  }
+}
+
+function normText(v: any): string {
+  return String(v || '').trim().toLowerCase()
+}
+
+function customerIdentity(c: Customer | null | undefined): string {
+  if (!c) return ''
+  const idNum = Number((c as any).id)
+  if (Number.isFinite(idNum) && idNum > 0) return `id:${idNum}`
+  return `tmp:${normText(c.name)}|${normText(c.phone)}|${normText(c.address_line)}`
+}
+
 const GRID_INPUT_SX = {
   '& .MuiInputBase-root': {
     height: 38,
@@ -226,6 +257,10 @@ export default function SalesReport(props: {
   const [editNewCustomerName, setEditNewCustomerName] = useState('')
   const [editNewCustomerPhone, setEditNewCustomerPhone] = useState('')
   const [editNewCustomerAddress, setEditNewCustomerAddress] = useState('')
+  const detailCustomer = useMemo(
+    () => parseCustomerFromNotes(String(detail?.notes || '')),
+    [detail?.notes]
+  )
 
   const qEditItems = useQuery({
     queryKey: ['edit-bill-items', editItemQuery],
@@ -238,11 +273,34 @@ export default function SalesReport(props: {
     queryFn: () => fetchCustomers({ q: editCustomerQ }),
   })
   const editCustomerOptionsWithSelected = useMemo(() => {
-    if (!editSelectedCustomer) return editCustomerOptions
-    const hasSelected = editCustomerOptions.some(
-      (c: any) => Number(c?.id) === Number(editSelectedCustomer.id)
-    )
-    return hasSelected ? editCustomerOptions : [editSelectedCustomer, ...editCustomerOptions]
+    const out: Customer[] = []
+    const seen = new Set<string>()
+    const add = (c: Customer | null | undefined) => {
+      if (!c) return
+      const key = customerIdentity(c)
+      if (!key || seen.has(key)) return
+      seen.add(key)
+      out.push(c)
+    }
+    add(editSelectedCustomer)
+    for (const c of editCustomerOptions as Customer[]) add(c)
+    return out
+  }, [editCustomerOptions, editSelectedCustomer])
+
+  useEffect(() => {
+    if (!editSelectedCustomer) return
+    const selectedKey = customerIdentity(editSelectedCustomer)
+    if (!selectedKey.startsWith('tmp:')) return
+    const selectedName = normText(editSelectedCustomer.name)
+    if (!selectedName) return
+    const matched = (editCustomerOptions as Customer[]).find((c) => {
+      if (normText(c.name) !== selectedName) return false
+      const phoneA = normText(editSelectedCustomer.phone)
+      const phoneB = normText(c.phone)
+      if (phoneA && phoneB && phoneA !== phoneB) return false
+      return true
+    })
+    if (matched) setEditSelectedCustomer(matched)
   }, [editCustomerOptions, editSelectedCustomer])
   const mEditAddCustomer = useMutation({
     mutationFn: createCustomer,
@@ -626,9 +684,11 @@ export default function SalesReport(props: {
     setEditCash(Number(b.payment_cash || 0))
     setEditOnline(Number(b.payment_online || 0))
     setEditDateTime(toLocalDateInput(b.date_time || b.created_at))
-    setEditNotes(String(b.notes || ''))
-    setEditSelectedCustomer(null)
-    setEditCustomerQ('')
+    const rawNotes = String(b.notes || '')
+    const parsedCustomer = parseCustomerFromNotes(rawNotes)
+    setEditNotes(extractFreeNotes(rawNotes))
+    setEditSelectedCustomer(parsedCustomer)
+    setEditCustomerQ(parsedCustomer?.name || '')
     setEditAddCustomerOpen(false)
     setEditNewCustomerName('')
     setEditNewCustomerPhone('')
@@ -1240,6 +1300,11 @@ export default function SalesReport(props: {
                     Notes: <i>{detail.notes}</i>
                   </Typography>
                 ) : null}
+                {detailCustomer ? (
+                  <Typography sx={{ mt: 0.5 }}>
+                    Customer: <b>{[detailCustomer.name, detailCustomer.phone, detailCustomer.address_line].filter(Boolean).join(' | ')}</b>
+                  </Typography>
+                ) : null}
                 {!detail.is_deleted ? (
                   <Box sx={{ pt: 1 }}>
                     <Button size="small" variant="outlined" startIcon={<EditIcon />} onClick={() => openEdit({ raw: detail })}>
@@ -1280,7 +1345,7 @@ export default function SalesReport(props: {
                     if (reason === 'clear' || reason === 'reset') setEditCustomerQ('')
                   }}
                   getOptionLabel={(option: any) => option?.name || ''}
-                  isOptionEqualToValue={(a: any, b: any) => Number(a?.id) === Number(b?.id)}
+                  isOptionEqualToValue={(a: any, b: any) => customerIdentity(a) === customerIdentity(b)}
                   filterOptions={(options) => options}
                   noOptionsText="No customers found"
                   sx={{ minWidth: 320, flex: 1 }}

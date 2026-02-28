@@ -17,6 +17,7 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createCustomer, deleteCustomer, fetchCustomers, updateCustomer } from '../../services/customers'
 import type { Customer } from '../../lib/types'
+import { useToast } from '../../components/ui/Toaster'
 
 function formatDate(dt?: string) {
   if (!dt) return '-'
@@ -40,6 +41,7 @@ function formatDate(dt?: string) {
 
 export default function CustomersPage() {
   const queryClient = useQueryClient()
+  const toast = useToast()
 
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(false)
@@ -65,6 +67,10 @@ export default function CustomersPage() {
       setAddressLine('')
       setNameError('')
     },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to create customer'
+      toast.push(String(msg), 'error')
+    },
   })
   const updateM = useMutation({
     mutationFn: ({ id, payload }: { id: number; payload: { name: string; phone?: string; address_line?: string } }) =>
@@ -77,12 +83,20 @@ export default function CustomersPage() {
       setAddressLine('')
       setNameError('')
     },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to update customer'
+      toast.push(String(msg), 'error')
+    },
   })
   const deleteM = useMutation({
     mutationFn: (id: number) => deleteCustomer(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['customers'] })
       setDeleteTarget(null)
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to delete customer'
+      toast.push(String(msg), 'error')
     },
   })
 

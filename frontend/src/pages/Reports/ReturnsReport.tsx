@@ -14,7 +14,7 @@ import {
 import CloseIcon from '@mui/icons-material/Close'
 import { useInfiniteQuery } from '@tanstack/react-query'
 
-import { listReturns, getReturn } from '../../services/returns'
+import { listReturns, getReturn, getExchangeByReturn } from '../../services/returns'
 
 function toCSV(rows: string[][]) {
   return rows
@@ -93,13 +93,20 @@ export default function ReturnsReport(props: {
   }, [returnsRaw])
 
   async function openDetail(row: any) {
+    try {
+      const ex = await getExchangeByReturn(row.id)
+      setDetail({ kind: 'exchange', ...ex })
+      setOpen(true)
+      return
+    } catch {}
+
     let r = row.raw
     if (!r?.items || !Array.isArray(r.items) || r.items.length === 0) {
       try {
         r = await getReturn(row.id)
       } catch {}
     }
-    setDetail(r)
+    setDetail({ kind: 'return', ...r })
     setOpen(true)
   }
 
@@ -182,7 +189,7 @@ export default function ReturnsReport(props: {
       {/* Return detail dialog */}
       <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Return Details
+          {detail?.kind === 'exchange' ? 'Exchange Details' : 'Return Details'}
           <IconButton onClick={() => setOpen(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -191,6 +198,85 @@ export default function ReturnsReport(props: {
         <DialogContent dividers>
           {!detail ? (
             <Typography color="text.secondary">Loading…</Typography>
+          ) : detail.kind === 'exchange' ? (
+            <Stack gap={2}>
+              <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
+                <Typography variant="subtitle1">
+                  Return ID: <b>{detail.return_id}</b> | New Bill ID: <b>{detail.new_bill_id}</b>
+                </Typography>
+                <Typography variant="subtitle1">
+                  Date/Time: <b>{detail.created_at || detail.return?.date_time || '-'}</b>
+                </Typography>
+              </Stack>
+
+              <Divider />
+
+              <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
+                <Stack gap={0.5}>
+                  <Typography variant="subtitle2">Exchange Summary</Typography>
+                  <Typography>Theoretical Net: <b>₹{money(detail.theoretical_net)}</b></Typography>
+                  <Typography>Rounding Adj: <b>₹{money(detail.rounding_adjustment)}</b></Typography>
+                  <Typography>Final Net Due: <b>₹{money(detail.net_due)}</b></Typography>
+                  <Typography>
+                    Payment: <b>{String(detail.payment_mode || '').toUpperCase() || '-'}</b>
+                    {' '}| Cash ₹{money(detail.payment_cash)} | Online ₹{money(detail.payment_online)}
+                  </Typography>
+                  <Typography>
+                    Refund: Cash ₹{money(detail.refund_cash)} | Online ₹{money(detail.refund_online)}
+                  </Typography>
+                </Stack>
+              </Stack>
+
+              <Divider />
+
+              <Typography variant="subtitle2">Returned Items</Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 220 }}>Item</th>
+                      <th>Qty</th>
+                      <th>MRP</th>
+                      <th>Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(detail.return?.items || []).map((it: any, idx: number) => (
+                      <tr key={`ret-${idx}`}>
+                        <td>{it.item_name || `#${it.item_id}`}</td>
+                        <td>{Number(it.quantity || 0)}</td>
+                        <td>{money(it.mrp)}</td>
+                        <td>{money(it.line_total ?? Number(it.quantity || 0) * Number(it.mrp || 0))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Box>
+
+              <Typography variant="subtitle2">New Bill Items</Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 220 }}>Item</th>
+                      <th>Qty</th>
+                      <th>MRP</th>
+                      <th>Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(detail.bill?.items || []).map((it: any, idx: number) => (
+                      <tr key={`bill-${idx}`}>
+                        <td>{it.item_name || `#${it.item_id}`}</td>
+                        <td>{Number(it.quantity || 0)}</td>
+                        <td>{money(it.mrp)}</td>
+                        <td>{money(it.line_total ?? Number(it.quantity || 0) * Number(it.mrp || 0))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Box>
+            </Stack>
           ) : (
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>

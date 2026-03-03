@@ -886,6 +886,28 @@ export default function SalesReport(props: {
     if (editSplitCombination === 'cash-credit') return c >= 0 && c <= editChosenFinal
     return o >= 0 && o <= editChosenFinal
   }, [editPaymentMode, editCash, editOnline, editChosenFinal, editSplitCombination])
+
+  function handleEditCashAmountChange(raw: string) {
+    const n = Number(parseNumText(raw) || 0)
+    if (editPaymentMode === 'split' && editSplitCombination === 'cash-online') {
+      const c = Math.min(editChosenFinal, Math.max(0, round2(n)))
+      setEditCash(c)
+      setEditOnline(round2(Math.max(0, editChosenFinal - c)))
+      return
+    }
+    setEditCash(round2(Math.max(0, n)))
+  }
+
+  function handleEditOnlineAmountChange(raw: string) {
+    const n = Number(parseNumText(raw) || 0)
+    if (editPaymentMode === 'split' && editSplitCombination === 'cash-online') {
+      const o = Math.min(editChosenFinal, Math.max(0, round2(n)))
+      setEditOnline(o)
+      setEditCash(round2(Math.max(0, editChosenFinal - o)))
+      return
+    }
+    setEditOnline(round2(Math.max(0, n)))
+  }
   const editCustomerNote = useMemo(() => buildCustomerNote(editSelectedCustomer), [editSelectedCustomer])
   const editEffectiveNotes = useMemo(() => {
     const freeText = extractFreeNotes(editNotes).trim()
@@ -927,7 +949,12 @@ export default function SalesReport(props: {
       setEditOnline(editChosenFinal)
       return
     }
-  }, [editOpen, editPaymentMode, editChosenFinal])
+    if (editPaymentMode === 'split' && editSplitCombination === 'cash-online') {
+      const c = Math.min(editChosenFinal, Math.max(0, round2(Number(editCash || 0))))
+      setEditCash(c)
+      setEditOnline(round2(Math.max(0, editChosenFinal - c)))
+    }
+  }, [editOpen, editPaymentMode, editChosenFinal, editSplitCombination])
 
   const noSpinnerSx = {
     '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': {
@@ -1630,7 +1657,7 @@ export default function SalesReport(props: {
                       label="Cash Amount"
                       type="text"
                       value={String(editCash)}
-                      onChange={(e) => setEditCash(Number(parseNumText(e.target.value) || 0))}
+                      onChange={(e) => handleEditCashAmountChange(e.target.value)}
                       onWheel={blurOnWheel}
                       sx={{ width: 170, ...noSpinnerSx }}
                       inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
@@ -1643,7 +1670,7 @@ export default function SalesReport(props: {
                       label="Online Amount"
                       type="text"
                       value={String(editOnline)}
-                      onChange={(e) => setEditOnline(Number(parseNumText(e.target.value) || 0))}
+                      onChange={(e) => handleEditOnlineAmountChange(e.target.value)}
                       onWheel={blurOnWheel}
                       sx={{ width: 170, ...noSpinnerSx }}
                       inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}

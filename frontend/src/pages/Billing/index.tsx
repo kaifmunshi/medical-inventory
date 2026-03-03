@@ -414,6 +414,46 @@ export default function Billing() {
     return false
   }, [mode, cash, online, chosenFinal, splitCombination])
 
+  function handleCashAmountChange(raw: string) {
+    const parsed = parseNumText(raw)
+    if (mode === 'split' && splitCombination === 'cash-online') {
+      if (parsed === '') {
+        setCash('')
+        setOnline(chosenFinal > 0 ? chosenFinal : '')
+        return
+      }
+      const c = Math.min(chosenFinal, Math.max(0, round2(Number(parsed))))
+      setCash(c)
+      setOnline(round2(Math.max(0, chosenFinal - c)))
+      return
+    }
+    setCash(parsed as any)
+  }
+
+  function handleOnlineAmountChange(raw: string) {
+    const parsed = parseNumText(raw)
+    if (mode === 'split' && splitCombination === 'cash-online') {
+      if (parsed === '') {
+        setOnline('')
+        setCash(chosenFinal > 0 ? chosenFinal : '')
+        return
+      }
+      const o = Math.min(chosenFinal, Math.max(0, round2(Number(parsed))))
+      setOnline(o)
+      setCash(round2(Math.max(0, chosenFinal - o)))
+      return
+    }
+    setOnline(parsed as any)
+  }
+
+  useEffect(() => {
+    if (mode !== 'split' || splitCombination !== 'cash-online') return
+    if (cash === '' && online === '') return
+    const c = Math.min(chosenFinal, Math.max(0, round2(Number(cash || 0))))
+    setCash(c)
+    setOnline(round2(Math.max(0, chosenFinal - c)))
+  }, [mode, splitCombination, chosenFinal])
+
   // ✅ Notes compulsory for CREDIT
   const notesOkForCredit = mode !== 'credit' || effectiveNotes.trim().length > 0
 
@@ -1159,7 +1199,7 @@ export default function Billing() {
                   label="Cash Amount"
                   type="text"
                   value={cash === '' ? '' : String(cash)}
-                  onChange={(e) => setCash(parseNumText(e.target.value) as any)}
+                  onChange={(e) => handleCashAmountChange(e.target.value)}
                   onWheel={blurOnWheel}
                   sx={{ width: 170, ...noSpinnerSx }}
                   inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
@@ -1172,7 +1212,7 @@ export default function Billing() {
                   label="Online Amount"
                   type="text"
                   value={online === '' ? '' : String(online)}
-                  onChange={(e) => setOnline(parseNumText(e.target.value) as any)}
+                  onChange={(e) => handleOnlineAmountChange(e.target.value)}
                   onWheel={blurOnWheel}
                   sx={{ width: 170, ...noSpinnerSx }}
                   inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}

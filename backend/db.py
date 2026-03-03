@@ -107,6 +107,30 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_cashbookentry_entry_type ON cashbookentry (entry_type)"))
         session.commit()
 
+        # ---------- exchangerecord table migration ----------
+        session.exec(text("""
+            CREATE TABLE IF NOT EXISTS exchangerecord (
+                id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                source_bill_id INTEGER,
+                return_id INTEGER NOT NULL,
+                new_bill_id INTEGER NOT NULL,
+                theoretical_net REAL NOT NULL DEFAULT 0,
+                net_due REAL NOT NULL DEFAULT 0,
+                rounding_adjustment REAL NOT NULL DEFAULT 0,
+                payment_mode TEXT NOT NULL DEFAULT 'cash',
+                payment_cash REAL NOT NULL DEFAULT 0,
+                payment_online REAL NOT NULL DEFAULT 0,
+                refund_cash REAL NOT NULL DEFAULT 0,
+                refund_online REAL NOT NULL DEFAULT 0,
+                notes TEXT
+            )
+        """))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_exchangerecord_created_at ON exchangerecord (created_at)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_exchangerecord_return_id ON exchangerecord (return_id)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_exchangerecord_new_bill_id ON exchangerecord (new_bill_id)"))
+        session.commit()
+
         # ---------- stockmovement table migration ----------
         sm_cols = session.exec(text("PRAGMA table_info(stockmovement)")).all()
         sm_col_names = {c[1] for c in sm_cols}  # column name is index 1

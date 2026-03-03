@@ -90,6 +90,23 @@ class ReturnItem(SQLModel, table=True):
     line_total: float
 
 
+class ExchangeRecord(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"), index=True)
+    source_bill_id: Optional[int] = None
+    return_id: int = Field(index=True)
+    new_bill_id: int = Field(index=True)
+    theoretical_net: float = 0.0
+    net_due: float = 0.0
+    rounding_adjustment: float = 0.0
+    payment_mode: str = "cash"
+    payment_cash: float = 0.0
+    payment_online: float = 0.0
+    refund_cash: float = 0.0
+    refund_online: float = 0.0
+    notes: Optional[str] = None
+
+
 # ---------- Requested Items (DB) ----------
 class RequestedItem(SQLModel, table=True):
     """

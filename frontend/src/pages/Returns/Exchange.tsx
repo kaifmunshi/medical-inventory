@@ -1,6 +1,6 @@
 // src/pages/Returns/Exchange.tsx
-import { useMemo, useState } from 'react'
-import { Box, Button, Paper, Stack, TextField, Typography, IconButton } from '@mui/material'
+import { useEffect, useMemo, useState } from 'react'
+import { Box, Button, Paper, Stack, TextField, Typography, IconButton, MenuItem } from '@mui/material'
 import DeleteIcon from '@mui/icons-material/Delete'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { findBill, createExchange, getReturnSummary } from '../../services/returns'
@@ -31,6 +31,9 @@ export default function Exchange() {
   // Exchange discount on NEW items + final amount override
   const [exDiscount, setExDiscount] = useState(0)
   const [finalOverride, setFinalOverride] = useState<number | ''>('') // abs amount
+  const [refundMode, setRefundMode] = useState<'cash' | 'online' | 'split'>('cash')
+  const [refundCashSplit, setRefundCashSplit] = useState<number | ''>('')
+  const [refundOnlineSplit, setRefundOnlineSplit] = useState<number | ''>('')
 
   const { refetch } = useQuery({
     queryKey: ['ex-bill', query],
@@ -87,6 +90,9 @@ export default function Exchange() {
     setAdd([]) // clear added items when bill changes
     setExDiscount(0)
     setFinalOverride('')
+    setRefundMode('cash')
+    setRefundCashSplit('')
+    setRefundOnlineSplit('')
   }
 
   // ====== full/partial detection and proration context ======
@@ -159,6 +165,13 @@ export default function Exchange() {
 
   // -------------------------------------------------------
 
+  useEffect(() => {
+    if (chosenDelta >= 0 || refundMode !== 'split') return
+    const c = Math.min(chosenAmountAbs, Math.max(0, round2(Number(refundCashSplit || 0))))
+    setRefundCashSplit(c)
+    setRefundOnlineSplit(round2(Math.max(0, chosenAmountAbs - c)))
+  }, [chosenDelta, chosenAmountAbs, refundMode])
+
   function buildExchangePayload() {
     if (!bill) throw new Error('No bill loaded')
 
@@ -189,7 +202,21 @@ export default function Exchange() {
       payload.payment_cash = round2(chosenDelta)
     } else if (chosenDelta < 0) {
       // refund to customer
-      payload.refund_cash = round2(-chosenDelta)
+      const refundAbs = round2(-chosenDelta)
+      if (refundMode === 'cash') {
+        payload.refund_cash = refundAbs
+      } else if (refundMode === 'online') {
+        payload.refund_online = refundAbs
+      } else {
+        const c = round2(Number(refundCashSplit || 0))
+        const o = round2(Number(refundOnlineSplit || 0))
+        if (c < 0 || o < 0) throw new Error('Refund split amounts cannot be negative')
+        if (round2(c + o) !== refundAbs) {
+          throw new Error(`Refund split mismatch. Cash + Online must equal ₹${refundAbs.toFixed(2)}.`)
+        }
+        payload.refund_cash = c
+        payload.refund_online = o
+      }
     }
 
     console.log('Exchange payload →', payload)
@@ -202,6 +229,7 @@ export default function Exchange() {
       toast.push('Exchange completed', 'success')
       setBill(null); setRet([]); setAdd([]); setQuery('')
       setExDiscount(0); setFinalOverride('')
+      setRefundMode('cash'); setRefundCashSplit(''); setRefundOnlineSplit('')
     },
     onError: (err: any) => {
       const d = err?.response?.data
@@ -393,6 +421,78 @@ export default function Exchange() {
                   inputProps={{ min: 0, step: '0.01' }}
                 />
               </Stack>
+
+              {chosenDelta < 0 && (
+                <Stack
+                  direction={{ xs: 'column', sm: 'row' }}
+                  spacing={1}
+                  alignItems="center"
+                  justifyContent="flex-end"
+                >
+                  <TextField
+                    select
+                    size="small"
+                    label="Refund Mode"
+                    value={refundMode}
+                    onChange={(e) => {
+                      const mode = e.target.value as 'cash' | 'online' | 'split'
+                      setRefundMode(mode)
+                      if (mode !== 'split') {
+                        setRefundCashSplit('')
+                        setRefundOnlineSplit('')
+                      }
+                    }}
+                    sx={{ width: 210 }}
+                  >
+                    <MenuItem value="cash">Cash</MenuItem>
+                    <MenuItem value="online">Online</MenuItem>
+                    <MenuItem value="split">Split</MenuItem>
+                  </TextField>
+
+                  {refundMode === 'split' && (
+                    <>
+                      <TextField
+                        size="small"
+                        label="Refund Cash"
+                        type="number"
+                        value={refundCashSplit}
+                        onChange={(e) => {
+                          const raw = e.target.value
+                          if (raw === '') {
+                            setRefundCashSplit('')
+                            setRefundOnlineSplit(chosenAmountAbs > 0 ? chosenAmountAbs : '')
+                            return
+                          }
+                          const c = Math.min(chosenAmountAbs, Math.max(0, round2(Number(raw))))
+                          setRefundCashSplit(c)
+                          setRefundOnlineSplit(round2(Math.max(0, chosenAmountAbs - c)))
+                        }}
+                        sx={{ width: 160 }}
+                        inputProps={{ min: 0, step: '0.01' }}
+                      />
+                      <TextField
+                        size="small"
+                        label="Refund Online"
+                        type="number"
+                        value={refundOnlineSplit}
+                        onChange={(e) => {
+                          const raw = e.target.value
+                          if (raw === '') {
+                            setRefundOnlineSplit('')
+                            setRefundCashSplit(chosenAmountAbs > 0 ? chosenAmountAbs : '')
+                            return
+                          }
+                          const o = Math.min(chosenAmountAbs, Math.max(0, round2(Number(raw))))
+                          setRefundOnlineSplit(o)
+                          setRefundCashSplit(round2(Math.max(0, chosenAmountAbs - o)))
+                        }}
+                        sx={{ width: 160 }}
+                        inputProps={{ min: 0, step: '0.01' }}
+                      />
+                    </>
+                  )}
+                </Stack>
+              )}
 
               <Typography variant="h6">
                 {chosenDelta >= 0

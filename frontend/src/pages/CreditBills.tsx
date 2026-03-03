@@ -123,6 +123,10 @@ export default function CreditBills() {
   const [cash, setCash] = useState<number | ''>('')
   const [online, setOnline] = useState<number | ''>('')
   const [note, setNote] = useState('')
+  const payPending = useMemo(
+    () => round2(Math.max(0, Number(payBill?.total_amount || 0) - Number(payBill?.paid_amount || 0))),
+    [payBill]
+  )
 
   const qBills = useQuery({
     queryKey: ['credit-bills', appliedFrom, appliedTo, q],
@@ -237,6 +241,36 @@ export default function CreditBills() {
     setOnline('')
     setNote('')
     setOpenPayDlg(true)
+  }
+
+  function handleSplitCashInPayDialog(raw: string) {
+    if (payMode !== 'split') {
+      setCash(raw === '' ? '' : Number(raw))
+      return
+    }
+    if (raw === '') {
+      setCash('')
+      setOnline(payPending > 0 ? payPending : '')
+      return
+    }
+    const c = Math.min(payPending, Math.max(0, round2(Number(raw))))
+    setCash(c)
+    setOnline(round2(Math.max(0, payPending - c)))
+  }
+
+  function handleSplitOnlineInPayDialog(raw: string) {
+    if (payMode !== 'split') {
+      setOnline(raw === '' ? '' : Number(raw))
+      return
+    }
+    if (raw === '') {
+      setOnline('')
+      setCash(payPending > 0 ? payPending : '')
+      return
+    }
+    const o = Math.min(payPending, Math.max(0, round2(Number(raw))))
+    setOnline(o)
+    setCash(round2(Math.max(0, payPending - o)))
   }
 
   const mPay = useMutation({
@@ -622,6 +656,10 @@ export default function CreditBills() {
                   setPayMode(v)
                   if (v === 'cash') setOnline('')
                   if (v === 'online') setCash('')
+                  if (v === 'split') {
+                    setCash('')
+                    setOnline(payPending > 0 ? payPending : '')
+                  }
                 }}
               >
                 <MenuItem value="cash">Cash</MenuItem>
@@ -634,7 +672,7 @@ export default function CreditBills() {
                   label="Cash Amount"
                   type="number"
                   value={cash}
-                  onChange={(e) => setCash(e.target.value as any)}
+                  onChange={(e) => handleSplitCashInPayDialog(e.target.value)}
                 />
               )}
 
@@ -643,7 +681,7 @@ export default function CreditBills() {
                   label="Online Amount"
                   type="number"
                   value={online}
-                  onChange={(e) => setOnline(e.target.value as any)}
+                  onChange={(e) => handleSplitOnlineInPayDialog(e.target.value)}
                 />
               )}
 

@@ -100,6 +100,11 @@ export async function getReturn(id: number) {
   return data as ReturnRecord
 }
 
+export async function getExchangeByReturn(returnId: number) {
+  const { data } = await api.get(`/returns/${returnId}/exchange`)
+  return data as any
+}
+
 // 🔹 NEW: fetch remaining quantity per item for a bill (sold, returned, remaining)
 export async function getReturnSummary(billId: number) {
   const { data } = await api.get(`/returns/summary/${billId}`)

@@ -11,6 +11,7 @@ from backend.models import (
     Return, ReturnItem,
     ReturnCreate, ReturnOut, ReturnItemOut,
     ExchangeCreate,
+    ExchangeRecord,
     StockMovement,
 )
 
@@ -23,6 +24,8 @@ def round2(x: float) -> float:
 
 # Allow manual round-off near the computed amount
 ROUND_TOLERANCE = 5.0  # e.g., 104.35 → any refund between ~99.35 and ~109.35 is OK
+MONEY_EPSILON = 0.01   # allow 1 paisa drift between FE/BE rounding paths
+EXCHANGE_SETTLE_EPSILON = 0.05  # absorb small FE/BE rounding drift in exchange settlement
 
 
 def now_ts() -> str:
@@ -79,6 +82,26 @@ def already_returned_map_for_bill(session, bill_id: int) -> Dict[int, int]:
         items = session.exec(select(ReturnItem).where(ReturnItem.return_id == r.id)).all()
         for ri in items:
             out[ri.item_id] = out.get(ri.item_id, 0) + int(ri.quantity)
+    return out
+
+
+def charged_unit_map_for_bill(session, bill_id: int) -> Dict[int, float]:
+    """
+    item_id -> effective charged per-unit from BillItem rows.
+    Uses historical billed line_total/qty, so exchange/return matches original charge,
+    even when item MRP changed or bill used manual final amount adjustments.
+    """
+    totals: Dict[int, float] = {}
+    qtys: Dict[int, int] = {}
+    rows = session.exec(select(BillItem).where(BillItem.bill_id == bill_id)).all()
+    for bi in rows:
+        iid = int(bi.item_id)
+        totals[iid] = float(totals.get(iid, 0.0)) + float(getattr(bi, "line_total", 0.0) or 0.0)
+        qtys[iid] = int(qtys.get(iid, 0)) + int(getattr(bi, "quantity", 0) or 0)
+    out: Dict[int, float] = {}
+    for iid, q in qtys.items():
+        if q > 0:
+            out[iid] = round2(float(totals.get(iid, 0.0)) / float(q))
     return out
 
 
@@ -192,6 +215,76 @@ def get_return(return_id: int):
         )
 
 
+@router.get("/{return_id}/exchange", response_model=dict)
+def get_exchange_by_return(return_id: int):
+    with get_session() as session:
+        ex = session.exec(select(ExchangeRecord).where(ExchangeRecord.return_id == return_id)).first()
+        if not ex:
+            raise HTTPException(status_code=404, detail="Exchange record not found for this return")
+
+        ret = session.get(Return, ex.return_id)
+        bill = session.get(Bill, ex.new_bill_id)
+        if not ret or not bill:
+            raise HTTPException(status_code=404, detail="Linked exchange data is missing")
+
+        ret_items = session.exec(select(ReturnItem).where(ReturnItem.return_id == ret.id)).all()
+        bill_items = session.exec(select(BillItem).where(BillItem.bill_id == bill.id)).all()
+
+        return {
+            "id": ex.id,
+            "created_at": ex.created_at,
+            "source_bill_id": ex.source_bill_id,
+            "return_id": ex.return_id,
+            "new_bill_id": ex.new_bill_id,
+            "theoretical_net": ex.theoretical_net,
+            "net_due": ex.net_due,
+            "rounding_adjustment": ex.rounding_adjustment,
+            "payment_mode": ex.payment_mode,
+            "payment_cash": ex.payment_cash,
+            "payment_online": ex.payment_online,
+            "refund_cash": ex.refund_cash,
+            "refund_online": ex.refund_online,
+            "notes": ex.notes,
+            "return": {
+                "id": ret.id,
+                "date_time": ret.date_time,
+                "subtotal_return": ret.subtotal_return,
+                "refund_cash": ret.refund_cash,
+                "refund_online": ret.refund_online,
+                "items": [
+                    {
+                        "item_id": i.item_id,
+                        "item_name": i.item_name,
+                        "mrp": i.mrp,
+                        "quantity": i.quantity,
+                        "line_total": i.line_total,
+                    }
+                    for i in ret_items
+                ],
+            },
+            "bill": {
+                "id": bill.id,
+                "date_time": bill.date_time,
+                "discount_percent": bill.discount_percent,
+                "subtotal": bill.subtotal,
+                "total_amount": bill.total_amount,
+                "payment_mode": bill.payment_mode,
+                "payment_cash": bill.payment_cash,
+                "payment_online": bill.payment_online,
+                "items": [
+                    {
+                        "item_id": i.item_id,
+                        "item_name": i.item_name,
+                        "mrp": i.mrp,
+                        "quantity": i.quantity,
+                        "line_total": i.line_total,
+                    }
+                    for i in bill_items
+                ],
+            },
+        }
+
+
 @router.post("/", response_model=ReturnOut, status_code=201)
 def create_return(payload: ReturnCreate):
     if not payload.items:
@@ -204,6 +297,7 @@ def create_return(payload: ReturnCreate):
     with get_session() as session:
         sold_lookup: Dict[int, int] = {}
         returned_lookup: Dict[int, int] = {}
+        charged_unit_lookup: Dict[int, float] = {}
         bill = None
         disc_pct = 0.0
         tax_pct = 0.0
@@ -218,6 +312,7 @@ def create_return(payload: ReturnCreate):
 
             sold_lookup = sold_map_for_bill(session, bill.id)
             returned_lookup = already_returned_map_for_bill(session, bill.id)
+            charged_unit_lookup = charged_unit_map_for_bill(session, bill.id)
 
             # bill-level proration (mirror frontend)
             try:
@@ -270,8 +365,11 @@ def create_return(payload: ReturnCreate):
 
             db_items[line.item_id] = itm
 
-            base = float(itm.mrp) * int(line.quantity)
-            if bill:
+            qty = int(line.quantity)
+            base = float(itm.mrp) * qty
+            if bill and itm.id in charged_unit_lookup:
+                subtotal_return += float(charged_unit_lookup[itm.id]) * qty
+            elif bill:
                 after_disc = base * (1 - disc_pct / 100.0)
                 after_tax = after_disc * (1 + tax_pct / 100.0)
                 charged = after_tax * factor
@@ -350,8 +448,11 @@ def create_return(payload: ReturnCreate):
                     note=f"Return #{r.id}",
                 )
 
-                line_total = float(itm.mrp) * qty
-                if bill:
+                if bill and itm.id in charged_unit_lookup:
+                    line_total = float(charged_unit_lookup[itm.id]) * qty
+                else:
+                    line_total = float(itm.mrp) * qty
+                if bill and itm.id not in charged_unit_lookup:
                     after_disc = line_total * (1 - disc_pct / 100.0)
                     after_tax = after_disc * (1 + tax_pct / 100.0)
                     line_total = after_tax * factor
@@ -447,6 +548,7 @@ def create_exchange(payload: ExchangeCreate):
     with get_session() as session:
         sold_lookup = {}
         returned_lookup = {}
+        charged_unit_lookup = {}
         bill = None
         disc_pct = 0.0
         tax_pct = 0.0
@@ -461,6 +563,7 @@ def create_exchange(payload: ExchangeCreate):
 
             sold_lookup = sold_map_for_bill(session, bill.id)
             returned_lookup = already_returned_map_for_bill(session, bill.id)
+            charged_unit_lookup = charged_unit_map_for_bill(session, bill.id)
 
             try:
                 disc_pct = float(getattr(bill, "discount_percent", 0.0) or 0.0)
@@ -510,8 +613,11 @@ def create_exchange(payload: ExchangeCreate):
 
             ret_items_map[itm.id] = (itm, int(line.quantity))
 
-            base = float(itm.mrp) * int(line.quantity)
-            if bill:
+            qty = int(line.quantity)
+            base = float(itm.mrp) * qty
+            if bill and itm.id in charged_unit_lookup:
+                charged = float(charged_unit_lookup[itm.id]) * qty
+            elif bill:
                 after_disc = base * (1 - disc_pct / 100.0)
                 after_tax = after_disc * (1 + tax_pct / 100.0)
                 charged = after_tax * factor
@@ -547,21 +653,40 @@ def create_exchange(payload: ExchangeCreate):
         # Validate payment/refund fields
         if net_due > 0:
             if payload.payment_mode == "cash":
-                ok = round2(payload.payment_cash) == net_due
+                paid_total = round2(payload.payment_cash)
             elif payload.payment_mode == "online":
-                ok = round2(payload.payment_online) == net_due
+                paid_total = round2(payload.payment_online)
             else:
-                ok = round2(payload.payment_cash + payload.payment_online) == net_due
-            if not ok:
+                paid_total = round2(payload.payment_cash + payload.payment_online)
+            pay_diff = round2(net_due - paid_total)
+            if abs(pay_diff) > EXCHANGE_SETTLE_EPSILON:
                 raise HTTPException(status_code=400, detail="Payment amounts must equal net due")
             r_cash, r_online = 0.0, 0.0
             b_cash = round2(payload.payment_cash)
             b_online = round2(payload.payment_online)
+            if abs(pay_diff) > MONEY_EPSILON:
+                if payload.payment_mode == "online":
+                    b_online = round2(b_online + pay_diff)
+                else:
+                    b_cash = round2(b_cash + pay_diff)
         elif net_due < 0:
             refund_total = round2(payload.refund_cash + payload.refund_online)
-            if refund_total != abs(net_due):
-                raise HTTPException(status_code=400, detail="Refund amounts must equal |net due|")
+            refund_diff = round2(abs(net_due) - refund_total)
+            if abs(refund_diff) > EXCHANGE_SETTLE_EPSILON:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Refund amounts must equal |net due|. "
+                        f"Expected ₹{abs(net_due):.2f}, got ₹{refund_total:.2f} "
+                        f"(cash ₹{round2(payload.refund_cash):.2f} + online ₹{round2(payload.refund_online):.2f})."
+                    ),
+                )
             r_cash, r_online = round2(payload.refund_cash), round2(payload.refund_online)
+            if abs(refund_diff) > MONEY_EPSILON:
+                if r_online > 0 and r_cash == 0:
+                    r_online = round2(r_online + refund_diff)
+                else:
+                    r_cash = round2(r_cash + refund_diff)
             b_cash, b_online = 0.0, 0.0
         else:
             r_cash = r_online = b_cash = b_online = 0.0
@@ -595,13 +720,15 @@ def create_exchange(payload: ExchangeCreate):
                 note=f"Exchange return #{ret.id}",
             )
 
-            base = float(itm.mrp) * qty
-            if bill:
+            if bill and itm.id in charged_unit_lookup:
+                line_total = float(charged_unit_lookup[itm.id]) * qty
+            else:
+                base = float(itm.mrp) * qty
+                line_total = base
+            if bill and itm.id not in charged_unit_lookup:
                 after_disc = base * (1 - disc_pct / 100.0)
                 after_tax = after_disc * (1 + tax_pct / 100.0)
                 line_total = after_tax * factor
-            else:
-                line_total = base
 
             session.add(ReturnItem(
                 return_id=ret.id, item_id=itm.id, item_name=itm.name,
@@ -648,6 +775,24 @@ def create_exchange(payload: ExchangeCreate):
 
         ret_items = session.exec(select(ReturnItem).where(ReturnItem.return_id == ret.id)).all()
         bill_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+
+        session.add(
+            ExchangeRecord(
+                source_bill_id=payload.source_bill_id,
+                return_id=int(ret.id),
+                new_bill_id=int(b.id),
+                theoretical_net=theoretical_net,
+                net_due=net_due,
+                rounding_adjustment=rounding_adjustment,
+                payment_mode=payload.payment_mode,
+                payment_cash=b_cash,
+                payment_online=b_online,
+                refund_cash=r_cash,
+                refund_online=r_online,
+                notes=payload.notes,
+            )
+        )
+        session.commit()
 
         return {
             "net_due": net_due,

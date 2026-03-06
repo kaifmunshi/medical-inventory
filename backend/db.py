@@ -312,6 +312,69 @@ def migrate_db():
             )
             session.commit()
 
+        # ---------- one-time backfill: missing SALE ledger rows for existing bills ----------
+        sale_backfill_key = "backfill_missing_bill_sale_ledger_v1"
+        sale_backfill_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=sale_backfill_key),
+        ).first()
+
+        if not sale_backfill_done:
+            ts2 = _now_ts()
+            bill_rows = session.exec(text("SELECT id FROM bill")).all()
+
+            for row in bill_rows:
+                bill_id = int(row[0])
+                bill_lines = session.exec(
+                    text("""
+                        SELECT item_id, COALESCE(SUM(quantity), 0) AS qty
+                        FROM billitem
+                        WHERE bill_id = :bill_id
+                        GROUP BY item_id
+                        HAVING COALESCE(SUM(quantity), 0) > 0
+                    """).bindparams(bill_id=bill_id),
+                ).all()
+
+                for line in bill_lines:
+                    item_id = int(line[0])
+                    sold_qty = int(line[1])
+
+                    sale_abs = session.exec(
+                        text("""
+                            SELECT COALESCE(SUM(CASE WHEN delta < 0 THEN -delta ELSE 0 END), 0)
+                            FROM stockmovement
+                            WHERE ref_type = 'BILL'
+                              AND ref_id = :bill_id
+                              AND item_id = :item_id
+                              AND reason = 'SALE'
+                        """).bindparams(bill_id=bill_id, item_id=item_id),
+                    ).first()
+                    existing_sale_qty = int(sale_abs[0] or 0) if sale_abs else 0
+                    missing_qty = sold_qty - existing_sale_qty
+                    if missing_qty <= 0:
+                        continue
+
+                    session.exec(
+                        text("""
+                            INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
+                            VALUES (:item_id, :ts, :delta, 'SALE', 'BILL', :ref_id, :note, 'migration')
+                        """).bindparams(
+                            item_id=item_id,
+                            ts=ts2,
+                            delta=-missing_qty,
+                            ref_id=bill_id,
+                            note=f"Backfill: missing SALE movement for bill #{bill_id}",
+                        ),
+                    )
+
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, 'done', :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(k=sale_backfill_key, ts=ts2),
+            )
+            session.commit()
+
 
 SQLModel.metadata.create_all(engine)
 migrate_db()

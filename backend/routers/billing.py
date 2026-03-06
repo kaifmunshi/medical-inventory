@@ -912,6 +912,32 @@ def soft_delete_bill(bill_id: int):
         if is_deleted_bill(b):
             return {"bill_id": b.id, "is_deleted": True, "deleted_at": b.deleted_at}
 
+        bill_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+        qty_by_item: Dict[int, int] = {}
+        for line in bill_items:
+            iid = as_i(getattr(line, "item_id", 0))
+            qty = as_i(getattr(line, "quantity", 0))
+            if iid <= 0 or qty <= 0:
+                continue
+            qty_by_item[iid] = qty_by_item.get(iid, 0) + qty
+
+        for iid, qty in qty_by_item.items():
+            itm = session.get(Item, iid)
+            if not itm:
+                continue
+            itm.stock = as_i(itm.stock) + as_i(qty)
+            session.add(itm)
+            apply_archive_rules(session, itm)
+            add_movement(
+                session,
+                item_id=itm.id,
+                delta=as_i(qty),
+                reason="BILL_DELETE",
+                ref_type="BILL",
+                ref_id=b.id,
+                note=f"Bill #{b.id} soft-deleted (stock restored)",
+            )
+
         b.is_deleted = True
         b.deleted_at = now_ts()
         session.add(b)
@@ -925,6 +951,45 @@ def recover_bill(bill_id: int):
         b = session.get(Bill, bill_id)
         if not b:
             raise HTTPException(status_code=404, detail="Bill not found")
+
+        if not is_deleted_bill(b):
+            return {"bill_id": b.id, "is_deleted": False, "deleted_at": None}
+
+        bill_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+        qty_by_item: Dict[int, int] = {}
+        for line in bill_items:
+            iid = as_i(getattr(line, "item_id", 0))
+            qty = as_i(getattr(line, "quantity", 0))
+            if iid <= 0 or qty <= 0:
+                continue
+            qty_by_item[iid] = qty_by_item.get(iid, 0) + qty
+
+        for iid, qty in qty_by_item.items():
+            itm = session.get(Item, iid)
+            if not itm:
+                raise HTTPException(status_code=404, detail=f"Item {iid} not found for recover")
+            if as_i(itm.stock) < as_i(qty):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot recover bill. Insufficient stock for {itm.name}",
+                )
+
+        for iid, qty in qty_by_item.items():
+            itm = session.get(Item, iid)
+            if not itm:
+                continue
+            itm.stock = as_i(itm.stock) - as_i(qty)
+            session.add(itm)
+            apply_archive_rules(session, itm)
+            add_movement(
+                session,
+                item_id=itm.id,
+                delta=-as_i(qty),
+                reason="BILL_RECOVER",
+                ref_type="BILL",
+                ref_id=b.id,
+                note=f"Bill #{b.id} recovered (stock deducted again)",
+            )
 
         b.is_deleted = False
         b.deleted_at = None

@@ -696,30 +696,96 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         for it in existing_items:
             old_qty_by_item[it.item_id] = old_qty_by_item.get(it.item_id, 0) + as_i(it.quantity)
 
-        new_qty_by_item: Dict[int, int] = {}
-        for line in payload.items:
-            qty = as_i(line.quantity)
-            if qty <= 0:
-                raise HTTPException(status_code=400, detail="Quantity must be > 0")
-            new_qty_by_item[line.item_id] = new_qty_by_item.get(line.item_id, 0) + qty
+        def _norm_txt(v: Any) -> str:
+            return str(v or "").strip().lower()
 
-        touched_item_ids = set(old_qty_by_item.keys()) | set(new_qty_by_item.keys())
+        def _group_key(name: Any, brand: Any) -> str:
+            return f"{_norm_txt(name)}__{_norm_txt(brand)}"
+
+        def _expiry_sort_key(it: Item):
+            raw = str(getattr(it, "expiry_date", "") or "").strip()
+            exp = raw[:10] if raw else "9999-99-99"
+            no_exp = 1 if not raw else 0
+            return (no_exp, exp, as_i(getattr(it, "id", 0)))
+
+        requested_item_ids = {as_i(x.item_id) for x in payload.items}
         db_items: Dict[int, Item] = {}
-        for iid in touched_item_ids:
+        for iid in requested_item_ids | set(old_qty_by_item.keys()):
             itm = session.get(Item, iid)
             if not itm:
                 raise HTTPException(status_code=404, detail=f"Item {iid} not found")
             db_items[iid] = itm
 
+        requested_qty_by_group: Dict[str, int] = {}
+        seed_item_by_group: Dict[str, Item] = {}
+        unit_price_by_group: Dict[str, float] = {}
+        for line in payload.items:
+            qty = as_i(line.quantity)
+            if qty <= 0:
+                raise HTTPException(status_code=400, detail="Quantity must be > 0")
+            seed = db_items.get(as_i(line.item_id))
+            if not seed:
+                raise HTTPException(status_code=404, detail=f"Item {line.item_id} not found")
+            gk = _group_key(seed.name, getattr(seed, "brand", None))
+            requested_qty_by_group[gk] = requested_qty_by_group.get(gk, 0) + qty
+            seed_item_by_group[gk] = seed
+            custom_price = as_f(getattr(line, "custom_unit_price", None))
+            if custom_price <= 0:
+                custom_price = as_f(seed.mrp)
+            if gk not in unit_price_by_group:
+                unit_price_by_group[gk] = custom_price
+
+        new_qty_by_item: Dict[int, int] = {}
         line_price_by_item: Dict[int, float] = {}
+
+        for gk, requested_qty in requested_qty_by_group.items():
+            seed = seed_item_by_group[gk]
+            group_name = str(seed.name or "")
+            group_brand = str(getattr(seed, "brand", "") or "")
+
+            candidates = session.exec(
+                select(Item).where(
+                    func.lower(Item.name) == func.lower(group_name),
+                    func.lower(func.coalesce(Item.brand, "")) == func.lower(group_brand),
+                )
+            ).all()
+            candidates = sorted(candidates, key=_expiry_sort_key)
+
+            remaining = as_i(requested_qty)
+            total_available = 0
+            for it in candidates:
+                iid = as_i(getattr(it, "id", 0))
+                avail = max(0, as_i(getattr(it, "stock", 0)) + old_qty_by_item.get(iid, 0))
+                total_available += avail
+                if remaining <= 0 or avail <= 0:
+                    continue
+                take = min(remaining, avail)
+                new_qty_by_item[iid] = new_qty_by_item.get(iid, 0) + as_i(take)
+                line_price_by_item[iid] = as_f(unit_price_by_group.get(gk, getattr(seed, "mrp", 0.0)))
+                db_items[iid] = it
+                remaining -= take
+
+            if remaining > 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Insufficient stock for {group_name} ({group_brand or 'no brand'}). "
+                        f"Requested={requested_qty}, available across batches={total_available}."
+                    ),
+                )
+
+        touched_item_ids = set(old_qty_by_item.keys()) | set(new_qty_by_item.keys())
+        for iid in touched_item_ids:
+            if iid not in db_items:
+                itm = session.get(Item, iid)
+                if not itm:
+                    raise HTTPException(status_code=404, detail=f"Item {iid} not found")
+                db_items[iid] = itm
+
         subtotal = 0.0
         for iid, qty in new_qty_by_item.items():
-            payload_line = next((x for x in payload.items if int(x.item_id) == int(iid)), None)
-            custom_price = as_f(getattr(payload_line, "custom_unit_price", None) if payload_line else None)
-            if custom_price <= 0:
-                custom_price = as_f(db_items[iid].mrp)
-            line_price_by_item[iid] = custom_price
-            subtotal += custom_price * as_i(qty)
+            unit = as_f(line_price_by_item.get(iid, db_items[iid].mrp))
+            subtotal += unit * as_i(qty)
         subtotal = round2(subtotal)
         computed_total = round2(subtotal * (1 - as_f(payload.discount_percent) / 100.0))
         total = manual_final if manual_final is not None else computed_total

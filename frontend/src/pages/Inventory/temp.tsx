@@ -27,7 +27,7 @@ import {
   updateItem,
   deleteItem,
   adjustStock,
-  getItemLedger,
+  getGroupLedger,
 } from '../../services/inventory'
 
 import Loading from '../../components/ui/Loading'
@@ -350,12 +350,13 @@ export default function Inventory() {
   const LEDGER_LIMIT = 50
 
   const qLedger = useInfiniteQuery({
-    queryKey: ['inventory-ledger', ledgerItem?.id, ledgerFrom, ledgerTo, ledgerReason],
-    enabled: ledgerOpen && !!ledgerItem?.id && !!ledgerFrom && !!ledgerTo,
+    queryKey: ['inventory-ledger-group', ledgerGroup?.key, ledgerFrom, ledgerTo, ledgerReason],
+    enabled: ledgerOpen && !!ledgerGroup?.key && !!ledgerFrom && !!ledgerTo,
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
-      return await getItemLedger({
-        item_id: Number(ledgerItem.id),
+      return await getGroupLedger({
+        name: String(ledgerGroup?.name || ''),
+        brand: String(ledgerGroup?.brand || ''),
         from_date: ledgerFrom,
         to_date: ledgerTo,
         reason: ledgerReason ? ledgerReason : undefined,
@@ -382,18 +383,20 @@ export default function Inventory() {
       ref_type: m.ref_type || '',
       ref_id: m.ref_id ?? '',
       note: m.note || '',
+      item_id: Number(m.item_id ?? 0),
       before: Number(m.balance_before ?? 0),
       after: Number(m.balance_after ?? 0),
     }))
   }, [ledgerRows])
 
-  const ledgerCurrentStock = qLedger.data?.pages?.[0]?.current_stock ?? ledgerItem?.stock ?? '-'
+  const ledgerCurrentStock = qLedger.data?.pages?.[0]?.current_stock ?? ledgerGroup?.totalStock ?? '-'
 
   function exportLedgerCSV() {
-    const header = ['ID', 'TS', 'Delta', 'Reason', 'Ref Type', 'Ref ID', 'Before', 'After', 'Note']
+    const header = ['ID', 'TS', 'Batch', 'Delta', 'Reason', 'Ref Type', 'Ref ID', 'Before', 'After', 'Note']
     const body = ledgerDetail.map((r: any) => [
       String(r.id),
       String(r.ts),
+      String(r.item_id || ''),
       String(r.delta),
       String(r.reason),
       String(r.ref_type ?? ''),
@@ -408,7 +411,7 @@ export default function Inventory() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `stock-ledger_item-${ledgerItem?.id ?? 'item'}_${ledgerFrom}_to_${ledgerTo}.csv`
+    a.download = `stock-ledger_group-${ledgerGroup?.key ?? 'group'}_${ledgerFrom}_to_${ledgerTo}.csv`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -731,6 +734,8 @@ export default function Inventory() {
                       <MenuItem value="OPENING">OPENING</MenuItem>
                       <MenuItem value="ADJUST">ADJUST</MenuItem>
                       <MenuItem value="BILL">BILL</MenuItem>
+                      <MenuItem value="BILL_DELETE">BILL_DELETE</MenuItem>
+                      <MenuItem value="BILL_RECOVER">BILL_RECOVER</MenuItem>
                       <MenuItem value="RETURN">RETURN</MenuItem>
                       <MenuItem value="EXCHANGE_IN">EXCHANGE_IN</MenuItem>
                       <MenuItem value="EXCHANGE_OUT">EXCHANGE_OUT</MenuItem>
@@ -784,6 +789,7 @@ export default function Inventory() {
                   <tr>
                     <th>ID</th>
                     <th>TS</th>
+                    <th>Batch</th>
                     <th>Delta</th>
                     <th>Reason</th>
                     <th>Ref</th>
@@ -795,7 +801,7 @@ export default function Inventory() {
                 <tbody>
                   {qLedger.isLoading && (
                     <tr>
-                      <td colSpan={8}>
+                      <td colSpan={9}>
                         <Box p={2} color="text.secondary">
                           Loading…
                         </Box>
@@ -805,7 +811,7 @@ export default function Inventory() {
 
                   {!qLedger.isLoading && ledgerDetail.length === 0 && (
                     <tr>
-                      <td colSpan={8}>
+                      <td colSpan={9}>
                         <Box p={2} color="text.secondary">
                           No ledger rows for this date range.
                         </Box>
@@ -817,6 +823,7 @@ export default function Inventory() {
                     <tr key={`lg-${r.id}`}>
                       <td>{r.id}</td>
                       <td>{r.ts}</td>
+                      <td>#{r.item_id || '-'}</td>
                       <td style={{ fontWeight: 900 }}>{r.delta}</td>
                       <td>{r.reason}</td>
                       <td>{r.ref_type ? `${r.ref_type}${r.ref_id ? ` #${r.ref_id}` : ''}` : '-'}</td>

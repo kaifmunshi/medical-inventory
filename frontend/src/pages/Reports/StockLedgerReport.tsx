@@ -241,23 +241,6 @@ export default function StockLedgerReport(props: {
     }))
   }, [ledgerRaw])
 
-  // ✅ IMPORTANT: find earliest ITEM_CREATE inside this group (for "OPENING only once" rule)
-  const firstCreateKey = useMemo(() => {
-    // Find earliest ts among ITEM_CREATE rows
-    const creates = detailRows
-      .filter((r) => String(r.ref_type || '').toUpperCase() === 'ITEM_CREATE')
-      .filter((r) => Number(r.delta || 0) > 0)
-
-    if (creates.length === 0) return null
-
-    let best = creates[0]
-    for (const r of creates) {
-      // ISO timestamps compare lexicographically fine if they are ISO-like, but we will still fallback:
-      if (String(r.ts) < String(best.ts)) best = r
-    }
-    return `${best.ts}__${best.item_id ?? ''}`
-  }, [detailRows])
-
   // ✅ Header controls (Reports top bar)
   useEffect(() => {
     setExtraControls(
@@ -289,6 +272,8 @@ export default function StockLedgerReport(props: {
           <MenuItem value="OPENING">OPENING</MenuItem>
           <MenuItem value="ADJUST">ADJUST</MenuItem>
           <MenuItem value="BILL">BILL</MenuItem>
+          <MenuItem value="BILL_DELETE">BILL_DELETE</MenuItem>
+          <MenuItem value="BILL_RECOVER">BILL_RECOVER</MenuItem>
           <MenuItem value="RETURN">RETURN</MenuItem>
           <MenuItem value="EXCHANGE_IN">EXCHANGE_IN</MenuItem>
           <MenuItem value="EXCHANGE_OUT">EXCHANGE_OUT</MenuItem>
@@ -387,24 +372,8 @@ export default function StockLedgerReport(props: {
     <Chip size="small" label={reason || '-'} variant="outlined" sx={{ borderRadius: 999, fontWeight: 800 }} />
   )
 
-  // ✅ FIXED RULES:
-  // 1) OPENING should appear ONLY for the very first ITEM_CREATE of this (name+brand) group.
-  // 2) If backend logs OPENING for ITEM_MERGE (adding stock into existing batch), show PURCHASE.
-  // 3) If backend logs OPENING for later ITEM_CREATE (new batch created later), show PURCHASE.
   function displayReason(r: any) {
-    const reason = String(r?.reason ?? '').toUpperCase()
-    const refType = String(r?.ref_type ?? '').toUpperCase()
-
-    // merge into existing batch should never be "OPENING" in UI
-    if (reason === 'OPENING' && refType === 'ITEM_MERGE') return 'PURCHASE'
-
-    // Item create: only first-ever create is OPENING; all later creates are PURCHASE
-    if (reason === 'OPENING' && refType === 'ITEM_CREATE') {
-      const key = `${String(r?.ts ?? '')}__${String(r?.item_id ?? '')}`
-      if (firstCreateKey && key === firstCreateKey) return 'OPENING'
-      return 'PURCHASE'
-    }
-
+    // Show exact backend reason to avoid hiding real ledger events.
     return r?.reason || ''
   }
 

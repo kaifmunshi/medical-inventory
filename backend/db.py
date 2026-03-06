@@ -241,7 +241,7 @@ def migrate_db():
         """))
         session.commit()
 
-        backfill_key = "backfill_deleted_bill_stock_ledger_v1"
+        backfill_key = "backfill_deleted_bill_stock_ledger_v2"
         already_done = session.exec(
             text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=backfill_key),
         ).first()
@@ -313,7 +313,7 @@ def migrate_db():
             session.commit()
 
         # ---------- one-time backfill: missing SALE ledger rows for existing bills ----------
-        sale_backfill_key = "backfill_missing_bill_sale_ledger_v1"
+        sale_backfill_key = "backfill_missing_bill_sale_ledger_v2"
         sale_backfill_done = session.exec(
             text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=sale_backfill_key),
         ).first()
@@ -324,6 +324,18 @@ def migrate_db():
 
             for row in bill_rows:
                 bill_id = int(row[0])
+                has_bill_edit = session.exec(
+                    text("""
+                        SELECT 1
+                        FROM stockmovement
+                        WHERE ref_type = 'BILL' AND ref_id = :bill_id AND reason = 'BILL_EDIT'
+                        LIMIT 1
+                    """).bindparams(bill_id=bill_id),
+                ).first()
+                if has_bill_edit:
+                    # Edited bills already have correction entries; auto SALE backfill can overstate history.
+                    continue
+
                 bill_lines = session.exec(
                     text("""
                         SELECT item_id, COALESCE(SUM(quantity), 0) AS qty

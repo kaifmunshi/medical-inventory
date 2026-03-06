@@ -773,9 +773,17 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         for iid, itm in db_items.items():
             old_qty = old_qty_by_item.get(iid, 0)
             new_qty = new_qty_by_item.get(iid, 0)
-            available_for_edit = as_i(itm.stock) + old_qty
-            if new_qty > available_for_edit:
-                raise HTTPException(status_code=400, detail=f"Insufficient stock for {itm.name}")
+            current_stock = as_i(itm.stock)
+            additional_needed = max(0, new_qty - old_qty)
+            if additional_needed > current_stock:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Insufficient stock for {itm.name} (item #{iid}). "
+                        f"Current stock={current_stock}, already in bill={old_qty}, "
+                        f"requested in edit={new_qty}, additional needed={additional_needed}."
+                    ),
+                )
 
         now_iso = now_ts()
         bill_ts = normalize_bill_ts(getattr(payload, "date_time", None), b.date_time or now_iso)

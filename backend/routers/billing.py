@@ -747,17 +747,28 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                 )
             cash, online, credit = pay_cash_in, pay_online_in, pay_credit_in
 
-        # Preserve payment history integrity: allow edit only when no manual receipts exist.
         pays = session.exec(select(BillPayment).where(BillPayment.bill_id == b.id)).all()
         manual_receipts = [
             p for p in pays
             if str(getattr(p, "note", "") or "") != "auto: payment at bill creation"
         ]
-        if manual_receipts:
-            raise HTTPException(
-                status_code=400,
-                detail="Bill has received payments. Edit is blocked to prevent payment history mismatch."
-            )
+        has_manual_receipts = len(manual_receipts) > 0
+
+        if has_manual_receipts:
+            total_cash = round2(sum(as_f(getattr(p, "cash_amount", 0.0)) for p in pays))
+            total_online = round2(sum(as_f(getattr(p, "online_amount", 0.0)) for p in pays))
+            cash, online = total_cash, total_online
+            credit = round2(max(0.0, total - (cash + online)))
+            if cash > 0 and online > 0:
+                effective_payment_mode = "split"
+            elif cash > 0:
+                effective_payment_mode = "cash"
+            elif online > 0:
+                effective_payment_mode = "online"
+            else:
+                effective_payment_mode = "credit"
+        else:
+            effective_payment_mode = payload.payment_mode
 
         for iid, itm in db_items.items():
             old_qty = old_qty_by_item.get(iid, 0)
@@ -769,14 +780,22 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         now_iso = now_ts()
         bill_ts = normalize_bill_ts(getattr(payload, "date_time", None), b.date_time or now_iso)
         paid_now = round2(cash + online)
+        if has_manual_receipts and paid_now > round2(total) + 0.0001:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot reduce bill total below received amount. "
+                    f"Received={paid_now:.2f}, New total={round2(total):.2f}"
+                ),
+            )
         has_credit_component = round2(total - paid_now) > 0
-        is_credit = payload.payment_mode == "credit" or has_credit_component
+        is_credit = effective_payment_mode == "credit" or has_credit_component
         if paid_now <= 0:
             status = "UNPAID"
             paid_at = None
         elif paid_now + 0.0001 < total:
             status = "PARTIAL"
-            paid_at = bill_ts
+            paid_at = None if has_manual_receipts else bill_ts
         else:
             status = "PAID"
             paid_at = bill_ts
@@ -820,23 +839,24 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                     line_total=round2(as_f(line_price_by_item.get(iid, itm.mrp)) * as_i(qty)),
                 ))
 
-            for p in pays:
-                session.delete(p)
-            if paid_now > 0:
-                session.add(BillPayment(
-                    bill_id=b.id,
-                    received_at=bill_ts,
-                    mode=payload.payment_mode,
-                    cash_amount=cash,
-                    online_amount=online,
-                    note="auto: payment at bill creation",
-                ))
+            if not has_manual_receipts:
+                for p in pays:
+                    session.delete(p)
+                if paid_now > 0:
+                    session.add(BillPayment(
+                        bill_id=b.id,
+                        received_at=bill_ts,
+                        mode=payload.payment_mode,
+                        cash_amount=cash,
+                        online_amount=online,
+                        note="auto: payment at bill creation",
+                    ))
 
             b.date_time = bill_ts
             b.discount_percent = payload.discount_percent
             b.subtotal = subtotal
             b.total_amount = total
-            b.payment_mode = payload.payment_mode
+            b.payment_mode = effective_payment_mode
             b.payment_cash = cash
             b.payment_online = online
             b.notes = payload.notes

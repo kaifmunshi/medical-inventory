@@ -238,6 +238,7 @@ export default function SalesReport(props: {
   const [editBillId, setEditBillId] = useState<number | null>(null)
   const [editItems, setEditItems] = useState<EditLine[]>([])
   const [editPaymentMode, setEditPaymentMode] = useState<EditMode>('cash')
+  const [editOriginalPaymentMode, setEditOriginalPaymentMode] = useState<EditMode>('cash')
   const [editSplitCombination, setEditSplitCombination] = useState<
     'cash-online' | 'cash-credit' | 'online-credit'
   >('cash-online')
@@ -497,6 +498,12 @@ export default function SalesReport(props: {
   const mEdit = useMutation({
     mutationFn: async () => {
       if (!editBillId) throw new Error('Bill not selected')
+      if (editPaymentMode !== editOriginalPaymentMode) {
+        const ok = window.confirm(
+          `Payment mode changed from "${String(editOriginalPaymentMode).toUpperCase()}" to "${String(editPaymentMode).toUpperCase()}". Continue with edit?`
+        )
+        if (!ok) throw new Error('Edit cancelled by user')
+      }
       if (editPaymentMode === 'credit' && editEffectiveNotes.trim().length === 0) {
         throw new Error('Notes required for credit')
       }
@@ -679,7 +686,9 @@ export default function SalesReport(props: {
     })
     setEditBillId(Number(b.id))
     setEditItems(lines)
-    setEditPaymentMode((b.payment_mode || 'cash') as EditMode)
+    const originalMode = (b.payment_mode || 'cash') as EditMode
+    setEditPaymentMode(originalMode)
+    setEditOriginalPaymentMode(originalMode)
     setEditSplitCombination('cash-online')
     setEditCash(Number(b.payment_cash || 0))
     setEditOnline(Number(b.payment_online || 0))

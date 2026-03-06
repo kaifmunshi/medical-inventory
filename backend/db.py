@@ -243,8 +243,7 @@ def migrate_db():
 
         backfill_key = "backfill_deleted_bill_stock_ledger_v1"
         already_done = session.exec(
-            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1"),
-            {"k": backfill_key},
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=backfill_key),
         ).first()
 
         if not already_done:
@@ -260,8 +259,7 @@ def migrate_db():
                         FROM stockmovement
                         WHERE ref_type = 'BILL' AND ref_id = :bill_id AND reason = 'BILL_DELETE'
                         LIMIT 1
-                    """),
-                    {"bill_id": bill_id},
+                    """).bindparams(bill_id=bill_id),
                 ).first()
                 if has_delete_movement:
                     continue
@@ -273,8 +271,7 @@ def migrate_db():
                         WHERE bill_id = :bill_id
                         GROUP BY item_id
                         HAVING COALESCE(SUM(quantity), 0) > 0
-                    """),
-                    {"bill_id": bill_id},
+                    """).bindparams(bill_id=bill_id),
                 ).all()
 
                 for line in bill_lines:
@@ -282,28 +279,28 @@ def migrate_db():
                     qty = int(line[1])
 
                     item_exists = session.exec(
-                        text("SELECT 1 FROM item WHERE id = :item_id LIMIT 1"),
-                        {"item_id": item_id},
+                        text("SELECT 1 FROM item WHERE id = :item_id LIMIT 1").bindparams(item_id=item_id),
                     ).first()
                     if not item_exists:
                         continue
 
                     session.exec(
-                        text("UPDATE item SET stock = COALESCE(stock, 0) + :qty WHERE id = :item_id"),
-                        {"qty": qty, "item_id": item_id},
+                        text("UPDATE item SET stock = COALESCE(stock, 0) + :qty WHERE id = :item_id").bindparams(
+                            qty=qty,
+                            item_id=item_id,
+                        ),
                     )
                     session.exec(
                         text("""
                             INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
                             VALUES (:item_id, :ts, :delta, 'BILL_DELETE', 'BILL', :ref_id, :note, 'migration')
-                        """),
-                        {
-                            "item_id": item_id,
-                            "ts": ts,
-                            "delta": qty,
-                            "ref_id": bill_id,
-                            "note": f"Backfill: bill #{bill_id} was already soft-deleted before ledger fix",
-                        },
+                        """).bindparams(
+                            item_id=item_id,
+                            ts=ts,
+                            delta=qty,
+                            ref_id=bill_id,
+                            note=f"Backfill: bill #{bill_id} was already soft-deleted before ledger fix",
+                        ),
                     )
 
             session.exec(
@@ -311,8 +308,7 @@ def migrate_db():
                     INSERT INTO appmeta (key, value, updated_at)
                     VALUES (:k, 'done', :ts)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """),
-                {"k": backfill_key, "ts": ts},
+                """).bindparams(k=backfill_key, ts=ts),
             )
             session.commit()
 

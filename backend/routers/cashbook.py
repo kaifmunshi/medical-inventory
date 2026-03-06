@@ -7,7 +7,7 @@ from sqlmodel import select
 from sqlalchemy import text  # ✅ use sqlalchemy.text (NOT sqlmodel.text)
 
 from backend.db import get_session
-from backend.models import CashbookEntry, CashbookCreate, CashbookOut, Bill, BillPayment, Return
+from backend.models import CashbookEntry, CashbookCreate, CashbookOut, Bill, BillPayment, Return, ExchangeRecord
 
 router = APIRouter()
 
@@ -90,6 +90,19 @@ def _sum_return_cash(session, *, start_iso: Optional[str] = None, end_iso: Optio
     return round(total, 2)
 
 
+def _sum_exchange_cash_in(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
+    stmt = select(ExchangeRecord)
+    if start_iso:
+        stmt = stmt.where(ExchangeRecord.created_at >= start_iso)
+    if end_iso:
+        stmt = stmt.where(ExchangeRecord.created_at <= end_iso)
+    rows = session.exec(stmt).all()
+    total = 0.0
+    for r in rows:
+        total += float(getattr(r, "payment_cash", 0) or 0)
+    return round(total, 2)
+
+
 @router.post("/", response_model=CashbookOut)
 def create_entry(payload: CashbookCreate):
     et = (payload.entry_type or "").strip().upper()
@@ -149,8 +162,9 @@ def summary(
         rows = session.exec(base).all()
         out = _sum_rows(rows)
         bill_cash = _sum_bill_cash(session, start_iso=start_iso, end_iso=end_iso)
+        exchange_cash_in = _sum_exchange_cash_in(session, start_iso=start_iso, end_iso=end_iso)
         return_cash = _sum_return_cash(session, start_iso=start_iso, end_iso=end_iso)
-        out["receipts"] = round(float(out["receipts"]) + bill_cash, 2)
+        out["receipts"] = round(float(out["receipts"]) + bill_cash + exchange_cash_in, 2)
         out["withdrawals"] = round(float(out["withdrawals"]) + return_cash, 2)
         out["cash_out"] = round(float(out["withdrawals"]) + float(out["expenses"]), 2)
         out["net_change"] = round(float(out["receipts"]) - float(out["cash_out"]), 2)
@@ -174,6 +188,7 @@ def day_cashbook(date: str = Query(..., description="YYYY-MM-DD")):
         opening_balance = (
             _sum_rows(opening_rows)["net_change"]
             + _sum_bill_cash(session, end_iso=prev_end)
+            + _sum_exchange_cash_in(session, end_iso=prev_end)
             - _sum_return_cash(session, end_iso=prev_end)
         )
 
@@ -185,8 +200,9 @@ def day_cashbook(date: str = Query(..., description="YYYY-MM-DD")):
         ).all()
         day_summary = _sum_rows(day_rows)
         bill_cash_today = _sum_bill_cash(session, start_iso=day_start, end_iso=day_end)
+        exchange_cash_in_today = _sum_exchange_cash_in(session, start_iso=day_start, end_iso=day_end)
         return_cash_today = _sum_return_cash(session, start_iso=day_start, end_iso=day_end)
-        day_summary["receipts"] = round(float(day_summary["receipts"]) + bill_cash_today, 2)
+        day_summary["receipts"] = round(float(day_summary["receipts"]) + bill_cash_today + exchange_cash_in_today, 2)
         day_summary["withdrawals"] = round(float(day_summary["withdrawals"]) + return_cash_today, 2)
         day_summary["cash_out"] = round(float(day_summary["withdrawals"]) + float(day_summary["expenses"]), 2)
         day_summary["net_change"] = round(float(day_summary["receipts"]) - float(day_summary["cash_out"]), 2)

@@ -27,7 +27,7 @@ import {
   type CashbookType,
 } from '../../services/cashbook'
 import { listPayments } from '../../services/billing'
-import { listReturns } from '../../services/returns'
+import { listExchangeRecords, listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
 
 function money(n: number | string | null | undefined) {
@@ -140,6 +140,12 @@ export default function CashbookPage() {
     enabled: recordsFilter === 'DAY',
   })
 
+  const qDayExchanges = useQuery({
+    queryKey: ['cashbook-exchanges-day', selectedDate],
+    queryFn: () => listExchangeRecords({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    enabled: recordsFilter === 'DAY',
+  })
+
   const qAllCashbook = useQuery({
     queryKey: ['cashbook-all-entries', allView, allRange.from, allRange.to],
     queryFn: async () => {
@@ -182,6 +188,23 @@ export default function CashbookPage() {
       const limit = 500
       while (true) {
         const rows = await listReturns({ from_date: allRange.from, to_date: allRange.to, limit, offset })
+        out.push(...(rows || []))
+        if (!rows || rows.length < limit) break
+        offset += limit
+      }
+      return out
+    },
+    enabled: recordsFilter === 'ALL',
+  })
+
+  const qAllExchanges = useQuery({
+    queryKey: ['cashbook-all-exchanges', allView, allRange.from, allRange.to],
+    queryFn: async () => {
+      const out: any[] = []
+      let offset = 0
+      const limit = 500
+      while (true) {
+        const rows = await listExchangeRecords({ from_date: allRange.from, to_date: allRange.to, limit, offset })
         out.push(...(rows || []))
         if (!rows || rows.length < limit) break
         offset += limit
@@ -257,31 +280,73 @@ export default function CashbookPage() {
 
   const returnCashRowsDay = useMemo(() => {
     const returns = (qDayReturns.data || []) as any[]
+    const exchangeByReturnId = new Map<number, any>()
+    for (const ex of (qDayExchanges.data || []) as any[]) {
+      exchangeByReturnId.set(Number(ex.return_id), ex)
+    }
     return returns
       .filter((r) => Number(r?.refund_cash || 0) > 0)
       .map((r) => ({
         id: `return-${r.id}`,
         created_at: r.date_time,
         entry_type: 'WITHDRAWAL',
+        pill_type: exchangeByReturnId.has(Number(r.id)) ? 'RETURN' : undefined,
         amount: Number(r.refund_cash || 0),
-        note: `Cash return #${r.id}`,
+        note: exchangeByReturnId.has(Number(r.id))
+          ? `Cash refund in exchange #${exchangeByReturnId.get(Number(r.id))?.id ?? ''}`
+          : `Cash return #${r.id}`,
         source: 'RETURN' as const,
       }))
-  }, [qDayReturns.data])
+  }, [qDayReturns.data, qDayExchanges.data])
 
   const returnCashRowsAll = useMemo(() => {
     const returns = (qAllReturns.data || []) as any[]
+    const exchangeByReturnId = new Map<number, any>()
+    for (const ex of (qAllExchanges.data || []) as any[]) {
+      exchangeByReturnId.set(Number(ex.return_id), ex)
+    }
     return returns
       .filter((r) => Number(r?.refund_cash || 0) > 0)
       .map((r) => ({
         id: `return-${r.id}`,
         created_at: r.date_time,
         entry_type: 'WITHDRAWAL',
+        pill_type: exchangeByReturnId.has(Number(r.id)) ? 'RETURN' : undefined,
         amount: Number(r.refund_cash || 0),
-        note: `Cash return #${r.id}`,
+        note: exchangeByReturnId.has(Number(r.id))
+          ? `Cash refund in exchange #${exchangeByReturnId.get(Number(r.id))?.id ?? ''}`
+          : `Cash return #${r.id}`,
         source: 'RETURN' as const,
       }))
-  }, [qAllReturns.data])
+  }, [qAllReturns.data, qAllExchanges.data])
+
+  const exchangeCashInRowsDay = useMemo(() => {
+    const exchanges = (qDayExchanges.data || []) as any[]
+    return exchanges
+      .filter((x) => Number(x?.payment_cash || 0) > 0)
+      .map((x) => ({
+        id: `exchange-in-${x.id}`,
+        created_at: x.created_at,
+        entry_type: 'RECEIPT',
+        amount: Number(x.payment_cash || 0),
+        note: `Cash received in exchange #${x.id}`,
+        source: 'EXCHANGE' as const,
+      }))
+  }, [qDayExchanges.data])
+
+  const exchangeCashInRowsAll = useMemo(() => {
+    const exchanges = (qAllExchanges.data || []) as any[]
+    return exchanges
+      .filter((x) => Number(x?.payment_cash || 0) > 0)
+      .map((x) => ({
+        id: `exchange-in-${x.id}`,
+        created_at: x.created_at,
+        entry_type: 'RECEIPT',
+        amount: Number(x.payment_cash || 0),
+        note: `Cash received in exchange #${x.id}`,
+        source: 'EXCHANGE' as const,
+      }))
+  }, [qAllExchanges.data])
 
   const manualRowsDay = useMemo(() => {
     const rows = (day?.entries || []) as any[]
@@ -307,11 +372,12 @@ export default function CashbookPage() {
             },
             ...manualRowsDay,
             ...billCashRowsDay,
+            ...exchangeCashInRowsDay,
             ...returnCashRowsDay,
           ]
-        : [...manualRowsAll, ...billCashRowsAll, ...returnCashRowsAll]
+        : [...manualRowsAll, ...billCashRowsAll, ...exchangeCashInRowsAll, ...returnCashRowsAll]
     return rows.sort((a: any, b: any) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
-  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, returnCashRowsAll])
+  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, exchangeCashInRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, exchangeCashInRowsAll, returnCashRowsAll])
 
   const dayColorMap = useMemo(() => {
     if (recordsFilter !== 'ALL') return {} as Record<string, string>
@@ -524,7 +590,9 @@ export default function CashbookPage() {
               </TableRow>
             </TableHead>
             <TableBody>
-              {(recordsFilter === 'DAY' ? qDay.isLoading || qDayPayments.isLoading || qDayReturns.isLoading : qAllCashbook.isLoading || qAllPayments.isLoading || qAllReturns.isLoading) ? (
+              {(recordsFilter === 'DAY'
+                ? qDay.isLoading || qDayPayments.isLoading || qDayReturns.isLoading || qDayExchanges.isLoading
+                : qAllCashbook.isLoading || qAllPayments.isLoading || qAllReturns.isLoading || qAllExchanges.isLoading) ? (
                 <TableRow>
                   <TableCell colSpan={6}>Loading...</TableCell>
                 </TableRow>
@@ -573,7 +641,7 @@ export default function CashbookPage() {
                       >
                         {t === 'OPENING' ? '' : isIn ? '+' : '-'}Rs {money(row.amount)}
                       </TableCell>
-                      <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'RETURN' ? 'Return' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
+                      <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
                       <TableCell align="right">
                         {row.source === 'CASHBOOK' ? (
                           <IconButton

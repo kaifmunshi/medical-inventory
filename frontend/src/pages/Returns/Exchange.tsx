@@ -31,6 +31,9 @@ export default function Exchange() {
   // Exchange discount on NEW items + final amount override
   const [exDiscount, setExDiscount] = useState(0)
   const [finalOverride, setFinalOverride] = useState<number | ''>('') // abs amount
+  const [paymentMode, setPaymentMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
+  const [paymentCashSplit, setPaymentCashSplit] = useState<number | ''>('')
+  const [paymentOnlineSplit, setPaymentOnlineSplit] = useState<number | ''>('')
   const [refundMode, setRefundMode] = useState<'cash' | 'online' | 'split'>('cash')
   const [refundCashSplit, setRefundCashSplit] = useState<number | ''>('')
   const [refundOnlineSplit, setRefundOnlineSplit] = useState<number | ''>('')
@@ -90,6 +93,9 @@ export default function Exchange() {
     setAdd([]) // clear added items when bill changes
     setExDiscount(0)
     setFinalOverride('')
+    setPaymentMode('cash')
+    setPaymentCashSplit('')
+    setPaymentOnlineSplit('')
     setRefundMode('cash')
     setRefundCashSplit('')
     setRefundOnlineSplit('')
@@ -166,6 +172,13 @@ export default function Exchange() {
   // -------------------------------------------------------
 
   useEffect(() => {
+    if (chosenDelta <= 0 || paymentMode !== 'split') return
+    const c = Math.min(chosenAmountAbs, Math.max(0, round2(Number(paymentCashSplit || 0))))
+    setPaymentCashSplit(c)
+    setPaymentOnlineSplit(round2(Math.max(0, chosenAmountAbs - c)))
+  }, [chosenDelta, chosenAmountAbs, paymentMode])
+
+  useEffect(() => {
     if (chosenDelta >= 0 || refundMode !== 'split') return
     const c = Math.min(chosenAmountAbs, Math.max(0, round2(Number(refundCashSplit || 0))))
     setRefundCashSplit(c)
@@ -190,7 +203,7 @@ export default function Exchange() {
       rounding_adjustment: roundingAdjustment,    // 🔴 IMPORTANT
 
       notes: '',
-      payment_mode: 'cash',   // for now everything is cash; can extend later
+      payment_mode: paymentMode,
       payment_cash: 0,
       payment_online: 0,
       refund_cash: 0,
@@ -199,7 +212,24 @@ export default function Exchange() {
 
     if (chosenDelta > 0) {
       // customer pays
-      payload.payment_cash = round2(chosenDelta)
+      const payAbs = round2(chosenDelta)
+      if (paymentMode === 'cash') {
+        payload.payment_cash = payAbs
+      } else if (paymentMode === 'online') {
+        payload.payment_online = payAbs
+      } else if (paymentMode === 'credit') {
+        payload.payment_cash = 0
+        payload.payment_online = 0
+      } else {
+        const c = round2(Number(paymentCashSplit || 0))
+        const o = round2(Number(paymentOnlineSplit || 0))
+        if (c < 0 || o < 0) throw new Error('Payment split amounts cannot be negative')
+        if (round2(c + o) !== payAbs) {
+          throw new Error(`Payment split mismatch. Cash + Online must equal ₹${payAbs.toFixed(2)}.`)
+        }
+        payload.payment_cash = c
+        payload.payment_online = o
+      }
     } else if (chosenDelta < 0) {
       // refund to customer
       const refundAbs = round2(-chosenDelta)
@@ -229,6 +259,7 @@ export default function Exchange() {
       toast.push('Exchange completed', 'success')
       setBill(null); setRet([]); setAdd([]); setQuery('')
       setExDiscount(0); setFinalOverride('')
+      setPaymentMode('cash'); setPaymentCashSplit(''); setPaymentOnlineSplit('')
       setRefundMode('cash'); setRefundCashSplit(''); setRefundOnlineSplit('')
     },
     onError: (err: any) => {
@@ -421,6 +452,79 @@ export default function Exchange() {
                   inputProps={{ min: 0, step: '0.01' }}
                 />
               </Stack>
+
+              {chosenDelta > 0 && (
+                <Stack
+                  direction={{ xs: 'column', sm: 'row' }}
+                  spacing={1}
+                  alignItems="center"
+                  justifyContent="flex-end"
+                >
+                  <TextField
+                    select
+                    size="small"
+                    label="Payment Mode"
+                    value={paymentMode}
+                    onChange={(e) => {
+                      const mode = e.target.value as 'cash' | 'online' | 'split' | 'credit'
+                      setPaymentMode(mode)
+                      if (mode !== 'split') {
+                        setPaymentCashSplit('')
+                        setPaymentOnlineSplit('')
+                      }
+                    }}
+                    sx={{ width: 210 }}
+                  >
+                    <MenuItem value="cash">Cash</MenuItem>
+                    <MenuItem value="online">Online</MenuItem>
+                    <MenuItem value="split">Split</MenuItem>
+                    <MenuItem value="credit">Credit</MenuItem>
+                  </TextField>
+
+                  {paymentMode === 'split' && (
+                    <>
+                      <TextField
+                        size="small"
+                        label="Payment Cash"
+                        type="number"
+                        value={paymentCashSplit}
+                        onChange={(e) => {
+                          const raw = e.target.value
+                          if (raw === '') {
+                            setPaymentCashSplit('')
+                            setPaymentOnlineSplit(chosenAmountAbs > 0 ? chosenAmountAbs : '')
+                            return
+                          }
+                          const c = Math.min(chosenAmountAbs, Math.max(0, round2(Number(raw))))
+                          setPaymentCashSplit(c)
+                          setPaymentOnlineSplit(round2(Math.max(0, chosenAmountAbs - c)))
+                        }}
+                        sx={{ width: 160 }}
+                        inputProps={{ min: 0, step: '0.01' }}
+                      />
+                      <TextField
+                        size="small"
+                        label="Payment Online"
+                        type="number"
+                        value={paymentOnlineSplit}
+                        onChange={(e) => {
+                          const raw = e.target.value
+                          if (raw === '') {
+                            setPaymentOnlineSplit('')
+                            setPaymentCashSplit(chosenAmountAbs > 0 ? chosenAmountAbs : '')
+                            return
+                          }
+                          const o = Math.min(chosenAmountAbs, Math.max(0, round2(Number(raw))))
+                          setPaymentOnlineSplit(o)
+                          setPaymentCashSplit(round2(Math.max(0, chosenAmountAbs - o)))
+                        }}
+                        sx={{ width: 160 }}
+                        inputProps={{ min: 0, step: '0.01' }}
+                      />
+                    </>
+                  )}
+                </Stack>
+              )}
 
               {chosenDelta < 0 && (
                 <Stack

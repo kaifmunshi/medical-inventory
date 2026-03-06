@@ -47,6 +47,20 @@ export type ReturnSummaryRow = {
   remaining: number
 }
 
+export type ExchangeRecord = {
+  id: number
+  created_at: string
+  source_bill_id?: number | null
+  return_id: number
+  new_bill_id: number
+  payment_mode: 'cash' | 'online' | 'split'
+  payment_cash: number
+  payment_online: number
+  refund_cash: number
+  refund_online: number
+  net_due: number
+}
+
 // --- API calls ---
 
 // Keep existing behavior: numeric id → /billing/{id}/, else → /billing/?q=
@@ -78,7 +92,7 @@ export type ExchangePayload = {
   new_items: { item_id: number; quantity: number }[];
   discount_percent?: number;
   // when customer pays (net > 0)
-  payment_mode?: 'cash' | 'online' | 'split';
+  payment_mode?: 'cash' | 'online' | 'split' | 'credit';
   payment_cash?: number;
   payment_online?: number;
   // when you refund (net < 0)
@@ -103,6 +117,16 @@ export async function getReturn(id: number) {
 export async function getExchangeByReturn(returnId: number) {
   const { data } = await api.get(`/returns/${returnId}/exchange`)
   return data as any
+}
+
+export async function listExchangeRecords(params: {
+  from_date?: string
+  to_date?: string
+  limit?: number
+  offset?: number
+}) {
+  const { data } = await api.get<ExchangeRecord[]>('/returns/exchange/records', { params })
+  return data
 }
 
 // 🔹 NEW: fetch remaining quantity per item for a bill (sold, returned, remaining)

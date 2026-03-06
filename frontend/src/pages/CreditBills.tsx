@@ -20,6 +20,7 @@ import {
 import CloseIcon from '@mui/icons-material/Close'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { getBill, listBills, receivePayment, listBillPayments } from '../services/billing'
+import { getExchangeByReturn, listExchangeRecords } from '../services/returns'
 import { todayRange } from '../lib/date'
 
 function itemsPreview(items: any[], max = 6) {
@@ -115,6 +116,8 @@ export default function CreditBills() {
   const [detail, setDetail] = useState<any | null>(null)
   const [detailPayments, setDetailPayments] = useState<any[]>([])
   const [detailLoadingPayments, setDetailLoadingPayments] = useState(false)
+  const [openExchangeDlg, setOpenExchangeDlg] = useState(false)
+  const [exchangeDetail, setExchangeDetail] = useState<any | null>(null)
 
   // Receive payment dialog
   const [openPayDlg, setOpenPayDlg] = useState(false)
@@ -139,9 +142,33 @@ export default function CreditBills() {
         limit: 500,
       }),
   })
+  const qExchanges = useQuery({
+    queryKey: ['credit-bills-exchanges', appliedFrom, appliedTo],
+    queryFn: async () => {
+      const out: any[] = []
+      let offset = 0
+      const limit = 500
+      while (true) {
+        const rows = await listExchangeRecords({
+          from_date: appliedFrom || undefined,
+          to_date: appliedTo || undefined,
+          limit,
+          offset,
+        })
+        out.push(...(rows || []))
+        if (!rows || rows.length < limit) break
+        offset += limit
+      }
+      return out
+    },
+  })
 
   const creditRows = useMemo(() => {
     const bills = (qBills.data || []) as any[]
+    const exchangeByNewBillId = new Map<number, any>()
+    for (const ex of (qExchanges.data || []) as any[]) {
+      exchangeByNewBillId.set(Number(ex.new_bill_id), ex)
+    }
 
     // ✅ client-side search over id/notes/item names
     const t = q.trim().toLowerCase()
@@ -187,10 +214,11 @@ export default function CreditBills() {
         pendingNum,
         status,
         mode: b.payment_mode || '',
+        exchange: exchangeByNewBillId.get(Number(b.id)) || null,
         itemsPreview: itemsPreview(b.items || []),
       }
     })
-  }, [qBills.data, q])
+  }, [qBills.data, qExchanges.data, q])
 
   async function openBillDetail(row: any) {
     let b = row.raw
@@ -209,6 +237,17 @@ export default function CreditBills() {
       setDetailPayments([])
     } finally {
       setDetailLoadingPayments(false)
+    }
+  }
+
+  async function openExchangeDetail(ex: any) {
+    try {
+      const d = await getExchangeByReturn(Number(ex?.return_id))
+      setExchangeDetail(d)
+      setOpenExchangeDlg(true)
+    } catch {
+      setExchangeDetail(null)
+      setOpenExchangeDlg(true)
     }
   }
 
@@ -417,6 +456,14 @@ export default function CreditBills() {
                             {r.id}
                           </Link>
                         </Tooltip>
+                        {r.exchange ? (
+                          <Chip
+                            size="small"
+                            label={`EXCH #${r.exchange.id}`}
+                            onClick={() => openExchangeDetail(r.exchange)}
+                            sx={{ ml: 1, bgcolor: '#e9f4ff', color: '#0b4b7a', fontWeight: 700 }}
+                          />
+                        ) : null}
                       </td>
                        <td>
                         {r.notes ? (
@@ -702,6 +749,100 @@ export default function CreditBills() {
                   {(mPay.error as any)?.message || 'Payment failed'}
                 </Typography>
               ) : null}
+            </Stack>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ---------------- Exchange Detail Dialog ---------------- */}
+      <Dialog open={openExchangeDlg} onClose={() => setOpenExchangeDlg(false)} fullWidth maxWidth="md">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Exchange Details
+          <IconButton onClick={() => setOpenExchangeDlg(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          {!exchangeDetail ? (
+            <Typography color="text.secondary">Exchange details not found.</Typography>
+          ) : (
+            <Stack gap={2}>
+              <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
+                <Typography variant="subtitle1">
+                  Return ID: <b>{exchangeDetail.return_id}</b> | New Bill ID: <b>{exchangeDetail.new_bill_id}</b>
+                </Typography>
+                <Typography variant="subtitle1">
+                  Date/Time: <b>{exchangeDetail.created_at || exchangeDetail.return?.date_time || '-'}</b>
+                </Typography>
+              </Stack>
+
+              <Divider />
+
+              <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
+                <Stack gap={0.5}>
+                  <Typography variant="subtitle2">Exchange Summary</Typography>
+                  <Typography>Theoretical Net: <b>₹{money(exchangeDetail.theoretical_net)}</b></Typography>
+                  <Typography>Rounding Adj: <b>₹{money(exchangeDetail.rounding_adjustment)}</b></Typography>
+                  <Typography>Final Net Due: <b>₹{money(exchangeDetail.net_due)}</b></Typography>
+                  <Typography>
+                    Payment: <b>{String(exchangeDetail.payment_mode || '').toUpperCase() || '-'}</b>
+                    {' '}| Cash ₹{money(exchangeDetail.payment_cash)} | Online ₹{money(exchangeDetail.payment_online)}
+                  </Typography>
+                  <Typography>
+                    Refund: Cash ₹{money(exchangeDetail.refund_cash)} | Online ₹{money(exchangeDetail.refund_online)}
+                  </Typography>
+                </Stack>
+              </Stack>
+
+              <Divider />
+
+              <Typography variant="subtitle2">Returned Items</Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 220 }}>Item</th>
+                      <th>Qty</th>
+                      <th>MRP</th>
+                      <th>Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(exchangeDetail.return?.items || []).map((it: any, idx: number) => (
+                      <tr key={`ex-ret-${idx}`}>
+                        <td>{it.item_name || `#${it.item_id}`}</td>
+                        <td>{Number(it.quantity || 0)}</td>
+                        <td>{money(it.mrp)}</td>
+                        <td>{money(it.line_total ?? Number(it.quantity || 0) * Number(it.mrp || 0))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Box>
+
+              <Typography variant="subtitle2">New Bill Items</Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 220 }}>Item</th>
+                      <th>Qty</th>
+                      <th>MRP</th>
+                      <th>Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(exchangeDetail.bill?.items || []).map((it: any, idx: number) => (
+                      <tr key={`ex-bill-${idx}`}>
+                        <td>{it.item_name || `#${it.item_id}`}</td>
+                        <td>{Number(it.quantity || 0)}</td>
+                        <td>{money(it.mrp)}</td>
+                        <td>{money(it.line_total ?? Number(it.quantity || 0) * Number(it.mrp || 0))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Box>
             </Stack>
           )}
         </DialogContent>

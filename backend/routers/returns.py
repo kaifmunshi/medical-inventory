@@ -186,6 +186,39 @@ def bill_return_summary(bill_id: int):
         return out
 
 
+@router.get("/exchange/records", response_model=List[dict])
+def list_exchange_records(
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
+):
+    with get_session() as session:
+        stmt = select(ExchangeRecord)
+        if from_date:
+            stmt = stmt.where(ExchangeRecord.created_at >= f"{from_date}T00:00:00")
+        if to_date:
+            stmt = stmt.where(ExchangeRecord.created_at <= f"{to_date}T23:59:59")
+        stmt = stmt.order_by(ExchangeRecord.id.desc()).offset(offset).limit(limit)
+        rows = session.exec(stmt).all()
+        return [
+            {
+                "id": r.id,
+                "created_at": r.created_at,
+                "source_bill_id": r.source_bill_id,
+                "return_id": r.return_id,
+                "new_bill_id": r.new_bill_id,
+                "payment_mode": r.payment_mode,
+                "payment_cash": r.payment_cash,
+                "payment_online": r.payment_online,
+                "refund_cash": r.refund_cash,
+                "refund_online": r.refund_online,
+                "net_due": r.net_due,
+            }
+            for r in rows
+        ]
+
+
 @router.get("/{return_id}", response_model=ReturnOut)
 def get_return(return_id: int):
     with get_session() as session:
@@ -535,7 +568,7 @@ def create_exchange(payload: ExchangeCreate):
         raise HTTPException(status_code=400, detail="Exchange must include new_items")
     if payload.discount_percent < 0 or payload.discount_percent > 100:
         raise HTTPException(status_code=400, detail="Discount must be between 0 and 100")
-    if payload.payment_mode not in {"cash", "online", "split"}:
+    if payload.payment_mode not in {"cash", "online", "split", "credit"}:
         raise HTTPException(status_code=400, detail="Invalid payment_mode")
     if (
         payload.payment_cash < 0
@@ -652,22 +685,39 @@ def create_exchange(payload: ExchangeCreate):
 
         # Validate payment/refund fields
         if net_due > 0:
-            if payload.payment_mode == "cash":
+            if payload.payment_mode == "credit":
+                # Defer collection; no immediate cash/online entry for this exchange.
+                r_cash, r_online = 0.0, 0.0
+                b_cash, b_online = 0.0, 0.0
+            elif payload.payment_mode == "cash":
                 paid_total = round2(payload.payment_cash)
+                pay_diff = round2(net_due - paid_total)
+                if abs(pay_diff) > EXCHANGE_SETTLE_EPSILON:
+                    raise HTTPException(status_code=400, detail="Payment amounts must equal net due")
+                r_cash, r_online = 0.0, 0.0
+                b_cash = round2(payload.payment_cash)
+                b_online = round2(payload.payment_online)
+                if abs(pay_diff) > MONEY_EPSILON:
+                    b_cash = round2(b_cash + pay_diff)
             elif payload.payment_mode == "online":
                 paid_total = round2(payload.payment_online)
-            else:
-                paid_total = round2(payload.payment_cash + payload.payment_online)
-            pay_diff = round2(net_due - paid_total)
-            if abs(pay_diff) > EXCHANGE_SETTLE_EPSILON:
-                raise HTTPException(status_code=400, detail="Payment amounts must equal net due")
-            r_cash, r_online = 0.0, 0.0
-            b_cash = round2(payload.payment_cash)
-            b_online = round2(payload.payment_online)
-            if abs(pay_diff) > MONEY_EPSILON:
-                if payload.payment_mode == "online":
+                pay_diff = round2(net_due - paid_total)
+                if abs(pay_diff) > EXCHANGE_SETTLE_EPSILON:
+                    raise HTTPException(status_code=400, detail="Payment amounts must equal net due")
+                r_cash, r_online = 0.0, 0.0
+                b_cash = round2(payload.payment_cash)
+                b_online = round2(payload.payment_online)
+                if abs(pay_diff) > MONEY_EPSILON:
                     b_online = round2(b_online + pay_diff)
-                else:
+            else:  # split
+                paid_total = round2(payload.payment_cash + payload.payment_online)
+                pay_diff = round2(net_due - paid_total)
+                if abs(pay_diff) > EXCHANGE_SETTLE_EPSILON:
+                    raise HTTPException(status_code=400, detail="Payment amounts must equal net due")
+                r_cash, r_online = 0.0, 0.0
+                b_cash = round2(payload.payment_cash)
+                b_online = round2(payload.payment_online)
+                if abs(pay_diff) > MONEY_EPSILON:
                     b_cash = round2(b_cash + pay_diff)
         elif net_due < 0:
             refund_total = round2(payload.refund_cash + payload.refund_online)
@@ -737,6 +787,24 @@ def create_exchange(payload: ExchangeCreate):
         session.commit()
 
         # create new bill (exchange)
+        # In exchange, part of bill value can be settled by returned items.
+        # For credit mode, customer owes only net_due now.
+        settled_by_return = round2(max(0.0, bill_total - max(0.0, net_due)))
+        if net_due > 0 and payload.payment_mode == "credit":
+            is_credit = True
+            paid_amount = settled_by_return
+            payment_status = "PARTIAL" if paid_amount > 0 else "UNPAID"
+            paid_at = now_ts() if paid_amount > 0 else None
+        else:
+            is_credit = False
+            paid_amount = bill_total
+            payment_status = "PAID"
+            paid_at = now_ts()
+
+        base_note = str(payload.notes or "").strip()
+        exchange_note = f"Exchange link: source bill #{payload.source_bill_id or '-'} | return #{ret.id}"
+        merged_notes = f"{base_note}\n{exchange_note}" if base_note else exchange_note
+
         b = Bill(
             discount_percent=payload.discount_percent,
             subtotal=bill_subtotal,
@@ -744,7 +812,11 @@ def create_exchange(payload: ExchangeCreate):
             payment_mode=payload.payment_mode,
             payment_cash=b_cash,
             payment_online=b_online,
-            notes=payload.notes
+            notes=merged_notes,
+            is_credit=is_credit,
+            payment_status=payment_status,
+            paid_amount=paid_amount,
+            paid_at=paid_at,
         )
         session.add(b)
         session.commit()
@@ -789,7 +861,7 @@ def create_exchange(payload: ExchangeCreate):
                 payment_online=b_online,
                 refund_cash=r_cash,
                 refund_online=r_online,
-                notes=payload.notes,
+                notes=merged_notes,
             )
         )
         session.commit()

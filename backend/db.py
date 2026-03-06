@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from sqlmodel import create_engine, Session, SQLModel
 from sqlalchemy import text
@@ -11,6 +12,11 @@ engine = create_engine(
     echo=False,
     connect_args={"check_same_thread": False},
 )
+
+
+def _now_ts() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
 
 def migrate_db():
     with Session(engine) as session:
@@ -224,6 +230,91 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_stockmovement_ref_type ON stockmovement (ref_type)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_stockmovement_ref_id ON stockmovement (ref_id)"))
         session.commit()
+
+        # ---------- one-time backfill: deleted bill stock + ledger ----------
+        session.exec(text("""
+            CREATE TABLE IF NOT EXISTS appmeta (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT
+            )
+        """))
+        session.commit()
+
+        backfill_key = "backfill_deleted_bill_stock_ledger_v1"
+        already_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1"),
+            {"k": backfill_key},
+        ).first()
+
+        if not already_done:
+            ts = _now_ts()
+            deleted_bill_ids = session.exec(text("SELECT id FROM bill WHERE is_deleted = 1")).all()
+
+            for row in deleted_bill_ids:
+                bill_id = int(row[0])
+
+                has_delete_movement = session.exec(
+                    text("""
+                        SELECT 1
+                        FROM stockmovement
+                        WHERE ref_type = 'BILL' AND ref_id = :bill_id AND reason = 'BILL_DELETE'
+                        LIMIT 1
+                    """),
+                    {"bill_id": bill_id},
+                ).first()
+                if has_delete_movement:
+                    continue
+
+                bill_lines = session.exec(
+                    text("""
+                        SELECT item_id, COALESCE(SUM(quantity), 0) AS qty
+                        FROM billitem
+                        WHERE bill_id = :bill_id
+                        GROUP BY item_id
+                        HAVING COALESCE(SUM(quantity), 0) > 0
+                    """),
+                    {"bill_id": bill_id},
+                ).all()
+
+                for line in bill_lines:
+                    item_id = int(line[0])
+                    qty = int(line[1])
+
+                    item_exists = session.exec(
+                        text("SELECT 1 FROM item WHERE id = :item_id LIMIT 1"),
+                        {"item_id": item_id},
+                    ).first()
+                    if not item_exists:
+                        continue
+
+                    session.exec(
+                        text("UPDATE item SET stock = COALESCE(stock, 0) + :qty WHERE id = :item_id"),
+                        {"qty": qty, "item_id": item_id},
+                    )
+                    session.exec(
+                        text("""
+                            INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
+                            VALUES (:item_id, :ts, :delta, 'BILL_DELETE', 'BILL', :ref_id, :note, 'migration')
+                        """),
+                        {
+                            "item_id": item_id,
+                            "ts": ts,
+                            "delta": qty,
+                            "ref_id": bill_id,
+                            "note": f"Backfill: bill #{bill_id} was already soft-deleted before ledger fix",
+                        },
+                    )
+
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, 'done', :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """),
+                {"k": backfill_key, "ts": ts},
+            )
+            session.commit()
 
 
 SQLModel.metadata.create_all(engine)

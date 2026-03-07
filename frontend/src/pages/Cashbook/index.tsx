@@ -1,9 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
+  Box,
   Button,
   Chip,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  Divider,
   IconButton,
+  Link,
   MenuItem,
   Paper,
   Stack,
@@ -17,7 +23,9 @@ import {
   TextField,
   Typography,
 } from '@mui/material'
+import CloseIcon from '@mui/icons-material/Close'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
+import EditIcon from '@mui/icons-material/Edit'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createCashbookEntry,
@@ -26,9 +34,10 @@ import {
   listCashbookEntries,
   type CashbookType,
 } from '../../services/cashbook'
-import { listPayments } from '../../services/billing'
+import { getBill, listPayments } from '../../services/billing'
 import { listExchangeRecords, listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
+import BillEditDialog from '../../components/billing/BillEditDialog'
 
 function money(n: number | string | null | undefined) {
   return Number(n || 0).toFixed(2)
@@ -98,6 +107,35 @@ function typeChipProps(type: string) {
   return { label: 'Expense', sx: { ...baseSx, bgcolor: 'error.light', color: 'error.dark' } }
 }
 
+function round2(n: number) {
+  return Math.round(n * 100) / 100
+}
+
+function computeBillProration(bill: any) {
+  const items = (bill?.items || []) as any[]
+  const sub = items.reduce((s: number, it: any) => s + Number(it.mrp) * Number(it.quantity), 0)
+  const discPct = Number(bill?.discount_percent || 0)
+  const taxPct = Number(bill?.tax_percent || 0)
+  const discAmt = (sub * discPct) / 100
+  const afterDisc = sub - discAmt
+  const taxAmt = (afterDisc * taxPct) / 100
+  const computedTotal = afterDisc + taxAmt
+  const finalTotal =
+    bill?.total_amount !== undefined && bill?.total_amount !== null
+      ? Number(bill.total_amount)
+      : computedTotal
+  const factor = computedTotal > 0 ? finalTotal / computedTotal : 1
+  return { discPct, taxPct, factor }
+}
+
+function chargedLine(bill: any, mrp: number, qty: number) {
+  const { discPct, taxPct, factor } = computeBillProration(bill)
+  const lineSub = Number(mrp) * Number(qty)
+  const afterDisc = lineSub * (1 - discPct / 100)
+  const afterTax = afterDisc * (1 + taxPct / 100)
+  return round2(afterTax * factor)
+}
+
 export default function CashbookPage() {
   const qc = useQueryClient()
   const today = useMemo(() => toYMD(new Date()), [])
@@ -110,6 +148,10 @@ export default function CashbookPage() {
   const [entryType, setEntryType] = useState<CashbookType>('RECEIPT')
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
+  const [billOpen, setBillOpen] = useState(false)
+  const [billLoading, setBillLoading] = useState(false)
+  const [billDetail, setBillDetail] = useState<any | null>(null)
+  const [billEditOpen, setBillEditOpen] = useState(false)
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedAllAnchorDate(allAnchorDate), 250)
@@ -248,6 +290,21 @@ export default function CashbookPage() {
   const canSave = Number(amount) > 0 && !mCreate.isPending
   const canGoAllNext = allAnchorDate < today
 
+  async function openBillDetail(billId: number) {
+    if (!Number.isFinite(Number(billId)) || Number(billId) <= 0) return
+    setBillOpen(true)
+    setBillLoading(true)
+    setBillDetail(null)
+    try {
+      const b = await getBill(Number(billId))
+      setBillDetail(b)
+    } catch {
+      setBillDetail(null)
+    } finally {
+      setBillLoading(false)
+    }
+  }
+
   const billCashRowsDay = useMemo(() => {
     const payments = (qDayPayments.data || []) as any[]
     return payments
@@ -258,7 +315,8 @@ export default function CashbookPage() {
         entry_type: 'RECEIPT',
         pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
         amount: Number(p.cash_amount || 0),
-        note: `Cash payment for bill #${p.bill_id}`,
+        bill_id: Number(p.bill_id || 0),
+        note: `Cash payment for Bill #${p.bill_id}`,
         source: 'BILL' as const,
       }))
   }, [qDayPayments.data])
@@ -273,7 +331,8 @@ export default function CashbookPage() {
         entry_type: 'RECEIPT',
         pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
         amount: Number(p.cash_amount || 0),
-        note: `Cash payment for bill #${p.bill_id}`,
+        bill_id: Number(p.bill_id || 0),
+        note: `Cash payment for Bill #${p.bill_id}`,
         source: 'BILL' as const,
       }))
   }, [qAllPayments.data])
@@ -629,7 +688,16 @@ export default function CashbookPage() {
                       <TableCell>
                         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                           <Chip size="small" label={chip.label} sx={{ borderRadius: 999, ...chip.sx }} />
-                          <Typography variant="body2">{row.note || '-'}</Typography>
+                          {row.source === 'BILL' && Number(row.bill_id || 0) > 0 ? (
+                            <Typography variant="body2">
+                              Cash payment for{' '}
+                              <Link component="button" onClick={() => openBillDetail(Number(row.bill_id))} underline="hover">
+                                Bill #{row.bill_id}
+                              </Link>
+                            </Typography>
+                          ) : (
+                            <Typography variant="body2">{row.note || '-'}</Typography>
+                          )}
                         </Stack>
                       </TableCell>
                       <TableCell
@@ -688,6 +756,129 @@ export default function CashbookPage() {
           </Table>
         </TableContainer>
       </Paper>
+
+      <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Bill Details
+          <IconButton onClick={() => setBillOpen(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          {billLoading ? (
+            <Typography color="text.secondary">Loading…</Typography>
+          ) : !billDetail ? (
+            <Typography color="error">Failed to load bill details.</Typography>
+          ) : (
+            <Stack gap={2}>
+              <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
+                <Typography variant="subtitle1">
+                  ID: <b>{billDetail.id}</b>
+                </Typography>
+                <Typography variant="subtitle1">
+                  Date/Time: <b>{billDetail.date_time || billDetail.created_at || '-'}</b>
+                </Typography>
+              </Stack>
+
+              <Divider />
+
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 220 }}>Item</th>
+                      <th>Qty</th>
+                      <th>MRP</th>
+                      <th>Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(billDetail.items || []).map((it: any, idx: number) => {
+                      const name = it.item_name || it.name || it.item?.name || `#${it.item_id}`
+                      const qty = Number(it.quantity)
+                      const mrp = Number(it.mrp)
+                      return (
+                        <tr key={idx}>
+                          <td>{name}</td>
+                          <td>{qty}</td>
+                          <td>{money(mrp)}</td>
+                          <td>{money(chargedLine(billDetail, mrp, qty))}</td>
+                        </tr>
+                      )
+                    })}
+
+                    {(billDetail.items || []).length === 0 && (
+                      <tr>
+                        <td colSpan={4}>
+                          <Box p={2} color="text.secondary">
+                            No items.
+                          </Box>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </Box>
+
+              <Stack gap={0.5} sx={{ ml: 'auto', maxWidth: 420 }}>
+                <Typography>
+                  Total: <b>{money(billDetail.total_amount || 0)}</b>
+                </Typography>
+                <Typography>
+                  Payment Mode: <b>{billDetail.payment_mode || '-'}</b>
+                </Typography>
+                <Typography>
+                  Deleted: <b>{billDetail.is_deleted ? 'Yes' : 'No'}</b>
+                </Typography>
+                {billDetail.is_deleted ? (
+                  <Typography>
+                    Deleted At: <b>{billDetail.deleted_at || '-'}</b>
+                  </Typography>
+                ) : null}
+                <Typography>
+                  Payment Status: <b>{billDetail.payment_status || (billDetail.is_credit ? 'UNPAID' : 'PAID')}</b>
+                </Typography>
+                <Typography>
+                  Paid Amount: <b>{money(billDetail.paid_amount || 0)}</b>
+                </Typography>
+                <Typography>
+                  Pending Amount:{' '}
+                  <b>{money(Math.max(0, Number(billDetail.total_amount || 0) - Number(billDetail.paid_amount || 0)))}</b>
+                </Typography>
+                {billDetail.notes ? (
+                  <Typography sx={{ mt: 1 }}>
+                    Notes: <i>{billDetail.notes}</i>
+                  </Typography>
+                ) : null}
+                {!billDetail.is_deleted ? (
+                  <Box sx={{ pt: 1 }}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<EditIcon />}
+                      onClick={() => setBillEditOpen(true)}
+                    >
+                      Edit Bill
+                    </Button>
+                  </Box>
+                ) : null}
+              </Stack>
+            </Stack>
+          )}
+        </DialogContent>
+      </Dialog>
+      <BillEditDialog
+        open={billEditOpen}
+        bill={billDetail}
+        onClose={() => setBillEditOpen(false)}
+        onSaved={(updated) => {
+          setBillDetail(updated)
+          qc.invalidateQueries({ queryKey: ['cashbook-day', selectedDate] })
+          qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+          qc.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
+          qc.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
+        }}
+      />
     </Stack>
   )
 }

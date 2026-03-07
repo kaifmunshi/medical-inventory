@@ -166,6 +166,7 @@ export default function Billing() {
   const [billDateTime, setBillDateTime] = useState<string>(nowLocalDateInput())
   const [finalAmount, setFinalAmount] = useState<number>(0)
   const [finalManuallyEdited, setFinalManuallyEdited] = useState(false)
+  const [paymentAutoFilledOnce, setPaymentAutoFilledOnce] = useState(false)
 
   // ✅ Beautiful confirm dialog for CASH
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
@@ -446,6 +447,20 @@ export default function Billing() {
     setOnline(parsed as any)
   }
 
+  function handleAmountFocus(kind: 'cash' | 'online') {
+    if (paymentAutoFilledOnce) return
+    if (chosenFinal <= 0) return
+    if (kind === 'cash') {
+      if (cash !== '') return
+      handleCashAmountChange(String(chosenFinal))
+      setPaymentAutoFilledOnce(true)
+      return
+    }
+    if (online !== '') return
+    handleOnlineAmountChange(String(chosenFinal))
+    setPaymentAutoFilledOnce(true)
+  }
+
   useEffect(() => {
     if (mode !== 'split' || splitCombination !== 'cash-online') return
     if (cash === '' && online === '') return
@@ -543,6 +558,7 @@ export default function Billing() {
       setBillDateTime(nowLocalDateInput())
       setFinalAmount(0)
       setFinalManuallyEdited(false)
+      setPaymentAutoFilledOnce(false)
       toast.push('Bill created successfully. Inventory and payment entries were updated.', 'success')
     },
     onError: (err: any) => {
@@ -1158,6 +1174,7 @@ export default function Billing() {
                 onChange={(e) => {
                   const v = e.target.value as any
                   setMode(v)
+                  setPaymentAutoFilledOnce(false)
                   if (v === 'credit') {
                     setCash('')
                     setOnline('')
@@ -1179,6 +1196,7 @@ export default function Billing() {
                   onChange={(e) => {
                     const v = e.target.value as 'cash-online' | 'cash-credit' | 'online-credit'
                     setSplitCombination(v)
+                    setPaymentAutoFilledOnce(false)
                     if (v === 'cash-online') return
                     if (v === 'cash-credit') setOnline('')
                     if (v === 'online-credit') setCash('')
@@ -1200,6 +1218,7 @@ export default function Billing() {
                   type="text"
                   value={cash === '' ? '' : String(cash)}
                   onChange={(e) => handleCashAmountChange(e.target.value)}
+                  onFocus={() => handleAmountFocus('cash')}
                   onWheel={blurOnWheel}
                   sx={{ width: 170, ...noSpinnerSx }}
                   inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
@@ -1213,6 +1232,7 @@ export default function Billing() {
                   type="text"
                   value={online === '' ? '' : String(online)}
                   onChange={(e) => handleOnlineAmountChange(e.target.value)}
+                  onFocus={() => handleAmountFocus('online')}
                   onWheel={blurOnWheel}
                   sx={{ width: 170, ...noSpinnerSx }}
                   inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}

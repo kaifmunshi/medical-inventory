@@ -7,6 +7,7 @@ export type CashbookCreate = {
   entry_type: CashbookType
   amount: number
   note?: string
+  entry_date?: string
 }
 
 export type CashbookSummary = {

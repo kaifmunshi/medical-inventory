@@ -146,6 +146,7 @@ export default function CashbookPage() {
   const [debouncedAllAnchorDate, setDebouncedAllAnchorDate] = useState(today)
 
   const [entryType, setEntryType] = useState<CashbookType>('RECEIPT')
+  const [entryDate, setEntryDate] = useState(today)
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
   const [billOpen, setBillOpen] = useState(false)
@@ -157,6 +158,10 @@ export default function CashbookPage() {
     const t = setTimeout(() => setDebouncedAllAnchorDate(allAnchorDate), 250)
     return () => clearTimeout(t)
   }, [allAnchorDate])
+
+  useEffect(() => {
+    if (recordsFilter === 'DAY') setEntryDate(selectedDate)
+  }, [recordsFilter, selectedDate])
 
   const allRange = useMemo(() => {
     if (allView === 'WEEK') return weekRange(debouncedAllAnchorDate)
@@ -262,11 +267,13 @@ export default function CashbookPage() {
         entry_type: entryType,
         amount: Number(amount),
         note: note.trim() || undefined,
+        entry_date: entryDate,
       }),
     onSuccess: () => {
       setAmount('')
       setNote('')
-      qc.invalidateQueries({ queryKey: ['cashbook-day', selectedDate] })
+      setSelectedDate(entryDate)
+      qc.invalidateQueries({ queryKey: ['cashbook-day'] })
       qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
@@ -287,7 +294,7 @@ export default function CashbookPage() {
 
   const day = qDay.data
   const canGoNext = selectedDate < today
-  const canSave = Number(amount) > 0 && !mCreate.isPending
+  const canSave = Number(amount) > 0 && !!entryDate && !mCreate.isPending
   const canGoAllNext = allAnchorDate < today
 
   async function openBillDetail(billId: number) {
@@ -607,6 +614,13 @@ export default function CashbookPage() {
             <MenuItem value="EXPENSE">Expense (Cash Out)</MenuItem>
             <MenuItem value="WITHDRAWAL">Withdrawal (Cash Out)</MenuItem>
           </TextField>
+          <TextField
+            label="Entry Date"
+            type="date"
+            value={entryDate}
+            onChange={(e) => setEntryDate(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+          />
           <TextField
             label="Amount"
             type="number"

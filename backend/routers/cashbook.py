@@ -116,11 +116,18 @@ def create_entry(payload: CashbookCreate):
     if amt <= 0:
         raise HTTPException(status_code=400, detail="amount must be > 0")
 
+    now_time = datetime.now().strftime("%H:%M:%S")
+    created_at = datetime.now().isoformat(timespec="seconds")
+    if payload.entry_date:
+        day_dt = _parse_ymd(payload.entry_date)
+        created_at = f"{day_dt.date().isoformat()}T{now_time}"
+
     with get_session() as session:
         row = CashbookEntry(
             entry_type=et,
             amount=amt,
             note=(payload.note or None),
+            created_at=created_at,
         )
         session.add(row)
         session.commit()

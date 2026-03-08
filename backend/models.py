@@ -327,6 +327,7 @@ class CashbookCreate(SQLModel):
     entry_type: str  # "WITHDRAWAL" | "EXPENSE"
     amount: float
     note: Optional[str] = None
+    entry_date: Optional[str] = None  # YYYY-MM-DD (optional; defaults to today)
 
 
 class CashbookOut(SQLModel):

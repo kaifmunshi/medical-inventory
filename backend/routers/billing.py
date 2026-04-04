@@ -59,6 +59,7 @@ def iso_date(s: Optional[str]) -> str:
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
+
 def normalize_bill_ts(raw: Optional[str], fallback: str) -> str:
     if not raw:
         return fallback
@@ -73,8 +74,82 @@ def normalize_bill_ts(raw: Optional[str], fallback: str) -> str:
     return dt.isoformat(timespec="seconds")
 
 
+def normalize_payment_ts(raw: Optional[str], fallback: str) -> str:
+    if not raw:
+        return fallback
+    s = str(raw).strip().replace(" ", "T")
+    if not s:
+        return fallback
+    if len(s) == 10:
+        s = f"{s}T00:00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid payment_date. Use YYYY-MM-DD or ISO format.")
+    return dt.isoformat(timespec="seconds")
+
+
 def is_deleted_bill(b: Bill) -> bool:
     return bool(getattr(b, "is_deleted", False))
+
+
+def active_bill_payments_query(bill_id: int):
+    return select(BillPayment).where(BillPayment.bill_id == bill_id, BillPayment.is_deleted == False)  # noqa: E712
+
+
+def recalculate_bill_payment_state(session, bill: Bill) -> Dict[str, Any]:
+    pays = session.exec(active_bill_payments_query(bill.id)).all()
+
+    total_cash = round2(sum(as_f(x.cash_amount) for x in pays))
+    total_online = round2(sum(as_f(x.online_amount) for x in pays))
+    total_paid = round2(total_cash + total_online)
+    total_amount = round2(as_f(bill.total_amount))
+
+    bill.payment_cash = total_cash
+    bill.payment_online = total_online
+    bill.paid_amount = total_paid
+
+    if total_paid <= 0:
+        bill.payment_status = "UNPAID"
+        bill.paid_at = None
+        bill.is_credit = True
+    elif total_paid + 0.0001 < total_amount:
+        bill.payment_status = "PARTIAL"
+        bill.paid_at = None
+        bill.is_credit = True
+    else:
+        bill.payment_status = "PAID"
+        latest_paid_at = max((str(p.received_at or "") for p in pays), default="")
+        bill.paid_at = latest_paid_at or None
+        bill.is_credit = False
+
+    return {
+        "bill_id": bill.id,
+        "payment_status": bill.payment_status,
+        "paid_amount": bill.paid_amount,
+        "total_amount": bill.total_amount,
+        "pending_amount": round2(max(0.0, total_amount - total_paid)),
+    }
+
+
+def bill_allows_payment_undo(session, bill: Bill, *, include_deleted: bool = False) -> bool:
+    if str(getattr(bill, "payment_mode", "") or "").lower() == "credit":
+        return True
+    if bool(getattr(bill, "is_credit", False)):
+        return True
+
+    stmt = select(BillPayment).where(BillPayment.bill_id == bill.id)
+    if not include_deleted:
+        stmt = stmt.where(BillPayment.is_deleted == False)  # noqa: E712
+    pays = session.exec(stmt).all()
+    total_amount = round2(as_f(getattr(bill, "total_amount", 0.0)))
+    for p in pays:
+        if str(getattr(p, "note", "") or "") != "auto: payment at bill creation":
+            continue
+        opening_paid = round2(as_f(getattr(p, "cash_amount", 0.0)) + as_f(getattr(p, "online_amount", 0.0)))
+        if opening_paid + 0.0001 < total_amount:
+            return True
+    return False
 
 
 def add_movement(
@@ -388,6 +463,7 @@ def list_payments(
         stmt = (
             select(BillPayment, Bill)
             .join(Bill, Bill.id == BillPayment.bill_id)
+            .where(BillPayment.is_deleted == False)  # noqa: E712
         )
         if deleted_filter == "active":
             stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
@@ -813,7 +889,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                 )
             cash, online, credit = pay_cash_in, pay_online_in, pay_credit_in
 
-        pays = session.exec(select(BillPayment).where(BillPayment.bill_id == b.id)).all()
+        pays = session.exec(active_bill_payments_query(b.id)).all()
         manual_receipts = [
             p for p in pays
             if str(getattr(p, "note", "") or "") != "auto: payment at bill creation"
@@ -1079,15 +1155,10 @@ class ReceivePaymentIn(BaseModel):
     cash_amount: float = 0.0
     online_amount: float = 0.0
     note: Optional[str] = None
+    payment_date: Optional[str] = None
 
 
-@router.post("/{bill_id}/receive-payment")
-def receive_payment(bill_id: int, payload: ReceivePaymentIn):
-    """
-    ✅ Future-bug-proofing:
-    - Inserts BillPayment (source of truth)
-    - Recomputes Bill totals from BillPayment rows (prevents drift / double counting forever)
-    """
+def validate_payment_payload(payload: ReceivePaymentIn) -> Dict[str, Any]:
     if payload.mode not in {"cash", "online", "split"}:
         raise HTTPException(status_code=400, detail="Invalid mode")
 
@@ -1102,7 +1173,22 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
     if (cash + online) <= 0:
         raise HTTPException(status_code=400, detail="Payment amount must be > 0")
 
+    return {"cash": cash, "online": online}
+
+
+@router.post("/{bill_id}/receive-payment")
+def receive_payment(bill_id: int, payload: ReceivePaymentIn):
+    """
+    ✅ Future-bug-proofing:
+    - Inserts BillPayment (source of truth)
+    - Recomputes Bill totals from BillPayment rows (prevents drift / double counting forever)
+    """
+    vals = validate_payment_payload(payload)
+    cash = vals["cash"]
+    online = vals["online"]
+
     now_iso = now_ts()
+    payment_ts = normalize_payment_ts(payload.payment_date, now_iso)
 
     with get_session() as session:
         b = session.get(Bill, bill_id)
@@ -1114,7 +1200,7 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
         # 1) Insert payment record (THIS is the source of truth for "Collected Today")
         p = BillPayment(
             bill_id=bill_id,
-            received_at=now_iso,
+            received_at=payment_ts,
             mode=payload.mode,
             cash_amount=cash,
             online_amount=online,
@@ -1124,43 +1210,42 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
         session.commit()
 
         # 2) Recalculate totals from all BillPayment rows (prevents future inconsistencies)
-        pays = session.exec(select(BillPayment).where(BillPayment.bill_id == bill_id)).all()
-
-        total_cash = round2(sum(as_f(x.cash_amount) for x in pays))
-        total_online = round2(sum(as_f(x.online_amount) for x in pays))
-        total_paid = round2(total_cash + total_online)
-
-        # Keep Bill fields aligned with payments history
-        b.payment_cash = total_cash
-        b.payment_online = total_online
-        b.paid_amount = total_paid
-
-        # 3) Decide status (UNPAID / PARTIAL / PAID)
-        total_amount = round2(as_f(b.total_amount))
-
-        if total_paid <= 0:
-            b.payment_status = "UNPAID"
-            b.paid_at = None
-            b.is_credit = True
-        elif total_paid + 0.0001 < total_amount:
-            b.payment_status = "PARTIAL"
-            b.paid_at = None
-            b.is_credit = True
-        else:
-            b.payment_status = "PAID"
-            b.paid_at = now_iso
-            b.is_credit = False
-
+        result = recalculate_bill_payment_state(session, b)
         session.add(b)
         session.commit()
+        return result
 
-        return {
-            "bill_id": b.id,
-            "payment_status": b.payment_status,
-            "paid_amount": b.paid_amount,
-            "total_amount": b.total_amount,
-            "pending_amount": round2(max(0.0, total_amount - total_paid))
-        }
+
+@router.put("/{bill_id}/payments/{payment_id}")
+def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
+    vals = validate_payment_payload(payload)
+    cash = vals["cash"]
+    online = vals["online"]
+
+    payment_ts = normalize_payment_ts(payload.payment_date, now_ts())
+
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+        if is_deleted_bill(b):
+            raise HTTPException(status_code=400, detail="Cannot edit payment on deleted bill")
+
+        p = session.get(BillPayment, payment_id)
+        if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
+            raise HTTPException(status_code=404, detail="Payment not found")
+
+        p.received_at = payment_ts
+        p.mode = payload.mode
+        p.cash_amount = cash
+        p.online_amount = online
+        p.note = payload.note
+        session.add(p)
+
+        result = recalculate_bill_payment_state(session, b)
+        session.add(b)
+        session.commit()
+        return result
 
 
 # ------------------ List Payments for a Bill ------------------
@@ -1187,9 +1272,67 @@ def list_bill_payments(bill_id: int):
                 "cash_amount": p.cash_amount,
                 "online_amount": p.online_amount,
                 "note": p.note,
+                "is_deleted": bool(getattr(p, "is_deleted", False)),
+                "deleted_at": getattr(p, "deleted_at", None),
             }
             for p in pays
         ]
+
+
+@router.delete("/{bill_id}/payments/{payment_id}")
+def undo_bill_payment(bill_id: int, payment_id: int):
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+        if is_deleted_bill(b):
+            raise HTTPException(status_code=400, detail="Cannot undo payment on deleted bill")
+        if not bill_allows_payment_undo(session, b):
+            raise HTTPException(
+                status_code=400,
+                detail="Undo payment is allowed only for bills with a credit component",
+            )
+
+        p = session.get(BillPayment, payment_id)
+        if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
+            raise HTTPException(status_code=404, detail="Payment not found")
+
+        p.is_deleted = True
+        p.deleted_at = now_ts()
+        session.add(p)
+
+        result = recalculate_bill_payment_state(session, b)
+        session.add(b)
+        session.commit()
+        return result
+
+
+@router.post("/{bill_id}/payments/{payment_id}/recover")
+def recover_bill_payment(bill_id: int, payment_id: int):
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+        if is_deleted_bill(b):
+            raise HTTPException(status_code=400, detail="Cannot recover payment on deleted bill")
+        if not bill_allows_payment_undo(session, b, include_deleted=True):
+            raise HTTPException(
+                status_code=400,
+                detail="Recover payment is allowed only for bills with a credit component",
+            )
+
+        p = session.get(BillPayment, payment_id)
+        if not p or int(p.bill_id) != int(bill_id) or not bool(getattr(p, "is_deleted", False)):
+            raise HTTPException(status_code=404, detail="Deleted payment not found")
+
+        p.is_deleted = False
+        p.deleted_at = None
+        session.add(p)
+
+        result = recalculate_bill_payment_state(session, b)
+        session.add(b)
+        session.commit()
+        return result
 
 
 # ------------------ Dashboard helper: Payments Summary (Collected Today) ------------------
@@ -1210,6 +1353,7 @@ def payments_summary(
         stmt = (
             select(BillPayment)
             .join(Bill, Bill.id == BillPayment.bill_id)
+            .where(BillPayment.is_deleted == False)  # noqa: E712
             .order_by(BillPayment.id.desc())
         )
         if deleted_filter == "active":
@@ -1271,6 +1415,7 @@ def payments_aggregate(
             )
             .select_from(BillPayment)
             .join(Bill, Bill.id == BillPayment.bill_id)
+            .where(BillPayment.is_deleted == False)  # noqa: E712
             .where(BillPayment.received_at >= start_ts)
             .where(BillPayment.received_at <= end_ts)
             .group_by(period_expr)

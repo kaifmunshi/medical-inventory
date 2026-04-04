@@ -108,6 +108,7 @@ export interface ReceivePaymentIn {
   cash_amount?: number
   online_amount?: number
   note?: string
+  payment_date?: string
 }
 
 export interface ReceivePaymentOut {
@@ -132,10 +133,27 @@ export interface BillPaymentRow {
   cash_amount: number
   online_amount: number
   note?: string | null
+  is_deleted: boolean
+  deleted_at?: string | null
 }
 
 export async function listBillPayments(billId: number) {
   const { data } = await api.get<BillPaymentRow[]>(`/billing/${billId}/payments`)
+  return data
+}
+
+export async function undoBillPayment(billId: number, paymentId: number) {
+  const { data } = await api.delete<ReceivePaymentOut>(`/billing/${billId}/payments/${paymentId}`)
+  return data
+}
+
+export async function recoverBillPayment(billId: number, paymentId: number) {
+  const { data } = await api.post<ReceivePaymentOut>(`/billing/${billId}/payments/${paymentId}/recover`)
+  return data
+}
+
+export async function editBillPayment(billId: number, paymentId: number, payload: ReceivePaymentIn) {
+  const { data } = await api.put<ReceivePaymentOut>(`/billing/${billId}/payments/${paymentId}`, payload)
   return data
 }
 

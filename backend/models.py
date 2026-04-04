@@ -65,6 +65,8 @@ class BillPayment(SQLModel, table=True):
     cash_amount: float = 0.0
     online_amount: float = 0.0
     note: Optional[str] = None
+    is_deleted: bool = Field(default=False, index=True)
+    deleted_at: Optional[str] = None
 
 
 # ---------- Returns (DB) ----------

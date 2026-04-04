@@ -18,10 +18,21 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { getBill, listBills, receivePayment, listBillPayments } from '../services/billing'
+import {
+  editBillPayment,
+  getBill,
+  listBills,
+  receivePayment,
+  listBillPayments,
+  recoverBillPayment,
+  undoBillPayment,
+} from '../services/billing'
 import { getExchangeByReturn, listExchangeRecords } from '../services/returns'
 import { todayRange } from '../lib/date'
+import ConfirmDialog from '../components/ui/ConfirmDialog'
 
 function itemsPreview(items: any[], max = 6) {
   const names = (items || []).map(
@@ -82,6 +93,19 @@ function isPaidStatus(s: any) {
   return String(s || '').toUpperCase() === 'PAID'
 }
 
+function billHasUndoableCreditComponent(bill: any, payments: any[]) {
+  if (String(bill?.payment_mode || '').toLowerCase() === 'credit') return true
+  if (Boolean(bill?.is_credit)) return true
+
+  const total = Number(bill?.total_amount || 0)
+  return (payments || []).some((p: any) => {
+    const isOpeningPayment = String(p?.note || '') === 'auto: payment at bill creation'
+    if (!isOpeningPayment) return false
+    const openingPaid = Number(p?.cash_amount || 0) + Number(p?.online_amount || 0)
+    return openingPaid + 0.0001 < total
+  })
+}
+
 // ✅ small colored status chip
 function StatusChip({ status }: { status: any }) {
   const s = String(status || '').toUpperCase()
@@ -118,6 +142,9 @@ export default function CreditBills() {
   const [detailLoadingPayments, setDetailLoadingPayments] = useState(false)
   const [openExchangeDlg, setOpenExchangeDlg] = useState(false)
   const [exchangeDetail, setExchangeDetail] = useState<any | null>(null)
+  const [undoPaymentRow, setUndoPaymentRow] = useState<any | null>(null)
+  const [recoverPaymentRow, setRecoverPaymentRow] = useState<any | null>(null)
+  const [editPaymentRow, setEditPaymentRow] = useState<any | null>(null)
 
   // Receive payment dialog
   const [openPayDlg, setOpenPayDlg] = useState(false)
@@ -126,6 +153,7 @@ export default function CreditBills() {
   const [cash, setCash] = useState<number | ''>('')
   const [online, setOnline] = useState<number | ''>('')
   const [note, setNote] = useState('')
+  const [paymentDate, setPaymentDate] = useState(todayFrom)
   const payPending = useMemo(
     () => round2(Math.max(0, Number(payBill?.total_amount || 0) - Number(payBill?.paid_amount || 0))),
     [payBill]
@@ -192,7 +220,6 @@ export default function CreditBills() {
       const status = String(b.payment_status || '').toUpperCase()
       if (status === 'UNPAID' || status === 'PARTIAL') return true
       if (b.is_credit === true) return true
-      // fallback: if payment_mode is credit
       if (String(b.payment_mode || '').toLowerCase() === 'credit') return true
       return false
     })
@@ -272,6 +299,10 @@ export default function CreditBills() {
     }
   }
 
+  function detailHasPendingBalance(bill: any) {
+    return Number(bill?.total_amount || 0) - Number(bill?.paid_amount || 0) > 0.0001
+  }
+
   function openReceivePayment(row: any) {
     const b = row.raw
     setPayBill(b)
@@ -279,7 +310,33 @@ export default function CreditBills() {
     setCash('')
     setOnline('')
     setNote('')
+    setPaymentDate(todayFrom)
     setOpenPayDlg(true)
+  }
+
+  function openReceivePaymentForBill(bill: any) {
+    if (!bill?.id) return
+    setPayBill(bill)
+    setPayMode('cash')
+    setCash('')
+    setOnline('')
+    setNote('')
+    setPaymentDate(todayFrom)
+    setOpenPayDlg(true)
+  }
+
+  function paymentDateOnly(raw: any) {
+    const s = String(raw || '')
+    return s.length >= 10 ? s.slice(0, 10) : todayFrom
+  }
+
+  function openEditPayment(payment: any) {
+    setEditPaymentRow(payment)
+    setPayMode((payment?.mode as any) || 'cash')
+    setCash(Number(payment?.cash_amount || 0) || '')
+    setOnline(Number(payment?.online_amount || 0) || '')
+    setNote(payment?.note || '')
+    setPaymentDate(paymentDateOnly(payment?.received_at))
   }
 
   function handleSplitCashInPayDialog(raw: string) {
@@ -331,6 +388,7 @@ export default function CreditBills() {
         cash_amount: cashAmt,
         online_amount: onlineAmt,
         note: note || undefined,
+        payment_date: paymentDate || undefined,
       })
     },
     onSuccess: async (_out) => {
@@ -342,13 +400,84 @@ export default function CreditBills() {
     },
   })
 
+  const mUndoPay = useMutation({
+    mutationFn: async (payment: any) => {
+      if (!detail?.id) throw new Error('Bill missing')
+      if (!payment?.id) throw new Error('Payment missing')
+      return undoBillPayment(Number(detail.id), Number(payment.id))
+    },
+    onSuccess: async () => {
+      const billId = Number(detail?.id || 0)
+      setUndoPaymentRow(null)
+      await qBills.refetch()
+      if (billId) await refreshDetailIfOpen(billId)
+    },
+  })
+
+  const mRecoverPay = useMutation({
+    mutationFn: async (payment: any) => {
+      if (!detail?.id) throw new Error('Bill missing')
+      if (!payment?.id) throw new Error('Payment missing')
+      return recoverBillPayment(Number(detail.id), Number(payment.id))
+    },
+    onSuccess: async () => {
+      const billId = Number(detail?.id || 0)
+      setRecoverPaymentRow(null)
+      await qBills.refetch()
+      if (billId) await refreshDetailIfOpen(billId)
+    },
+  })
+
+  const mEditPay = useMutation({
+    mutationFn: async () => {
+      if (!detail?.id) throw new Error('Bill missing')
+      if (!editPaymentRow?.id) throw new Error('Payment missing')
+
+      const cashAmt = Number(cash || 0)
+      const onlineAmt = Number(online || 0)
+
+      if (payMode === 'cash' && onlineAmt !== 0) throw new Error('Online must be 0 for cash mode')
+      if (payMode === 'online' && cashAmt !== 0) throw new Error('Cash must be 0 for online mode')
+      if (payMode !== 'split' && cashAmt + onlineAmt <= 0) throw new Error('Amount must be > 0')
+      if (payMode === 'split' && cashAmt + onlineAmt <= 0) throw new Error('Split must have some amount')
+
+      return editBillPayment(Number(detail.id), Number(editPaymentRow.id), {
+        mode: payMode,
+        cash_amount: cashAmt,
+        online_amount: onlineAmt,
+        note: note || undefined,
+        payment_date: paymentDate || undefined,
+      })
+    },
+    onSuccess: async () => {
+      const billId = Number(detail?.id || 0)
+      setEditPaymentRow(null)
+      await qBills.refetch()
+      if (billId) await refreshDetailIfOpen(billId)
+    },
+  })
+
   // ✅ show "Last Payment Mode" based on latest payment entry (if any)
   const lastPayment = useMemo(() => {
-    const pays = Array.isArray(detailPayments) ? detailPayments : []
+    const pays = Array.isArray(detailPayments) ? detailPayments.filter((p: any) => !p?.is_deleted) : []
     if (pays.length === 0) return null
-    // assume API returns desc order; still safe to fallback to first
     return pays[0]
   }, [detailPayments])
+
+  const canUndoDetailPayments = useMemo(
+    () => billHasUndoableCreditComponent(detail, detailPayments),
+    [detail, detailPayments]
+  )
+
+  const activeDetailPayments = useMemo(
+    () => (detailPayments || []).filter((p: any) => !p?.is_deleted),
+    [detailPayments]
+  )
+
+  const deletedDetailPayments = useMemo(
+    () => (detailPayments || []).filter((p: any) => p?.is_deleted),
+    [detailPayments]
+  )
 
   const lastPaymentModeLabel = lastPayment?.mode ? String(lastPayment.mode) : null
 
@@ -449,7 +578,11 @@ export default function CreditBills() {
                   const isSettled = isPaidStatus(r.status) || Number(r.pendingNum || 0) <= 0
 
                   return (
-                    <tr key={`cb-${r.id}`}>
+                    <tr
+                      key={`cb-${r.id}`}
+                      onDoubleClick={() => openBillDetail(r)}
+                      style={{ cursor: 'pointer' }}
+                    >
                       <td>
                         <Tooltip title={r.itemsPreview} arrow placement="top">
                           <Link component="button" onClick={() => openBillDetail(r)} underline="hover">
@@ -536,6 +669,22 @@ export default function CreditBills() {
                   Date/Time: <b>{detail.date_time || detail.created_at || '-'}</b>
                 </Typography>
               </Stack>
+
+              <Box textAlign={{ xs: 'left', md: 'right' }}>
+                {detailHasPendingBalance(detail) ? (
+                  <Button
+                    variant="contained"
+                    onClick={() => openReceivePaymentForBill(detail)}
+                    disabled={mPay.isPending}
+                  >
+                    Receive Payment
+                  </Button>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">
+                    Bill fully paid
+                  </Typography>
+                )}
+              </Box>
 
               <Divider />
 
@@ -640,28 +789,67 @@ export default function CreditBills() {
                   <table className="table">
                     <thead>
                       <tr>
-                        <th>Date/Time</th>
+                        <th style={{ width: 120 }}>Date</th>
                         <th>Mode</th>
                         <th>Cash</th>
                         <th>Online</th>
-                        <th>Note</th>
+                        <th style={{ minWidth: 220 }}>Note</th>
+                        <th style={{ width: 64 }}></th>
                       </tr>
                     </thead>
                     <tbody>
-                      {(detailPayments || []).map((p: any) => (
+                      {activeDetailPayments.map((p: any) => (
                         <tr key={p.id}>
-                          <td>{p.received_at || '-'}</td>
+                          <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {p.received_at ? String(p.received_at).slice(0, 10) : '-'}
+                          </td>
                           <td>{p.mode || '-'}</td>
                           <td>{money(p.cash_amount)}</td>
                           <td>{money(p.online_amount)}</td>
-                          <td>{p.note || ''}</td>
+                          <td style={{ minWidth: 220 }}>{p.note || ''}</td>
+                          <td align="right">
+                            <Box
+                              sx={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'flex-end',
+                                gap: 0.25,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              <IconButton
+                                size="small"
+                                onClick={() => openEditPayment(p)}
+                                disabled={mEditPay.isPending}
+                                color="primary"
+                                sx={{ p: 0.25 }}
+                              >
+                                <EditOutlinedIcon fontSize="small" />
+                              </IconButton>
+                              {canUndoDetailPayments ? (
+                                <IconButton
+                                  size="small"
+                                  color="error"
+                                  onClick={() => setUndoPaymentRow(p)}
+                                  disabled={mUndoPay.isPending}
+                                  sx={{ p: 0.25 }}
+                                >
+                                  <DeleteOutlineIcon fontSize="small" />
+                                </IconButton>
+                              ) : (
+                                <Typography variant="body2" color="text.secondary">
+                                  -
+                                </Typography>
+                              )}
+                            </Box>
+                          </td>
                         </tr>
                       ))}
-                      {(detailPayments || []).length === 0 && (
+                      {activeDetailPayments.length === 0 && (
                         <tr>
-                          <td colSpan={5}>
+                          <td colSpan={6}>
                             <Box p={2} color="text.secondary">
-                              No payments yet.
+                              No active payments.
                             </Box>
                           </td>
                         </tr>
@@ -670,10 +858,185 @@ export default function CreditBills() {
                   </table>
                 </Box>
               )}
+
+              <Divider />
+
+              <Typography variant="subtitle1">Deleted Payment History</Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 120 }}>Date</th>
+                      <th>Mode</th>
+                      <th>Cash</th>
+                      <th>Online</th>
+                      <th style={{ minWidth: 220 }}>Note</th>
+                      <th style={{ width: 120 }}>Deleted</th>
+                      <th style={{ width: 64 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {deletedDetailPayments.map((p: any) => (
+                      <tr key={`deleted-${p.id}`}>
+                        <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {p.received_at ? String(p.received_at).slice(0, 10) : '-'}
+                        </td>
+                        <td>{p.mode || '-'}</td>
+                        <td>{money(p.cash_amount)}</td>
+                        <td>{money(p.online_amount)}</td>
+                        <td style={{ minWidth: 220 }}>{p.note || ''}</td>
+                        <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {p.deleted_at ? String(p.deleted_at).slice(0, 10) : '-'}
+                        </td>
+                        <td align="right">
+                          {canUndoDetailPayments ? (
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              onClick={() => setRecoverPaymentRow(p)}
+                              disabled={mRecoverPay.isPending}
+                              sx={{ minWidth: 0, px: 1 }}
+                            >
+                              Recover
+                            </Button>
+                          ) : (
+                            <Typography variant="body2" color="text.secondary">
+                              -
+                            </Typography>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {deletedDetailPayments.length === 0 && (
+                      <tr>
+                        <td colSpan={7}>
+                          <Box p={2} color="text.secondary">
+                            No deleted payments.
+                          </Box>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </Box>
             </Stack>
           )}
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={Boolean(undoPaymentRow)}
+        title="Undo Payment"
+        onClose={() => {
+          if (!mUndoPay.isPending) setUndoPaymentRow(null)
+        }}
+        onConfirm={() => {
+          if (undoPaymentRow) mUndoPay.mutate(undoPaymentRow)
+        }}
+      >
+        <Typography sx={{ mt: 1 }}>
+          Undo payment of ₹{money(Number(undoPaymentRow?.cash_amount || 0) + Number(undoPaymentRow?.online_amount || 0))}
+          {undoPaymentRow?.received_at ? ` received at ${undoPaymentRow.received_at}` : ''}?
+        </Typography>
+        {mUndoPay.isError ? (
+          <Typography color="error" sx={{ mt: 1 }}>
+            {(mUndoPay.error as any)?.message || 'Undo failed'}
+          </Typography>
+        ) : null}
+      </ConfirmDialog>
+
+      <Dialog open={Boolean(editPaymentRow)} onClose={() => !mEditPay.isPending && setEditPaymentRow(null)} fullWidth maxWidth="sm">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Edit Payment
+          <IconButton onClick={() => !mEditPay.isPending && setEditPaymentRow(null)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <TextField
+              select
+              label="Mode"
+              value={payMode}
+              onChange={(e) => {
+                const v = e.target.value as any
+                setPayMode(v)
+                if (v === 'cash') setOnline('')
+                if (v === 'online') setCash('')
+              }}
+            >
+              <MenuItem value="cash">Cash</MenuItem>
+              <MenuItem value="online">Online</MenuItem>
+              <MenuItem value="split">Split</MenuItem>
+            </TextField>
+
+            {(payMode === 'cash' || payMode === 'split') && (
+              <TextField
+                label="Cash Amount"
+                type="number"
+                value={cash}
+                onChange={(e) => setCash(e.target.value === '' ? '' : Number(e.target.value))}
+              />
+            )}
+
+            {(payMode === 'online' || payMode === 'split') && (
+              <TextField
+                label="Online Amount"
+                type="number"
+                value={online}
+                onChange={(e) => setOnline(e.target.value === '' ? '' : Number(e.target.value))}
+              />
+            )}
+
+            <TextField
+              label="Note (optional)"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+            />
+
+            <TextField
+              label="Payment Date"
+              type="date"
+              value={paymentDate}
+              onChange={(e) => setPaymentDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+            />
+
+            <Box textAlign="right">
+              <Button variant="contained" onClick={() => mEditPay.mutate()} disabled={mEditPay.isPending}>
+                Save Changes
+              </Button>
+            </Box>
+
+            {mEditPay.isError ? (
+              <Typography color="error">
+                {(mEditPay.error as any)?.message || 'Edit failed'}
+              </Typography>
+            ) : null}
+          </Stack>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={Boolean(recoverPaymentRow)}
+        title="Recover Payment"
+        onClose={() => {
+          if (!mRecoverPay.isPending) setRecoverPaymentRow(null)
+        }}
+        onConfirm={() => {
+          if (recoverPaymentRow) mRecoverPay.mutate(recoverPaymentRow)
+        }}
+      >
+        <Typography sx={{ mt: 1 }}>
+          Recover payment of ₹{money(Number(recoverPaymentRow?.cash_amount || 0) + Number(recoverPaymentRow?.online_amount || 0))}
+          {recoverPaymentRow?.received_at ? ` received at ${recoverPaymentRow.received_at}` : ''}?
+        </Typography>
+        {mRecoverPay.isError ? (
+          <Typography color="error" sx={{ mt: 1 }}>
+            {(mRecoverPay.error as any)?.message || 'Recover failed'}
+          </Typography>
+        ) : null}
+      </ConfirmDialog>
 
       {/* ---------------- Receive Payment Dialog ---------------- */}
       <Dialog open={openPayDlg} onClose={() => setOpenPayDlg(false)} fullWidth maxWidth="sm">
@@ -736,6 +1099,14 @@ export default function CreditBills() {
                 label="Note (optional)"
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
+              />
+
+              <TextField
+                label="Payment Date"
+                type="date"
+                value={paymentDate}
+                onChange={(e) => setPaymentDate(e.target.value)}
+                InputLabelProps={{ shrink: true }}
               />
 
               <Box textAlign="right">

@@ -315,10 +315,6 @@ export default function Inventory() {
     setEditing(row)
     setOpenForm(true)
   }
-  function handleAdjust(row: any) {
-    setAdjustId(row.id)
-    setAdjustName(row.name)
-  }
 
   function handleDeleteClick(row: any) {
     setDeleteTarget(row)

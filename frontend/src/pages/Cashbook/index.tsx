@@ -38,6 +38,7 @@ import { getBill, listPayments } from '../../services/billing'
 import { listExchangeRecords, listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
+import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 
 function money(n: number | string | null | undefined) {
   return Number(n || 0).toFixed(2)
@@ -773,7 +774,7 @@ export default function CashbookPage() {
 
       <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Bill Details
+          Bill Details {billDetail?.id ? `#${billDetail.id}` : ''}
           <IconButton onClick={() => setBillOpen(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -877,6 +878,18 @@ export default function CashbookPage() {
                   </Box>
                 ) : null}
               </Stack>
+
+              <Divider />
+              <BillPaymentsPanel
+                bill={billDetail}
+                onBillUpdated={async (updatedBill) => {
+                  setBillDetail(updatedBill)
+                  qc.invalidateQueries({ queryKey: ['cashbook-day', selectedDate] })
+                  qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+                  qc.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
+                  qc.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
+                }}
+              />
             </Stack>
           )}
         </DialogContent>

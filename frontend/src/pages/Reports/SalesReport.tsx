@@ -20,6 +20,7 @@ import type { Customer } from '../../lib/types'
 
 import { listBillsPaged, getBill, getSalesAggregate, softDeleteBill, recoverBill } from '../../services/billing'
 import BillEditDialog from '../../components/billing/BillEditDialog'
+import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 
 type ViewMode = 'details' | 'aggregate'
 type GroupBy = 'day' | 'month'
@@ -568,7 +569,7 @@ export default function SalesReport(props: {
       {/* Bill Detail dialog */}
       <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Bill Details
+          Bill Details {detail?.id ? `#${detail.id}` : ''}
           <IconButton onClick={() => setOpen(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -673,6 +674,15 @@ export default function SalesReport(props: {
                   </Box>
                 ) : null}
               </Stack>
+
+              <Divider />
+              <BillPaymentsPanel
+                bill={detail}
+                onBillUpdated={async (updatedBill) => {
+                  setDetail(updatedBill)
+                  await qSales.refetch()
+                }}
+              />
             </Stack>
           )}
         </DialogContent>

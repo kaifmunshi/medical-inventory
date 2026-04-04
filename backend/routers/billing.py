@@ -132,26 +132,6 @@ def recalculate_bill_payment_state(session, bill: Bill) -> Dict[str, Any]:
     }
 
 
-def bill_allows_payment_undo(session, bill: Bill, *, include_deleted: bool = False) -> bool:
-    if str(getattr(bill, "payment_mode", "") or "").lower() == "credit":
-        return True
-    if bool(getattr(bill, "is_credit", False)):
-        return True
-
-    stmt = select(BillPayment).where(BillPayment.bill_id == bill.id)
-    if not include_deleted:
-        stmt = stmt.where(BillPayment.is_deleted == False)  # noqa: E712
-    pays = session.exec(stmt).all()
-    total_amount = round2(as_f(getattr(bill, "total_amount", 0.0)))
-    for p in pays:
-        if str(getattr(p, "note", "") or "") != "auto: payment at bill creation":
-            continue
-        opening_paid = round2(as_f(getattr(p, "cash_amount", 0.0)) + as_f(getattr(p, "online_amount", 0.0)))
-        if opening_paid + 0.0001 < total_amount:
-            return True
-    return False
-
-
 def add_movement(
     session,
     *,
@@ -1287,11 +1267,6 @@ def undo_bill_payment(bill_id: int, payment_id: int):
             raise HTTPException(status_code=404, detail="Bill not found")
         if is_deleted_bill(b):
             raise HTTPException(status_code=400, detail="Cannot undo payment on deleted bill")
-        if not bill_allows_payment_undo(session, b):
-            raise HTTPException(
-                status_code=400,
-                detail="Undo payment is allowed only for bills with a credit component",
-            )
 
         p = session.get(BillPayment, payment_id)
         if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
@@ -1315,11 +1290,6 @@ def recover_bill_payment(bill_id: int, payment_id: int):
             raise HTTPException(status_code=404, detail="Bill not found")
         if is_deleted_bill(b):
             raise HTTPException(status_code=400, detail="Cannot recover payment on deleted bill")
-        if not bill_allows_payment_undo(session, b, include_deleted=True):
-            raise HTTPException(
-                status_code=400,
-                detail="Recover payment is allowed only for bills with a credit component",
-            )
 
         p = session.get(BillPayment, payment_id)
         if not p or int(p.bill_id) != int(bill_id) or not bool(getattr(p, "is_deleted", False)):

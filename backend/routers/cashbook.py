@@ -27,7 +27,8 @@ def _range_bounds(from_date: Optional[str], to_date: Optional[str]):
         return None, None
 
     start_iso = f"{f}T00:00:00"
-    end_iso = f"{t}T23:59:59"
+    # Include any sub-second timestamps on the end date (string compare on ISO datetimes).
+    end_iso = f"{t}T23:59:59.999999"
     return start_iso, end_iso
 
 
@@ -38,6 +39,8 @@ def _sum_rows(rows: List[CashbookEntry]):
     for r in rows:
         et = (r.entry_type or "").upper()
         amt = float(r.amount or 0)
+        if et == "OPENING":
+            continue
         if et == "RECEIPT":
             receipts += amt
         elif et == "WITHDRAWAL":
@@ -65,7 +68,12 @@ def _parse_ymd(date_str: str) -> datetime:
 
 
 def _sum_bill_cash(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
-    stmt = select(BillPayment).join(Bill, Bill.id == BillPayment.bill_id).where(Bill.is_deleted == False)  # noqa: E712
+    stmt = (
+        select(BillPayment)
+        .join(Bill, Bill.id == BillPayment.bill_id)
+        .where(Bill.is_deleted == False)  # noqa: E712
+        .where(BillPayment.is_deleted == False)  # noqa: E712
+    )
     if start_iso:
         stmt = stmt.where(BillPayment.received_at >= start_iso)
     if end_iso:
@@ -185,8 +193,8 @@ def day_cashbook(date: str = Query(..., description="YYYY-MM-DD")):
     prev_date = (day_dt - timedelta(days=1)).date().isoformat()
 
     day_start = f"{date}T00:00:00"
-    day_end = f"{date}T23:59:59"
-    prev_end = f"{prev_date}T23:59:59"
+    day_end = f"{date}T23:59:59.999999"
+    prev_end = f"{prev_date}T23:59:59.999999"
 
     with get_session() as session:
         opening_rows = session.exec(

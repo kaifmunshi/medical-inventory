@@ -476,9 +476,11 @@ export default function CashbookPage() {
 
   const totalsBottom = useMemo(() => {
     const opening = recordsFilter === 'DAY' ? Number(day?.opening_balance || 0) : 0
-    const closing = opening + computed.netChange
+    // Use API closing so it matches next day's opening (same server rollup; avoids list limits / drift).
+    const closing =
+      recordsFilter === 'DAY' ? Number(day?.closing_balance ?? opening + computed.netChange) : opening + computed.netChange
     return { opening, closing }
-  }, [recordsFilter, day?.opening_balance, computed.netChange])
+  }, [recordsFilter, day?.opening_balance, day?.closing_balance, computed.netChange])
 
   return (
     <Stack spacing={2}>
@@ -593,7 +595,7 @@ export default function CashbookPage() {
           {recordsFilter === 'DAY' ? (
             <Chip
               color="primary"
-              label={`Closing: Rs ${money(Number(day?.opening_balance || 0) + computed.netChange)}`}
+              label={`Closing: Rs ${money(Number(day?.closing_balance ?? Number(day?.opening_balance || 0) + computed.netChange))}`}
               sx={{ fontWeight: 700 }}
             />
           ) : (

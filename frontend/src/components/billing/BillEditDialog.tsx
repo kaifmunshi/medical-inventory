@@ -775,19 +775,37 @@ export default function BillEditDialog({
                 </Stack>
               </Stack>
 
-              <Box sx={{ mt: 1, maxHeight: 185, overflowY: 'auto', border: '1px solid #eee', borderRadius: 1, p: 1 }}>
+              <Box sx={{ mt: 1, maxHeight: 220, overflowY: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
                 {editSuggestionVisible.map((it: any) => (
-                  <Stack key={`edit-add-${it.id}`} direction="row" justifyContent="flex-start" gap={2} alignItems="center" sx={{ py: 0.5, px: 0.75, borderRadius: 1, bgcolor: Number(it.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.12)' : 'transparent' }}>
-                    <Box>
-                      <Typography variant="body2">{it.name}</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Brand: {it.brand || '-'} | Stock: {Number(it.stock || 0)} | MRP: {money(it.mrp)} | Exp: {formatExpiry(it.expiry_date)}
-                      </Typography>
+                  <Stack 
+                    key={`edit-add-${it.id}`} 
+                    direction="row" 
+                    justifyContent="space-between" 
+                    alignItems="center" 
+                    sx={{ 
+                      py: 1, 
+                      px: 1.5, 
+                      borderBottom: '1px solid #f0f0f0',
+                      bgcolor: Number(it.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.08)' : 'transparent',
+                      transition: 'background-color 0.2s',
+                      '&:hover': {
+                        bgcolor: Number(it.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.15)' : 'rgba(0, 0, 0, 0.04)'
+                      }
+                    }}
+                  >
+                    <Box sx={{ flex: 1, pr: 2 }}>
+                      <Typography variant="body1" fontWeight={500} sx={{ mb: 0.25 }}>{it.name}</Typography>
+                      <Stack direction="row" gap={1.5} flexWrap="wrap" alignItems="center">
+                        <Typography variant="caption" color="text.secondary">Brand: <b>{it.brand || '-'}</b></Typography>
+                        <Typography variant="caption" color="text.secondary">Stock: <b>{Number(it.stock || 0)}</b></Typography>
+                        <Typography variant="caption" color="text.secondary">MRP: <b>₹{money(it.mrp)}</b></Typography>
+                        <Typography variant="caption" color="text.secondary">Exp: <b>{formatExpiry(it.expiry_date)}</b></Typography>
+                      </Stack>
                     </Box>
-                    <Button size="small" variant="outlined" onClick={() => addItemToEdit(it)} disabled={Number(it.stock || 0) <= 0}>Add</Button>
+                    <Button size="small" variant="contained" color="primary" disableElevation onClick={() => addItemToEdit(it)} disabled={Number(it.stock || 0) <= 0} sx={{ minWidth: 80 }}>Add</Button>
                   </Stack>
                 ))}
-                {editSuggestionItems.length === 0 ? <Typography variant="body2" color="text.secondary">No items found.</Typography> : null}
+                {editSuggestionItems.length === 0 ? <Box p={2}><Typography variant="body2" color="text.secondary" textAlign="center">No items found.</Typography></Box> : null}
               </Box>
               {editSuggestionItems.length > EDIT_SUGGESTIONS_PAGE_SIZE && (
                 <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 1 }}>

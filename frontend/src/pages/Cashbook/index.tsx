@@ -11,7 +11,6 @@ import {
   IconButton,
   Link,
   MenuItem,
-  Paper,
   Stack,
   Table,
   TableBody,
@@ -21,6 +20,8 @@ import {
   TableHead,
   TableRow,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
@@ -86,25 +87,14 @@ function monthRange(ymd: string) {
   return { from: toYMD(start), to: toYMD(end) }
 }
 
-function typeChipProps(type: string) {
-  const baseSx = { minWidth: 84, height: 24, fontWeight: 700, justifyContent: 'center' as const }
+function typeLabel(type: string) {
   const t = String(type || '').toUpperCase()
-  if (t === 'OPENING') {
-    return { label: 'Opening', sx: { ...baseSx, bgcolor: 'info.light', color: 'info.dark' } }
-  }
-  if (t === 'RETURN') {
-    return { label: 'Return', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
-  }
-  if (t === 'SPLIT') {
-    return { label: 'Split', sx: { ...baseSx, bgcolor: '#9fe3b0', color: '#124b19' } }
-  }
-  if (t === 'RECEIPT') {
-    return { label: 'Receipt', sx: { ...baseSx, bgcolor: 'success.light', color: 'success.dark' } }
-  }
-  if (t === 'WITHDRAWAL') {
-    return { label: 'Withdrawal', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
-  }
-  return { label: 'Expense', sx: { ...baseSx, bgcolor: 'error.light', color: 'error.dark' } }
+  if (t === 'OPENING') return { text: 'Opn', color: 'text.secondary' as const }
+  if (t === 'RETURN') return { text: 'Ret', color: 'warning.dark' as const }
+  if (t === 'SPLIT') return { text: 'Spl', color: 'success.dark' as const }
+  if (t === 'RECEIPT') return { text: 'Rcpt', color: 'success.dark' as const }
+  if (t === 'WITHDRAWAL') return { text: 'Wdl', color: 'warning.dark' as const }
+  return { text: 'Exp', color: 'error.dark' as const }
 }
 
 function round2(n: number) {
@@ -447,7 +437,7 @@ export default function CashbookPage() {
 
   const dayColorMap = useMemo(() => {
     if (recordsFilter !== 'ALL') return {} as Record<string, string>
-    const palette = ['#f6fbff', '#eef6ff']
+    const palette = ['background.paper', 'grey.50']
     const dates = Array.from(new Set((visibleRows || []).map((r: any) => isoDate(r.created_at))))
     const out: Record<string, string> = {}
     dates.forEach((d, i) => {
@@ -479,129 +469,123 @@ export default function CashbookPage() {
     return { opening, closing }
   }, [recordsFilter, day?.opening_balance, computed.netChange])
 
+  const panelSx = {
+    border: '1px solid',
+    borderColor: 'rgba(13,51,36,0.12)',
+    bgcolor: 'background.paper',
+    borderRadius: 2,
+  }
+
   return (
-    <Stack spacing={2}>
-      <Paper sx={{ p: 2 }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'center' }}>
-          <Typography variant="h6" sx={{ fontWeight: 700 }}>
+    <Stack spacing={1.25}>
+      <Box sx={{ ...panelSx, p: 1.5, background: 'linear-gradient(180deg, rgba(247,250,245,0.9) 0%, rgba(255,255,255,0.95) 100%)' }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }} flexWrap="wrap">
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
             Cashbook
           </Typography>
           <TextField
             select
             size="small"
-            label="Records"
+            label="View"
             value={recordsFilter}
             onChange={(e) => setRecordsFilter(e.target.value as 'DAY' | 'ALL')}
-            sx={{ minWidth: 150, ml: { sm: 'auto' } }}
+            sx={{ minWidth: 140 }}
           >
-            <MenuItem value="DAY">Selected Day</MenuItem>
-            <MenuItem value="ALL">All Records</MenuItem>
+            <MenuItem value="DAY">Day</MenuItem>
+            <MenuItem value="ALL">All</MenuItem>
           </TextField>
-          <Stack direction="row" spacing={1} sx={{ ml: { sm: 'auto' } }}>
-            <Button variant="outlined" onClick={() => setSelectedDate(addDays(selectedDate, -1))}>
-              Previous Day
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" sx={{ ml: { sm: 'auto' } }}>
+            <Button size="small" variant="outlined" onClick={() => setSelectedDate(addDays(selectedDate, -1))}>
+              Prev
             </Button>
-            <Button variant="outlined" onClick={() => setSelectedDate(today)} disabled={selectedDate === today}>
+            <Button size="small" variant="outlined" onClick={() => setSelectedDate(today)} disabled={selectedDate === today}>
               Today
             </Button>
             <Button
+              size="small"
               variant="outlined"
               onClick={() => setSelectedDate(addDays(selectedDate, 1))}
               disabled={!canGoNext || recordsFilter === 'ALL'}
             >
-              Next Day
+              Next
             </Button>
           </Stack>
         </Stack>
         {recordsFilter === 'DAY' ? (
-          <Stack sx={{ mt: 1 }} spacing={0.25}>
-            <Typography variant="body2" sx={{ fontWeight: 700 }}>
-              Date: {selectedDate}
-            </Typography>
-            <Typography variant="body2" sx={{ color: 'error.main' }}>
-              Note : Opening balance is carried from previous day closing.
-            </Typography>
-          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+            {selectedDate} · Opening from previous closing
+          </Typography>
         ) : (
           <Stack sx={{ mt: 1 }} spacing={1}>
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} sx={{ width: '100%' }}>
-              <Stack direction="row" spacing={1}>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => setAllView('ALL')}
-                  sx={allView === 'ALL' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
-                >
-                  All
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => setAllView('WEEK')}
-                  sx={allView === 'WEEK' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
-                >
-                  Week
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => setAllView('MONTH')}
-                  sx={allView === 'MONTH' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
-                >
-                  Month
-                </Button>
-              </Stack>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} flexWrap="wrap">
+              <ToggleButtonGroup
+                size="small"
+                value={allView}
+                exclusive
+                onChange={(_, v) => v && setAllView(v)}
+                sx={{ '& .MuiToggleButton-root': { px: 1.25, py: 0.25, fontSize: 12 } }}
+              >
+                <ToggleButton value="ALL">All</ToggleButton>
+                <ToggleButton value="WEEK">Week</ToggleButton>
+                <ToggleButton value="MONTH">Month</ToggleButton>
+              </ToggleButtonGroup>
               {allView !== 'ALL' ? (
-                <Stack direction="row" spacing={1} sx={{ ml: { sm: 'auto' }, justifyContent: { sm: 'flex-end' } }}>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => setAllAnchorDate(allView === 'WEEK' ? addDays(allAnchorDate, -7) : addMonths(allAnchorDate, -1))}
-                >
-                  Previous {allView === 'WEEK' ? 'Week' : 'Month'}
-                </Button>
-                <Button variant="outlined" size="small" onClick={() => setAllAnchorDate(today)} disabled={allAnchorDate === today}>
-                  Today
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => setAllAnchorDate(allView === 'WEEK' ? addDays(allAnchorDate, 7) : addMonths(allAnchorDate, 1))}
-                  disabled={!canGoAllNext}
-                >
-                  Next {allView === 'WEEK' ? 'Week' : 'Month'}
-                </Button>
+                <Stack direction="row" spacing={0.5} sx={{ ml: { sm: 'auto' } }}>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() => setAllAnchorDate(allView === 'WEEK' ? addDays(allAnchorDate, -7) : addMonths(allAnchorDate, -1))}
+                  >
+                    Prev
+                  </Button>
+                  <Button size="small" variant="outlined" onClick={() => setAllAnchorDate(today)} disabled={allAnchorDate === today}>
+                    Today
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() => setAllAnchorDate(allView === 'WEEK' ? addDays(allAnchorDate, 7) : addMonths(allAnchorDate, 1))}
+                    disabled={!canGoAllNext}
+                  >
+                    Next
+                  </Button>
                 </Stack>
               ) : null}
             </Stack>
-            <Typography variant="body2" color="text.secondary">
-              {allView === 'ALL'
-                ? 'Showing full cashbook history (all records).'
-                : `Showing ${allView.toLowerCase()} view: ${allRange.from} to ${allRange.to}`}
+            <Typography variant="caption" color="text.secondary">
+              {allView === 'ALL' ? 'Full history' : `${allRange.from} → ${allRange.to}`}
             </Typography>
           </Stack>
         )}
-      </Paper>
+      </Box>
 
-      <Paper sx={{ p: 2 }}>
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} flexWrap="wrap">
-          {recordsFilter === 'DAY' ? <Chip label={`Opening: Rs ${money(day?.opening_balance)}`} /> : null}
-          <Chip color="success" variant="outlined" label={`Receipts: Rs ${money(computed.receipts)}`} />
-          <Chip color="error" variant="outlined" label={`Expenses: Rs ${money(computed.expenses)}`} />
-          <Chip color="warning" variant="outlined" label={`Withdrawals: Rs ${money(computed.withdrawals)}`} />
+      <Box
+        sx={{
+          ...panelSx,
+          px: 1.5,
+          py: 1,
+          bgcolor: 'rgba(31,107,74,0.05)',
+        }}
+      >
+        <Stack direction="row" flexWrap="wrap" gap={1} columnGap={1} rowGap={0.5}>
+          {recordsFilter === 'DAY' ? <Chip size="small" variant="outlined" label={`Opening ${money(day?.opening_balance)}`} /> : null}
+          <Chip size="small" color="success" variant="outlined" label={`Receipts ${money(computed.receipts)}`} />
+          <Chip size="small" color="error" variant="outlined" label={`Expenses ${money(computed.expenses)}`} />
+          <Chip size="small" color="warning" variant="outlined" label={`Withdrawals ${money(computed.withdrawals)}`} />
           {recordsFilter === 'DAY' ? (
             <Chip
+              size="small"
               color="primary"
               label={`Closing: Rs ${money(Number(day?.opening_balance || 0) + computed.netChange)}`}
               sx={{ fontWeight: 700 }}
             />
           ) : (
-            <Chip color="primary" label={`Net: Rs ${money(computed.netChange)}`} sx={{ fontWeight: 700 }} />
+            <Chip size="small" color="primary" label={`Net ${money(computed.netChange)}`} sx={{ fontWeight: 700 }} />
           )}
         </Stack>
-      </Paper>
+      </Box>
 
-      <Paper sx={{ p: 2 }}>
+      <Box sx={{ ...panelSx, p: 1.5 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5}>
           <TextField
             select
@@ -635,21 +619,23 @@ export default function CashbookPage() {
             placeholder="Optional details"
             sx={{ flex: 1 }}
           />
-          <Button variant="contained" onClick={() => mCreate.mutate()} disabled={!canSave}>
-            {mCreate.isPending ? 'Saving...' : 'Add Entry'}
+          <Button size="small" variant="contained" onClick={() => mCreate.mutate()} disabled={!canSave}>
+            {mCreate.isPending ? 'Saving...' : 'Add'}
           </Button>
         </Stack>
         {mCreate.isError ? (
-          <Alert severity="error" sx={{ mt: 1.5 }}>
+          <Alert severity="error" sx={{ mt: 1.5 }} variant="outlined">
             Failed to save entry. Please try again.
           </Alert>
         ) : null}
-      </Paper>
+      </Box>
 
-      <Paper sx={{ p: 2 }}>
-        <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
-          {recordsFilter === 'DAY' ? 'Day Entries' : 'All Records'}
-        </Typography>
+      <Box sx={{ ...panelSx, p: 0 }}>
+        <Box sx={{ px: 1.5, py: 0.75, borderBottom: '1px solid', borderColor: 'divider', bgcolor: 'rgba(31,107,74,0.06)' }}>
+          <Typography variant="caption" sx={{ fontWeight: 700 }}>
+            {recordsFilter === 'DAY' ? 'Entries' : 'Register'}
+          </Typography>
+        </Box>
         <TableContainer>
           <Table size="small">
             <TableHead>
@@ -680,7 +666,7 @@ export default function CashbookPage() {
                   const t = String(row.entry_type || '').toUpperCase()
                   const chipType = row.source === 'RETURN' ? 'RETURN' : String(row.pill_type || t).toUpperCase()
                   const isIn = t === 'RECEIPT'
-                  const chip = typeChipProps(chipType)
+                  const lbl = typeLabel(chipType)
                   const date = isoDate(row.created_at)
                   const prevDate = idx > 0 ? isoDate((visibleRows as any[])[idx - 1]?.created_at) : date
                   const isNewDay = recordsFilter === 'ALL' && idx > 0 && date !== prevDate
@@ -700,8 +686,14 @@ export default function CashbookPage() {
                       <TableCell>{isoDate(row.created_at)}</TableCell>
                       <TableCell>{isoTime(row.created_at)}</TableCell>
                       <TableCell>
-                        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                          <Chip size="small" label={chip.label} sx={{ borderRadius: 999, ...chip.sx }} />
+                        <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap">
+                          <Typography
+                            component="span"
+                            variant="caption"
+                            sx={{ color: lbl.color, fontWeight: 700, minWidth: 28, fontFamily: 'inherit' }}
+                          >
+                            [{lbl.text}]
+                          </Typography>
                           {row.source === 'BILL' && Number(row.bill_id || 0) > 0 ? (
                             <Typography variant="body2">
                               Cash payment for{' '}
@@ -769,7 +761,7 @@ export default function CashbookPage() {
             </TableFooter>
           </Table>
         </TableContainer>
-      </Paper>
+      </Box>
 
       <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

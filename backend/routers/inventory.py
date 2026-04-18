@@ -10,8 +10,11 @@ from backend.utils.archive_rules import apply_archive_rules
 from sqlalchemy import func, or_, exists
 from sqlalchemy.orm import aliased
 
+from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import Item, StockMovement
+from backend.security import require_min_role
+from backend.security import get_request_actor_name
 
 logger = logging.getLogger("api.items")
 router = APIRouter()
@@ -25,6 +28,7 @@ class ItemIn(BaseModel):
     mrp: float
     stock: int
     rack_number: int = 0
+    category_id: Optional[int] = None
 
     class Config:
         extra = "ignore"
@@ -37,6 +41,7 @@ class ItemUpdateIn(BaseModel):
     mrp: Optional[float] = None
     stock: Optional[int] = None
     rack_number: Optional[int] = None
+    category_id: Optional[int] = None
 
     class Config:
         extra = "ignore"
@@ -50,11 +55,19 @@ class ItemOut(BaseModel):
     mrp: float
     stock: int
     rack_number: int
+    category_id: Optional[int] = None
+    is_deleted: bool
     created_at: str
     updated_at: str
 
     class Config:
         from_attributes = True
+
+
+class InventoryStatsOut(BaseModel):
+    total_unique_items: int
+    total_packs: int
+    total_value: float
 
 
 class ItemPageOut(BaseModel):
@@ -147,7 +160,7 @@ def add_movement(
             ref_type=ref_type,
             ref_id=ref_id,
             note=note,
-            actor=actor,
+            actor=actor or get_request_actor_name(),
         )
     )
 
@@ -170,6 +183,28 @@ def _same_group_stmt(name: Optional[str], brand: Optional[str]):
     return stmt
 
 
+@router.get("/stats", response_model=InventoryStatsOut)
+def get_inventory_stats():
+    with get_session() as session:
+        # Group by name+brand representing "unique items"
+        unique_stmt = select(func.count(func.distinct(Item.name + Item.brand))).where(Item.is_deleted == False) # noqa: E712
+        unique = session.exec(unique_stmt).one_or_none() or 0
+
+        # Sum of stock
+        stock_stmt = select(func.sum(Item.stock)).where(Item.is_deleted == False) # noqa: E712
+        packs = session.exec(stock_stmt).one_or_none() or 0
+
+        # Sum of stock * mrp
+        value_stmt = select(func.sum(Item.stock * Item.mrp)).where(Item.is_deleted == False) # noqa: E712
+        val = session.exec(value_stmt).one_or_none() or 0.0
+
+        return {
+            "total_unique_items": int(unique),
+            "total_packs": int(packs),
+            "total_value": float(val),
+        }
+
+
 # ---------- Endpoints ----------
 @router.get("/", response_model=ItemPageOut)
 def list_items(
@@ -181,9 +216,13 @@ def list_items(
 
     # ✅ NEW
     include_archived: bool = Query(False, description="If true, include archived batches"),
+    include_deleted: bool = Query(False, description="If true, include globally deleted items"),
 ):
     with get_session() as session:
         base_stmt = select(Item)
+
+        if not include_deleted:
+            base_stmt = base_stmt.where(Item.is_deleted == False)  # noqa: E712
 
         # ✅ hide archived by default, but keep at least one row visible per (name+brand) group.
         # This prevents fully sold-out groups from disappearing when every batch became archived.
@@ -247,6 +286,7 @@ def list_items(
 def group_ledger(
     name: str = Query(..., description="Item name (exact match, case-insensitive)"),
     brand: Optional[str] = Query(None, description="Brand (case-insensitive); pass empty for None"),
+    item_id: Optional[int] = Query(None, description="Optional batch/item id inside this group"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
@@ -260,7 +300,7 @@ def group_ledger(
 
         b = _norm_str(brand)  # None allowed
 
-        stmt_items = select(Item).where(func.lower(Item.name) == func.lower(n))
+        stmt_items = select(Item).where(func.lower(Item.name) == func.lower(n)).where(Item.is_deleted == False)  # noqa: E712
 
         # brand handling:
         # - if brand missing/empty -> match NULL/empty brand
@@ -278,10 +318,15 @@ def group_ledger(
         if not batches:
             raise HTTPException(status_code=404, detail="No items found for this (name+brand)")
 
-        item_ids = [int(x.id) for x in batches]
-        items_by_id = {int(x.id): x for x in batches}
+        all_item_ids = [int(x.id) for x in batches]
+        if item_id is not None and int(item_id) not in all_item_ids:
+            raise HTTPException(status_code=404, detail="Batch does not belong to this product group")
 
-        current_stock = sum(int(x.stock or 0) for x in batches)
+        ledger_batches = [x for x in batches if item_id is None or int(x.id) == int(item_id)]
+        item_ids = [int(x.id) for x in ledger_batches]
+        items_by_id = {int(x.id): x for x in ledger_batches}
+
+        current_stock = sum(int(x.stock or 0) for x in ledger_batches)
         key = f"{n.strip().lower()}__{(b or '').strip().lower()}"
 
         stmt = select(StockMovement).where(StockMovement.item_id.in_(item_ids))
@@ -294,6 +339,12 @@ def group_ledger(
         if reason:
             stmt = stmt.where(func.lower(StockMovement.reason) == reason.strip().lower())
 
+        if offset > 0:
+            previous_rows = session.exec(stmt.order_by(StockMovement.id.desc()).limit(offset)).all()
+            previous_delta = sum(int(m.delta or 0) for m in previous_rows)
+        else:
+            previous_delta = 0
+
         stmt = stmt.order_by(StockMovement.id.desc()).limit(limit + 1).offset(offset)
         rows = session.exec(stmt).all()
 
@@ -301,7 +352,7 @@ def group_ledger(
         if has_more:
             rows = rows[:limit]
 
-        running = int(current_stock)
+        running = int(current_stock) - int(previous_delta)
         out: List[StockMovementGroupOut] = []
 
         for m in rows:
@@ -338,7 +389,7 @@ def group_ledger(
             "name": str(batches[0].name),
             "brand": getattr(batches[0], "brand", None),
             "current_stock": int(current_stock),
-            "item_ids": item_ids,
+            "item_ids": all_item_ids,
             "items": out,
             "next_offset": next_offset,
         }
@@ -375,9 +426,11 @@ def create_item(
 
     with get_session() as session:
         try:
+            assert_financial_year_unlocked(session, now_ts(), context="Inventory item creation")
             existing = None
             if not force_new:
                 stmt = select(Item).where(
+                    Item.is_deleted == False,  # noqa: E712
                     func.lower(Item.name) == func.lower(name),
                     func.coalesce(func.lower(Item.brand), "") == func.coalesce(func.lower(brand), ""),
                     func.coalesce(Item.expiry_date, "") == (expiry or ""),
@@ -408,6 +461,15 @@ def create_item(
 
                 session.commit()
                 session.refresh(existing)
+                log_audit(
+                    session,
+                    entity_type="ITEM",
+                    entity_id=int(existing.id),
+                    action="MERGE_STOCK",
+                    note=f"Merged stock into item #{existing.id}",
+                    details={"delta_stock": delta_stock, "mrp": mrp, "rack_number": rack_no},
+                )
+                session.commit()
                 response.status_code = 200
                 return existing
 
@@ -418,6 +480,7 @@ def create_item(
                 mrp=mrp,
                 stock=delta_stock,
                 rack_number=rack_no,
+                category_id=payload.category_id,
                 created_at=now_ts(),
                 updated_at=now_ts(),
             )
@@ -442,6 +505,15 @@ def create_item(
                     session.rollback()
                     logger.exception("Ledger insert failed (ignored). Error: %s", e)
 
+            log_audit(
+                session,
+                entity_type="ITEM",
+                entity_id=int(item.id),
+                action="CREATE",
+                note=f"Created inventory item #{item.id}",
+                details={"stock": item.stock, "mrp": item.mrp, "rack_number": item.rack_number},
+            )
+            session.commit()
             return item
 
         except HTTPException:
@@ -473,6 +545,8 @@ def update_item(item_id: int, payload: ItemUpdateIn):
         for k, v in data.items():
             if k == "rack_number" and v is not None:
                 setattr(item, k, int(v))
+            elif k == "category_id":
+                setattr(item, k, int(v) if v else None)
             else:
                 setattr(item, k, v)
 
@@ -491,18 +565,64 @@ def update_item(item_id: int, payload: ItemUpdateIn):
 
         session.commit()
         session.refresh(item)
+        log_audit(
+            session,
+            entity_type="ITEM",
+            entity_id=int(item.id),
+            action="UPDATE",
+            note=f"Updated inventory item #{item.id}",
+            details=data,
+        )
+        session.commit()
         return item
 
 
 @router.delete("/{item_id}", status_code=204)
 def delete_item(item_id: int):
+    require_min_role("MANAGER", context="Inventory item delete")
     with get_session() as session:
         item = session.get(Item, item_id)
         if not item:
             raise HTTPException(status_code=404, detail="Item not found")
-        session.delete(item)
+        assert_financial_year_unlocked(session, now_ts(), context="Inventory item delete")
+        log_audit(
+            session,
+            entity_type="ITEM",
+            entity_id=int(item.id),
+            action="DELETE",
+            note=f"Deleted inventory item #{item.id}",
+            details={"name": item.name, "stock": item.stock},
+        )
+        item.is_deleted = True
+        item.updated_at = now_ts()
+        session.add(item)
         session.commit()
         return
+
+
+@router.patch("/{item_id}/restore", response_model=ItemOut)
+def restore_item(item_id: int):
+    require_min_role("MANAGER", context="Inventory item restore")
+    with get_session() as session:
+        item = session.get(Item, item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        assert_financial_year_unlocked(session, now_ts(), context="Inventory item restore")
+
+        item.is_deleted = False
+        item.updated_at = now_ts()
+        session.add(item)
+        log_audit(
+            session,
+            entity_type="ITEM",
+            entity_id=int(item.id),
+            action="RESTORE",
+            note=f"Restored inventory item #{item.id}",
+            details={"name": item.name},
+        )
+        session.commit()
+        session.refresh(item)
+        return item
 
 
 @router.post("/{item_id}/adjust", response_model=ItemOut)
@@ -511,11 +631,13 @@ def adjust_stock(
     delta: int = Query(..., description="Positive or negative integer"),
     note: Optional[str] = Query(None, description="Optional note for ledger"),
 ):
+    require_min_role("MANAGER", context="Stock adjustment")
     with get_session() as session:
         try:
             item = session.get(Item, item_id)
             if not item:
                 raise HTTPException(status_code=404, detail="Item not found")
+            assert_financial_year_unlocked(session, now_ts(), context="Stock adjustment")
 
             new_stock = item.stock + int(delta)
             if new_stock < 0:
@@ -539,6 +661,15 @@ def adjust_stock(
 
             session.commit()
             session.refresh(item)
+            log_audit(
+                session,
+                entity_type="ITEM",
+                entity_id=int(item.id),
+                action="ADJUST_STOCK",
+                note=f"Adjusted stock for item #{item.id}",
+                details={"delta": int(delta), "new_stock": item.stock, "note": note},
+            )
+            session.commit()
             return item
 
         except HTTPException:

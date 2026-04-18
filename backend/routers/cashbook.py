@@ -6,8 +6,10 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlmodel import select
 from sqlalchemy import text  # ✅ use sqlalchemy.text (NOT sqlmodel.text)
 
+from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import CashbookEntry, CashbookCreate, CashbookOut, Bill, BillPayment, Return, ExchangeRecord
+from backend.security import require_min_role
 
 router = APIRouter()
 
@@ -103,6 +105,11 @@ def _sum_exchange_cash_in(session, *, start_iso: Optional[str] = None, end_iso: 
     return round(total, 2)
 
 
+def _assert_cashbook_rows_unlocked(session, rows: List[CashbookEntry], *, context: str):
+    for row in rows:
+        assert_financial_year_unlocked(session, getattr(row, "created_at", None), context=context)
+
+
 @router.post("/", response_model=CashbookOut)
 def create_entry(payload: CashbookCreate):
     et = (payload.entry_type or "").strip().upper()
@@ -123,6 +130,7 @@ def create_entry(payload: CashbookCreate):
         created_at = f"{day_dt.date().isoformat()}T{now_time}"
 
     with get_session() as session:
+        assert_financial_year_unlocked(session, created_at, context="Cashbook entry")
         row = CashbookEntry(
             entry_type=et,
             amount=amt,
@@ -130,6 +138,15 @@ def create_entry(payload: CashbookCreate):
             created_at=created_at,
         )
         session.add(row)
+        session.flush()
+        log_audit(
+            session,
+            entity_type="CASHBOOK",
+            entity_id=int(row.id),
+            action="CREATE",
+            note=f"Created {et} cashbook entry",
+            details={"amount": amt, "created_at": created_at, "entry_type": et},
+        )
         session.commit()
         session.refresh(row)
         return row
@@ -230,11 +247,21 @@ def delete_cashbook_entry(entry_id: int):
     """
     Delete a particular cashbook entry by id.
     """
+    require_min_role("MANAGER", context="Cashbook delete")
     with get_session() as session:
         # ensure exists
         row = session.exec(select(CashbookEntry).where(CashbookEntry.id == entry_id)).first()
         if not row:
             raise HTTPException(status_code=404, detail="cashbook entry not found")
+        assert_financial_year_unlocked(session, row.created_at, context="Cashbook delete")
+        log_audit(
+            session,
+            entity_type="CASHBOOK",
+            entity_id=int(row.id),
+            action="DELETE",
+            note=f"Deleted cashbook entry #{row.id}",
+            details={"amount": row.amount, "entry_type": row.entry_type},
+        )
 
         session.exec(text("DELETE FROM cashbookentry WHERE id = :id").bindparams(id=entry_id))
         session.commit()
@@ -252,6 +279,7 @@ def clear_last_cashbook_entry(
     - If no from/to provided: defaults to TODAY only (safe).
     - If from/to provided: deletes last entry within that range.
     """
+    require_min_role("MANAGER", context="Cashbook delete")
     # default safe scope = today
     if not from_date and not to_date:
         today = today_yyyy_mm_dd()
@@ -277,6 +305,18 @@ def clear_last_cashbook_entry(
         if not last_id:
             return {"ok": True, "deleted_id": None}
 
+        row = session.exec(select(CashbookEntry).where(CashbookEntry.id == int(last_id))).first()
+        if row:
+            assert_financial_year_unlocked(session, row.created_at, context="Cashbook delete")
+            log_audit(
+                session,
+                entity_type="CASHBOOK",
+                entity_id=int(row.id),
+                action="DELETE",
+                note=f"Deleted last cashbook entry #{row.id}",
+                details={"amount": row.amount, "entry_type": row.entry_type},
+            )
+
         session.exec(text("DELETE FROM cashbookentry WHERE id = :id").bindparams(id=int(last_id)))
         session.commit()
 
@@ -290,8 +330,22 @@ def clear_today_cashbook():
     created_at stored as ISO string like "YYYY-MM-DDTHH:MM:SS"
     """
     today = today_yyyy_mm_dd()
+    require_min_role("MANAGER", context="Cashbook clear today")
 
     with get_session() as session:
+        rows = session.exec(
+            select(CashbookEntry).where(CashbookEntry.created_at >= f"{today}T00:00:00", CashbookEntry.created_at <= f"{today}T23:59:59")
+        ).all()
+        _assert_cashbook_rows_unlocked(session, rows, context="Cashbook clear today")
+        for row in rows:
+            log_audit(
+                session,
+                entity_type="CASHBOOK",
+                entity_id=int(row.id),
+                action="DELETE",
+                note=f"Cleared today's cashbook entry #{row.id}",
+                details={"amount": row.amount, "entry_type": row.entry_type},
+            )
         stmt = text(
             "DELETE FROM cashbookentry WHERE substr(created_at, 1, 10) = :d"
         ).bindparams(d=today)
@@ -305,7 +359,19 @@ def clear_today_cashbook():
 @router.delete("/clear")
 def clear_all_cashbook():
     """Dangerous: clears ALL cashbook history."""
+    require_min_role("OWNER", context="Cashbook clear all")
     with get_session() as session:
+        rows = session.exec(select(CashbookEntry)).all()
+        _assert_cashbook_rows_unlocked(session, rows, context="Cashbook clear all")
+        for row in rows:
+            log_audit(
+                session,
+                entity_type="CASHBOOK",
+                entity_id=int(row.id),
+                action="DELETE",
+                note=f"Cleared cashbook entry #{row.id}",
+                details={"amount": row.amount, "entry_type": row.entry_type},
+            )
         session.exec(text("DELETE FROM cashbookentry"))
         session.commit()
 

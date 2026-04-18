@@ -8,7 +8,7 @@ import ItemPicker from '../../components/billing/ItemPicker'
 import BillPickerDialog from '../../components/billing/BillPickerDialog'
 import { useToast } from '../../components/ui/Toaster'
 
-type RetRow = { item_id:number; name:string; qty:number; max:number; mrp:number }
+type RetRow = { item_id:number; name:string; qty:number; max:number; mrp:number; stock_unit?: string | null }
 type AddRow = { item_id:number; name:string; qty:number; mrp:number }
 
 function round2(n:number){ return Math.round(n*100)/100 }
@@ -86,6 +86,7 @@ export default function Exchange() {
         qty: 0,
         max: remaining,
         mrp,
+        stock_unit: it.stock_unit ?? null,
       }
     })
 
@@ -318,7 +319,14 @@ export default function Exchange() {
               <tbody>
                 {ret.map((r, i) => (
                   <tr key={`${r.item_id}-${i}`}>
-                    <td>{r.name}</td>
+                    <td>
+                      {r.name}
+                      {r.stock_unit ? (
+                        <Box color="text.secondary" sx={{ fontSize: 12 }}>
+                          Sold as: {r.stock_unit}
+                        </Box>
+                      ) : null}
+                    </td>
                     <td>{r.max}</td>
                     <td>
                       <TextField

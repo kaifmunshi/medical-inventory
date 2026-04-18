@@ -58,6 +58,11 @@ export type StockLedgerGroupPage = {
   next_offset: number | null
 }
 
+export async function getInventoryStats(): Promise<{ total_unique_items: number, total_packs: number, total_value: number }> {
+  const { data } = await api.get('/inventory/stats')
+  return data
+}
+
 export async function listItems(q: string = ''): Promise<Item[]> {
   const params = q ? { q } : undefined
   const { data } = await api.get('/inventory', { params })
@@ -71,12 +76,14 @@ export async function listItemsPage(
   q: string = '',
   limit: number = 50,
   offset: number = 0,
-  rackNumber?: number
+  rackNumber?: number,
+  includeDeleted: boolean = false
 ): Promise<ItemsPage> {
   const params: Record<string, string | number> = { q, limit, offset }
   if (typeof rackNumber === 'number' && Number.isFinite(rackNumber)) {
     params.rack_number = rackNumber
   }
+  if (includeDeleted) params.include_deleted = 'true'
   const { data } = await api.get('/inventory', { params })
   return data as ItemsPage
 }
@@ -100,6 +107,11 @@ export async function deleteItem(id: number): Promise<void> {
   await api.delete(`/inventory/${id}`)
 }
 
+export async function restoreItem(id: number): Promise<Item> {
+  const { data } = await api.patch(`/inventory/${id}/restore`)
+  return data
+}
+
 export async function adjustStock(id: number, delta: number): Promise<Item> {
   const { data } = await api.post(`/inventory/${id}/adjust`, null, { params: { delta } })
   return data
@@ -112,6 +124,7 @@ export async function getGroupLedger(params: {
   from_date?: string
   to_date?: string
   reason?: string
+  item_id?: number
   limit?: number
   offset?: number
 }): Promise<StockLedgerGroupPage> {
@@ -122,6 +135,7 @@ export async function getGroupLedger(params: {
       from_date: params.from_date,
       to_date: params.to_date,
       reason: params.reason,
+      item_id: params.item_id,
       limit: params.limit ?? 50,
       offset: params.offset ?? 0,
     },

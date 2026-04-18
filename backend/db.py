@@ -45,10 +45,21 @@ def migrate_db():
                 "ALTER TABLE item ADD COLUMN archived_at TEXT"
             ))
 
+        if "category_id" not in col_names:
+            session.exec(text(
+                "ALTER TABLE item ADD COLUMN category_id INTEGER"
+            ))
+
+        if "is_deleted" not in col_names:
+            session.exec(text(
+                "ALTER TABLE item ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0"
+            ))
+
         session.commit()
 
         # ✅ helpful indexes (safe to run repeatedly)
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_item_is_archived ON item (is_archived)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_item_is_deleted ON item (is_deleted)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_item_stock ON item (stock)"))
         session.commit()
 

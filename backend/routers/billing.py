@@ -9,10 +9,16 @@ from sqlalchemy import or_, exists, func, cast
 from sqlalchemy.types import Integer, Float
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
+from backend.accounting import mark_voucher_deleted, post_bill_payment_voucher, post_sales_voucher, sync_bill_vouchers
+from backend.controls import assert_financial_year_unlocked, log_audit
+from backend.security import require_min_role
+from backend.security import get_request_actor_name
 from backend.models import (
-    Item, Bill, BillItem, BillPayment,
+    Item, Bill, BillItem, BillItemAllocation, BillPayment,
     BillCreate, BillOut, BillItemOut,
     StockMovement,  # ✅ NEW
+    InventoryLot,
+    BillItemAllocationOut,
 )
 
 router = APIRouter()
@@ -100,8 +106,14 @@ def add_movement(
             ref_type=str(ref_type),
             ref_id=int(ref_id),
             note=note,
+            actor=get_request_actor_name(),
         )
     )
+
+
+def allocation_map_for_bill(session, bill_id: int) -> Dict[int, BillItemAllocation]:
+    rows = session.exec(select(BillItemAllocation).where(BillItemAllocation.bill_id == bill_id)).all()
+    return {int(row.bill_item_id): row for row in rows}
 
 
 # -------------------- Response Models --------------------
@@ -125,6 +137,11 @@ class ItemSalesRowOut(BaseModel):
 class ItemSalesPageOut(BaseModel):
     items: List[ItemSalesRowOut]
     next_offset: Optional[int] = None
+
+
+class BillAllocationsOut(BaseModel):
+    bill_id: int
+    items: List[BillItemAllocationOut]
 
 
 # -------------------- Bills list endpoints --------------------
@@ -159,6 +176,7 @@ def list_bills(
         out: List[BillOut] = []
         for b in rows:
             items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+            allocations = allocation_map_for_bill(session, b.id)
             out.append(BillOut(
                 id=b.id,
                 date_time=b.date_time,
@@ -183,7 +201,9 @@ def list_bills(
                     item_name=i.item_name,
                     mrp=i.mrp,
                     quantity=i.quantity,
-                    line_total=i.line_total
+                    line_total=i.line_total,
+                    lot_id=getattr(allocations.get(i.id), "lot_id", None),
+                    stock_unit=getattr(allocations.get(i.id), "stock_unit", None),
                 ) for i in items]
             ))
         return out
@@ -247,6 +267,7 @@ def list_bills_paged(
         out: List[BillOut] = []
         for b in rows:
             items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+            allocations = allocation_map_for_bill(session, b.id)
             out.append(BillOut(
                 id=b.id,
                 date_time=b.date_time,
@@ -270,7 +291,9 @@ def list_bills_paged(
                     item_name=i.item_name,
                     mrp=i.mrp,
                     quantity=i.quantity,
-                    line_total=i.line_total
+                    line_total=i.line_total,
+                    lot_id=getattr(allocations.get(i.id), "lot_id", None),
+                    stock_unit=getattr(allocations.get(i.id), "stock_unit", None),
                 ) for i in items]
             ))
 
@@ -424,6 +447,7 @@ def get_bill(bill_id: int):
         if not b:
             raise HTTPException(status_code=404, detail="Bill not found")
         items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+        allocations = allocation_map_for_bill(session, b.id)
         return BillOut(
             id=b.id,
             date_time=b.date_time,
@@ -447,9 +471,24 @@ def get_bill(bill_id: int):
                 item_name=i.item_name,
                 mrp=i.mrp,
                 quantity=i.quantity,
-                line_total=i.line_total
+                line_total=i.line_total,
+                lot_id=getattr(allocations.get(i.id), "lot_id", None),
+                stock_unit=getattr(allocations.get(i.id), "stock_unit", None),
             ) for i in items]
         )
+
+
+@router.get("/{bill_id}/allocations", response_model=BillAllocationsOut)
+def get_bill_allocations(bill_id: int):
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+        rows = session.exec(select(BillItemAllocation).where(BillItemAllocation.bill_id == bill_id).order_by(BillItemAllocation.id.asc())).all()
+        return {
+            "bill_id": bill_id,
+            "items": [BillItemAllocationOut(**row.dict()) for row in rows],
+        }
 
 
 # -------------------- Create Bill --------------------
@@ -474,6 +513,7 @@ def create_bill(payload: BillCreate):
             raise HTTPException(status_code=400, detail="Invalid final_amount")
 
     with get_session() as session:
+        assert_financial_year_unlocked(session, getattr(payload, "date_time", None) or now_ts(), context="Bill creation")
         # 1) Load items and validate stock
         db_items: Dict[int, Item] = {}
         line_price_by_item: Dict[int, float] = {}
@@ -494,6 +534,14 @@ def create_bill(payload: BillCreate):
                 line_price = as_f(itm.mrp)
             line_price_by_item[line.item_id] = line_price
             subtotal += (as_i(line.quantity) * line_price)
+
+            lot_id = getattr(line, "lot_id", None)
+            if lot_id is not None:
+                lot = session.get(InventoryLot, int(lot_id))
+                if not lot:
+                    raise HTTPException(status_code=404, detail=f"Lot {lot_id} not found")
+                if int(getattr(lot, "legacy_item_id", 0) or 0) != int(itm.id):
+                    raise HTTPException(status_code=400, detail=f"Lot {lot_id} does not match selected stock item")
 
         subtotal = round2(subtotal)
         computed_total = round2(subtotal * (1 - as_f(payload.discount_percent) / 100.0))
@@ -585,6 +633,17 @@ def create_bill(payload: BillCreate):
                     line_total=round2(qty * as_f(line_price_by_item.get(itm.id, itm.mrp)))
                 )
                 session.add(bi)
+                session.flush()
+
+                session.add(BillItemAllocation(
+                    bill_id=b.id,
+                    bill_item_id=bi.id,
+                    item_id=itm.id,
+                    lot_id=getattr(line, "lot_id", None),
+                    quantity=qty,
+                    stock_unit=getattr(line, "stock_unit", None),
+                    created_at=bill_ts,
+                ))
 
                 # ✅ Ledger: SALE (stock OUT)
                 add_movement(
@@ -608,7 +667,17 @@ def create_bill(payload: BillCreate):
                     note="auto: payment at bill creation"
                 )
                 session.add(p)
+                session.flush()
 
+            post_sales_voucher(session, b)
+            log_audit(
+                session,
+                entity_type="BILL",
+                entity_id=int(b.id),
+                action="CREATE",
+                note=f"Created bill #{b.id}",
+                details={"total_amount": b.total_amount, "payment_mode": b.payment_mode, "item_count": len(payload.items)},
+            )
             session.commit()
             session.refresh(b)
 
@@ -620,6 +689,7 @@ def create_bill(payload: BillCreate):
             raise HTTPException(status_code=500, detail=f"Failed to create bill: {e}")
 
         items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+        allocations = allocation_map_for_bill(session, b.id)
         return BillOut(
             id=b.id,
             date_time=b.date_time,
@@ -643,7 +713,9 @@ def create_bill(payload: BillCreate):
                 item_name=i.item_name,
                 mrp=i.mrp,
                 quantity=i.quantity,
-                line_total=i.line_total
+                line_total=i.line_total,
+                lot_id=getattr(allocations.get(i.id), "lot_id", None),
+                stock_unit=getattr(allocations.get(i.id), "stock_unit", None),
             ) for i in items]
         )
 
@@ -668,6 +740,7 @@ class BillUpdateIn(BaseModel):
 
 @router.put("/{bill_id}", response_model=BillOut)
 def update_bill(bill_id: int, payload: BillUpdateIn):
+    require_min_role("MANAGER", context="Bill edit")
     if not payload.items:
         raise HTTPException(status_code=400, detail="Bill must have at least one item")
     if payload.discount_percent < 0 or payload.discount_percent > 100:
@@ -690,6 +763,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             raise HTTPException(status_code=404, detail="Bill not found")
         if is_deleted_bill(b):
             raise HTTPException(status_code=400, detail="Deleted bill cannot be edited")
+        assert_financial_year_unlocked(session, b.date_time, context="Bill edit")
 
         existing_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
         old_qty_by_item: Dict[int, int] = {}
@@ -900,6 +974,8 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
 
             for it in existing_items:
                 session.delete(it)
+            for alloc in session.exec(select(BillItemAllocation).where(BillItemAllocation.bill_id == b.id)).all():
+                session.delete(alloc)
             session.flush()
 
             for iid, qty in new_qty_by_item.items():
@@ -940,6 +1016,15 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             b.paid_at = paid_at
 
             session.add(b)
+            sync_bill_vouchers(session, b)
+            log_audit(
+                session,
+                entity_type="BILL",
+                entity_id=int(b.id),
+                action="UPDATE",
+                note=f"Edited bill #{b.id}",
+                details={"total_amount": b.total_amount, "payment_mode": b.payment_mode, "item_count": len(new_qty_by_item)},
+            )
             session.commit()
             session.refresh(b)
         except HTTPException:
@@ -978,6 +1063,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
 
 @router.delete("/{bill_id}")
 def soft_delete_bill(bill_id: int):
+    require_min_role("MANAGER", context="Bill delete")
     with get_session() as session:
         b = session.get(Bill, bill_id)
         if not b:
@@ -985,6 +1071,7 @@ def soft_delete_bill(bill_id: int):
 
         if is_deleted_bill(b):
             return {"bill_id": b.id, "is_deleted": True, "deleted_at": b.deleted_at}
+        assert_financial_year_unlocked(session, b.date_time, context="Bill delete")
 
         bill_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
         qty_by_item: Dict[int, int] = {}
@@ -1015,12 +1102,25 @@ def soft_delete_bill(bill_id: int):
         b.is_deleted = True
         b.deleted_at = now_ts()
         session.add(b)
+        sync_bill_vouchers(session, b)
+        payments = session.exec(select(BillPayment).where(BillPayment.bill_id == b.id)).all()
+        for payment in payments:
+            mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(payment.id))
+        log_audit(
+            session,
+            entity_type="BILL",
+            entity_id=int(b.id),
+            action="DELETE",
+            note=f"Soft-deleted bill #{b.id}",
+            details={"deleted_at": b.deleted_at},
+        )
         session.commit()
         return {"bill_id": b.id, "is_deleted": True, "deleted_at": b.deleted_at}
 
 
 @router.post("/{bill_id}/recover")
 def recover_bill(bill_id: int):
+    require_min_role("MANAGER", context="Bill recover")
     with get_session() as session:
         b = session.get(Bill, bill_id)
         if not b:
@@ -1028,6 +1128,7 @@ def recover_bill(bill_id: int):
 
         if not is_deleted_bill(b):
             return {"bill_id": b.id, "is_deleted": False, "deleted_at": None}
+        assert_financial_year_unlocked(session, b.date_time, context="Bill recover")
 
         bill_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
         qty_by_item: Dict[int, int] = {}
@@ -1068,6 +1169,31 @@ def recover_bill(bill_id: int):
         b.is_deleted = False
         b.deleted_at = None
         session.add(b)
+        sync_bill_vouchers(session, b)
+        payments = session.exec(
+            select(BillPayment).where(BillPayment.bill_id == b.id, BillPayment.is_deleted == False)  # noqa: E712
+        ).all()
+        for payment in payments:
+            auto_note = str(payment.note or "").strip().lower()
+            if auto_note == "auto: payment at bill creation":
+                continue
+            post_bill_payment_voucher(
+                session,
+                b,
+                int(payment.id),
+                payment.received_at,
+                float(payment.cash_amount or 0),
+                float(payment.online_amount or 0),
+                payment.note,
+            )
+        log_audit(
+            session,
+            entity_type="BILL",
+            entity_id=int(b.id),
+            action="RECOVER",
+            note=f"Recovered bill #{b.id}",
+            details={"deleted_at": None},
+        )
         session.commit()
         return {"bill_id": b.id, "is_deleted": False, "deleted_at": None}
 
@@ -1110,6 +1236,7 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
             raise HTTPException(status_code=404, detail="Bill not found")
         if is_deleted_bill(b):
             raise HTTPException(status_code=400, detail="Cannot receive payment on deleted bill")
+        assert_financial_year_unlocked(session, payment_ts, context="Bill payment receipt")
 
         # 1) Insert payment record (THIS is the source of truth for "Collected Today")
         p = BillPayment(
@@ -1121,6 +1248,16 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
             note=payload.note
         )
         session.add(p)
+        session.flush()
+        post_bill_payment_voucher(session, b, int(p.id), payment_ts, cash, online, payload.note)
+        log_audit(
+            session,
+            entity_type="BILL_PAYMENT",
+            entity_id=int(p.id),
+            action="CREATE",
+            note=f"Received payment for bill #{bill_id}",
+            details={"bill_id": bill_id, "cash_amount": cash, "online_amount": online},
+        )
         session.commit()
 
         # 2) Recalculate totals from all BillPayment rows (prevents future inconsistencies)
@@ -1190,6 +1327,82 @@ def list_bill_payments(bill_id: int):
             }
             for p in pays
         ]
+
+
+@router.delete("/{bill_id}/payments/{payment_id}")
+def undo_bill_payment(bill_id: int, payment_id: int):
+    require_min_role("MANAGER", context="Bill payment delete")
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+        if is_deleted_bill(b):
+            raise HTTPException(status_code=400, detail="Cannot undo payment on deleted bill")
+
+        p = session.get(BillPayment, payment_id)
+        if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
+            raise HTTPException(status_code=404, detail="Payment not found")
+        assert_financial_year_unlocked(session, p.received_at, context="Bill payment delete")
+
+        p.is_deleted = True
+        p.deleted_at = now_ts()
+        session.add(p)
+        mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(p.id))
+        log_audit(
+            session,
+            entity_type="BILL_PAYMENT",
+            entity_id=int(p.id),
+            action="DELETE",
+            note=f"Deleted payment #{payment_id} for bill #{bill_id}",
+            details={"bill_id": bill_id},
+        )
+
+        result = recalculate_bill_payment_state(session, b)
+        session.add(b)
+        session.commit()
+        return result
+
+
+@router.post("/{bill_id}/payments/{payment_id}/recover")
+def recover_bill_payment(bill_id: int, payment_id: int):
+    require_min_role("MANAGER", context="Bill payment recover")
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+        if is_deleted_bill(b):
+            raise HTTPException(status_code=400, detail="Cannot recover payment on deleted bill")
+
+        p = session.get(BillPayment, payment_id)
+        if not p or int(p.bill_id) != int(bill_id) or not bool(getattr(p, "is_deleted", False)):
+            raise HTTPException(status_code=404, detail="Deleted payment not found")
+        assert_financial_year_unlocked(session, p.received_at, context="Bill payment recover")
+
+        p.is_deleted = False
+        p.deleted_at = None
+        session.add(p)
+        post_bill_payment_voucher(
+            session,
+            b,
+            int(p.id),
+            p.received_at,
+            float(p.cash_amount or 0),
+            float(p.online_amount or 0),
+            p.note,
+        )
+        log_audit(
+            session,
+            entity_type="BILL_PAYMENT",
+            entity_id=int(p.id),
+            action="RECOVER",
+            note=f"Recovered payment #{payment_id} for bill #{bill_id}",
+            details={"bill_id": bill_id},
+        )
+
+        result = recalculate_bill_payment_state(session, b)
+        session.add(b)
+        session.commit()
+        return result
 
 
 # ------------------ Dashboard helper: Payments Summary (Collected Today) ------------------

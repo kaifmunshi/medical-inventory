@@ -13,6 +13,7 @@ type BillLine = {
   name: string
   soldQty: number
   mrp: number
+  stock_unit?: string | null
 }
 
 type Row = {
@@ -21,6 +22,7 @@ type Row = {
   qty: number
   max: number
   mrp: number
+  stock_unit?: string | null
 }
 
 type RefundMode = 'cash' | 'online' | 'credit'
@@ -158,6 +160,7 @@ export default function Returns() {
         name: it.item_name || it.name || it.item?.name || `#${it.item_id}`,
         soldQty: Number(it.quantity),
         mrp: Number(it.mrp),
+        stock_unit: it.stock_unit ?? null,
       }))
 
       let remById: Record<number, number> = {}
@@ -179,6 +182,7 @@ export default function Returns() {
             qty: 0,
             max: remaining,
             mrp: l.mrp,
+            stock_unit: l.stock_unit ?? null,
           }
         })
       )
@@ -299,7 +303,14 @@ export default function Returns() {
               <tbody>
                 {rows.map((r, i) => (
                   <tr key={r.item_id}>
-                    <td>{r.name}</td>
+                    <td>
+                      {r.name}
+                      {r.stock_unit ? (
+                        <Box color="text.secondary" sx={{ fontSize: 12 }}>
+                          Sold as: {r.stock_unit}
+                        </Box>
+                      ) : null}
+                    </td>
                     <td>{r.max}</td>
                     <td>
                       <TextField

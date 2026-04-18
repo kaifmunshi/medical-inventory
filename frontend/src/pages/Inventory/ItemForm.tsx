@@ -18,8 +18,11 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { itemSchema } from '../../lib/validators'
 import { z } from 'zod'
 import React from 'react'
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Controller } from 'react-hook-form'
 import { listItemsPage } from '../../services/inventory'
+import { fetchCategories, createCategory } from '../../services/products'
+import { useToast } from '../../components/ui/Toaster'
 
 export type ItemFormValues = z.infer<typeof itemSchema>
 
@@ -67,6 +70,7 @@ export default function ItemForm({
     handleSubmit,
     reset,
     watch,
+    control,
     formState: { errors, isSubmitting },
   } = useForm<ItemFormValues>({
     resolver: zodResolver(itemSchema),
@@ -77,8 +81,34 @@ export default function ItemForm({
       mrp: Number((initial as any)?.mrp ?? 0),
       stock: Number((initial as any)?.stock ?? 0),
       rack_number: Number((initial as any)?.rack_number ?? 0),
+      category_id: (initial as any)?.category_id || null,
     },
   })
+
+  const queryClient = useQueryClient()
+  const toast = useToast()
+
+  // --- Categories Setup ---
+  const { data: categories = [] } = useQuery({
+    queryKey: ['product-categories-master', { active_only: true }],
+    queryFn: () => fetchCategories({ active_only: true }),
+  })
+
+  const [showAddCategory, setShowAddCategory] = React.useState(false)
+  const [newCatName, setNewCatName] = React.useState('')
+  const mAddCat = useMutation({
+    mutationFn: createCategory,
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['product-categories-master'] })
+      setShowAddCategory(false)
+      setNewCatName('')
+      toast.push('Category created!', 'success')
+      reset({ ...watch(), category_id: data.id })
+    },
+    onError: () => toast.push('Failed to create category', 'error'),
+  })
+
+  // -------------------------
 
   const isEditMode = Boolean(initial?.name)
 
@@ -99,6 +129,7 @@ export default function ItemForm({
       mrp: Number((initial as any).mrp ?? 0),
       stock: Number((initial as any).stock ?? 0),
       rack_number: Number((initial as any).rack_number ?? 0),
+      category_id: (initial as any).category_id ?? null,
     })
   }, [initial, reset])
 
@@ -114,6 +145,7 @@ export default function ItemForm({
         mrp: '' as any,
         stock: '' as any,
         rack_number: 0 as any,
+        category_id: null,
       })
     }
   }, [open, initial, reset])
@@ -132,6 +164,7 @@ export default function ItemForm({
       mrp: Number(it.mrp ?? 0),
       stock: '' as any, // user enters quantity
       rack_number: Number(it.rack_number ?? 0),
+      category_id: it.category_id ?? watch('category_id') ?? null, // keep whatever picked has, or current
     })
   }
 
@@ -455,6 +488,62 @@ export default function ItemForm({
             InputLabelProps={{ shrink: true }}
             disabled={lockNameBrand}
           />
+
+          <Box>
+            <Stack direction="row" gap={1} alignItems="flex-start">
+              <Box sx={{ flex: 1 }}>
+                <Controller
+                  name="category_id"
+                  control={control}
+                  render={({ field }) => (
+                    <Autocomplete
+                      options={categories}
+                      getOptionLabel={(o) => o?.name || ''}
+                      value={categories.find(c => c.id === field.value) || null}
+                      onChange={(_, val) => field.onChange(val ? val.id : null)}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          label="Category"
+                          InputLabelProps={{ shrink: true }}
+                          error={!!(errors as any)?.category_id}
+                          helperText={(errors as any)?.category_id?.message}
+                        />
+                      )}
+                    />
+                  )}
+                />
+              </Box>
+              <Button
+                variant="outlined"
+                size="small"
+                sx={{ height: 56, minWidth: 'auto', px: 1, whiteSpace: 'nowrap' }}
+                onClick={() => setShowAddCategory(!showAddCategory)}
+              >
+                + NEW
+              </Button>
+            </Stack>
+
+            {showAddCategory && (
+              <Stack direction="row" gap={1} mt={1} p={1.5} sx={{ bgcolor: 'action.hover', borderRadius: 1 }}>
+                <TextField
+                  size="small"
+                  label="New Category Name"
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  fullWidth
+                  autoFocus
+                />
+                <Button
+                  variant="contained"
+                  disabled={!newCatName.trim() || mAddCat.isPending}
+                  onClick={() => mAddCat.mutate(newCatName)}
+                >
+                  Save
+                </Button>
+              </Stack>
+            )}
+          </Box>
 
           <TextField
             label="Expiry"

@@ -1,5 +1,6 @@
 // F:\medical-inventory\frontend\src\pages\Billing\index.tsx
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   Box,
   Button,
@@ -29,11 +30,13 @@ import ItemPicker from '../../components/billing/ItemPicker'
 import { createBill } from '../../services/billing'
 import { createCustomer, fetchCustomers } from '../../services/customers'
 import type { Customer } from '../../lib/types'
-import { listItems } from '../../services/inventory'
+import type { InventoryLotBrowse } from '../../lib/types'
+import { fetchLots } from '../../services/lots'
 import { useToast } from '../../components/ui/Toaster'
 
 interface CartRow {
   item_id: number
+  lot_id?: number
   name: string
   mrp: number
   quantity: number
@@ -42,6 +45,7 @@ interface CartRow {
   stock?: number
   expiry_date?: string | null
   brand?: string | null
+  unit_label?: string | null
 }
 
 function formatExpiry(exp?: string | null) {
@@ -57,12 +61,6 @@ function toIsoDateOnly(exp?: string | null) {
   if (!exp) return ''
   const s = String(exp)
   return s.length > 10 ? s.slice(0, 10) : s
-}
-
-function buildGroupKey(it: any) {
-  const name = String(it?.name ?? '').trim().toLowerCase()
-  const brand = String(it?.brand ?? '').trim().toLowerCase()
-  return `${name}__${brand}`
 }
 
 function nowLocalDateInput() {
@@ -170,9 +168,9 @@ export default function Billing() {
 
   // ✅ Beautiful confirm dialog for CASH
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
-  const { data: inventoryItems = [] } = useQuery({
-    queryKey: ['billing-grid-items', gridSearch],
-    queryFn: () => listItems(gridSearch),
+  const { data: inventoryLots = [] } = useQuery({
+    queryKey: ['billing-grid-lots', gridSearch],
+    queryFn: () => fetchLots({ q: gridSearch.trim() || undefined }),
   })
   const { data: customerOptions = [] } = useQuery({
     queryKey: ['billing-customers', customerQ],
@@ -184,30 +182,16 @@ export default function Billing() {
     return hasSelected ? customerOptions : [selectedCustomer, ...customerOptions]
   }, [customerOptions, selectedCustomer])
   const inventoryItemsSorted = useMemo(() => {
-    const all = [...(inventoryItems as any[])]
-    const byGroup = new Map<string, any[]>()
-
-    for (const it of all) {
-      const key = buildGroupKey(it)
-      const arr = byGroup.get(key) ?? []
-      arr.push(it)
-      byGroup.set(key, arr)
-    }
-
-    const out: any[] = []
-    for (const group of byGroup.values()) {
-      const sorted = [...group].sort((a: any, b: any) => {
-        const da = toIsoDateOnly(a?.expiry_date)
-        const db = toIsoDateOnly(b?.expiry_date)
-        if (!da && !db) return 0
-        if (!da) return 1
-        if (!db) return -1
-        return da.localeCompare(db)
-      })
-      const inStock = sorted.filter((x: any) => Number(x?.stock ?? 0) > 0)
-      const visible = inStock.length > 0 ? inStock : sorted.slice(0, 1)
-      out.push(...visible)
-    }
+    const out: any[] = [...(inventoryLots as InventoryLotBrowse[])].map((lot) => ({
+      id: Number(lot.legacy_item_id || 0),
+      lot_id: Number(lot.id),
+      name: lot.product_name,
+      brand: lot.brand ?? null,
+      mrp: Number(lot.mrp || 0),
+      stock: lot.opened_from_lot_id ? Number(lot.loose_qty || 0) : Number(lot.sealed_qty || 0),
+      expiry_date: lot.expiry_date ?? null,
+      unit_label: lot.opened_from_lot_id ? (lot.child_unit_name || 'Loose') : (lot.parent_unit_name || 'Pack'),
+    })).filter((it) => it.id > 0)
 
     out.sort((a: any, b: any) => {
       const an = String(a?.name ?? '').toLowerCase()
@@ -224,7 +208,7 @@ export default function Billing() {
       return da.localeCompare(db)
     })
     return out
-  }, [inventoryItems])
+  }, [inventoryLots])
   const mAddCustomer = useMutation({
     mutationFn: createCustomer,
     onSuccess: (created) => {
@@ -491,6 +475,8 @@ export default function Billing() {
             quantity: Number(r.quantity) || 1,
             mrp: Number(r.mrp) || 0,
             custom_unit_price: Number(r.custom_unit_price || r.mrp || 0),
+            lot_id: r.lot_id,
+            stock_unit: r.unit_label || undefined,
           })),
         discount_percent: 0,
         tax_percent: Number(tax) || 0,
@@ -615,6 +601,8 @@ export default function Billing() {
                 stock: it.stock,
                 expiry_date: it.expiry_date ?? null,
                 brand: it.brand ?? null,
+                lot_id: it.lot_id,
+                unit_label: it.unit_label ?? null,
               }
             : r
         )
@@ -747,6 +735,8 @@ export default function Billing() {
               stock: Number(it.stock ?? 0),
               expiry_date: it.expiry_date ?? null,
               brand: it.brand ?? null,
+              lot_id: it.lot_id,
+              unit_label: it.unit_label ?? null,
             }
           : r
       )
@@ -941,9 +931,18 @@ export default function Billing() {
                   placeholder="Search name / phone..."
                   InputLabelProps={{ shrink: true }}
                   helperText={
-                    selectedCustomer
-                      ? [selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).join(' | ')
-                      : 'Select customer for this bill'
+                    <Stack direction="row" spacing={1} component="span" sx={{ alignItems: 'center' }}>
+                      <span style={{ flex: 1 }}>
+                        {selectedCustomer
+                          ? [selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).join(' | ')
+                          : 'Select customer for this bill'}
+                      </span>
+                      {selectedCustomer ? (
+                        <Link to={`/customer-ledger?customer_id=${selectedCustomer.id}`} style={{ textDecoration: 'none', fontWeight: 600, color: '#1976d2' }}>
+                          &gt; View Ledger
+                        </Link>
+                      ) : null}
+                    </Stack>
                   }
                   FormHelperTextProps={{
                     sx: { color: 'text.secondary', fontSize: '0.74rem', ml: 0.25, mt: 0.25 },
@@ -1000,20 +999,22 @@ export default function Billing() {
                       size="small"
                       options={inventoryItemsSorted}
                       value={
-                        inventoryItemsSorted.find((it: any) => Number(it.id) === Number(r.item_id)) ||
+                        inventoryItemsSorted.find((it: any) => Number(it.id) === Number(r.item_id) && Number(it.lot_id || 0) === Number(r.lot_id || 0)) ||
                         (Number(r.item_id) > 0
                           ? {
                               id: r.item_id,
+                              lot_id: r.lot_id,
                               name: r.name,
                               brand: r.brand ?? '',
                               mrp: r.mrp,
                               stock: r.stock ?? 0,
                               expiry_date: r.expiry_date ?? null,
+                              unit_label: r.unit_label ?? null,
                             }
                           : null)
                       }
                       getOptionLabel={(it: any) => `${it?.name || ''}`}
-                      isOptionEqualToValue={(a: any, b: any) => Number(a?.id) === Number(b?.id)}
+                      isOptionEqualToValue={(a: any, b: any) => Number(a?.id) === Number(b?.id) && Number(a?.lot_id || 0) === Number(b?.lot_id || 0)}
                       filterOptions={(options) => options}
                       onInputChange={(_e, val, reason) => {
                         if (reason === 'clear' || reason === 'reset') {
@@ -1044,7 +1045,7 @@ export default function Billing() {
                               {option.brand ? ` (${option.brand})` : ''}
                             </Typography>
                             <Typography variant="caption" color="text.secondary">
-                              {option.brand ? `${option.brand} | ` : ''}MRP ₹{Number(option.mrp || 0).toFixed(2)} | Stock {Number(option.stock || 0)} | Exp {formatExpiry(option.expiry_date)}
+                              {option.brand ? `${option.brand} | ` : ''}MRP ₹{Number(option.mrp || 0).toFixed(2)} | Stock {Number(option.stock || 0)} {option.unit_label || ''} | Exp {formatExpiry(option.expiry_date)}
                             </Typography>
                           </Stack>
                         </li>
@@ -1056,7 +1057,7 @@ export default function Billing() {
                           size="small"
                           placeholder="Search medicine..."
                           sx={GRID_INPUT_SX}
-                          helperText={Number(r.item_id) > 0 && String(r.brand || '').trim() ? `${r.brand}` : ''}
+                          helperText={Number(r.item_id) > 0 ? [r.brand, r.unit_label].filter(Boolean).join(' | ') : ''}
                           FormHelperTextProps={{
                             sx: {
                               color: 'text.secondary',

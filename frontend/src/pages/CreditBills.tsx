@@ -561,7 +561,16 @@ export default function CreditBills() {
                       const lineDiscPct = lineDiscountPercent(mrp, sp)
                       return (
                         <tr key={idx}>
-                          <td>{name}</td>
+                          <td>
+                            {name}
+                            {(it.stock_unit || it.lot_id) ? (
+                              <Box color="text.secondary" sx={{ fontSize: 12 }}>
+                                {[it.stock_unit ? `Unit: ${it.stock_unit}` : '', it.lot_id ? `Lot: ${it.lot_id}` : '']
+                                  .filter(Boolean)
+                                  .join(' | ')}
+                              </Box>
+                            ) : null}
+                          </td>
                           <td>{qty}</td>
                           <td>{money(mrp)}</td>
                           <td>{money(sp)}</td>

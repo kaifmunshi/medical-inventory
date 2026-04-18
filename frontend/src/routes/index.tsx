@@ -13,6 +13,17 @@ import Customers from '../pages/Customers'
 import CreditBills from '../pages/CreditBills' 
 import CashbookPage from '../pages/Cashbook'
 import SalesBookPage from '../pages/SalesBook'
+import SuppliersPage from '../pages/Suppliers'
+import ProductsPage from '../pages/Products'
+import ProductCategoriesPage from '../pages/ProductCategories'
+import PurchasesPage from '../pages/Purchases'
+import LooseStockPage from '../pages/LooseStock'
+import SupplierLedgerPage from '../pages/SupplierLedger'
+import CustomerLedgerPage from '../pages/CustomerLedger'
+import DayBookPage from '../pages/DayBook'
+import AccountingPage from '../pages/Accounting'
+import ShortcutsPage from '../pages/Shortcuts'
+import StockAuditPage from '../pages/StockAudit'
 
 export default function AppRoutes() {
   return (
@@ -24,12 +35,23 @@ export default function AppRoutes() {
         <Route path="returns" element={<Returns />} />
         <Route path="exchange" element={<Exchange />} />
         <Route path="reports" element={<Reports />} />
-        <Route path="credit-bills" element={<CreditBills />} /> {/* ✅ NEW */}
+        <Route path="credit-bills" element={<CreditBills />} />
         <Route path="cashbook" element={<CashbookPage />} />
         <Route path="sales-book" element={<SalesBookPage />} />
         <Route path="settings" element={<Settings />} />
         <Route path="requested-items" element={<RequestedItems />} />
         <Route path="customers" element={<Customers />} />
+        <Route path="suppliers" element={<SuppliersPage />} />
+        <Route path="products" element={<ProductsPage />} />
+        <Route path="product-categories" element={<ProductCategoriesPage />} />
+        <Route path="purchases" element={<PurchasesPage />} />
+        <Route path="loose-stock" element={<LooseStockPage />} />
+        <Route path="supplier-ledger" element={<SupplierLedgerPage />} />
+        <Route path="stock-audit" element={<StockAuditPage />} />
+        <Route path="customer-ledger" element={<CustomerLedgerPage />} />
+        <Route path="day-book" element={<DayBookPage />} />
+        <Route path="accounting" element={<AccountingPage />} />
+        <Route path="shortcuts" element={<ShortcutsPage />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

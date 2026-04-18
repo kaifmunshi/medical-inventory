@@ -1,0 +1,1078 @@
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import {
+  Autocomplete,
+  Box,
+  Button,
+  Checkbox,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  FormControlLabel,
+  Grid,
+  MenuItem,
+  Paper,
+  Stack,
+  TextField,
+  Typography,
+} from '@mui/material'
+import AddIcon from '@mui/icons-material/Add'
+import DeleteIcon from '@mui/icons-material/Delete'
+import PaymentsIcon from '@mui/icons-material/Payments'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
+import { createParty, fetchParties } from '../../services/parties'
+import { createCategory, fetchCategories, fetchProducts } from '../../services/products'
+import {
+  addPurchasePayment,
+  cancelPurchase,
+  createPurchase,
+  fetchPurchase,
+  fetchPurchases,
+  replacePurchaseItems,
+  fetchSupplierLedgerSummary,
+  updatePurchase,
+} from '../../services/purchases'
+import type { Category, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
+import { useToast } from '../../components/ui/Toaster'
+
+type DraftItem = PurchaseItemPayload & { key: string }
+
+function makeEmptyItem(): DraftItem {
+  return {
+    key: Math.random().toString(36).slice(2),
+    product_name: '',
+    alias: '',
+    brand: '',
+    category_id: undefined,
+    expiry_date: '',
+    rack_number: 0,
+    sealed_qty: 1,
+    free_qty: 0,
+    cost_price: 0,
+    mrp: 0,
+    gst_percent: 0,
+    discount_amount: 0,
+    loose_sale_enabled: false,
+    parent_unit_name: '',
+    child_unit_name: '',
+    conversion_qty: undefined,
+  }
+}
+
+function money(n: number) {
+  return Number(n || 0).toFixed(2)
+}
+
+function fmtDateTime(v?: string | null) {
+  if (!v) return '-'
+  try {
+    return new Date(v).toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    })
+  } catch {
+    return String(v)
+  }
+}
+
+export default function PurchasesPage() {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const today = new Date().toISOString().slice(0, 10)
+
+  const [filterPartyId, setFilterPartyId] = useState<number | null>(null)
+  const [filterFromDate, setFilterFromDate] = useState('')
+  const [filterToDate, setFilterToDate] = useState('')
+
+  const [addOpen, setAddOpen] = useState(false)
+  const [partyId, setPartyId] = useState<number | null>(null)
+  const [invoiceNumber, setInvoiceNumber] = useState('')
+  const [invoiceDate, setInvoiceDate] = useState(today)
+  const [notes, setNotes] = useState('')
+  const [discountAmount, setDiscountAmount] = useState('0')
+  const [gstAmount, setGstAmount] = useState('0')
+  const [roundingAdjustment, setRoundingAdjustment] = useState('0')
+  const [paidAmount, setPaidAmount] = useState('0')
+  const [writeoffAmount, setWriteoffAmount] = useState('0')
+  const [items, setItems] = useState<DraftItem[]>([makeEmptyItem()])
+
+  const [productSearch, setProductSearch] = useState('')
+  const [selectedPurchaseId, setSelectedPurchaseId] = useState<number | null>(null)
+  const [editHeaderOpen, setEditHeaderOpen] = useState(false)
+  const [editItemsOpen, setEditItemsOpen] = useState(false)
+  const [editItems, setEditItems] = useState<DraftItem[]>([makeEmptyItem()])
+  const [paymentOpen, setPaymentOpen] = useState(false)
+  const [paymentAmount, setPaymentAmount] = useState('0')
+  const [paymentDate, setPaymentDate] = useState(today)
+  const [paymentNote, setPaymentNote] = useState('')
+  const [paymentType, setPaymentType] = useState<'payment' | 'writeoff'>('payment')
+  const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false)
+
+  const [editPartyId, setEditPartyId] = useState<number | null>(null)
+  const [editInvoiceNumber, setEditInvoiceNumber] = useState('')
+  const [editInvoiceDate, setEditInvoiceDate] = useState(today)
+  const [editNotes, setEditNotes] = useState('')
+  const [editDiscountAmount, setEditDiscountAmount] = useState('0')
+  const [editGstAmount, setEditGstAmount] = useState('0')
+  const [editRoundingAdjustment, setEditRoundingAdjustment] = useState('0')
+
+  const [supplierDialogOpen, setSupplierDialogOpen] = useState(false)
+  const [newSupplierName, setNewSupplierName] = useState('')
+  const [newSupplierPhone, setNewSupplierPhone] = useState('')
+  const [newSupplierGst, setNewSupplierGst] = useState('')
+  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false)
+  const [categoryTargetKey, setCategoryTargetKey] = useState<string | null>(null)
+  const [newCategoryName, setNewCategoryName] = useState('')
+
+  const suppliersQ = useQuery<Party[], Error>({
+    queryKey: ['suppliers-select'],
+    queryFn: () => fetchParties({ party_group: 'SUNDRY_CREDITOR', is_active: true }),
+  })
+
+  const categoriesQ = useQuery<Category[], Error>({
+    queryKey: ['purchase-categories'],
+    queryFn: () => fetchCategories(),
+  })
+
+  const productsQ = useQuery<Product[], Error>({
+    queryKey: ['purchase-products', productSearch],
+    queryFn: () => fetchProducts({ q: productSearch.trim() || undefined }),
+  })
+
+  const purchasesQ = useQuery<Purchase[], Error>({
+    queryKey: ['purchases-list', filterPartyId, filterFromDate, filterToDate],
+    queryFn: () => fetchPurchases({
+      party_id: filterPartyId || undefined,
+      from_date: filterFromDate || undefined,
+      to_date: filterToDate || undefined,
+    }),
+  })
+
+  const selectedPurchaseQ = useQuery<Purchase, Error>({
+    queryKey: ['purchase-detail', selectedPurchaseId],
+    queryFn: () => fetchPurchase(Number(selectedPurchaseId)),
+    enabled: Boolean(selectedPurchaseId),
+  })
+
+  const ledgerQ = useQuery({
+    queryKey: ['supplier-ledger-summary', partyId],
+    queryFn: () => fetchSupplierLedgerSummary(Number(partyId)),
+    enabled: Boolean(partyId),
+  })
+
+  useEffect(() => {
+    const supplierId = Number(searchParams.get('supplier_id') || 0)
+    const shouldAdd = searchParams.get('new') === '1'
+    if (supplierId > 0) {
+      setPartyId(supplierId)
+      setFilterPartyId(supplierId)
+    }
+    if (shouldAdd) setAddOpen(true)
+    if (supplierId > 0 || shouldAdd) setSearchParams({}, { replace: true })
+  }, [searchParams, setSearchParams])
+
+  const createM = useMutation({
+    mutationFn: createPurchase,
+    onSuccess: () => {
+      toast.push('Purchase saved', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      if (partyId) queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary', partyId] })
+      resetForm()
+      setAddOpen(false)
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to save purchase'), 'error'),
+  })
+
+  const updateM = useMutation({
+    mutationFn: ({ id, payload }: { id: number; payload: any }) => updatePurchase(id, payload),
+    onSuccess: (purchase) => {
+      toast.push('Purchase updated', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
+      queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      setEditHeaderOpen(false)
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to update purchase'), 'error'),
+  })
+
+  const addPaymentM = useMutation({
+    mutationFn: ({ id, payload }: { id: number; payload: any }) => addPurchasePayment(id, payload),
+    onSuccess: (purchase) => {
+      toast.push(paymentType === 'writeoff' ? 'Write-off added' : 'Payment added', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
+      queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      setPaymentOpen(false)
+      setPaymentAmount('0')
+      setPaymentNote('')
+      setPaymentType('payment')
+      setPaymentDate(today)
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to save payment'), 'error'),
+  })
+
+  const cancelM = useMutation({
+    mutationFn: (id: number) => cancelPurchase(id),
+    onSuccess: (purchase) => {
+      toast.push('Purchase cancelled', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
+      queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      setCancelConfirmOpen(false)
+      setSelectedPurchaseId(null)
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to cancel purchase'), 'error'),
+  })
+
+  const replaceItemsM = useMutation({
+    mutationFn: ({ id, items }: { id: number; items: PurchaseItemPayload[] }) => replacePurchaseItems(id, items),
+    onSuccess: (purchase) => {
+      toast.push('Purchase items replaced', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
+      queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      setEditItemsOpen(false)
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to replace purchase items'), 'error'),
+  })
+
+  const createSupplierM = useMutation({
+    mutationFn: createParty,
+    onSuccess: (supplier) => {
+      toast.push('Supplier added', 'success')
+      queryClient.invalidateQueries({ queryKey: ['suppliers'] })
+      queryClient.invalidateQueries({ queryKey: ['suppliers-select'] })
+      setPartyId(Number(supplier.id))
+      setSupplierDialogOpen(false)
+      setNewSupplierName('')
+      setNewSupplierPhone('')
+      setNewSupplierGst('')
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to add supplier'), 'error'),
+  })
+
+  const createCategoryM = useMutation({
+    mutationFn: createCategory,
+    onSuccess: (category) => {
+      toast.push('Category added', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchase-categories'] })
+      queryClient.invalidateQueries({ queryKey: ['product-categories-master'] })
+      if (categoryTargetKey) {
+        updateItem(categoryTargetKey, { category_id: Number(category.id) })
+        updateEditItem(categoryTargetKey, { category_id: Number(category.id) })
+      }
+      setCategoryDialogOpen(false)
+      setCategoryTargetKey(null)
+      setNewCategoryName('')
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to add category'), 'error'),
+  })
+
+  const subtotal = useMemo(
+    () => items.reduce((sum, item) => sum + (Number(item.sealed_qty || 0) * Number(item.cost_price || 0) - Number(item.discount_amount || 0)), 0),
+    [items],
+  )
+
+  const total = useMemo(
+    () => subtotal - Number(discountAmount || 0) + Number(gstAmount || 0) + Number(roundingAdjustment || 0),
+    [subtotal, discountAmount, gstAmount, roundingAdjustment],
+  )
+
+  const suppliers = suppliersQ.data || []
+  const categories = categoriesQ.data || []
+  const products = productsQ.data || []
+  const purchases = purchasesQ.data || []
+  const selectedPurchase = selectedPurchaseQ.data || null
+  const selectedSupplierName = selectedPurchase
+    ? suppliers.find((s) => Number(s.id) === Number(selectedPurchase.party_id))?.name || `Supplier #${selectedPurchase.party_id}`
+    : ''
+  const supplierNameFor = (id: number) => suppliers.find((supplier) => Number(supplier.id) === Number(id))?.name || `Supplier #${id}`
+
+  function resetForm() {
+    setPartyId(null)
+    setInvoiceNumber('')
+    setInvoiceDate(today)
+    setNotes('')
+    setDiscountAmount('0')
+    setGstAmount('0')
+    setRoundingAdjustment('0')
+    setPaidAmount('0')
+    setWriteoffAmount('0')
+    setItems([makeEmptyItem()])
+  }
+
+  function resetFilters() {
+    setFilterPartyId(null)
+    setFilterFromDate('')
+    setFilterToDate('')
+  }
+
+  function openAddPurchase() {
+    resetForm()
+    setAddOpen(true)
+  }
+
+  function updateItem(key: string, patch: Partial<DraftItem>) {
+    setItems((prev) => prev.map((item) => (item.key === key ? { ...item, ...patch } : item)))
+  }
+
+  function updateEditItem(key: string, patch: Partial<DraftItem>) {
+    setEditItems((prev) => prev.map((item) => (item.key === key ? { ...item, ...patch } : item)))
+  }
+
+  function applyProduct(itemKey: string, product: Product | null, editMode = false) {
+    if (!product) return
+    const patch = {
+      product_id: product.id,
+      product_name: product.name,
+      alias: product.alias || '',
+      brand: product.brand || '',
+      category_id: product.category_id ?? undefined,
+      rack_number: product.default_rack_number || 0,
+      loose_sale_enabled: product.loose_sale_enabled,
+      parent_unit_name: product.parent_unit_name || '',
+      child_unit_name: product.child_unit_name || '',
+      conversion_qty: product.default_conversion_qty ?? undefined,
+    }
+    if (editMode) updateEditItem(itemKey, patch)
+    else updateItem(itemKey, patch)
+  }
+
+  function openDetail(purchaseId: number) {
+    setSelectedPurchaseId(purchaseId)
+  }
+
+  function openEditHeader() {
+    const purchase = selectedPurchaseQ.data
+    if (!purchase) return
+    setEditPartyId(purchase.party_id)
+    setEditInvoiceNumber(purchase.invoice_number)
+    setEditInvoiceDate(purchase.invoice_date)
+    setEditNotes(purchase.notes || '')
+    setEditDiscountAmount(String(purchase.discount_amount || 0))
+    setEditGstAmount(String(purchase.gst_amount || 0))
+    setEditRoundingAdjustment(String(purchase.rounding_adjustment || 0))
+    setEditHeaderOpen(true)
+  }
+
+  function openEditItems() {
+    const purchase = selectedPurchaseQ.data
+    if (!purchase) return
+    setEditItems(purchase.items.map((item) => ({
+      key: Math.random().toString(36).slice(2),
+      product_id: item.product_id,
+      product_name: item.product_name,
+      alias: '',
+      brand: item.brand || '',
+      category_id: undefined,
+      expiry_date: item.expiry_date || '',
+      rack_number: item.rack_number,
+      sealed_qty: item.sealed_qty,
+      free_qty: item.free_qty,
+      cost_price: item.cost_price,
+      mrp: item.mrp,
+      gst_percent: item.gst_percent,
+      discount_amount: item.discount_amount,
+      loose_sale_enabled: false,
+      parent_unit_name: '',
+      child_unit_name: '',
+      conversion_qty: undefined,
+    })))
+    setEditItemsOpen(true)
+  }
+
+  function cleanItems(draftItems: DraftItem[]) {
+    return draftItems.map((item) => ({
+      ...item,
+      product_name: item.product_name.trim(),
+      alias: item.alias?.trim() || undefined,
+      brand: item.brand?.trim() || undefined,
+      expiry_date: item.expiry_date?.trim() || undefined,
+      parent_unit_name: item.parent_unit_name?.trim() || undefined,
+      child_unit_name: item.child_unit_name?.trim() || undefined,
+    }))
+  }
+
+  function submit() {
+    if (!partyId) {
+      toast.push('Select a supplier first', 'error')
+      return
+    }
+    if (!invoiceNumber.trim()) {
+      toast.push('Invoice number is required', 'error')
+      return
+    }
+    const cleanedItems = cleanItems(items)
+    if (cleanedItems.some((item) => !item.product_name)) {
+      toast.push('Every line needs a product name', 'error')
+      return
+    }
+    createM.mutate({
+      party_id: partyId,
+      invoice_number: invoiceNumber.trim(),
+      invoice_date: invoiceDate,
+      notes: notes.trim() || undefined,
+      discount_amount: Number(discountAmount || 0),
+      gst_amount: Number(gstAmount || 0),
+      rounding_adjustment: Number(roundingAdjustment || 0),
+      items: cleanedItems.map(({ key, ...rest }) => rest),
+      payments: [
+        ...(Number(paidAmount || 0) > 0 ? [{ amount: Number(paidAmount), note: 'Initial payment', is_writeoff: false }] : []),
+        ...(Number(writeoffAmount || 0) > 0 ? [{ amount: Number(writeoffAmount), note: 'Initial write-off', is_writeoff: true }] : []),
+      ],
+    })
+  }
+
+  function saveHeaderEdit() {
+    if (!selectedPurchaseId || !editPartyId) return
+    updateM.mutate({
+      id: selectedPurchaseId,
+      payload: {
+        party_id: editPartyId,
+        invoice_number: editInvoiceNumber.trim(),
+        invoice_date: editInvoiceDate,
+        notes: editNotes.trim() || undefined,
+        discount_amount: Number(editDiscountAmount || 0),
+        gst_amount: Number(editGstAmount || 0),
+        rounding_adjustment: Number(editRoundingAdjustment || 0),
+      },
+    })
+  }
+
+  function savePayment() {
+    if (!selectedPurchaseId) return
+    addPaymentM.mutate({
+      id: selectedPurchaseId,
+      payload: {
+        amount: Number(paymentAmount || 0),
+        note: paymentNote.trim() || undefined,
+        paid_at: paymentDate,
+        is_writeoff: paymentType === 'writeoff',
+      },
+    })
+  }
+
+  function saveItemReplacement() {
+    if (!selectedPurchaseId) return
+    const cleanedItems = cleanItems(editItems)
+    if (cleanedItems.some((item) => !item.product_name)) {
+      toast.push('Every replacement line needs a product name', 'error')
+      return
+    }
+    replaceItemsM.mutate({
+      id: selectedPurchaseId,
+      items: cleanedItems.map(({ key, ...rest }) => rest),
+    })
+  }
+
+  function saveQuickSupplier() {
+    const cleanName = newSupplierName.trim()
+    if (!cleanName) {
+      toast.push('Supplier name is required', 'error')
+      return
+    }
+    createSupplierM.mutate({
+      name: cleanName,
+      party_group: 'SUNDRY_CREDITOR',
+      phone: newSupplierPhone.trim() || undefined,
+      gst_number: newSupplierGst.trim() || undefined,
+      opening_balance: 0,
+      opening_balance_type: 'CR',
+    })
+  }
+
+  function saveQuickCategory() {
+    const cleanName = newCategoryName.trim()
+    if (!cleanName) {
+      toast.push('Category name is required', 'error')
+      return
+    }
+    createCategoryM.mutate(cleanName)
+  }
+
+  function openCategoryDialog(itemKey: string) {
+    setCategoryTargetKey(itemKey)
+    setNewCategoryName('')
+    setCategoryDialogOpen(true)
+  }
+
+  function itemEditor(
+    draftItems: DraftItem[],
+    setDraftItems: Dispatch<SetStateAction<DraftItem[]>>,
+    editMode = false,
+  ) {
+    const patchItem = editMode ? updateEditItem : updateItem
+    const draftSubtotal = draftItems.reduce(
+      (sum, item) => sum + (Number(item.sealed_qty || 0) * Number(item.cost_price || 0) - Number(item.discount_amount || 0)),
+      0,
+    )
+    return (
+      <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
+        <Stack
+          direction={{ xs: 'column', md: 'row' }}
+          justifyContent="space-between"
+          alignItems={{ md: 'center' }}
+          gap={1}
+          sx={{ px: 2, py: 1.5, bgcolor: 'rgba(31,107,74,0.05)', borderBottom: '1px solid', borderColor: 'divider' }}
+        >
+          <Box>
+            <Typography variant="subtitle1" fontWeight={700}>Product Lines</Typography>
+            <Typography variant="caption" color="text.secondary">
+              {draftItems.length} line{draftItems.length === 1 ? '' : 's'} · Subtotal {money(draftSubtotal)}
+            </Typography>
+          </Box>
+          <Stack direction="row" gap={1}>
+            <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setDraftItems((prev) => [...prev, makeEmptyItem()])}>Add Line</Button>
+          </Stack>
+        </Stack>
+
+        <Stack divider={<Divider flexItem />} sx={{ p: 0 }}>
+          {draftItems.map((item, index) => (
+            <Box key={item.key} sx={{ p: 1.5 }}>
+              <Stack gap={1.25}>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
+                  <Stack direction="row" gap={1} alignItems="center">
+                    <Chip size="small" label={`Line ${index + 1}`} />
+                    <Typography variant="caption" color="text.secondary">
+                      {item.product_name || 'New product line'}
+                    </Typography>
+                  </Stack>
+                  <Button
+                    color="error"
+                    size="small"
+                    startIcon={<DeleteIcon />}
+                    onClick={() => setDraftItems((prev) => (prev.length === 1 ? prev : prev.filter((row) => row.key !== item.key)))}
+                  >
+                    Remove
+                  </Button>
+                </Stack>
+                <Grid container spacing={1.25} alignItems="center">
+                  <Grid item xs={12} md={3.5}>
+                    <Autocomplete
+                      size="small"
+                      options={products}
+                      getOptionLabel={(option) => `${option.name}${option.brand ? ` | ${option.brand}` : ''}`}
+                      onInputChange={(_, value) => setProductSearch(value)}
+                      onChange={(_, value) => applyProduct(item.key, value, editMode)}
+                      renderInput={(params) => <TextField {...params} label="Pick Product" fullWidth />}
+                    />
+                  </Grid>
+                  <Grid item xs={12} md={3.5}>
+                    <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchItem(item.key, { product_name: e.target.value, product_id: undefined })} fullWidth />
+                  </Grid>
+                  <Grid item xs={12} md={2}>
+                    <TextField size="small" label="Brand" value={item.brand || ''} onChange={(e) => patchItem(item.key, { brand: e.target.value, product_id: undefined })} fullWidth />
+                  </Grid>
+                  <Grid item xs={12} md={1.5}>
+                    <TextField size="small" label="Alias" value={item.alias || ''} onChange={(e) => patchItem(item.key, { alias: e.target.value })} fullWidth />
+                  </Grid>
+                  <Grid item xs={12} md={1.5}>
+                    <Stack direction="row" gap={1}>
+                      <TextField size="small" select label="Category" value={item.category_id ?? ''} onChange={(e) => patchItem(item.key, { category_id: e.target.value ? Number(e.target.value) : undefined })} fullWidth>
+                        <MenuItem value="">None</MenuItem>
+                        {categories.map((category) => (
+                          <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
+                        ))}
+                      </TextField>
+                    </Stack>
+                  </Grid>
+
+                  <Grid item xs={6} md={1.6}>
+                    <TextField size="small" label="Expiry" type="date" value={item.expiry_date || ''} onChange={(e) => patchItem(item.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1}>
+                    <TextField size="small" label="Rack" type="number" value={item.rack_number ?? 0} onChange={(e) => patchItem(item.key, { rack_number: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1}>
+                    <TextField size="small" label="Qty" type="number" value={item.sealed_qty} onChange={(e) => patchItem(item.key, { sealed_qty: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1}>
+                    <TextField size="small" label="Free" type="number" value={item.free_qty || 0} onChange={(e) => patchItem(item.key, { free_qty: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1.2}>
+                    <TextField size="small" label="Cost" type="number" value={item.cost_price} onChange={(e) => patchItem(item.key, { cost_price: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1.2}>
+                    <TextField size="small" label="MRP" type="number" value={item.mrp} onChange={(e) => patchItem(item.key, { mrp: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1}>
+                    <TextField size="small" label="GST %" type="number" value={item.gst_percent || 0} onChange={(e) => patchItem(item.key, { gst_percent: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1.2}>
+                    <TextField size="small" label="Discount" type="number" value={item.discount_amount || 0} onChange={(e) => patchItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={12} md={2.8}>
+                    <Stack direction="row" gap={1} alignItems="center" justifyContent="space-between">
+                      <FormControlLabel
+                        control={<Checkbox size="small" checked={Boolean(item.loose_sale_enabled)} onChange={(e) => patchItem(item.key, { loose_sale_enabled: e.target.checked })} />}
+                        label="Loose"
+                        sx={{ m: 0 }}
+                      />
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={() => openCategoryDialog(item.key)}
+                        sx={{ minWidth: 0, px: 1, whiteSpace: 'nowrap' }}
+                      >
+                        + NEW
+                      </Button>
+                      <Typography variant="subtitle2" sx={{ minWidth: 80, textAlign: 'right' }}>
+                        {money(Number(item.sealed_qty || 0) * Number(item.cost_price || 0) - Number(item.discount_amount || 0))}
+                      </Typography>
+                    </Stack>
+                  </Grid>
+                  {item.loose_sale_enabled && (
+                    <>
+                      <Grid item xs={12} md={4}>
+                        <TextField size="small" label="Parent Unit" value={item.parent_unit_name || ''} onChange={(e) => patchItem(item.key, { parent_unit_name: e.target.value })} fullWidth />
+                      </Grid>
+                      <Grid item xs={12} md={4}>
+                        <TextField size="small" label="Child Unit" value={item.child_unit_name || ''} onChange={(e) => patchItem(item.key, { child_unit_name: e.target.value })} fullWidth />
+                      </Grid>
+                      <Grid item xs={12} md={4}>
+                        <TextField size="small" label="Conversion Qty" type="number" value={item.conversion_qty || ''} onChange={(e) => patchItem(item.key, { conversion_qty: e.target.value ? Number(e.target.value) : undefined })} fullWidth />
+                      </Grid>
+                    </>
+                  )}
+                </Grid>
+              </Stack>
+            </Box>
+          ))}
+        </Stack>
+      </Paper>
+    )
+  }
+
+  return (
+    <Stack gap={2}>
+      <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
+        <Typography variant="h5">Purchases</Typography>
+        <Button variant="contained" onClick={openAddPurchase}>Add Purchase</Button>
+      </Stack>
+
+      <Paper sx={{ p: 2 }}>
+        <Grid container spacing={2}>
+          <Grid item xs={12} md={4}>
+            <TextField select label="Supplier" value={filterPartyId ?? ''} onChange={(e) => setFilterPartyId(e.target.value ? Number(e.target.value) : null)} fullWidth>
+              <MenuItem value="">All</MenuItem>
+              {suppliers.map((supplier) => (
+                <MenuItem key={supplier.id} value={supplier.id}>{supplier.name}</MenuItem>
+              ))}
+            </TextField>
+          </Grid>
+          <Grid item xs={12} md={2.5}>
+            <TextField label="From" type="date" value={filterFromDate} onChange={(e) => setFilterFromDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+          </Grid>
+          <Grid item xs={12} md={2.5}>
+            <TextField label="To" type="date" value={filterToDate} onChange={(e) => setFilterToDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+          </Grid>
+          <Grid item xs={12} md={3}>
+            <Stack direction="row" gap={1} justifyContent={{ md: 'flex-end' }}>
+              <Button variant="outlined" onClick={resetFilters}>Reset Filters</Button>
+              <Button variant="contained" onClick={openAddPurchase}>Add</Button>
+            </Stack>
+          </Grid>
+        </Grid>
+      </Paper>
+
+      <Paper sx={{ p: 2 }}>
+        <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}>
+          <Typography variant="subtitle1" fontWeight={700}>Purchase List</Typography>
+          <Typography variant="body2" color="text.secondary">{purchases.length} entries</Typography>
+        </Stack>
+        <Box sx={{ overflowX: 'auto' }}>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Supplier</th>
+                <th>Invoice</th>
+                <th>Date</th>
+                <th>Total</th>
+                <th>Paid</th>
+                <th>Write-off</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {purchases.map((purchase) => (
+                <tr key={purchase.id} onDoubleClick={() => openDetail(Number(purchase.id))} style={{ cursor: 'pointer' }}>
+                  <td>{purchase.id}</td>
+                  <td>{supplierNameFor(Number(purchase.party_id))}</td>
+                  <td>{purchase.invoice_number}</td>
+                  <td>{purchase.invoice_date}</td>
+                  <td>{money(purchase.total_amount)}</td>
+                  <td>{money(purchase.paid_amount)}</td>
+                  <td>{money(purchase.writeoff_amount)}</td>
+                  <td>{purchase.payment_status}</td>
+                  <td>
+                    <Button size="small" onClick={() => openDetail(Number(purchase.id))}>Open</Button>
+                  </td>
+                </tr>
+              ))}
+              {purchases.length === 0 && (
+                <tr>
+                  <td colSpan={9}>
+                    <Box p={2} color="text.secondary">No purchases found.</Box>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </Box>
+      </Paper>
+
+      <Dialog open={addOpen} onClose={() => setAddOpen(false)} fullWidth maxWidth="lg">
+        <DialogTitle>
+          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
+            <Box>
+              <Typography variant="h6">Add Purchase Order</Typography>
+              <Typography variant="body2" color="text.secondary">
+                {partyId ? supplierNameFor(partyId) : 'Select supplier'} | {invoiceDate || 'No date'}
+              </Typography>
+            </Box>
+            <Chip label={`Total ${money(total)}`} color="primary" />
+          </Stack>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Supplier & Invoice</Typography>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={4}>
+                  <Stack direction="row" gap={1}>
+                    <TextField select label="Supplier" value={partyId ?? ''} onChange={(e) => setPartyId(e.target.value ? Number(e.target.value) : null)} fullWidth>
+                      {suppliers.map((supplier) => (
+                        <MenuItem key={supplier.id} value={supplier.id}>{supplier.name}</MenuItem>
+                      ))}
+                    </TextField>
+                    <Button variant="outlined" onClick={() => setSupplierDialogOpen(true)} sx={{ whiteSpace: 'nowrap' }}>New</Button>
+                  </Stack>
+                </Grid>
+                <Grid item xs={12} md={4}>
+                  <TextField label="Invoice Number" value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={4}>
+                  <TextField label="Invoice Date" type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+                </Grid>
+                <Grid item xs={12}>
+                  <TextField label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} multiline minRows={2} fullWidth />
+                </Grid>
+              </Grid>
+            </Paper>
+
+            {partyId && ledgerQ.data && (
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">Total Purchases</Typography>
+                    <Typography fontWeight={700}>{money(ledgerQ.data.total_purchases)}</Typography>
+                  </Box>
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">Total Paid</Typography>
+                    <Typography fontWeight={700}>{money(ledgerQ.data.total_paid)}</Typography>
+                  </Box>
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">Total Write-off</Typography>
+                    <Typography fontWeight={700}>{money(ledgerQ.data.total_writeoff)}</Typography>
+                  </Box>
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">Outstanding</Typography>
+                    <Typography fontWeight={800}>{money(ledgerQ.data.outstanding_amount)}</Typography>
+                  </Box>
+                </Stack>
+              </Paper>
+            )}
+
+            {itemEditor(items, setItems)}
+
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Totals & Settlement</Typography>
+              <Grid container spacing={2} alignItems="center">
+                <Grid item xs={12} md={2.4}>
+                  <Typography variant="caption" color="text.secondary">Subtotal</Typography>
+                  <Typography variant="h6">{money(subtotal)}</Typography>
+                </Grid>
+                <Grid item xs={12} md={2.4}>
+                  <TextField label="Bill Discount" type="number" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={2.4}>
+                  <TextField label="GST Amount" type="number" value={gstAmount} onChange={(e) => setGstAmount(e.target.value)} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={2.4}>
+                  <TextField label="Rounding Adj." type="number" value={roundingAdjustment} onChange={(e) => setRoundingAdjustment(e.target.value)} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={2.4}>
+                  <Typography variant="caption" color="text.secondary">Total</Typography>
+                  <Typography variant="h5" fontWeight={800}>{money(total)}</Typography>
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <TextField label="Initial Payment" type="number" value={paidAmount} onChange={(e) => setPaidAmount(e.target.value)} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <TextField label="Initial Write-off" type="number" value={writeoffAmount} onChange={(e) => setWriteoffAmount(e.target.value)} fullWidth />
+                </Grid>
+              </Grid>
+            </Paper>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAddOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={submit} disabled={createM.isPending}>Save Purchase</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={supplierDialogOpen} onClose={() => setSupplierDialogOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Add Supplier</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} mt={1}>
+            <TextField label="Supplier Name" value={newSupplierName} onChange={(e) => setNewSupplierName(e.target.value)} required autoFocus />
+            <TextField label="Phone" value={newSupplierPhone} onChange={(e) => setNewSupplierPhone(e.target.value.replace(/\D/g, '').slice(0, 10))} />
+            <TextField label="GST Number" value={newSupplierGst} onChange={(e) => setNewSupplierGst(e.target.value)} />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSupplierDialogOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={saveQuickSupplier} disabled={createSupplierM.isPending}>Save Supplier</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={categoryDialogOpen} onClose={() => setCategoryDialogOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Add Product Category</DialogTitle>
+        <DialogContent dividers>
+          <TextField label="Category Name" value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} required autoFocus fullWidth sx={{ mt: 1 }} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCategoryDialogOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={saveQuickCategory} disabled={createCategoryM.isPending}>Save Category</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(selectedPurchaseId)} onClose={() => setSelectedPurchaseId(null)} fullWidth maxWidth="lg">
+        <DialogTitle>Purchase Detail</DialogTitle>
+        <DialogContent dividers>
+          {!selectedPurchase && <Typography>Loading...</Typography>}
+          {selectedPurchase && (
+            <Stack gap={2}>
+              <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
+                <Box>
+                  <Typography variant="h6">{selectedPurchase.invoice_number}</Typography>
+                  <Typography color="text.secondary">{selectedSupplierName} | {selectedPurchase.invoice_date}</Typography>
+                </Box>
+                <Stack direction="row" gap={1}>
+                  <Button variant="outlined" onClick={openEditHeader}>Edit Header</Button>
+                  <Button variant="outlined" onClick={openEditItems}>Edit Items</Button>
+                  <Button variant="contained" startIcon={<PaymentsIcon />} onClick={() => setPaymentOpen(true)}>Add Payment</Button>
+                  <Button color="error" variant="outlined" onClick={() => setCancelConfirmOpen(true)}>Cancel Purchase</Button>
+                </Stack>
+              </Stack>
+
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
+                  <Typography>Total: {money(selectedPurchase.total_amount)}</Typography>
+                  <Typography>Paid: {money(selectedPurchase.paid_amount)}</Typography>
+                  <Typography>Write-off: {money(selectedPurchase.writeoff_amount)}</Typography>
+                  <Typography fontWeight={700}>Outstanding: {money(selectedPurchase.total_amount - selectedPurchase.paid_amount - selectedPurchase.writeoff_amount)}</Typography>
+                  <Typography>Status: {selectedPurchase.payment_status}</Typography>
+                </Stack>
+                {selectedPurchase.notes ? <Typography mt={2} color="text.secondary">Notes: {selectedPurchase.notes}</Typography> : null}
+              </Paper>
+
+              <Typography variant="h6">Items</Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Product</th>
+                      <th>Brand</th>
+                      <th>Expiry</th>
+                      <th>Rack</th>
+                      <th>Qty</th>
+                      <th>Free</th>
+                      <th>Cost</th>
+                      <th>MRP</th>
+                      <th>Discount</th>
+                      <th>Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedPurchase.items.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.product_name}</td>
+                        <td>{item.brand || '-'}</td>
+                        <td>{item.expiry_date || '-'}</td>
+                        <td>{item.rack_number}</td>
+                        <td>{item.sealed_qty}</td>
+                        <td>{item.free_qty}</td>
+                        <td>{money(item.cost_price)}</td>
+                        <td>{money(item.mrp)}</td>
+                        <td>{money(item.discount_amount)}</td>
+                        <td>{money(item.line_total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Box>
+
+              <Typography variant="h6">Payments & Write-offs</Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>Type</th>
+                      <th>Amount</th>
+                      <th>Note</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedPurchase.payments.map((payment) => (
+                      <tr key={payment.id}>
+                        <td>{fmtDateTime(payment.paid_at)}</td>
+                        <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
+                        <td>{money(payment.amount)}</td>
+                        <td>{payment.note || '-'}</td>
+                      </tr>
+                    ))}
+                    {selectedPurchase.payments.length === 0 && (
+                      <tr>
+                        <td colSpan={4}>
+                          <Box p={2} color="text.secondary">No payments yet.</Box>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </Box>
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSelectedPurchaseId(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={editHeaderOpen} onClose={() => setEditHeaderOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>
+          <Box>
+            <Typography variant="h6">Edit Purchase Order</Typography>
+            <Typography variant="body2" color="text.secondary">
+              {editPartyId ? supplierNameFor(editPartyId) : 'Select supplier'} | {editInvoiceDate || 'No date'}
+            </Typography>
+          </Box>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Supplier & Invoice</Typography>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={4}>
+                  <TextField select label="Supplier" value={editPartyId ?? ''} onChange={(e) => setEditPartyId(e.target.value ? Number(e.target.value) : null)} fullWidth>
+                    {suppliers.map((supplier) => (
+                      <MenuItem key={supplier.id} value={supplier.id}>{supplier.name}</MenuItem>
+                    ))}
+                  </TextField>
+                </Grid>
+                <Grid item xs={12} md={4}>
+                  <TextField label="Invoice Number" value={editInvoiceNumber} onChange={(e) => setEditInvoiceNumber(e.target.value)} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={4}>
+                  <TextField label="Invoice Date" type="date" value={editInvoiceDate} onChange={(e) => setEditInvoiceDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+                </Grid>
+                <Grid item xs={12}>
+                  <TextField label="Notes" value={editNotes} onChange={(e) => setEditNotes(e.target.value)} multiline minRows={2} fullWidth />
+                </Grid>
+              </Grid>
+            </Paper>
+
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Bill Adjustments</Typography>
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={4}>
+                  <TextField label="Bill Discount" type="number" value={editDiscountAmount} onChange={(e) => setEditDiscountAmount(e.target.value)} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={4}>
+                  <TextField label="GST Amount" type="number" value={editGstAmount} onChange={(e) => setEditGstAmount(e.target.value)} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={4}>
+                  <TextField label="Rounding Adjustment" type="number" value={editRoundingAdjustment} onChange={(e) => setEditRoundingAdjustment(e.target.value)} fullWidth />
+                </Grid>
+              </Grid>
+            </Paper>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditHeaderOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={saveHeaderEdit} disabled={updateM.isPending}>Save Changes</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={paymentOpen} onClose={() => setPaymentOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Add Payment / Write-off</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} mt={1}>
+            <TextField select label="Entry Type" value={paymentType} onChange={(e) => setPaymentType(e.target.value as 'payment' | 'writeoff')} fullWidth>
+              <MenuItem value="payment">Payment</MenuItem>
+              <MenuItem value="writeoff">Write-off</MenuItem>
+            </TextField>
+            <TextField label="Amount" type="number" value={paymentAmount} onChange={(e) => setPaymentAmount(e.target.value)} fullWidth />
+            <TextField label="Date" type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+            <TextField label="Note" value={paymentNote} onChange={(e) => setPaymentNote(e.target.value)} multiline minRows={2} fullWidth />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPaymentOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={savePayment} disabled={addPaymentM.isPending}>Save</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={editItemsOpen} onClose={() => setEditItemsOpen(false)} fullWidth maxWidth="lg">
+        <DialogTitle>
+          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
+            <Box>
+              <Typography variant="h6">Edit Purchase Items</Typography>
+              <Typography variant="body2" color="text.secondary">Only allowed while purchase stock is untouched.</Typography>
+            </Box>
+            <Chip label={`${editItems.length} line${editItems.length === 1 ? '' : 's'}`} />
+          </Stack>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            {itemEditor(editItems, setEditItems, true)}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditItemsOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={saveItemReplacement} disabled={replaceItemsM.isPending}>Save Items</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={cancelConfirmOpen} onClose={() => setCancelConfirmOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Cancel Purchase?</DialogTitle>
+        <DialogContent dividers>
+          <Typography>Purchase stock must be untouched.</Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCancelConfirmOpen(false)}>Back</Button>
+          <Button color="error" variant="contained" onClick={() => selectedPurchaseId && cancelM.mutate(selectedPurchaseId)} disabled={cancelM.isPending}>
+            Cancel Purchase
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Stack>
+  )
+}

@@ -25,6 +25,7 @@ import type { Customer } from '../../lib/types'
 type EditMode = 'cash' | 'online' | 'split' | 'credit'
 type EditLine = {
   item_id: number
+  lot_id?: number | null
   item_name: string
   brand?: string | null
   mrp: number
@@ -32,6 +33,7 @@ type EditLine = {
   custom_unit_price: number
   item_discount_percent: number
   stock?: number
+  stock_unit?: string | null
   existed_in_bill?: boolean
 }
 
@@ -255,12 +257,14 @@ export default function BillEditDialog({
       const pct = mrp > 0 ? ((mrp - custom) / mrp) * 100 : 0
       return {
         item_id: Number(it.item_id),
+        lot_id: it.lot_id ?? null,
         item_name: String(it.item_name || it.name || `#${it.item_id}`),
         brand: it.brand ?? null,
         mrp,
         quantity: qty,
         custom_unit_price: custom,
         item_discount_percent: Number(Math.min(100, Math.max(0, pct)).toFixed(2)),
+        stock_unit: it.stock_unit ?? null,
         existed_in_bill: true,
       }
     })

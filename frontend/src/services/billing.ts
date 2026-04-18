@@ -7,6 +7,8 @@ export interface BillItemIn {
   quantity: number
   mrp: number
   custom_unit_price?: number
+  lot_id?: number
+  stock_unit?: string
 }
 
 export interface BillCreate {
@@ -50,6 +52,19 @@ export interface BillItem {
   mrp: number
   quantity: number
   line_total: number
+  lot_id?: number | null
+  stock_unit?: string | null
+}
+
+export interface BillItemAllocation {
+  id: number
+  bill_id: number
+  bill_item_id: number
+  item_id: number
+  lot_id?: number | null
+  quantity: number
+  stock_unit?: string | null
+  created_at: string
 }
 
 export interface Bill {
@@ -76,6 +91,11 @@ export interface Bill {
 
 export async function getBill(id: number) {
   const { data } = await api.get<Bill>(`/billing/${id}/`)
+  return data
+}
+
+export async function getBillAllocations(id: number) {
+  const { data } = await api.get<{ bill_id: number; items: BillItemAllocation[] }>(`/billing/${id}/allocations`)
   return data
 }
 

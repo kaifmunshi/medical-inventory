@@ -14,6 +14,8 @@ import {
 } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
 import DeleteIcon from '@mui/icons-material/Delete'
+import MenuBookIcon from '@mui/icons-material/MenuBook'
+import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createCustomer, deleteCustomer, fetchCustomers, updateCustomer } from '../../services/customers'
 import type { Customer } from '../../lib/types'
@@ -40,6 +42,7 @@ function formatDate(dt?: string) {
 }
 
 export default function CustomersPage() {
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const toast = useToast()
 
@@ -200,6 +203,9 @@ export default function CustomersPage() {
                       <Stack direction="row" gap={1}>
                         <IconButton size="small" onClick={() => openEdit(r)} disabled={updateM.isPending}>
                           <EditIcon fontSize="small" />
+                        </IconButton>
+                        <IconButton size="small" onClick={() => navigate(`/customer-ledger?customer_id=${r.id}`)}>
+                          <MenuBookIcon fontSize="small" />
                         </IconButton>
                         <IconButton
                           size="small"

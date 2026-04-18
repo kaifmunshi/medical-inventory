@@ -27,16 +27,7 @@ export default function Topbar() {
           }}
         >
           <Box>
-            <Typography variant="h6" sx={{ fontWeight: 600 }}>
-              Medical Inventory
-            </Typography>
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              sx={{ display: { xs: 'none', sm: 'block' } }}
-            >
-              Simple billing &amp; stock for Ayurvedic medicines
-            </Typography>
+            <Box component="img" src="/logo.png" alt="Logo" sx={{ height: 42, width: 'auto', display: 'block' }} />
           </Box>
 
           <Box sx={{ flexGrow: 1 }} />

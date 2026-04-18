@@ -6,6 +6,7 @@ import ReturnsReport from './ReturnsReport'
 import StockLedgerReport from './StockLedgerReport'
 import ItemSalesReport from './ItemSalesReport'
 import { last15DaysRange } from '../../lib/date'
+import { useSearchParams } from 'react-router-dom'
 
 type Tab = 'sales' | 'returns' | 'stock' | 'item_sales'
 type ViewMode = 'details' | 'aggregate'
@@ -16,15 +17,17 @@ export default function Reports() {
   // ✅ default = last 15 days
   const { from: defaultFrom, to: defaultTo } = last15DaysRange()
 
-  const [tab, setTab] = useState<Tab>('sales')
-  const [viewMode, setViewMode] = useState<ViewMode>('details')
+  const [params] = useSearchParams()
+
+  const [tab, setTab] = useState<Tab>((params.get('tab') as Tab) || 'sales')
+  const [viewMode, setViewMode] = useState<ViewMode>((params.get('view') as ViewMode) || 'details')
   const [groupBy, setGroupBy] = useState<GroupBy>('day')
   const [deletedFilter, setDeletedFilter] = useState<DeletedFilter>('active')
 
-  const [from, setFrom] = useState(defaultFrom)
-  const [to, setTo] = useState(defaultTo)
+  const [from, setFrom] = useState(params.get('from') || defaultFrom)
+  const [to, setTo] = useState(params.get('to') || defaultTo)
 
-  const [q, setQ] = useState('')
+  const [q, setQ] = useState(params.get('q') || '')
 
   // child-controlled extras + export
   const [extraControls, setExtraControls] = useState<ReactNode>(null)

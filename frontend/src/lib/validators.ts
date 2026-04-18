@@ -10,6 +10,7 @@ export const itemSchema = z.object({
 
   // ✅ NEW: numeric only, integer, >= 0, default 0
   rack_number: z.coerce.number().int().nonnegative().default(0),
+  category_id: z.number().int().optional().nullable(),
 })
 
 export const billSchema = z.object({

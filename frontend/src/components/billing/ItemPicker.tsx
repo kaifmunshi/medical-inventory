@@ -13,16 +13,19 @@ import {
   Button,
 } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
-import { listItems } from '../../services/inventory'
+import { fetchLots } from '../../services/lots'
 import { useToast } from '../ui/Toaster'
+import type { InventoryLotBrowse } from '../../lib/types'
 
 export interface PickerItem {
   id: number
+  lot_id?: number
   name: string
   mrp: number
   stock: number
   brand?: string | null
   expiry_date?: string | null
+  unit_label?: string | null
 }
 
 function formatExpiry(exp?: string | null) {
@@ -38,12 +41,6 @@ function toIsoDateOnly(exp?: string | null) {
   if (!exp) return ''
   const s = String(exp)
   return s.length > 10 ? s.slice(0, 10) : s
-}
-
-function buildGroupKey(it: any) {
-  const name = String(it?.name ?? '').trim().toLowerCase()
-  const brand = String(it?.brand ?? '').trim().toLowerCase()
-  return `${name}__${brand}`
 }
 
 export default function ItemPicker({
@@ -62,7 +59,7 @@ export default function ItemPicker({
     queryKey: ['billing-items', q],
     queryFn: async () => {
       try {
-        return await listItems(q)
+        return await fetchLots({ q })
       } catch (err: any) {
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load items'
         toast.push(String(msg), 'error')
@@ -72,30 +69,17 @@ export default function ItemPicker({
   })
 
   const items = ((() => {
-    const all = (data || []) as PickerItem[]
-    const byGroup = new Map<string, PickerItem[]>()
-
-    for (const it of all) {
-      const key = buildGroupKey(it)
-      const arr = byGroup.get(key) ?? []
-      arr.push(it)
-      byGroup.set(key, arr)
-    }
-
-    const out: PickerItem[] = []
-    for (const group of byGroup.values()) {
-      const sorted = [...group].sort((a, b) => {
-        const da = toIsoDateOnly(a?.expiry_date)
-        const db = toIsoDateOnly(b?.expiry_date)
-        if (!da && !db) return 0
-        if (!da) return 1
-        if (!db) return -1
-        return da.localeCompare(db)
-      })
-      const inStock = sorted.filter((x) => Number(x?.stock ?? 0) > 0)
-      const visible = inStock.length > 0 ? inStock : sorted.slice(0, 1)
-      out.push(...visible)
-    }
+    const all = (data || []) as InventoryLotBrowse[]
+    const out: PickerItem[] = all.map((lot) => ({
+      id: Number(lot.legacy_item_id || 0),
+      lot_id: Number(lot.id),
+      name: lot.product_name,
+      mrp: Number(lot.mrp || 0),
+      stock: lot.opened_from_lot_id ? Number(lot.loose_qty || 0) : Number(lot.sealed_qty || 0),
+      brand: lot.brand,
+      expiry_date: lot.expiry_date,
+      unit_label: lot.opened_from_lot_id ? (lot.child_unit_name || 'Loose') : (lot.parent_unit_name || 'Pack'),
+    })).filter((it) => it.id > 0)
 
     out.sort((a, b) => {
       const an = String(a?.name ?? '').toLowerCase()
@@ -156,9 +140,9 @@ export default function ItemPicker({
             >
               <ListItemText
                 primary={`${it.name} — ₹${it.mrp}`}
-                secondary={`Stock: ${it.stock}${it.brand ? ` • ${it.brand}` : ''} • Exp: ${formatExpiry(
+                secondary={`Stock: ${it.stock}${it.unit_label ? ` ${it.unit_label}` : ''}${it.brand ? ` • ${it.brand}` : ''} • Exp: ${formatExpiry(
                   it.expiry_date
-                )}${Number(it.stock ?? 0) <= 0 ? ' • Out of stock' : ''}`}
+                )}${it.unit_label ? ` • ${it.unit_label}` : ''}${Number(it.stock ?? 0) <= 0 ? ' • Out of stock' : ''}`}
               />
             </ListItemButton>
           ))}

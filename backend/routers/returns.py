@@ -5,6 +5,7 @@ from typing import List, Optional, Dict
 from sqlmodel import select
 from datetime import datetime
 from backend.utils.archive_rules import apply_archive_rules
+from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import (
     Item, Bill, BillItem,
@@ -14,6 +15,7 @@ from backend.models import (
     ExchangeRecord,
     StockMovement,
 )
+from backend.security import get_request_actor_name
 
 router = APIRouter()
 
@@ -59,6 +61,7 @@ def add_movement(
             ref_type=str(ref_type),
             ref_id=int(ref_id),
             note=note,
+            actor=get_request_actor_name(),
         )
     )
 
@@ -328,6 +331,7 @@ def create_return(payload: ReturnCreate):
         raise HTTPException(status_code=400, detail="Refund amounts cannot be negative")
 
     with get_session() as session:
+        assert_financial_year_unlocked(session, now_ts(), context="Return creation")
         sold_lookup: Dict[int, int] = {}
         returned_lookup: Dict[int, int] = {}
         charged_unit_lookup: Dict[int, float] = {}
@@ -529,6 +533,15 @@ def create_return(payload: ReturnCreate):
                     session.commit()
         except Exception:
             session.rollback()
+        log_audit(
+            session,
+            entity_type="RETURN",
+            entity_id=int(r.id),
+            action="CREATE",
+            note=f"Created return #{r.id}",
+            details={"source_bill_id": r.source_bill_id, "subtotal_return": r.subtotal_return, "refund_cash": r.refund_cash, "refund_online": r.refund_online},
+        )
+        session.commit()
         return ReturnOut(
             id=r.id,
             date_time=r.date_time,
@@ -579,6 +592,7 @@ def create_exchange(payload: ExchangeCreate):
         raise HTTPException(status_code=400, detail="Payment/refund amounts cannot be negative")
 
     with get_session() as session:
+        assert_financial_year_unlocked(session, now_ts(), context="Exchange creation")
         sold_lookup = {}
         returned_lookup = {}
         charged_unit_lookup = {}
@@ -863,6 +877,15 @@ def create_exchange(payload: ExchangeCreate):
                 refund_online=r_online,
                 notes=merged_notes,
             )
+        )
+        session.flush()
+        log_audit(
+            session,
+            entity_type="EXCHANGE",
+            entity_id=int(b.id),
+            action="CREATE",
+            note=f"Created exchange with new bill #{b.id}",
+            details={"source_bill_id": payload.source_bill_id, "return_id": int(ret.id), "new_bill_id": int(b.id), "net_due": net_due},
         )
         session.commit()
 

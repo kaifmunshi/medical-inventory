@@ -18,17 +18,32 @@ import {
   useMediaQuery,
   Divider,
   MenuItem,
+  TableContainer,
+  Table,
+  TableHead,
+  TableRow,
+  TableCell,
+  TableBody
 } from '@mui/material'
+import { Link } from 'react-router-dom'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery, useQueryClient, useMutation } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
+import RestoreIcon from '@mui/icons-material/Restore'
+import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet'
+import InventoryIcon from '@mui/icons-material/Inventory'
+import CategoryIcon from '@mui/icons-material/Category'
+import FormControlLabel from '@mui/material/FormControlLabel'
+import Switch from '@mui/material/Switch'
 
 import {
   listItemsPage,
   createItem,
   updateItem,
   deleteItem,
+  restoreItem,
   adjustStock,
   getGroupLedger,
+  getInventoryStats
 } from '../../services/inventory'
 
 import Loading from '../../components/ui/Loading'
@@ -98,6 +113,7 @@ export default function Inventory() {
   const [debouncedQ, setDebouncedQ] = useState('') // ✅ debounce search input
   const [rackQ, setRackQ] = useState('')
   const [debouncedRackQ, setDebouncedRackQ] = useState('')
+  const [showDeleted, setShowDeleted] = useState(false)
 
   const [openForm, setOpenForm] = useState(false)
   const [editing, setEditing] = useState<any | null>(null)
@@ -142,6 +158,11 @@ export default function Inventory() {
   const qc = useQueryClient()
   const LIMIT = 50
 
+  const statsQ = useQuery({
+    queryKey: ['inventory-stats', showDeleted],
+    queryFn: getInventoryStats
+  })
+
   // ✅ Infinite inventory query (loads 50 at a time)
   const {
     data,
@@ -151,7 +172,7 @@ export default function Inventory() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['inventory-items', debouncedQ, debouncedRackQ],
+    queryKey: ['inventory-items', debouncedQ, debouncedRackQ, showDeleted],
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
       try {
@@ -159,7 +180,7 @@ export default function Inventory() {
           debouncedRackQ !== '' && /^\d+$/.test(debouncedRackQ)
             ? Number(debouncedRackQ)
             : undefined
-        return await listItemsPage(debouncedQ, LIMIT, pageParam, rackFilter)
+        return await listItemsPage(debouncedQ, LIMIT, pageParam, rackFilter, showDeleted)
       } catch (err: any) {
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load inventory'
         toast.push(String(msg), 'error')
@@ -307,6 +328,19 @@ export default function Inventory() {
     },
   })
 
+  const mRestore = useMutation({
+    mutationFn: (id: number) => restoreItem(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['inventory-items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-stats'] })
+      toast.push('Item restored', 'success')
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Restore failed'
+      toast.push(String(msg), 'error')
+    },
+  })
+
   const mAdjust = useMutation({
     mutationFn: ({ id, delta }: { id: number; delta: number }) => adjustStock(id, delta),
     onSuccess: () => {
@@ -349,26 +383,18 @@ export default function Inventory() {
 
   // ✅ Open ledger dialog for GROUP (name+brand), then user can pick expiry batch inside
   function openLedgerForGroup(g: any) {
-    const now = new Date()
-    const past = new Date()
-    past.setDate(now.getDate() - 30)
-
     setLedgerGroup(g)
     setLedgerItem(g?.items?.[0] ?? null) // default: earliest expiry batch
-    setLedgerFrom(toISODate(past))
-    setLedgerTo(toISODate(now))
+    setLedgerFrom('')
+    setLedgerTo('')
     setLedgerReason('')
     setLedgerOpen(true)
   }
   function openLedgerForBatch(g: any, item: any) {
-    const now = new Date()
-    const past = new Date()
-    past.setDate(now.getDate() - 30)
-
     setLedgerGroup(g)
     setLedgerItem(item ?? g?.items?.[0] ?? null)
-    setLedgerFrom(toISODate(past))
-    setLedgerTo(toISODate(now))
+    setLedgerFrom('')
+    setLedgerTo('')
     setLedgerReason('')
     setLedgerOpen(true)
   }
@@ -376,8 +402,8 @@ export default function Inventory() {
   const LEDGER_LIMIT = 50
 
   const qLedger = useInfiniteQuery({
-    queryKey: ['inventory-ledger-group', ledgerGroup?.key, ledgerFrom, ledgerTo, ledgerReason],
-    enabled: ledgerOpen && !!ledgerGroup?.key && !!ledgerFrom && !!ledgerTo,
+    queryKey: ['inventory-ledger-group', ledgerGroup?.key, ledgerItem?.id],
+    enabled: ledgerOpen && !!ledgerGroup?.key,
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
       return await getGroupLedger({
@@ -386,6 +412,7 @@ export default function Inventory() {
         from_date: ledgerFrom,
         to_date: ledgerTo,
         reason: ledgerReason ? ledgerReason : undefined,
+        item_id: ledgerItem?.id ? Number(ledgerItem.id) : undefined,
         limit: LEDGER_LIMIT,
         offset: pageParam,
       })
@@ -415,7 +442,7 @@ export default function Inventory() {
     }))
   }, [ledgerRows])
 
-  const ledgerCurrentStock = qLedger.data?.pages?.[0]?.current_stock ?? ledgerGroup?.totalStock ?? '-'
+  const ledgerCurrentStock = qLedger.data?.pages?.[0]?.current_stock ?? ledgerItem?.stock ?? ledgerGroup?.totalStock ?? '-'
 
   function exportLedgerCSV() {
     const header = ['ID', 'TS', 'Batch', 'Delta', 'Reason', 'Ref Type', 'Ref ID', 'Before', 'After', 'Note']
@@ -444,7 +471,39 @@ export default function Inventory() {
 
   return (
     <Stack gap={2}>
-      <Typography variant="h5">Inventory</Typography>
+      <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={2}>
+        <Typography variant="h5">Inventory</Typography>
+
+        {/* TOTALS DISPLAY (Like Bills) */}
+        <Stack direction="row" gap={2} sx={{ flexWrap: 'wrap' }}>
+          <Paper sx={{ p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 140, bgcolor: 'primary.50' }}>
+            <CategoryIcon color="primary" />
+            <Box>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1 }}>Unique Items</Typography>
+              <Typography variant="h6" sx={{ lineHeight: 1.2 }}>{statsQ.data?.total_unique_items || 0}</Typography>
+            </Box>
+          </Paper>
+          <Paper sx={{ p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 140, bgcolor: 'secondary.50' }}>
+            <InventoryIcon color="secondary" />
+            <Box>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1 }}>Total Packs</Typography>
+              <Typography variant="h6" sx={{ lineHeight: 1.2 }}>{statsQ.data?.total_packs || 0}</Typography>
+            </Box>
+          </Paper>
+          <Paper sx={{ p: 1.5, display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 160, bgcolor: 'success.50' }}>
+            <AccountBalanceWalletIcon color="success" />
+            <Box>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1 }}>Est. Value</Typography>
+              <Typography variant="h6" sx={{ lineHeight: 1.2, color: 'success.main' }}>
+                ₹{(statsQ.data?.total_value || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+              </Typography>
+            </Box>
+          </Paper>
+          <Button component={Link} to="/products" variant="outlined" sx={{ alignSelf: 'stretch', minHeight: 54 }}>
+            Manage Products
+          </Button>
+        </Stack>
+      </Stack>
 
       <Paper
         sx={{
@@ -542,6 +601,21 @@ export default function Inventory() {
               Clear filters
             </Button>
           )}
+
+          <FormControlLabel
+            control={
+              <Switch
+                checked={showDeleted}
+                onChange={(e) => setShowDeleted(e.target.checked)}
+                color="error"
+              />
+            }
+            label={
+              <Typography variant="body2" color={showDeleted ? 'error.main' : 'text.secondary'} sx={{ fontWeight: 600 }}>
+                Show deleted
+              </Typography>
+            }
+          />
         </Stack>
       </Paper>
 
@@ -597,14 +671,16 @@ export default function Inventory() {
                 <tbody>
                   {groups.flatMap((g: any) => {
                     const isOut = Number(g.totalStock || 0) <= 0
+                    const isDeleted = g.displayItems.every((item: any) => item.is_deleted)
 
                     const parentRow = (
                       <tr
                         key={g.key}
                         className="parent-row"
                         style={{
-                          background: isOut ? 'rgba(244,67,54,0.10)' : undefined,
-                          opacity: 1,
+                          background: isDeleted ? 'rgba(0,0,0,0.04)' : (isOut ? 'rgba(244,67,54,0.10)' : undefined),
+                          opacity: isDeleted ? 0.6 : 1,
+                          textDecoration: isDeleted ? 'line-through' : 'none'
                         }}
                       >
                         <td style={{ padding: isSm ? '10px 8px' : undefined }}>
@@ -691,10 +767,16 @@ export default function Inventory() {
                       Number(g.displayItems?.length || 0) > 1
                         ? g.displayItems.map((it: any) => {
                             const batchOut = Number(it?.stock || 0) <= 0
+                        const batchDeleted = it.is_deleted
                             return (
                               <tr
                                 key={`${g.key}-batch-${it.id}`}
                                 className={`batch-row${batchOut ? ' out-row' : ''}`}
+                                style={{
+                                  background: batchDeleted ? 'rgba(0,0,0,0.02)' : undefined,
+                                  opacity: batchDeleted ? 0.6 : 1,
+                                  textDecoration: batchDeleted ? 'line-through' : 'none'
+                                }}
                               >
                                 <td style={{ paddingLeft: isSm ? 8 : 24 }}>
                                   <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
@@ -745,16 +827,29 @@ export default function Inventory() {
                                       </IconButton>
                                     </Tooltip>
 
-                                    <Tooltip title="Delete this batch">
-                                      <IconButton
-                                        size="small"
-                                        color="error"
-                                        onClick={() => handleDeleteClick(it)}
-                                        disabled={mDelete.isPending}
-                                      >
-                                        <DeleteIcon fontSize="small" />
-                                      </IconButton>
-                                    </Tooltip>
+                                    {batchDeleted ? (
+                                      <Tooltip title="Restore this batch">
+                                        <IconButton
+                                          size="small"
+                                          color="success"
+                                          onClick={() => mRestore.mutate(it.id)}
+                                          disabled={mRestore.isPending}
+                                        >
+                                          <RestoreIcon fontSize="small" />
+                                        </IconButton>
+                                      </Tooltip>
+                                    ) : (
+                                      <Tooltip title="Delete this batch">
+                                        <IconButton
+                                          size="small"
+                                          color="error"
+                                          onClick={() => handleDeleteClick(it)}
+                                          disabled={mDelete.isPending}
+                                        >
+                                          <DeleteIcon fontSize="small" />
+                                        </IconButton>
+                                      </Tooltip>
+                                    )}
                                   </Stack>
                                 </td>
                               </tr>
@@ -908,43 +1003,6 @@ export default function Inventory() {
                   </Stack>
 
                   <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.2} alignItems={{ sm: 'center' }}>
-                    <TextField
-                      label="From"
-                      type="date"
-                      value={ledgerFrom}
-                      onChange={(e) => setLedgerFrom(e.target.value)}
-                      InputLabelProps={{ shrink: true }}
-                      size="small"
-                      sx={{ width: 165 }}
-                    />
-                    <TextField
-                      label="To"
-                      type="date"
-                      value={ledgerTo}
-                      onChange={(e) => setLedgerTo(e.target.value)}
-                      InputLabelProps={{ shrink: true }}
-                      size="small"
-                      sx={{ width: 165 }}
-                    />
-                    <TextField
-                      select
-                      label="Reason"
-                      value={ledgerReason}
-                      onChange={(e) => setLedgerReason(e.target.value)}
-                      size="small"
-                      sx={{ width: 170 }}
-                    >
-                      <MenuItem value="">All</MenuItem>
-                      <MenuItem value="OPENING">OPENING</MenuItem>
-                      <MenuItem value="ADJUST">ADJUST</MenuItem>
-                      <MenuItem value="BILL">BILL</MenuItem>
-                      <MenuItem value="BILL_DELETE">BILL_DELETE</MenuItem>
-                      <MenuItem value="BILL_RECOVER">BILL_RECOVER</MenuItem>
-                      <MenuItem value="RETURN">RETURN</MenuItem>
-                      <MenuItem value="EXCHANGE_IN">EXCHANGE_IN</MenuItem>
-                      <MenuItem value="EXCHANGE_OUT">EXCHANGE_OUT</MenuItem>
-                    </TextField>
-
                     <Button
                       variant="contained"
                       onClick={exportLedgerCSV}
@@ -987,58 +1045,80 @@ export default function Inventory() {
               </Stack>
             </Paper>
 
-            <Box sx={{ overflowX: 'auto' }}>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>TS</th>
-                    <th>Batch</th>
-                    <th>Delta</th>
-                    <th>Reason</th>
-                    <th>Ref</th>
-                    <th>Before</th>
-                    <th>After</th>
-                    <th>Note</th>
-                  </tr>
-                </thead>
-                <tbody>
+            <TableContainer component={Paper} variant="outlined" sx={{ overflowX: 'auto', borderRadius: 2 }}>
+              <Table size="small">
+                <TableHead sx={{ bgcolor: 'rgba(0,0,0,0.03)' }}>
+                  <TableRow>
+                    <TableCell sx={{ fontWeight: 600 }}>ID</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>TS</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Batch</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }} align="right">Delta</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Reason</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Ref</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }} align="center">Before</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }} align="center">After</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Note</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
                   {qLedger.isLoading && (
-                    <tr>
-                      <td colSpan={9}>
+                    <TableRow>
+                      <TableCell colSpan={9}>
                         <Box p={2} color="text.secondary">
                           Loading…
                         </Box>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   )}
 
                   {!qLedger.isLoading && ledgerDetail.length === 0 && (
-                    <tr>
-                      <td colSpan={9}>
+                    <TableRow>
+                      <TableCell colSpan={9}>
                         <Box p={2} color="text.secondary">
                           No ledger rows for this date range.
                         </Box>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   )}
 
-                  {ledgerDetail.map((r: any) => (
-                    <tr key={`lg-${r.id}`}>
-                      <td>{r.id}</td>
-                      <td>{r.ts}</td>
-                      <td>#{r.item_id || '-'}</td>
-                      <td style={{ fontWeight: 900 }}>{r.delta}</td>
-                      <td>{r.reason}</td>
-                      <td>{r.ref_type ? `${r.ref_type}${r.ref_id ? ` #${r.ref_id}` : ''}` : '-'}</td>
-                      <td>{r.before}</td>
-                      <td>{r.after}</td>
-                      <td>{r.note || '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </Box>
+                  {ledgerDetail.map((r: any) => {
+                    const isPositive = r.delta > 0;
+                    const isNegative = r.delta < 0;
+
+                    let refLink = r.ref_type ? `${r.ref_type}${r.ref_id ? ` #${r.ref_id}` : ''}` : '-';
+                    let linkedRef = <>{refLink}</>;
+
+                    if (r.reason === 'BILL' && r.ref_id) {
+                       linkedRef = <Link to={`/billing?bill_id=${r.ref_id}`} style={{ fontWeight: 600, color: '#1976d2', textDecoration: 'none' }}>{refLink}</Link>;
+                    } else if (r.reason === 'RETURN' && r.ref_id) {
+                       linkedRef = <Link to={`/returns?ref_id=${r.ref_id}`} style={{ fontWeight: 600, color: '#9c27b0', textDecoration: 'none' }}>{refLink}</Link>;
+                    }
+
+                    return (
+                      <TableRow key={`lg-${r.id}`} hover>
+                        <TableCell>{r.id}</TableCell>
+                        <TableCell>{r.ts}</TableCell>
+                        <TableCell sx={{ fontWeight: 600 }}>#{r.item_id || '-'}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 900, color: isPositive ? 'success.main' : isNegative ? 'error.main' : 'inherit' }}>
+                          {r.delta > 0 ? `+${r.delta}` : r.delta}
+                        </TableCell>
+                        <TableCell>
+                          <Chip size="small" variant="outlined" label={r.reason} />
+                        </TableCell>
+                        <TableCell>{linkedRef}</TableCell>
+                        <TableCell align="center">{r.before}</TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 600 }}>{r.after}</TableCell>
+                        <TableCell sx={{ maxWidth: 200, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          <Tooltip title={r.note || ''}>
+                             <span>{r.note || '-'}</span>
+                          </Tooltip>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            </TableContainer>
 
             {qLedger.isError && (
               <Box sx={{ py: 2, textAlign: 'center' }}>

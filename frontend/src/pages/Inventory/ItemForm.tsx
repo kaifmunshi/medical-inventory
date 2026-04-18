@@ -254,6 +254,16 @@ export default function ItemForm({
 
   const pickedStock = Number(pickedExisting?.stock ?? 0)
 
+  const noSpinnerSx = {
+    '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': {
+      WebkitAppearance: 'none',
+      margin: 0,
+    },
+    '& input[type=number]': {
+      MozAppearance: 'textfield',
+    },
+  } as const
+
   return (
     <Drawer
       anchor="right"
@@ -477,6 +487,7 @@ export default function ItemForm({
             InputLabelProps={{ shrink: true }}
             error={!!errors.mrp}
             helperText={errors.mrp?.message}
+            sx={noSpinnerSx}
           />
 
           <TextField
@@ -487,6 +498,7 @@ export default function ItemForm({
             InputLabelProps={{ shrink: true }}
             error={!!(errors as any).rack_number}
             helperText={(errors as any).rack_number?.message || 'Default: 0'}
+            sx={noSpinnerSx}
           />
 
           <TextField
@@ -497,6 +509,7 @@ export default function ItemForm({
             {...register('stock', { valueAsNumber: true })}
             InputLabelProps={{ shrink: true }}
             error={!!errors.stock}
+            sx={noSpinnerSx}
             helperText={
               errors.stock?.message ||
               (pickedExisting && !isEditMode

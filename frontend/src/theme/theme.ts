@@ -37,6 +37,13 @@ const theme = createTheme({
             'linear-gradient(135deg, #f5fbf7 0%, #fdfaf3 100%)',
           backgroundAttachment: 'fixed',
         },
+        'input[type=number]::-webkit-outer-spin-button, input[type=number]::-webkit-inner-spin-button': {
+          WebkitAppearance: 'none !important',
+          margin: 0,
+        },
+        'input[type=number]': {
+          MozAppearance: 'textfield !important',
+        },
       },
     },
     MuiPaper: {

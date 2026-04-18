@@ -777,7 +777,7 @@ export default function BillEditDialog({
 
               <Box sx={{ mt: 1, maxHeight: 185, overflowY: 'auto', border: '1px solid #eee', borderRadius: 1, p: 1 }}>
                 {editSuggestionVisible.map((it: any) => (
-                  <Stack key={`edit-add-${it.id}`} direction="row" justifyContent="space-between" alignItems="center" sx={{ py: 0.5, px: 0.75, borderRadius: 1, bgcolor: Number(it.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.12)' : 'transparent' }}>
+                  <Stack key={`edit-add-${it.id}`} direction="row" justifyContent="flex-start" gap={2} alignItems="center" sx={{ py: 0.5, px: 0.75, borderRadius: 1, bgcolor: Number(it.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.12)' : 'transparent' }}>
                     <Box>
                       <Typography variant="body2">{it.name}</Typography>
                       <Typography variant="caption" color="text.secondary">

@@ -789,7 +789,7 @@ export default function BillEditDialog({
                       bgcolor: Number(it.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.08)' : 'transparent',
                       transition: 'background-color 0.2s',
                       '&:hover': {
-                        bgcolor: Number(it.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.15)' : 'rgba(0, 0, 0, 0.04)'
+                        bgcolor: Number(it.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.25)' : 'rgba(0, 0, 0, 0.1)'
                       }
                     }}
                   >

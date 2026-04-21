@@ -8,6 +8,7 @@ import App from './App'
 import theme from './theme/theme'
 import './styles.css'
 import GlobalFetchingUI from './components/ui/GlobalFetchingUI'
+import DisableNumberInputScroll from './components/ui/DisableNumberInputScroll'
 
 const client = new QueryClient({
   defaultOptions: {
@@ -22,6 +23,7 @@ const client = new QueryClient({
 function Root() {
   return (
     <>
+      <DisableNumberInputScroll />
       <GlobalFetchingUI />
       <App />
     </>

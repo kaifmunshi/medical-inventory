@@ -1,11 +1,39 @@
 from contextlib import contextmanager
 from datetime import datetime
+import os
 from pathlib import Path
+import sys
 from sqlmodel import create_engine, Session, SQLModel
 from sqlalchemy import text
 
 BASE_DIR = Path(__file__).resolve().parent.parent   # project root (medical-inventory/)
-DB_FILE = BASE_DIR / "medical_shop.db"
+
+
+def _resolve_db_file() -> Path:
+    env_value = (
+        os.environ.get("MEDICAL_SHOP_DB_PATH")
+        or os.environ.get("MEDICAL_INVENTORY_DB_PATH")
+        or os.environ.get("DB_FILE")
+    )
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+
+    candidates = [
+        Path.cwd() / "medical_shop.db",
+        Path(sys.argv[0]).resolve().parent / "medical_shop.db" if sys.argv and sys.argv[0] else None,
+        Path(sys.executable).resolve().parent / "medical_shop.db" if sys.executable else None,
+        BASE_DIR / "medical_shop.db",
+    ]
+
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return candidate
+
+    return BASE_DIR / "medical_shop.db"
+
+
+DB_FILE = _resolve_db_file()
+DB_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 engine = create_engine(
     f"sqlite:///{DB_FILE}",

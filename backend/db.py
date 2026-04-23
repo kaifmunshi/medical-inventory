@@ -819,13 +819,12 @@ def migrate_db():
                     ) VALUES (
                         :label, :start_date, :end_date, 1, 0, :ts, :ts
                     )
-                """),
-                {
-                    "label": f"FY {str(start_year)[-2:]}-{str(start_year + 1)[-2:]}",
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "ts": _now_ts(),
-                },
+                """).bindparams(
+                    label=f"FY {str(start_year)[-2:]}-{str(start_year + 1)[-2:]}",
+                    start_date=start_date,
+                    end_date=end_date,
+                    ts=_now_ts(),
+                ),
             )
             session.commit()
 
@@ -867,8 +866,7 @@ def migrate_db():
                             WHERE lower(coalesce(name, '')) = lower(:name)
                               AND lower(coalesce(brand, '')) = lower(:brand)
                             LIMIT 1
-                        """),
-                        {"name": name, "brand": brand or ""},
+                        """).bindparams(name=name, brand=brand or ""),
                     ).first()
                     if existing_product:
                         product_id = int(existing_product[0])
@@ -883,20 +881,21 @@ def migrate_db():
                                     :name, NULL, :brand, :category_id, :rack_number, :printed_price,
                                     NULL, NULL, 0, NULL, 1, :ts, :ts
                                 )
-                            """),
-                            {
-                                "name": name,
-                                "brand": brand,
-                                "category_id": row[4],
-                                "rack_number": int(row[9] or 0),
-                                "printed_price": float(row[6] or 0),
-                                "ts": ts3,
-                            },
+                            """).bindparams(
+                                name=name,
+                                brand=brand,
+                                category_id=row[4],
+                                rack_number=int(row[9] or 0),
+                                printed_price=float(row[6] or 0),
+                                ts=ts3,
+                            ),
                         )
                         product_id = int(session.exec(text("SELECT last_insert_rowid()")).one()[0])
                         session.exec(
-                            text("UPDATE item SET product_id = :product_id WHERE id = :item_id"),
-                            {"product_id": product_id, "item_id": item_id},
+                            text("UPDATE item SET product_id = :product_id WHERE id = :item_id").bindparams(
+                                product_id=product_id,
+                                item_id=item_id,
+                            ),
                         )
 
                 if product_id is None:
@@ -913,18 +912,17 @@ def migrate_db():
                             :sealed_qty, 0, NULL, NULL,
                             :legacy_item_id, :is_active, :ts, :ts
                         )
-                    """),
-                    {
-                        "product_id": int(product_id),
-                        "expiry_date": row[5],
-                        "mrp": float(row[6] or 0),
-                        "cost_price": float(row[7] or 0),
-                        "rack_number": int(row[9] or 0),
-                        "sealed_qty": max(0, int(row[8] or 0)),
-                        "legacy_item_id": item_id,
-                        "is_active": 0 if bool(row[10]) else 1,
-                        "ts": ts3,
-                    },
+                    """).bindparams(
+                        product_id=int(product_id),
+                        expiry_date=row[5],
+                        mrp=float(row[6] or 0),
+                        cost_price=float(row[7] or 0),
+                        rack_number=int(row[9] or 0),
+                        sealed_qty=max(0, int(row[8] or 0)),
+                        legacy_item_id=item_id,
+                        is_active=0 if bool(row[10]) else 1,
+                        ts=ts3,
+                    ),
                 )
 
             session.exec(

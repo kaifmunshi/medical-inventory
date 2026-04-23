@@ -1,4 +1,6 @@
 # backend/main.py
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session
@@ -23,7 +25,12 @@ from backend.routers import vouchers
 from backend.routers import users
 app = FastAPI(title="Ayurvedic Medical Inventory System")
 
-# For DEV: allow local frontend origins
+extra_origins = [
+    origin.strip()
+    for origin in str(os.environ.get("APP_CORS_ORIGINS") or "").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -31,7 +38,12 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+        "null",
+        *extra_origins,
     ],
+    allow_origin_regex=r"^(https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+)(?::\d+)?|tauri://localhost|capacitor://localhost|null)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

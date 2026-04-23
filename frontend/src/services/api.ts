@@ -1,7 +1,22 @@
 import axios from 'axios'
 import { loadStoredUserSession } from '../lib/userSession'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+function resolveApiBaseUrl() {
+const configured = String(import.meta.env.VITE_API_BASE_URL || '').trim()
+if (configured) return configured
+
+if (typeof window !== 'undefined') {
+const hostname = String(window.location.hostname || '').trim()
+if (hostname) {
+const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
+return `${protocol}//${hostname}:8000`
+}
+}
+
+return 'http://127.0.0.1:8000'
+}
+
+const API_BASE_URL = resolveApiBaseUrl()
 
 const api = axios.create({
 baseURL: API_BASE_URL,

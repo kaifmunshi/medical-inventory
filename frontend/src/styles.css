@@ -19,7 +19,8 @@ body {
 
 /* Table styling */
 .table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
 }
 
@@ -29,6 +30,8 @@ body {
   padding: 8px 10px;
   text-align: left;
   font-size: 0.84rem;
+  white-space: nowrap;
+  vertical-align: top;
 }
 
 .table thead th {

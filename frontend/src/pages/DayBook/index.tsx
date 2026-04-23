@@ -76,13 +76,25 @@ export default function DayBookPage() {
       <Typography variant="h5">Day Book</Typography>
 
       <Paper sx={{ p: 2 }}>
-        <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: {
+              xs: '1fr',
+              sm: 'repeat(2, minmax(150px, 1fr))',
+              lg: 'repeat(5, minmax(150px, 1fr))',
+            },
+            gap: 1.25,
+            alignItems: 'start',
+          }}
+        >
           <TextField
             label="From"
             type="date"
             value={fromDate}
             onChange={(e) => setFromDate(e.target.value)}
             InputLabelProps={{ shrink: true }}
+            fullWidth
           />
           <TextField
             label="To"
@@ -90,13 +102,14 @@ export default function DayBookPage() {
             value={toDate}
             onChange={(e) => setToDate(e.target.value)}
             InputLabelProps={{ shrink: true }}
+            fullWidth
           />
           <TextField
             select
             label="Voucher Type"
             value={voucherType}
             onChange={(e) => setVoucherType(e.target.value)}
-            sx={{ minWidth: 180 }}
+            fullWidth
           >
             <MenuItem value="">All</MenuItem>
             {voucherTypes.filter(Boolean).map((type) => (
@@ -108,7 +121,7 @@ export default function DayBookPage() {
             label="Deleted"
             value={deletedFilter}
             onChange={(e) => setDeletedFilter(e.target.value as 'active' | 'deleted' | 'all')}
-            sx={{ minWidth: 150 }}
+            fullWidth
           >
             <MenuItem value="active">Active</MenuItem>
             <MenuItem value="deleted">Deleted</MenuItem>
@@ -120,9 +133,10 @@ export default function DayBookPage() {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Voucher no, party, notes"
             fullWidth
+            sx={{ gridColumn: { xs: 'auto', lg: 'span 1' } }}
           />
-        </Stack>
-        <Box sx={{ mt: 1 }}>
+        </Box>
+        <Box sx={{ mt: 1, pt: 0.25 }}>
           <FormControlLabel
             control={
               <Checkbox
@@ -172,7 +186,7 @@ export default function DayBookPage() {
             <tbody>
               {rows.map((row) => (
                 <tr key={`${row.source_type}-${row.source_id}`}>
-                  <td>{String(row.ts || '').replace('T', ' ')}</td>
+                  <td style={{ minWidth: 154 }}>{String(row.ts || '').replace('T', ' ')}</td>
                   <td>
                     <Chip
                       size="small"
@@ -181,18 +195,18 @@ export default function DayBookPage() {
                       variant={row.is_deleted ? 'outlined' : 'filled'}
                     />
                   </td>
-                  <td>
+                  <td style={{ minWidth: 170 }}>
                     {row.voucher_no}
                     <Box component="span" sx={{ color: 'text.secondary', ml: 1 }}>
                       ({row.source_type})
                     </Box>
                   </td>
-                  <td>{row.party_name || '-'}</td>
-                  <td>{money(row.amount)}</td>
-                  <td>{money(row.cash_amount)}</td>
-                  <td>{money(row.online_amount)}</td>
-                  <td>{row.status || (row.is_deleted ? 'DELETED' : '-')}</td>
-                  <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{row.narration || '-'}</td>
+                  <td style={{ minWidth: 160 }}>{row.party_name || '-'}</td>
+                  <td style={{ minWidth: 92 }}>{money(row.amount)}</td>
+                  <td style={{ minWidth: 92 }}>{money(row.cash_amount)}</td>
+                  <td style={{ minWidth: 92 }}>{money(row.online_amount)}</td>
+                  <td style={{ minWidth: 112 }}>{row.status || (row.is_deleted ? 'DELETED' : '-')}</td>
+                  <td style={{ whiteSpace: 'normal', wordBreak: 'break-word', minWidth: 240 }}>{row.narration || '-'}</td>
                 </tr>
               ))}
               {rows.length === 0 && (

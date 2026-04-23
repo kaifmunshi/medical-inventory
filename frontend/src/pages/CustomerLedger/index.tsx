@@ -37,7 +37,7 @@ export default function CustomerLedgerPage() {
   const today = new Date().toISOString().slice(0, 10)
   const [params, setParams] = useSearchParams()
 
-  const [customerName, setCustomerName] = useState('')
+  const [customerId, setCustomerId] = useState('')
   const [receiptOpen, setReceiptOpen] = useState(false)
   const [mode, setMode] = useState<'cash' | 'online' | 'split'>('cash')
   const [cashAmount, setCashAmount] = useState('0')
@@ -56,23 +56,32 @@ export default function CustomerLedgerPage() {
     queryFn: () => fetchParties({ party_group: 'SUNDRY_DEBTOR', is_active: true }),
   })
 
-  const selectedParty = (partiesQ.data || []).find(
-    (party) => {
-      const matchName = String(party.name || '').trim().toLowerCase() === String(customerName || '').trim().toLowerCase()
-      const matchId = params.get('customer_id') === String(party.id)
-      return matchName || matchId
-    }
+  const selectedCustomer = useMemo(
+    () => (customersQ.data || []).find((customer) => String(customer.id) === String(customerId || '')),
+    [customersQ.data, customerId],
+  )
+
+  const selectedParty = useMemo(
+    () =>
+      (partiesQ.data || []).find((party) => {
+        const selectedCustomerId = Number(selectedCustomer?.id || 0)
+        const selectedCustomerName = String(selectedCustomer?.name || '').trim().toLowerCase()
+        const legacyMatch = Number(party.legacy_customer_id || 0) > 0 && Number(party.legacy_customer_id) === selectedCustomerId
+        const nameMatch = selectedCustomerName && String(party.name || '').trim().toLowerCase() === selectedCustomerName
+        return legacyMatch || Boolean(nameMatch)
+      }),
+    [partiesQ.data, selectedCustomer],
   )
 
   useEffect(() => {
     const id = params.get('customer_id')
-    if (id && partiesQ.data) {
-      const match = partiesQ.data.find((p) => String(p.id) === id)
-      if (match && customerName !== match.name) {
-        setCustomerName(match.name || '')
+    if (id && customersQ.data) {
+      const match = customersQ.data.find((customer) => String(customer.id) === id)
+      if (match && customerId !== String(match.id)) {
+        setCustomerId(String(match.id))
       }
     }
-  }, [params, partiesQ.data, customerName])
+  }, [params, customersQ.data, customerId])
 
   const ledgerQ = useQuery<DebtorLedgerRow[], Error>({
     queryKey: ['customer-ledger', selectedParty?.id],
@@ -192,26 +201,39 @@ export default function CustomerLedgerPage() {
         <TextField
           select
           label="Customer"
-          value={customerName}
+          value={customerId}
           onChange={(e) => {
-            setCustomerName(e.target.value)
-            if (params.has('customer_id')) {
-              const newParams = new URLSearchParams(params)
-              newParams.delete('customer_id')
-              setParams(newParams, { replace: true })
-            }
+            const nextId = String(e.target.value || '')
+            setCustomerId(nextId)
+            const newParams = new URLSearchParams(params)
+            if (nextId) newParams.set('customer_id', nextId)
+            else newParams.delete('customer_id')
+            setParams(newParams, { replace: true })
           }}
           fullWidth
         >
           {(customersQ.data || []).map((customer) => (
-            <MenuItem key={customer.id} value={customer.name}>{customer.name}</MenuItem>
+            <MenuItem key={customer.id} value={String(customer.id)}>
+              {[customer.name, customer.phone].filter(Boolean).join(' • ')}
+            </MenuItem>
           ))}
         </TextField>
       </Paper>
 
-      {selectedParty && (
+      {selectedCustomer && (
         <Paper sx={{ p: 2 }}>
-          <Typography fontWeight={700}>Outstanding: {money(totalOutstanding)}</Typography>
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={2} justifyContent="space-between">
+            <div>
+              <Typography fontWeight={700}>{selectedCustomer.name}</Typography>
+              <Typography variant="body2" color="text.secondary">
+                {[selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).join(' • ') || 'Customer master record'}
+              </Typography>
+            </div>
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
+              <Typography fontWeight={700}>Outstanding: {money(totalOutstanding)}</Typography>
+              <Typography>Total Receipts: {money(receipts.reduce((sum, row) => sum + Number(row.total_amount || 0), 0))}</Typography>
+            </Stack>
+          </Stack>
         </Paper>
       )}
 
@@ -225,6 +247,7 @@ export default function CustomerLedgerPage() {
                 <th>Date</th>
                 <th>Total</th>
                 <th>Paid</th>
+                <th>Write-off</th>
                 <th>Outstanding</th>
                 <th>Status</th>
               </tr>
@@ -247,13 +270,14 @@ export default function CustomerLedgerPage() {
                   <td>{row.bill_date}</td>
                   <td>{money(row.total_amount)}</td>
                   <td>{money(row.paid_amount)}</td>
+                  <td>{money(row.writeoff_amount)}</td>
                   <td>{money(row.outstanding_amount)}</td>
                   <td>{row.payment_status}</td>
                 </tr>
               ))}
               {openBills.length === 0 && (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={7}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No open bills for this customer.' : 'Select a customer to view open bills.'}
                     </Box>
@@ -275,6 +299,7 @@ export default function CustomerLedgerPage() {
                 <th>Date</th>
                 <th>Total</th>
                 <th>Paid</th>
+                <th>Write-off</th>
                 <th>Outstanding</th>
                 <th>Status</th>
                 <th>Notes</th>
@@ -298,6 +323,7 @@ export default function CustomerLedgerPage() {
                   <td>{row.bill_date}</td>
                   <td>{money(row.total_amount)}</td>
                   <td>{money(row.paid_amount)}</td>
+                  <td>{money(row.writeoff_amount)}</td>
                   <td>{money(row.outstanding_amount)}</td>
                   <td>{row.payment_status}</td>
                   <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{row.notes || '-'}</td>
@@ -305,7 +331,7 @@ export default function CustomerLedgerPage() {
               ))}
               {ledgerRows.length === 0 && (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={8}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No debtor ledger rows for this customer yet.' : 'Select a customer to view the ledger.'}
                     </Box>

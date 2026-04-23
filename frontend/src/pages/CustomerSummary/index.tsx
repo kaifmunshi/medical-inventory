@@ -245,7 +245,7 @@ export default function CustomerSummaryPage() {
             </thead>
             <tbody>
               {filteredBills.map((bill: any) => {
-                const pending = Math.max(0, Number(bill.total_amount || 0) - Number(bill.paid_amount || 0))
+                const pending = Math.max(0, Number(bill.total_amount || 0) - Number(bill.paid_amount || 0) - Number(bill.writeoff_amount || 0))
                 return (
                   <tr key={bill.id}>
                     <td>
@@ -364,7 +364,7 @@ export default function CustomerSummaryPage() {
                 <Typography>Payment Mode: <b>{billDetail.payment_mode || '-'}</b></Typography>
                 <Typography>Payment Status: <b>{billDetail.payment_status || '-'}</b></Typography>
                 <Typography>Paid Amount: <b>{money(billDetail.paid_amount || 0)}</b></Typography>
-                <Typography>Pending Amount: <b>{money(Math.max(0, Number(billDetail.total_amount || 0) - Number(billDetail.paid_amount || 0)))}</b></Typography>
+                <Typography>Pending Amount: <b>{money(Math.max(0, Number(billDetail.total_amount || 0) - Number(billDetail.paid_amount || 0) - Number(billDetail.writeoff_amount || 0)))}</b></Typography>
                 {billDetail.notes ? <Typography sx={{ mt: 1 }}>Notes: <i>{billDetail.notes}</i></Typography> : null}
                 {!billDetail.is_deleted ? (
                   <Box sx={{ pt: 1 }}>

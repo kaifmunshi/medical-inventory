@@ -687,7 +687,7 @@ export default function SalesReport(props: {
                 </Typography>
                 <Typography>
                   Pending Amount:{' '}
-                  <b>{money(Math.max(0, Number(detail.total_amount || 0) - Number(detail.paid_amount || 0)))}</b>
+                  <b>{money(Math.max(0, Number(detail.total_amount || 0) - Number(detail.paid_amount || 0) - Number(detail.writeoff_amount || 0)))}</b>
                 </Typography>
                 {detail.notes ? (
                   <Typography sx={{ mt: 1 }}>

@@ -283,6 +283,7 @@ export interface DebtorLedgerRow {
   customer_name: string
   total_amount: number
   paid_amount: number
+  writeoff_amount: number
   outstanding_amount: number
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID'
   notes?: string | null
@@ -293,6 +294,7 @@ export interface OpenBill {
   bill_date: string
   total_amount: number
   paid_amount: number
+  writeoff_amount: number
   outstanding_amount: number
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID'
   notes?: string | null

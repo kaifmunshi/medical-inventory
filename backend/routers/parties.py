@@ -11,6 +11,7 @@ from backend.db import get_session
 from backend.models import (
     Bill,
     BillPayment,
+    Customer,
     DebtorLedgerRow,
     OpenBillOut,
     Party,
@@ -79,6 +80,78 @@ def _customer_note_matches_expr(name: str):
 
 def _round2(x: float) -> float:
     return float(f"{float(x or 0):.2f}")
+
+
+def _sync_customer_debtor_parties(session) -> None:
+    customers = session.exec(select(Customer).order_by(Customer.id.asc())).all()
+    dirty = False
+    ts = datetime.now().isoformat(timespec="seconds")
+    for customer in customers:
+        customer_name = _normalize_name(customer.name)
+        if not customer_name:
+            continue
+        party = session.exec(
+            select(Party).where(
+                Party.party_group == "SUNDRY_DEBTOR",
+                Party.legacy_customer_id == int(customer.id),
+            )
+        ).first()
+        if not party:
+            party = session.exec(
+                select(Party).where(
+                    Party.party_group == "SUNDRY_DEBTOR",
+                    func.lower(func.trim(func.coalesce(Party.name, ""))) == customer_name.lower(),
+                )
+            ).first()
+        next_phone = _normalize_phone(customer.phone)
+        next_address = _normalize_text(customer.address_line)
+        if not party:
+            session.add(
+                Party(
+                    name=customer_name,
+                    party_group="SUNDRY_DEBTOR",
+                    phone=next_phone,
+                    address_line=next_address,
+                    gst_number=None,
+                    notes=None,
+                    opening_balance=0.0,
+                    opening_balance_type="DR",
+                    legacy_customer_id=int(customer.id),
+                    is_active=True,
+                    created_at=ts,
+                    updated_at=ts,
+                )
+            )
+            dirty = True
+            continue
+        changed = False
+        if int(getattr(party, "legacy_customer_id", 0) or 0) != int(customer.id):
+            party.legacy_customer_id = int(customer.id)
+            changed = True
+        if _normalize_name(party.name) != customer_name:
+            party.name = customer_name
+            changed = True
+        if _normalize_phone(party.phone) != next_phone:
+            party.phone = next_phone
+            changed = True
+        if _normalize_text(party.address_line) != next_address:
+            party.address_line = next_address
+            changed = True
+        if changed:
+            party.updated_at = ts
+            session.add(party)
+            dirty = True
+    if dirty:
+        session.commit()
+
+
+def _party_customer_name(session, party: Party) -> str:
+    customer_id = int(getattr(party, "legacy_customer_id", 0) or 0)
+    if customer_id > 0:
+        customer = session.get(Customer, customer_id)
+        if customer and _normalize_name(customer.name):
+            return _normalize_name(customer.name)
+    return _normalize_name(party.name)
 
 
 def _normalize_payment_ts(raw: Optional[str]) -> str:
@@ -159,6 +232,7 @@ def list_parties(
     offset: int = Query(0, ge=0),
 ) -> List[PartyOut]:
     with get_session() as session:
+        _sync_customer_debtor_parties(session)
         stmt = select(Party)
         if party_group:
             stmt = stmt.where(Party.party_group == _normalize_group(party_group))
@@ -252,14 +326,16 @@ def deactivate_party(party_id: int) -> Response:
 @router.get("/{party_id}/debtor-ledger", response_model=List[DebtorLedgerRow])
 def debtor_ledger(party_id: int) -> List[DebtorLedgerRow]:
     with get_session() as session:
+        _sync_customer_debtor_parties(session)
         party = session.get(Party, party_id)
         if not party or party.party_group != "SUNDRY_DEBTOR":
             raise HTTPException(status_code=404, detail="Debtor party not found")
+        customer_name = _party_customer_name(session, party)
 
         stmt = (
             select(Bill)
             .where(Bill.is_deleted == False)  # noqa: E712
-            .where(_customer_note_matches_expr(party.name))
+            .where(_customer_note_matches_expr(customer_name))
             .order_by(Bill.date_time.desc(), Bill.id.desc())
         )
         rows = session.exec(stmt).all()
@@ -267,14 +343,16 @@ def debtor_ledger(party_id: int) -> List[DebtorLedgerRow]:
         for bill in rows:
             total = float(bill.total_amount or 0)
             paid = float(bill.paid_amount or 0)
-            outstanding = max(0.0, total - paid)
+            writeoff = float(getattr(bill, "writeoff_amount", 0.0) or 0)
+            outstanding = max(0.0, total - paid - writeoff)
             out.append(
                 DebtorLedgerRow(
                     bill_id=bill.id,
                     bill_date=bill.date_time,
-                    customer_name=party.name,
+                    customer_name=customer_name,
                     total_amount=round(total, 2),
                     paid_amount=round(paid, 2),
+                    writeoff_amount=round(writeoff, 2),
                     outstanding_amount=round(outstanding, 2),
                     payment_status=str(bill.payment_status or "UNPAID"),
                     notes=bill.notes,
@@ -286,21 +364,24 @@ def debtor_ledger(party_id: int) -> List[DebtorLedgerRow]:
 @router.get("/{party_id}/open-bills", response_model=List[OpenBillOut])
 def debtor_open_bills(party_id: int) -> List[OpenBillOut]:
     with get_session() as session:
+        _sync_customer_debtor_parties(session)
         party = session.get(Party, party_id)
         if not party or party.party_group != "SUNDRY_DEBTOR":
             raise HTTPException(status_code=404, detail="Debtor party not found")
+        customer_name = _party_customer_name(session, party)
 
         rows = session.exec(
             select(Bill)
             .where(Bill.is_deleted == False)  # noqa: E712
-            .where(_customer_note_matches_expr(party.name))
+            .where(_customer_note_matches_expr(customer_name))
             .order_by(Bill.date_time.desc(), Bill.id.desc())
         ).all()
         out: List[OpenBillOut] = []
         for bill in rows:
             total = float(bill.total_amount or 0)
             paid = float(bill.paid_amount or 0)
-            outstanding = max(0.0, total - paid)
+            writeoff = float(getattr(bill, "writeoff_amount", 0.0) or 0)
+            outstanding = max(0.0, total - paid - writeoff)
             if outstanding <= 0.0001:
                 continue
             out.append(
@@ -309,6 +390,7 @@ def debtor_open_bills(party_id: int) -> List[OpenBillOut]:
                     bill_date=bill.date_time,
                     total_amount=_round2(total),
                     paid_amount=_round2(paid),
+                    writeoff_amount=_round2(writeoff),
                     outstanding_amount=_round2(outstanding),
                     payment_status=str(bill.payment_status or "UNPAID"),
                     notes=bill.notes,
@@ -320,6 +402,7 @@ def debtor_open_bills(party_id: int) -> List[OpenBillOut]:
 @router.get("/{party_id}/receipts", response_model=List[PartyReceiptOut])
 def list_party_receipts(party_id: int) -> List[PartyReceiptOut]:
     with get_session() as session:
+        _sync_customer_debtor_parties(session)
         party = session.get(Party, party_id)
         if not party or party.party_group != "SUNDRY_DEBTOR":
             raise HTTPException(status_code=404, detail="Debtor party not found")
@@ -332,6 +415,7 @@ def list_party_receipts(party_id: int) -> List[PartyReceiptOut]:
 @router.get("/{party_id}/receipt-adjustments", response_model=List[ReceiptBillAdjustmentOut])
 def list_receipt_adjustments(party_id: int) -> List[ReceiptBillAdjustmentOut]:
     with get_session() as session:
+        _sync_customer_debtor_parties(session)
         party = session.get(Party, party_id)
         if not party or party.party_group != "SUNDRY_DEBTOR":
             raise HTTPException(status_code=404, detail="Debtor party not found")
@@ -347,9 +431,11 @@ def list_receipt_adjustments(party_id: int) -> List[ReceiptBillAdjustmentOut]:
 @router.post("/{party_id}/receipts", response_model=PartyReceiptOut, status_code=201)
 def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyReceiptOut:
     with get_session() as session:
+        _sync_customer_debtor_parties(session)
         party = session.get(Party, party_id)
         if not party or party.party_group != "SUNDRY_DEBTOR":
             raise HTTPException(status_code=404, detail="Debtor party not found")
+        customer_name = _party_customer_name(session, party)
 
         cash, online, total_amount = _validate_receipt_mode(payload.mode, payload.cash_amount, payload.online_amount)
         receipt_ts = _normalize_payment_ts(payload.payment_date)
@@ -360,7 +446,7 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
             for bill in session.exec(
                 select(Bill)
                 .where(Bill.is_deleted == False)  # noqa: E712
-                .where(_customer_note_matches_expr(party.name))
+                .where(_customer_note_matches_expr(customer_name))
             ).all()
         }
 
@@ -370,7 +456,10 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
             bill = open_bills.get(int(adj.bill_id))
             if not bill:
                 raise HTTPException(status_code=400, detail=f"Bill {adj.bill_id} does not belong to this customer")
-            outstanding = max(0.0, float(bill.total_amount or 0) - float(bill.paid_amount or 0))
+            outstanding = max(
+                0.0,
+                float(bill.total_amount or 0) - float(bill.paid_amount or 0) - float(getattr(bill, "writeoff_amount", 0.0) or 0),
+            )
             amount = _round2(adj.amount)
             if amount <= 0:
                 raise HTTPException(status_code=400, detail="Adjustment amounts must be greater than 0")
@@ -426,7 +515,9 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
                 mode=str(payload.mode).strip().lower(),
                 cash_amount=cash_share,
                 online_amount=online_share,
+                writeoff_amount=0.0,
                 note=f"party receipt #{receipt.id}",
+                is_writeoff=False,
                 is_deleted=False,
                 deleted_at=None,
             )
@@ -445,7 +536,11 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
             )
 
             bill.paid_amount = _round2(float(bill.paid_amount or 0) + amount)
-            outstanding = _round2(float(bill.total_amount or 0) - float(bill.paid_amount or 0))
+            outstanding = _round2(
+                float(bill.total_amount or 0)
+                - float(bill.paid_amount or 0)
+                - float(getattr(bill, "writeoff_amount", 0.0) or 0)
+            )
             if bill.paid_amount <= 0:
                 bill.payment_status = "UNPAID"
             elif outstanding > 0.0001:

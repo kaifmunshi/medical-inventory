@@ -40,6 +40,7 @@ class Bill(SQLModel, table=True):
     is_credit: bool = Field(default=False, index=True)              # true if credit
     payment_status: str = Field(default="PAID", index=True)         # "PAID"|"UNPAID"|"PARTIAL"
     paid_amount: float = 0.0                                        # total paid so far
+    writeoff_amount: float = 0.0
     paid_at: Optional[str] = None                                   # keep plain Optional[str]
     is_deleted: bool = Field(default=False, index=True)
     deleted_at: Optional[str] = None
@@ -78,7 +79,9 @@ class BillPayment(SQLModel, table=True):
     mode: str  # "cash" | "online" | "split"
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    writeoff_amount: float = 0.0
     note: Optional[str] = None
+    is_writeoff: bool = Field(default=False, index=True)
     is_deleted: bool = Field(default=False, index=True)
     deleted_at: Optional[str] = None
 
@@ -288,6 +291,7 @@ class BillOut(SQLModel):
     is_credit: bool = False
     payment_status: str = "PAID"
     paid_amount: float = 0.0
+    writeoff_amount: float = 0.0
     paid_at: Optional[str] = None
     is_deleted: bool = False
     deleted_at: Optional[str] = None
@@ -1059,6 +1063,7 @@ class DebtorLedgerRow(SQLModel):
     customer_name: str
     total_amount: float
     paid_amount: float
+    writeoff_amount: float = 0.0
     outstanding_amount: float
     payment_status: str
     notes: Optional[str] = None
@@ -1069,6 +1074,7 @@ class OpenBillOut(SQLModel):
     bill_date: str
     total_amount: float
     paid_amount: float
+    writeoff_amount: float = 0.0
     outstanding_amount: float
     payment_status: str
     notes: Optional[str] = None

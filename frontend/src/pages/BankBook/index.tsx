@@ -1060,7 +1060,7 @@ export default function BankBookPage() {
                 </Typography>
                 <Typography>
                   Pending Amount:{' '}
-                  <b>{money(Math.max(0, Number(billDetail.total_amount || 0) - Number(billDetail.paid_amount || 0)))}</b>
+                  <b>{money(Math.max(0, Number(billDetail.total_amount || 0) - Number(billDetail.paid_amount || 0) - Number(billDetail.writeoff_amount || 0)))}</b>
                 </Typography>
                 {billDetail.notes ? (
                   <Typography sx={{ mt: 1 }}>

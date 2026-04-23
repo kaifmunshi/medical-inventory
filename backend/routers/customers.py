@@ -259,7 +259,16 @@ def get_customer_summary(customer_id: int) -> CustomerSummaryOut:
 
         total_sales = round(sum(float(b.total_amount or 0) for b in bills), 2)
         total_paid = round(sum(float(b.paid_amount or 0) for b in bills), 2)
-        total_pending = round(sum(max(0.0, float(b.total_amount or 0) - float(b.paid_amount or 0)) for b in bills), 2)
+        total_pending = round(
+            sum(
+                max(
+                    0.0,
+                    float(b.total_amount or 0) - float(b.paid_amount or 0) - float(getattr(b, "writeoff_amount", 0.0) or 0),
+                )
+                for b in bills
+            ),
+            2,
+        )
 
         totals = CustomerSummaryTotalsOut(
             total_bills=len(bills),

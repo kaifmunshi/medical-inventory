@@ -67,6 +67,7 @@ export interface Bill {
   is_credit: boolean
   payment_status: 'PAID' | 'UNPAID' | 'PARTIAL'
   paid_amount: number
+  writeoff_amount: number
   paid_at: string | null
   is_deleted: boolean
   deleted_at: string | null
@@ -107,6 +108,8 @@ export interface ReceivePaymentIn {
   mode: 'cash' | 'online' | 'split'
   cash_amount?: number
   online_amount?: number
+  writeoff_amount?: number
+  is_writeoff?: boolean
   note?: string
   payment_date?: string
 }
@@ -115,6 +118,7 @@ export interface ReceivePaymentOut {
   bill_id: number
   payment_status: 'PAID' | 'UNPAID' | 'PARTIAL'
   paid_amount: number
+  writeoff_amount: number
   total_amount: number
   pending_amount: number
 }
@@ -129,10 +133,12 @@ export interface BillPaymentRow {
   id: number
   bill_id: number
   received_at: string
-  mode: 'cash' | 'online' | 'split' | 'credit'
+  mode: 'cash' | 'online' | 'split' | 'credit' | 'writeoff'
   cash_amount: number
   online_amount: number
+  writeoff_amount: number
   note?: string | null
+  is_writeoff: boolean
   is_deleted: boolean
   deleted_at?: string | null
 }

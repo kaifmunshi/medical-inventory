@@ -41,6 +41,7 @@ SYSTEM_GROUPS = {
     "SALES": ("Sales Accounts", "INCOME"),
     "PURCHASES": ("Purchase Accounts", "EXPENSE"),
     "INDIRECT_INCOME": ("Indirect Incomes", "INCOME"),
+    "INDIRECT_EXPENSE": ("Indirect Expenses", "EXPENSE"),
 }
 
 
@@ -50,6 +51,7 @@ SYSTEM_LEDGERS = {
     "SALES_ACCOUNT": ("Sales Account", "SALES"),
     "PURCHASE_ACCOUNT": ("Purchase Account", "PURCHASES"),
     "SALES_RECEIVABLE_CONTROL": ("Sales Receivable Control", "SUNDRY_DEBTORS"),
+    "CUSTOMER_WRITE_OFF": ("Customer Write-off", "INDIRECT_EXPENSE"),
     "PURCHASE_WRITE_OFF": ("Purchase Write-off", "INDIRECT_INCOME"),
 }
 
@@ -357,24 +359,39 @@ def post_party_receipt_voucher(session, receipt_id: int, party: Party, received_
     )
 
 
-def post_bill_payment_voucher(session, bill: Bill, payment_id: int, received_at: str, cash_amount: float, online_amount: float, note: Optional[str]) -> Voucher:
+def post_bill_payment_voucher(
+    session,
+    bill: Bill,
+    payment_id: int,
+    received_at: str,
+    cash_amount: float,
+    online_amount: float,
+    writeoff_amount: float,
+    is_writeoff: bool,
+    note: Optional[str],
+) -> Voucher:
     ledgers = ensure_accounting_setup(session)
     debtor_ledger = resolve_bill_party_ledger(session, bill) or ledgers["SALES_RECEIVABLE_CONTROL"]
     lines: List[PostingLine] = []
-    if round2(cash_amount) > 0:
-        lines.append({"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "DR", "amount": round2(cash_amount), "narration": note or "Bill receipt"})
-    if round2(online_amount) > 0:
-        lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "DR", "amount": round2(online_amount), "narration": note or "Bill receipt"})
-    total = round2(cash_amount) + round2(online_amount)
-    lines.append({"ledger_id": int(debtor_ledger.id), "entry_type": "CR", "amount": round2(total), "narration": note or "Bill receipt"})
+    if is_writeoff:
+        total = round2(writeoff_amount)
+        lines.append({"ledger_id": int(ledgers["CUSTOMER_WRITE_OFF"].id), "entry_type": "DR", "amount": total, "narration": note or "Customer write-off"})
+        lines.append({"ledger_id": int(debtor_ledger.id), "entry_type": "CR", "amount": total, "narration": note or "Customer write-off"})
+    else:
+        if round2(cash_amount) > 0:
+            lines.append({"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "DR", "amount": round2(cash_amount), "narration": note or "Bill receipt"})
+        if round2(online_amount) > 0:
+            lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "DR", "amount": round2(online_amount), "narration": note or "Bill receipt"})
+        total = round2(cash_amount) + round2(online_amount)
+        lines.append({"ledger_id": int(debtor_ledger.id), "entry_type": "CR", "amount": round2(total), "narration": note or "Bill receipt"})
     return upsert_voucher(
         session,
-        voucher_type="RECEIPT",
+        voucher_type="WRITE_OFF" if is_writeoff else "RECEIPT",
         source_type="BILL_PAYMENT",
         source_id=int(payment_id),
         voucher_date=str(received_at or "")[:10],
-        voucher_no=f"BR-{payment_id}",
-        narration=note or f"Bill receipt #{bill.id}",
+        voucher_no=f"{'BW' if is_writeoff else 'BR'}-{payment_id}",
+        narration=note or (f"Bill write-off #{bill.id}" if is_writeoff else f"Bill receipt #{bill.id}"),
         total_amount=round2(total),
         lines=lines,
     )
@@ -464,5 +481,7 @@ def sync_existing_vouchers(session) -> None:
             payment.received_at,
             float(payment.cash_amount or 0),
             float(payment.online_amount or 0),
+            float(getattr(payment, "writeoff_amount", 0) or 0),
+            bool(getattr(payment, "is_writeoff", False)),
             payment.note,
         )

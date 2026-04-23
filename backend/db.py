@@ -137,6 +137,10 @@ def migrate_db():
             session.exec(text(
                 "ALTER TABLE bill ADD COLUMN paid_amount REAL NOT NULL DEFAULT 0"
             ))
+        if "writeoff_amount" not in bill_col_names:
+            session.exec(text(
+                "ALTER TABLE bill ADD COLUMN writeoff_amount REAL NOT NULL DEFAULT 0"
+            ))
         if "paid_at" not in bill_col_names:
             session.exec(text(
                 "ALTER TABLE bill ADD COLUMN paid_at TEXT"
@@ -161,13 +165,23 @@ def migrate_db():
                 mode TEXT NOT NULL,
                 cash_amount REAL NOT NULL DEFAULT 0,
                 online_amount REAL NOT NULL DEFAULT 0,
+                writeoff_amount REAL NOT NULL DEFAULT 0,
                 note TEXT,
+                is_writeoff INTEGER NOT NULL DEFAULT 0,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT
             )
         """))
         bp_cols = session.exec(text("PRAGMA table_info(billpayment)")).all()
         bp_col_names = {c[1] for c in bp_cols}
+        if "writeoff_amount" not in bp_col_names:
+            session.exec(text(
+                "ALTER TABLE billpayment ADD COLUMN writeoff_amount REAL NOT NULL DEFAULT 0"
+            ))
+        if "is_writeoff" not in bp_col_names:
+            session.exec(text(
+                "ALTER TABLE billpayment ADD COLUMN is_writeoff INTEGER NOT NULL DEFAULT 0"
+            ))
         if "is_deleted" not in bp_col_names:
             session.exec(text(
                 "ALTER TABLE billpayment ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0"
@@ -178,6 +192,7 @@ def migrate_db():
             ))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_billpayment_bill_id ON billpayment (bill_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_billpayment_received_at ON billpayment (received_at)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_billpayment_is_writeoff ON billpayment (is_writeoff)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_billpayment_is_deleted ON billpayment (is_deleted)"))
         session.commit()
 

@@ -100,23 +100,35 @@ def active_bill_payments_query(bill_id: int):
     return select(BillPayment).where(BillPayment.bill_id == bill_id, BillPayment.is_deleted == False)  # noqa: E712
 
 
+def bill_outstanding_amount(bill: Bill) -> float:
+    total_amount = round2(as_f(bill.total_amount))
+    covered = round2(as_f(bill.paid_amount) + as_f(getattr(bill, "writeoff_amount", 0.0)))
+    return round2(max(0.0, total_amount - covered))
+
+
 def recalculate_bill_payment_state(session, bill: Bill) -> Dict[str, Any]:
     pays = session.exec(active_bill_payments_query(bill.id)).all()
 
-    total_cash = round2(sum(as_f(x.cash_amount) for x in pays))
-    total_online = round2(sum(as_f(x.online_amount) for x in pays))
+    receipt_pays = [x for x in pays if not bool(getattr(x, "is_writeoff", False))]
+    writeoff_pays = [x for x in pays if bool(getattr(x, "is_writeoff", False))]
+
+    total_cash = round2(sum(as_f(x.cash_amount) for x in receipt_pays))
+    total_online = round2(sum(as_f(x.online_amount) for x in receipt_pays))
     total_paid = round2(total_cash + total_online)
+    total_writeoff = round2(sum(as_f(getattr(x, "writeoff_amount", 0.0)) for x in writeoff_pays))
     total_amount = round2(as_f(bill.total_amount))
+    covered_total = round2(total_paid + total_writeoff)
 
     bill.payment_cash = total_cash
     bill.payment_online = total_online
     bill.paid_amount = total_paid
+    bill.writeoff_amount = total_writeoff
 
-    if total_paid <= 0:
+    if covered_total <= 0:
         bill.payment_status = "UNPAID"
         bill.paid_at = None
         bill.is_credit = True
-    elif total_paid + 0.0001 < total_amount:
+    elif covered_total + 0.0001 < total_amount:
         bill.payment_status = "PARTIAL"
         bill.paid_at = None
         bill.is_credit = True
@@ -130,8 +142,9 @@ def recalculate_bill_payment_state(session, bill: Bill) -> Dict[str, Any]:
         "bill_id": bill.id,
         "payment_status": bill.payment_status,
         "paid_amount": bill.paid_amount,
+        "writeoff_amount": bill.writeoff_amount,
         "total_amount": bill.total_amount,
-        "pending_amount": round2(max(0.0, total_amount - total_paid)),
+        "pending_amount": round2(max(0.0, total_amount - covered_total)),
     }
 
 
@@ -232,6 +245,7 @@ def list_bills(
                 is_credit=b.is_credit,
                 payment_status=b.payment_status,
                 paid_amount=b.paid_amount,
+                writeoff_amount=getattr(b, "writeoff_amount", 0.0),
                 paid_at=b.paid_at,
                 is_deleted=b.is_deleted,
                 deleted_at=b.deleted_at,
@@ -319,6 +333,7 @@ def list_bills_paged(
                 is_credit=b.is_credit,
                 payment_status=b.payment_status,
                 paid_amount=b.paid_amount,
+                writeoff_amount=getattr(b, "writeoff_amount", 0.0),
                 paid_at=b.paid_at,
                 is_deleted=b.is_deleted,
                 deleted_at=b.deleted_at,
@@ -497,6 +512,7 @@ def get_bill(bill_id: int):
             is_credit=b.is_credit,
             payment_status=b.payment_status,
             paid_amount=b.paid_amount,
+            writeoff_amount=getattr(b, "writeoff_amount", 0.0),
             paid_at=b.paid_at,
             is_deleted=b.is_deleted,
             deleted_at=b.deleted_at,
@@ -619,6 +635,7 @@ def create_bill(payload: BillCreate):
                 is_credit=is_credit,
                 payment_status=status,
                 paid_amount=paid_amount,
+                writeoff_amount=0.0,
                 paid_at=paid_at,
                 is_deleted=False,
                 deleted_at=None,
@@ -665,7 +682,9 @@ def create_bill(payload: BillCreate):
                     mode=payload.payment_mode,  # cash/online/split
                     cash_amount=cash,
                     online_amount=online,
-                    note="auto: payment at bill creation"
+                    writeoff_amount=0.0,
+                    note="auto: payment at bill creation",
+                    is_writeoff=False,
                 )
                 session.add(p)
 
@@ -696,6 +715,7 @@ def create_bill(payload: BillCreate):
             is_credit=b.is_credit,
             payment_status=b.payment_status,
             paid_amount=b.paid_amount,
+            writeoff_amount=getattr(b, "writeoff_amount", 0.0),
             paid_at=b.paid_at,
             is_deleted=b.is_deleted,
             deleted_at=b.deleted_at,
@@ -987,7 +1007,9 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                         mode=payload.payment_mode,
                         cash_amount=cash,
                         online_amount=online,
+                        writeoff_amount=0.0,
                         note="auto: payment at bill creation",
+                        is_writeoff=False,
                     ))
 
             b.date_time = bill_ts
@@ -1001,6 +1023,9 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             b.is_credit = is_credit
             b.payment_status = status
             b.paid_amount = paid_amount
+            b.writeoff_amount = round2(
+                sum(as_f(getattr(p, "writeoff_amount", 0.0)) for p in pays if not bool(getattr(p, "is_deleted", False)))
+            ) if has_manual_receipts else 0.0
             b.paid_at = paid_at
 
             session.add(b)
@@ -1029,6 +1054,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             is_credit=b.is_credit,
             payment_status=b.payment_status,
             paid_amount=b.paid_amount,
+            writeoff_amount=getattr(b, "writeoff_amount", 0.0),
             paid_at=b.paid_at,
             is_deleted=b.is_deleted,
             deleted_at=b.deleted_at,
@@ -1171,11 +1197,21 @@ class ReceivePaymentIn(BaseModel):
     mode: str  # "cash" | "online" | "split"
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    writeoff_amount: float = 0.0
+    is_writeoff: bool = False
     note: Optional[str] = None
     payment_date: Optional[str] = None
 
 
 def validate_payment_payload(payload: ReceivePaymentIn) -> Dict[str, Any]:
+    if bool(payload.is_writeoff):
+        writeoff = round2(as_f(payload.writeoff_amount))
+        if writeoff <= 0:
+            raise HTTPException(status_code=400, detail="Write-off amount must be > 0")
+        if round2(as_f(payload.cash_amount)) != 0 or round2(as_f(payload.online_amount)) != 0:
+            raise HTTPException(status_code=400, detail="Cash and online amounts must be 0 for write-off")
+        return {"cash": 0.0, "online": 0.0, "writeoff": writeoff, "mode": "writeoff", "is_writeoff": True}
+
     if payload.mode not in {"cash", "online", "split"}:
         raise HTTPException(status_code=400, detail="Invalid mode")
 
@@ -1190,7 +1226,7 @@ def validate_payment_payload(payload: ReceivePaymentIn) -> Dict[str, Any]:
     if (cash + online) <= 0:
         raise HTTPException(status_code=400, detail="Payment amount must be > 0")
 
-    return {"cash": cash, "online": online}
+    return {"cash": cash, "online": online, "writeoff": 0.0, "mode": payload.mode, "is_writeoff": False}
 
 
 @router.post("/{bill_id}/receive-payment")
@@ -1203,6 +1239,8 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
     vals = validate_payment_payload(payload)
     cash = vals["cash"]
     online = vals["online"]
+    writeoff = vals["writeoff"]
+    is_writeoff = vals["is_writeoff"]
 
     now_iso = now_ts()
     payment_ts = normalize_payment_ts(payload.payment_date, now_iso)
@@ -1216,13 +1254,20 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
             raise HTTPException(status_code=400, detail="Cannot receive payment on deleted bill")
 
         # 1) Insert payment record (THIS is the source of truth for "Collected Today")
+        pending_before = bill_outstanding_amount(b)
+        entry_amount = round2(cash + online + writeoff)
+        if entry_amount > pending_before + 0.0001:
+            raise HTTPException(status_code=400, detail="Amount exceeds outstanding amount")
+
         p = BillPayment(
             bill_id=bill_id,
             received_at=payment_ts,
-            mode=payload.mode,
+            mode=vals["mode"],
             cash_amount=cash,
             online_amount=online,
-            note=payload.note
+            writeoff_amount=writeoff,
+            note=payload.note,
+            is_writeoff=is_writeoff,
         )
         session.add(p)
         session.commit()
@@ -1231,7 +1276,17 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
         session.commit()
-        post_bill_payment_voucher(session, b, int(p.id), p.received_at, float(p.cash_amount or 0), float(p.online_amount or 0), p.note)
+        post_bill_payment_voucher(
+            session,
+            b,
+            int(p.id),
+            p.received_at,
+            float(p.cash_amount or 0),
+            float(p.online_amount or 0),
+            float(getattr(p, "writeoff_amount", 0) or 0),
+            bool(getattr(p, "is_writeoff", False)),
+            p.note,
+        )
         session.commit()
         return result
 
@@ -1242,6 +1297,8 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
     vals = validate_payment_payload(payload)
     cash = vals["cash"]
     online = vals["online"]
+    writeoff = vals["writeoff"]
+    is_writeoff = vals["is_writeoff"]
 
     payment_ts = normalize_payment_ts(payload.payment_date, now_ts())
 
@@ -1257,17 +1314,40 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
         if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Payment not found")
 
+        other_active_total = round2(
+            sum(
+                as_f(row.cash_amount) + as_f(row.online_amount) + as_f(getattr(row, "writeoff_amount", 0.0))
+                for row in session.exec(active_bill_payments_query(b.id)).all()
+                if int(getattr(row, "id", 0) or 0) != int(p.id)
+            )
+        )
+        proposed_total = round2(cash + online + writeoff)
+        if other_active_total + proposed_total > round2(as_f(b.total_amount)) + 0.0001:
+            raise HTTPException(status_code=400, detail="Amount exceeds outstanding amount")
+
         p.received_at = payment_ts
-        p.mode = payload.mode
+        p.mode = vals["mode"]
         p.cash_amount = cash
         p.online_amount = online
+        p.writeoff_amount = writeoff
         p.note = payload.note
+        p.is_writeoff = is_writeoff
         session.add(p)
 
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
         session.commit()
-        post_bill_payment_voucher(session, b, int(p.id), p.received_at, float(p.cash_amount or 0), float(p.online_amount or 0), p.note)
+        post_bill_payment_voucher(
+            session,
+            b,
+            int(p.id),
+            p.received_at,
+            float(p.cash_amount or 0),
+            float(p.online_amount or 0),
+            float(getattr(p, "writeoff_amount", 0) or 0),
+            bool(getattr(p, "is_writeoff", False)),
+            p.note,
+        )
         session.commit()
         return result
 
@@ -1295,7 +1375,9 @@ def list_bill_payments(bill_id: int):
                 "mode": p.mode,
                 "cash_amount": p.cash_amount,
                 "online_amount": p.online_amount,
+                "writeoff_amount": getattr(p, "writeoff_amount", 0.0),
                 "note": p.note,
+                "is_writeoff": bool(getattr(p, "is_writeoff", False)),
                 "is_deleted": bool(getattr(p, "is_deleted", False)),
                 "deleted_at": getattr(p, "deleted_at", None),
             }
@@ -1352,7 +1434,17 @@ def recover_bill_payment(bill_id: int, payment_id: int):
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
         session.commit()
-        post_bill_payment_voucher(session, b, int(p.id), p.received_at, float(p.cash_amount or 0), float(p.online_amount or 0), p.note)
+        post_bill_payment_voucher(
+            session,
+            b,
+            int(p.id),
+            p.received_at,
+            float(p.cash_amount or 0),
+            float(p.online_amount or 0),
+            float(getattr(p, "writeoff_amount", 0) or 0),
+            bool(getattr(p, "is_writeoff", False)),
+            p.note,
+        )
         session.commit()
         return result
 
@@ -1383,7 +1475,7 @@ def payments_summary(
         elif deleted_filter == "deleted":
             stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
 
-        pays = session.exec(stmt).all()
+        pays = [p for p in session.exec(stmt).all() if not bool(getattr(p, "is_writeoff", False))]
 
         if from_date:
             pays = [p for p in pays if iso_date(p.received_at) >= from_date]
@@ -1438,6 +1530,7 @@ def payments_aggregate(
             .select_from(BillPayment)
             .join(Bill, Bill.id == BillPayment.bill_id)
             .where(BillPayment.is_deleted == False)  # noqa: E712
+            .where(BillPayment.is_writeoff == False)  # noqa: E712
             .where(BillPayment.received_at >= start_ts)
             .where(BillPayment.received_at <= end_ts)
             .group_by(period_expr)
@@ -1502,7 +1595,7 @@ def sales_aggregate(
                 period_expr.label("period"),
                 func.count(Bill.id).label("bills_count"),
                 func.coalesce(func.sum(Bill.total_amount), 0).label("gross_sales"),
-                func.coalesce(func.sum(Bill.paid_amount), 0).label("paid_total"),
+                func.coalesce(func.sum(Bill.paid_amount + Bill.writeoff_amount), 0).label("paid_total"),
             )
             .where(Bill.date_time >= start_ts)
             .where(Bill.date_time <= end_ts)

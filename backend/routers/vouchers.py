@@ -231,15 +231,23 @@ def daybook(
             rows.append(
                 VoucherDayBookRow(
                     ts=payment.received_at,
-                    voucher_type="RECEIPT",
+                    voucher_type="WRITE_OFF" if bool(getattr(payment, "is_writeoff", False)) else "RECEIPT",
                     source_type="BILL_PAYMENT",
                     source_id=int(payment.id or 0),
-                    voucher_no=f"BR-{payment.id}",
+                    voucher_no=f"{'BW' if bool(getattr(payment, 'is_writeoff', False)) else 'BR'}-{payment.id}",
                     party_name=_parse_note_party(bill.notes),
-                    narration=payment.note or f"Receipt against bill #{payment.bill_id}",
-                    amount=_round2(float(payment.cash_amount or 0) + float(payment.online_amount or 0)),
-                    cash_amount=_round2(payment.cash_amount),
-                    online_amount=_round2(payment.online_amount),
+                    narration=payment.note or (
+                        f"Write-off against bill #{payment.bill_id}"
+                        if bool(getattr(payment, "is_writeoff", False))
+                        else f"Receipt against bill #{payment.bill_id}"
+                    ),
+                    amount=_round2(
+                        float(getattr(payment, "writeoff_amount", 0) or 0)
+                        if bool(getattr(payment, "is_writeoff", False))
+                        else float(payment.cash_amount or 0) + float(payment.online_amount or 0)
+                    ),
+                    cash_amount=0.0 if bool(getattr(payment, "is_writeoff", False)) else _round2(payment.cash_amount),
+                    online_amount=0.0 if bool(getattr(payment, "is_writeoff", False)) else _round2(payment.online_amount),
                     status=bill.payment_status,
                     is_deleted=False,
                 )

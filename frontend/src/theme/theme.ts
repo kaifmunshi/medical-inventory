@@ -22,11 +22,13 @@ const theme = createTheme({
       '"Segoe UI"',
       'sans-serif',
     ].join(','),
-    h5: { fontWeight: 600 },
-    h6: { fontWeight: 600 },
-    body1: { fontSize: 14.5 },
+    h5: { fontWeight: 600, fontSize: '1.22rem' },
+    h6: { fontWeight: 600, fontSize: '1rem' },
+    body1: { fontSize: 14 },
+    body2: { fontSize: 13 },
+    button: { fontSize: 13, fontWeight: 600, textTransform: 'none' },
   },
-  shape: { borderRadius: 16 },
+  shape: { borderRadius: 14 },
   components: {
     MuiCssBaseline: {
       styleOverrides: {
@@ -49,9 +51,53 @@ const theme = createTheme({
     MuiPaper: {
       styleOverrides: {
         root: {
-          borderRadius: 18,
-          boxShadow: '0 18px 40px rgba(0,0,0,0.05)',
+          borderRadius: 16,
+          boxShadow: '0 12px 28px rgba(0,0,0,0.045)',
         },
+      },
+    },
+    MuiButton: {
+      defaultProps: {
+        size: 'small',
+        disableElevation: true,
+      },
+      styleOverrides: {
+        root: {
+          borderRadius: 10,
+          minHeight: 32,
+          paddingInline: 12,
+        },
+      },
+    },
+    MuiIconButton: {
+      defaultProps: {
+        size: 'small',
+      },
+      styleOverrides: {
+        root: {
+          borderRadius: 10,
+        },
+      },
+    },
+    MuiChip: {
+      defaultProps: {
+        size: 'small',
+      },
+      styleOverrides: {
+        root: {
+          fontSize: 12,
+          height: 26,
+        },
+      },
+    },
+    MuiTextField: {
+      defaultProps: {
+        size: 'small',
+      },
+    },
+    MuiFormControl: {
+      defaultProps: {
+        size: 'small',
       },
     },
     MuiAlert: {

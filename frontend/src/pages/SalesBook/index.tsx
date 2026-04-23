@@ -15,6 +15,8 @@ import {
   TableRow,
   TableSortLabel,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
@@ -22,6 +24,7 @@ import { last15DaysRange, toYMD } from '../../lib/date'
 import { listBills, listPayments } from '../../services/billing'
 import { listReturns } from '../../services/returns'
 import { listCashbookEntries } from '../../services/cashbook'
+import { fetchPurchases } from '../../services/purchases'
 
 type DayRow = {
   date: string
@@ -31,12 +34,20 @@ type DayRow = {
   collected: number
   credit: number
   returns: number
+  purchases: number
   expenses: number
   withdrawals: number
   outflow: number
   netCash: number
   netOnline: number
   net: number
+}
+
+type ViewMode = 'daily' | 'weekly' | 'monthly'
+type DisplayRow = DayRow & {
+  sortKey: string
+  title: string
+  subtitle: string
 }
 
 function money(n: number | string | null | undefined) {
@@ -86,6 +97,34 @@ function addDaysYmd(ymd: string, days: number) {
   const dt = new Date(y, (m || 1) - 1, d || 1)
   dt.setDate(dt.getDate() + days)
   return toYMD(dt)
+}
+
+function startOfWeekYmd(ymd: string) {
+  const [y, m, d] = ymd.split('-').map(Number)
+  const dt = new Date(y, (m || 1) - 1, d || 1)
+  const day = dt.getDay()
+  const diff = day === 0 ? -6 : 1 - day
+  dt.setDate(dt.getDate() + diff)
+  return toYMD(dt)
+}
+
+function endOfWeekYmd(start: string) {
+  return addDaysYmd(start, 6)
+}
+
+function monthStartYmd(ymd: string) {
+  return `${ymd.slice(0, 7)}-01`
+}
+
+function monthEndYmd(start: string) {
+  const [y, m] = start.split('-').map(Number)
+  const dt = new Date(y, m, 0)
+  return toYMD(dt)
+}
+
+function monthLabel(ymd: string) {
+  const dt = new Date(`${ymd}T00:00:00`)
+  return dt.toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })
 }
 
 async function fetchAllBills(from_date: string, to_date: string) {
@@ -140,10 +179,24 @@ async function fetchAllCashbook(from_date: string, to_date: string) {
   return out
 }
 
+async function fetchAllPurchases(from_date: string, to_date: string) {
+  const out: any[] = []
+  const limit = 500
+  let offset = 0
+  while (true) {
+    const rows = await fetchPurchases({ from_date, to_date, limit, offset })
+    out.push(...(rows || []))
+    if (!rows || rows.length < limit) break
+    offset += limit
+  }
+  return out
+}
+
 export default function SalesBookPage() {
   const r = useMemo(() => last15DaysRange(), [])
   const [from, setFrom] = useState(r.from)
   const [to, setTo] = useState(r.to)
+  const [viewMode, setViewMode] = useState<ViewMode>('daily')
   const [density, setDensity] = useState<'compact' | 'comfortable'>('comfortable')
   const [dateSort, setDateSort] = useState<'asc' | 'desc'>('asc')
   const validRange = Boolean(from && to && from <= to)
@@ -172,7 +225,13 @@ export default function SalesBookPage() {
     enabled: validRange,
   })
 
-  const loading = qBills.isLoading || qPayments.isLoading || qReturns.isLoading || qCashbook.isLoading
+  const qPurchases = useQuery({
+    queryKey: ['sales-book-purchases', from, to],
+    queryFn: () => fetchAllPurchases(from, to),
+    enabled: validRange,
+  })
+
+  const loading = qBills.isLoading || qPayments.isLoading || qReturns.isLoading || qCashbook.isLoading || qPurchases.isLoading
 
   const rows = useMemo(() => {
     if (!validRange) return [] as DayRow[]
@@ -180,6 +239,7 @@ export default function SalesBookPage() {
     const billsMap = new Map<string, { billed: number; credit: number }>()
     const paymentsMap = new Map<string, { cash: number; online: number }>()
     const returnsMap = new Map<string, number>()
+    const purchaseMap = new Map<string, number>()
     const cashbookMap = new Map<string, { expenses: number; withdrawals: number }>()
 
     for (const b of (qBills.data || []) as any[]) {
@@ -209,6 +269,13 @@ export default function SalesBookPage() {
       returnsMap.set(d, prev + Number(r0?.refund_cash || 0) + Number(r0?.refund_online || 0))
     }
 
+    for (const purchase of (qPurchases.data || []) as any[]) {
+      const d = String(purchase?.invoice_date || '').slice(0, 10)
+      if (!d) continue
+      const prev = purchaseMap.get(d) || 0
+      purchaseMap.set(d, prev + Number(purchase?.total_amount || 0))
+    }
+
     for (const c of (qCashbook.data || []) as any[]) {
       const d = String(c?.created_at || '').slice(0, 10)
       if (!d) continue
@@ -224,10 +291,12 @@ export default function SalesBookPage() {
       const b = billsMap.get(d) || { billed: 0, credit: 0 }
       const p = paymentsMap.get(d) || { cash: 0, online: 0 }
       const rt = returnsMap.get(d) || 0
+      const purchaseAmount = purchaseMap.get(d) || 0
       const cb = cashbookMap.get(d) || { expenses: 0, withdrawals: 0 }
       const collected = p.cash + p.online
-      const cashOut = cb.expenses + cb.withdrawals
       const returnsCashOnline = rt
+      const cashOut = cb.expenses + cb.withdrawals
+      const pnl = b.billed - returnsCashOnline - cb.expenses - purchaseAmount
 
       out.push({
         date: d,
@@ -237,16 +306,63 @@ export default function SalesBookPage() {
         collected: to2(collected),
         credit: to2(b.credit),
         returns: to2(returnsCashOnline),
+        purchases: to2(purchaseAmount),
         expenses: to2(cb.expenses),
         withdrawals: to2(cb.withdrawals),
-        outflow: to2(returnsCashOnline + cb.expenses + cb.withdrawals),
+        outflow: to2(returnsCashOnline + cb.expenses + cb.withdrawals + purchaseAmount),
         netCash: to2(p.cash - returnsCashOnline - cashOut),
         netOnline: to2(p.online),
-        net: to2(collected - returnsCashOnline - cashOut),
+        net: to2(pnl),
       })
     }
     return out
-  }, [validRange, from, to, qBills.data, qPayments.data, qReturns.data, qCashbook.data])
+  }, [validRange, from, to, qBills.data, qPayments.data, qReturns.data, qCashbook.data, qPurchases.data])
+
+  const displayRows = useMemo(() => {
+    if (viewMode === 'daily') {
+      return rows.map((row) => {
+        const dateLabel = formatDateLabel(row.date)
+        return {
+          ...row,
+          sortKey: row.date,
+          title: dateLabel.date,
+          subtitle: dateLabel.weekday,
+        }
+      })
+    }
+
+    const grouped = new Map<string, DisplayRow>()
+    for (const row of rows) {
+      const sortKey = viewMode === 'weekly' ? startOfWeekYmd(row.date) : monthStartYmd(row.date)
+      const existing = grouped.get(sortKey)
+      if (!existing) {
+        grouped.set(sortKey, {
+          ...row,
+          sortKey,
+          title: viewMode === 'weekly' ? `Week of ${formatDateLabel(sortKey).date}` : monthLabel(sortKey),
+          subtitle:
+            viewMode === 'weekly'
+              ? `${formatDateLabel(sortKey).date} - ${formatDateLabel(endOfWeekYmd(sortKey)).date}`
+              : `${formatDateLabel(sortKey).date} - ${formatDateLabel(monthEndYmd(sortKey)).date}`,
+        })
+        continue
+      }
+      existing.billed = to2(existing.billed + row.billed)
+      existing.cash = to2(existing.cash + row.cash)
+      existing.online = to2(existing.online + row.online)
+      existing.collected = to2(existing.collected + row.collected)
+      existing.credit = to2(existing.credit + row.credit)
+      existing.returns = to2(existing.returns + row.returns)
+      existing.purchases = to2(existing.purchases + row.purchases)
+      existing.expenses = to2(existing.expenses + row.expenses)
+      existing.withdrawals = to2(existing.withdrawals + row.withdrawals)
+      existing.outflow = to2(existing.outflow + row.outflow)
+      existing.netCash = to2(existing.netCash + row.netCash)
+      existing.netOnline = to2(existing.netOnline + row.netOnline)
+      existing.net = to2(existing.net + row.net)
+    }
+    return Array.from(grouped.values())
+  }, [rows, viewMode])
 
   const totals = useMemo(() => {
     let billed = 0
@@ -255,19 +371,21 @@ export default function SalesBookPage() {
     let collected = 0
     let credit = 0
     let returns = 0
+    let purchases = 0
     let expenses = 0
     let withdrawals = 0
     let outflow = 0
     let netCash = 0
     let netOnline = 0
     let net = 0
-    for (const r0 of rows) {
+    for (const r0 of displayRows) {
       billed += r0.billed
       cash += r0.cash
       online += r0.online
       collected += r0.collected
       credit += r0.credit
       returns += r0.returns
+      purchases += r0.purchases
       expenses += r0.expenses
       withdrawals += r0.withdrawals
       outflow += r0.outflow
@@ -282,6 +400,7 @@ export default function SalesBookPage() {
       collected: to2(collected),
       credit: to2(credit),
       returns: to2(returns),
+      purchases: to2(purchases),
       expenses: to2(expenses),
       withdrawals: to2(withdrawals),
       outflow: to2(outflow),
@@ -289,15 +408,15 @@ export default function SalesBookPage() {
       netOnline: to2(netOnline),
       net: to2(net),
     }
-  }, [rows])
+  }, [displayRows])
 
   const sortedRows = useMemo(() => {
-    const copy = [...rows]
+    const copy = [...displayRows]
     copy.sort((a, b) =>
-      dateSort === 'asc' ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date)
+      dateSort === 'asc' ? a.sortKey.localeCompare(b.sortKey) : b.sortKey.localeCompare(a.sortKey)
     )
     return copy
-  }, [rows, dateSort])
+  }, [displayRows, dateSort])
 
   return (
     <Stack spacing={2}>
@@ -328,6 +447,16 @@ export default function SalesBookPage() {
               size="small"
             />
             <Box sx={{ display: { xs: 'none', sm: 'block' }, flexGrow: 1 }} />
+            <ToggleButtonGroup
+              size="small"
+              value={viewMode}
+              exclusive
+              onChange={(_, value) => value && setViewMode(value)}
+            >
+              <ToggleButton value="daily">Day</ToggleButton>
+              <ToggleButton value="weekly">Week</ToggleButton>
+              <ToggleButton value="monthly">Month</ToggleButton>
+            </ToggleButtonGroup>
             <Stack direction="row" spacing={0.75} sx={{ ml: { sm: 'auto' } }}>
               <Button
                 size="small"
@@ -356,9 +485,10 @@ export default function SalesBookPage() {
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} flexWrap="wrap" useFlexGap>
           <Chip label={`Sales ₹${money(totals.billed)}`} />
+          <Chip label={`Purchases ₹${money(totals.purchases)}`} color="warning" />
           <Chip label={`Collections ₹${money(totals.collected)}`} color="success" />
           <Chip label={`Outflow ₹${money(totals.outflow)}`} color="warning" />
-          <Chip label={`Net ₹${money(totals.net)}`} color={totals.net < 0 ? 'error' : 'primary'} />
+          <Chip label={`P&L ₹${money(totals.net)}`} color={totals.net < 0 ? 'error' : 'primary'} />
         </Stack>
       </Paper>
 
@@ -427,10 +557,10 @@ export default function SalesBookPage() {
                     >
                       <Stack spacing={0.125}>
                         <Typography sx={{ fontSize: 11, color: 'text.secondary', fontWeight: 700 }}>
-                          {formatDateLabel(r0.date).weekday}
+                          {r0.subtitle}
                         </Typography>
                         <Typography sx={{ fontSize: 13, fontWeight: 800 }}>
-                          {formatDateLabel(r0.date).date}
+                          {r0.title}
                         </Typography>
                       </Stack>
                     </TableCell>
@@ -454,6 +584,7 @@ export default function SalesBookPage() {
                         compact={density === 'compact'}
                         lines={[
                           { label: 'Returns', value: r0.returns },
+                          { label: 'Purchases', value: r0.purchases },
                           { label: 'Expenses', value: r0.expenses },
                           { label: 'Withdrawals', value: r0.withdrawals },
                         ]}
@@ -472,13 +603,13 @@ export default function SalesBookPage() {
                           }}
                         />
                         <BreakdownCell
-                          totalLabel="Net"
+                          totalLabel="P&L"
                           total={r0.net}
                           compact={density === 'compact'}
                           totalColor={r0.net < 0 ? '#d32f2f' : '#2e7d32'}
                           lines={[
-                            { label: 'Net Cash', value: r0.netCash },
-                            { label: 'Net Online', value: r0.netOnline },
+                            { label: 'Cash Flow', value: r0.netCash },
+                            { label: 'Online Flow', value: r0.netOnline },
                           ]}
                         />
                       </Stack>
@@ -511,6 +642,7 @@ export default function SalesBookPage() {
                       compact={density === 'compact'}
                       lines={[
                         { label: 'Returns', value: totals.returns },
+                        { label: 'Purchases', value: totals.purchases },
                         { label: 'Expenses', value: totals.expenses },
                         { label: 'Withdrawals', value: totals.withdrawals },
                       ]}
@@ -518,13 +650,13 @@ export default function SalesBookPage() {
                   </TableCell>
                   <TableCell sx={{ bgcolor: '#e8edf2' }}>
                     <BreakdownCell
-                      totalLabel="Net"
+                      totalLabel="P&L"
                       total={totals.net}
                       compact={density === 'compact'}
                       totalColor={totals.net < 0 ? '#d32f2f' : '#2e7d32'}
                       lines={[
-                        { label: 'Net Cash', value: totals.netCash },
-                        { label: 'Net Online', value: totals.netOnline },
+                        { label: 'Cash Flow', value: totals.netCash },
+                        { label: 'Online Flow', value: totals.netOnline },
                       ]}
                     />
                   </TableCell>

@@ -34,6 +34,7 @@ import {
   listCashbookEntries,
   type CashbookType,
 } from '../../services/cashbook'
+import { listBankbookEntries } from '../../services/bankbook'
 import { getBill, listPayments } from '../../services/billing'
 import { listExchangeRecords, listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
@@ -262,6 +263,29 @@ export default function CashbookPage() {
     enabled: recordsFilter === 'ALL',
   })
 
+  const qDayBankbookContra = useQuery({
+    queryKey: ['cashbook-bankbook-contra-day', selectedDate],
+    queryFn: () => listBankbookEntries({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    enabled: recordsFilter === 'DAY',
+  })
+
+  const qAllBankbookContra = useQuery({
+    queryKey: ['cashbook-bankbook-contra-all', allView, allRange.from, allRange.to],
+    queryFn: async () => {
+      const out: any[] = []
+      let offset = 0
+      const limit = 500
+      while (true) {
+        const rows = await listBankbookEntries({ from_date: allRange.from, to_date: allRange.to, limit, offset })
+        out.push(...(rows || []))
+        if (!rows || rows.length < limit) break
+        offset += limit
+      }
+      return out
+    },
+    enabled: recordsFilter === 'ALL',
+  })
+
   const mCreate = useMutation({
     mutationFn: () =>
       createCashbookEntry({
@@ -415,6 +439,52 @@ export default function CashbookPage() {
       }))
   }, [qAllExchanges.data])
 
+  const contraRowsDay = useMemo(() => {
+    const rows = (qDayBankbookContra.data || []) as any[]
+    return rows
+      .filter((r) => String(r?.mode || '').toUpperCase() === 'BANK_DEPOSIT')
+      .map((r) => {
+        const bankType = String(r?.entry_type || '').toUpperCase()
+        const cashType =
+          bankType === 'RECEIPT'
+            ? 'WITHDRAWAL'
+            : bankType === 'WITHDRAWAL'
+              ? 'RECEIPT'
+              : 'EXPENSE'
+        return {
+          id: `contra-${r.id}`,
+          created_at: r.created_at,
+          entry_type: cashType,
+          amount: Number(r.amount || 0),
+          note: r.note ? `Contra: ${r.note}` : 'Contra entry from Bank Book',
+          source: 'CONTRA' as const,
+        }
+      })
+  }, [qDayBankbookContra.data])
+
+  const contraRowsAll = useMemo(() => {
+    const rows = (qAllBankbookContra.data || []) as any[]
+    return rows
+      .filter((r) => String(r?.mode || '').toUpperCase() === 'BANK_DEPOSIT')
+      .map((r) => {
+        const bankType = String(r?.entry_type || '').toUpperCase()
+        const cashType =
+          bankType === 'RECEIPT'
+            ? 'WITHDRAWAL'
+            : bankType === 'WITHDRAWAL'
+              ? 'RECEIPT'
+              : 'EXPENSE'
+        return {
+          id: `contra-${r.id}`,
+          created_at: r.created_at,
+          entry_type: cashType,
+          amount: Number(r.amount || 0),
+          note: r.note ? `Contra: ${r.note}` : 'Contra entry from Bank Book',
+          source: 'CONTRA' as const,
+        }
+      })
+  }, [qAllBankbookContra.data])
+
   const manualRowsDay = useMemo(() => {
     const rows = (day?.entries || []) as any[]
     return rows.map((r) => ({ ...r, source: 'CASHBOOK' as const }))
@@ -440,11 +510,12 @@ export default function CashbookPage() {
             ...manualRowsDay,
             ...billCashRowsDay,
             ...exchangeCashInRowsDay,
+            ...contraRowsDay,
             ...returnCashRowsDay,
           ]
-        : [...manualRowsAll, ...billCashRowsAll, ...exchangeCashInRowsAll, ...returnCashRowsAll]
+        : [...manualRowsAll, ...billCashRowsAll, ...exchangeCashInRowsAll, ...contraRowsAll, ...returnCashRowsAll]
     return rows.sort((a: any, b: any) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
-  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, exchangeCashInRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, exchangeCashInRowsAll, returnCashRowsAll])
+  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, exchangeCashInRowsDay, contraRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, exchangeCashInRowsAll, contraRowsAll, returnCashRowsAll])
 
   const dayColorMap = useMemo(() => {
     if (recordsFilter !== 'ALL') return {} as Record<string, string>
@@ -667,8 +738,8 @@ export default function CashbookPage() {
             </TableHead>
             <TableBody>
               {(recordsFilter === 'DAY'
-                ? qDay.isLoading || qDayPayments.isLoading || qDayReturns.isLoading || qDayExchanges.isLoading
-                : qAllCashbook.isLoading || qAllPayments.isLoading || qAllReturns.isLoading || qAllExchanges.isLoading) ? (
+                ? qDay.isLoading || qDayPayments.isLoading || qDayReturns.isLoading || qDayExchanges.isLoading || qDayBankbookContra.isLoading
+                : qAllCashbook.isLoading || qAllPayments.isLoading || qAllReturns.isLoading || qAllExchanges.isLoading || qAllBankbookContra.isLoading) ? (
                 <TableRow>
                   <TableCell colSpan={6}>Loading...</TableCell>
                 </TableRow>
@@ -726,7 +797,7 @@ export default function CashbookPage() {
                       >
                         {t === 'OPENING' ? '' : isIn ? '+' : '-'}Rs {money(row.amount)}
                       </TableCell>
-                      <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
+                      <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
                       <TableCell align="right">
                         {row.source === 'CASHBOOK' ? (
                           <IconButton

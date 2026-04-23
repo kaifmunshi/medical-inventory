@@ -248,8 +248,6 @@ export default function Exchange() {
         payload.refund_online = o
       }
     }
-
-    console.log('Exchange payload →', payload)
     return payload
   }
 

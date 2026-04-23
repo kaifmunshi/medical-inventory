@@ -510,13 +510,16 @@ export default function ItemForm({
             InputLabelProps={{ shrink: true }}
             error={!!errors.stock}
             sx={noSpinnerSx}
+            disabled={isEditMode}
             helperText={
               errors.stock?.message ||
-              (pickedExisting && !isEditMode
-                ? willMergeIntoPicked
-                  ? 'Enter quantity to add into selected batch'
-                  : 'Opening stock for NEW batch'
-                : '')
+              (isEditMode
+                ? 'Stock edits are locked here. Use Adjust Stock or transaction flows.'
+                : pickedExisting
+                  ? willMergeIntoPicked
+                    ? 'Enter quantity to add into selected batch'
+                    : 'Opening stock for NEW batch'
+                  : '')
             }
           />
 

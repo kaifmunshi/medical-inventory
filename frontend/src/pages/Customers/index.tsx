@@ -14,10 +14,12 @@ import {
 } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
 import DeleteIcon from '@mui/icons-material/Delete'
+import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createCustomer, deleteCustomer, fetchCustomers, updateCustomer } from '../../services/customers'
 import type { Customer } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
+import { useNavigate } from 'react-router-dom'
 
 function formatDate(dt?: string) {
   if (!dt) return '-'
@@ -40,6 +42,7 @@ function formatDate(dt?: string) {
 }
 
 export default function CustomersPage() {
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const toast = useToast()
 
@@ -198,6 +201,17 @@ export default function CustomersPage() {
                     <td>{formatDate(r.created_at)}</td>
                     <td>
                       <Stack direction="row" gap={1}>
+                        <Button size="small" onClick={() => navigate(`/customer-ledger?customer_id=${r.id}`)}>
+                          Ledger
+                        </Button>
+                        <IconButton
+                          size="small"
+                          color="primary"
+                          onClick={() => navigate(`/customers/${r.id}/summary`)}
+                          title="Open Summary"
+                        >
+                          <ReceiptLongIcon fontSize="small" />
+                        </IconButton>
                         <IconButton size="small" onClick={() => openEdit(r)} disabled={updateM.isPending}>
                           <EditIcon fontSize="small" />
                         </IconButton>

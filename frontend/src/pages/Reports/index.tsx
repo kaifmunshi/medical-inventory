@@ -1,5 +1,6 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Box, Button, Paper, Stack, TextField, Typography, MenuItem } from '@mui/material'
+import { useSearchParams } from 'react-router-dom'
 
 import SalesReport from './SalesReport'
 import ReturnsReport from './ReturnsReport'
@@ -15,6 +16,7 @@ type DeletedFilter = 'active' | 'deleted' | 'all'
 export default function Reports() {
   // ✅ default = last 15 days
   const { from: defaultFrom, to: defaultTo } = last15DaysRange()
+  const [searchParams] = useSearchParams()
 
   const [tab, setTab] = useState<Tab>('sales')
   const [viewMode, setViewMode] = useState<ViewMode>('details')
@@ -31,6 +33,65 @@ export default function Reports() {
   const [exportDisabled, setExportDisabled] = useState(true)
   const [exportFn, setExportFn] = useState<() => void>(() => () => {})
 
+  const incomingState = useMemo<{
+    tab: Tab
+    viewMode: ViewMode
+    groupBy: GroupBy
+    deletedFilter: DeletedFilter
+    from: string
+    to: string
+    q: string
+    billId: number | null
+    stockName: string
+    stockBrand: string
+    stockView: string
+    stockReason: string
+    openReconcile: boolean
+  }>(() => {
+    const incomingTab = searchParams.get('tab')
+    const incomingView = searchParams.get('view')
+    const incomingGroupBy = searchParams.get('group_by')
+    const incomingDeletedFilter = searchParams.get('deleted_filter')
+
+    return {
+      tab:
+        incomingTab === 'sales' || incomingTab === 'returns' || incomingTab === 'stock' || incomingTab === 'item_sales'
+          ? incomingTab
+          : 'sales',
+      viewMode: incomingView === 'aggregate' ? 'aggregate' : 'details',
+      groupBy: incomingGroupBy === 'month' ? 'month' : 'day',
+      deletedFilter:
+        incomingDeletedFilter === 'deleted' || incomingDeletedFilter === 'all' ? incomingDeletedFilter : 'active',
+      from: searchParams.has('from') ? searchParams.get('from') || '' : defaultFrom,
+      to: searchParams.has('to') ? searchParams.get('to') || '' : defaultTo,
+      q: searchParams.get('q') || '',
+      billId: Number(searchParams.get('bill_id') || 0) || null,
+      stockName: (searchParams.get('stock_name') || '').trim(),
+      stockBrand: (searchParams.get('stock_brand') || '').trim(),
+      stockView: (searchParams.get('stock_view') || '').trim(),
+      stockReason: (searchParams.get('stock_reason') || '').trim(),
+      openReconcile: searchParams.get('open_reconcile') === '1',
+    }
+  }, [defaultFrom, defaultTo, searchParams])
+
+  useEffect(() => {
+    setTab(incomingState.tab)
+    setViewMode(incomingState.viewMode)
+    setGroupBy(incomingState.groupBy)
+    setDeletedFilter(incomingState.deletedFilter)
+    setFrom(incomingState.from)
+    setTo(incomingState.to)
+    setQ(incomingState.q)
+  }, [
+    incomingState.deletedFilter,
+    incomingState.from,
+    incomingState.groupBy,
+    incomingState.q,
+    incomingState.tab,
+    incomingState.to,
+    incomingState.viewMode,
+  ])
+
   // keep your old behavior: if not sales, force details
   useEffect(() => {
     if (tab !== 'sales' && viewMode === 'aggregate') setViewMode('details')
@@ -40,6 +101,10 @@ export default function Reports() {
   useEffect(() => {
     if (tab === 'stock') setViewMode('details')
   }, [tab])
+
+  useEffect(() => {
+    if (tab !== 'stock') setExtraControls(null)
+  }, [tab, setExtraControls])
 
   return (
     <Stack gap={2}>
@@ -162,6 +227,7 @@ export default function Reports() {
             viewMode={viewMode}
             groupBy={groupBy}
             deletedFilter={deletedFilter}
+            focusBillId={incomingState.billId}
             setExportFn={setExportFn}
             setExportDisabled={setExportDisabled}
           />
@@ -176,6 +242,12 @@ export default function Reports() {
           <StockLedgerReport
             from={from}
             to={to}
+            initialSearch={incomingState.q}
+            initialReason={incomingState.stockReason}
+            focusName={incomingState.stockName}
+            focusBrand={incomingState.stockBrand}
+            autoOpenLedger={incomingState.stockView === 'ledger'}
+            autoOpenReconcile={incomingState.openReconcile}
             setExportFn={setExportFn}
             setExportDisabled={setExportDisabled}
             setExtraControls={setExtraControls}

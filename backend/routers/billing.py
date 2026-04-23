@@ -7,6 +7,8 @@ from pydantic import BaseModel
 from sqlmodel import select
 from sqlalchemy import or_, exists, func, cast
 from sqlalchemy.types import Integer, Float
+from backend.accounting import mark_voucher_deleted, post_bill_payment_voucher, sync_bill_vouchers
+from backend.controls import assert_financial_year_unlocked
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
@@ -14,6 +16,7 @@ from backend.models import (
     BillCreate, BillOut, BillItemOut,
     StockMovement,  # ✅ NEW
 )
+from backend.security import require_min_role
 
 router = APIRouter()
 
@@ -585,6 +588,7 @@ def create_bill(payload: BillCreate):
         # 4) Create Bill + BillItems and deduct stock (✅ single transaction)
         now_iso = now_ts()
         bill_ts = normalize_bill_ts(getattr(payload, "date_time", None), now_iso)
+        assert_financial_year_unlocked(session, bill_ts, context="Bill creation")
 
         paid_now = round2(cash + online)
         has_credit_component = round2(total - paid_now) > 0
@@ -667,6 +671,8 @@ def create_bill(payload: BillCreate):
 
             session.commit()
             session.refresh(b)
+            sync_bill_vouchers(session, b)
+            session.commit()
 
         except HTTPException:
             session.rollback()
@@ -724,6 +730,7 @@ class BillUpdateIn(BaseModel):
 
 @router.put("/{bill_id}", response_model=BillOut)
 def update_bill(bill_id: int, payload: BillUpdateIn):
+    require_min_role("MANAGER", context="Bill edit")
     if not payload.items:
         raise HTTPException(status_code=400, detail="Bill must have at least one item")
     if payload.discount_percent < 0 or payload.discount_percent > 100:
@@ -909,6 +916,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
 
         now_iso = now_ts()
         bill_ts = normalize_bill_ts(getattr(payload, "date_time", None), b.date_time or now_iso)
+        assert_financial_year_unlocked(session, bill_ts, context="Bill edit")
         paid_now = round2(cash + online)
         if has_manual_receipts and paid_now > round2(total) + 0.0001:
             raise HTTPException(
@@ -998,6 +1006,8 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             session.add(b)
             session.commit()
             session.refresh(b)
+            sync_bill_vouchers(session, b)
+            session.commit()
         except HTTPException:
             session.rollback()
             raise
@@ -1034,10 +1044,12 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
 
 @router.delete("/{bill_id}")
 def soft_delete_bill(bill_id: int):
+    require_min_role("MANAGER", context="Bill delete")
     with get_session() as session:
         b = session.get(Bill, bill_id)
         if not b:
             raise HTTPException(status_code=404, detail="Bill not found")
+        assert_financial_year_unlocked(session, b.date_time, context="Bill delete")
 
         if is_deleted_bill(b):
             return {"bill_id": b.id, "is_deleted": True, "deleted_at": b.deleted_at}
@@ -1072,15 +1084,22 @@ def soft_delete_bill(bill_id: int):
         b.deleted_at = now_ts()
         session.add(b)
         session.commit()
+        mark_voucher_deleted(session, source_type="BILL", source_id=int(b.id))
+        pays = session.exec(select(BillPayment).where(BillPayment.bill_id == b.id)).all()
+        for p in pays:
+            mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(p.id))
+        session.commit()
         return {"bill_id": b.id, "is_deleted": True, "deleted_at": b.deleted_at}
 
 
 @router.post("/{bill_id}/recover")
 def recover_bill(bill_id: int):
+    require_min_role("MANAGER", context="Bill recover")
     with get_session() as session:
         b = session.get(Bill, bill_id)
         if not b:
             raise HTTPException(status_code=404, detail="Bill not found")
+        assert_financial_year_unlocked(session, b.date_time, context="Bill recover")
 
         if not is_deleted_bill(b):
             return {"bill_id": b.id, "is_deleted": False, "deleted_at": None}
@@ -1124,6 +1143,24 @@ def recover_bill(bill_id: int):
         b.is_deleted = False
         b.deleted_at = None
         session.add(b)
+        session.commit()
+        sync_bill_vouchers(session, b)
+        pays = session.exec(
+            select(BillPayment).where(BillPayment.bill_id == b.id, BillPayment.is_deleted == False)  # noqa: E712
+        ).all()
+        for p in pays:
+            note = str(p.note or "").strip().lower()
+            if note == "auto: payment at bill creation":
+                continue
+            post_bill_payment_voucher(
+                session,
+                b,
+                int(p.id),
+                p.received_at,
+                float(p.cash_amount or 0),
+                float(p.online_amount or 0),
+                p.note,
+            )
         session.commit()
         return {"bill_id": b.id, "is_deleted": False, "deleted_at": None}
 
@@ -1171,6 +1208,7 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
     payment_ts = normalize_payment_ts(payload.payment_date, now_iso)
 
     with get_session() as session:
+        assert_financial_year_unlocked(session, payment_ts, context="Bill payment receipt")
         b = session.get(Bill, bill_id)
         if not b:
             raise HTTPException(status_code=404, detail="Bill not found")
@@ -1193,11 +1231,14 @@ def receive_payment(bill_id: int, payload: ReceivePaymentIn):
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
         session.commit()
+        post_bill_payment_voucher(session, b, int(p.id), p.received_at, float(p.cash_amount or 0), float(p.online_amount or 0), p.note)
+        session.commit()
         return result
 
 
 @router.put("/{bill_id}/payments/{payment_id}")
 def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
+    require_min_role("MANAGER", context="Bill payment edit")
     vals = validate_payment_payload(payload)
     cash = vals["cash"]
     online = vals["online"]
@@ -1205,6 +1246,7 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
     payment_ts = normalize_payment_ts(payload.payment_date, now_ts())
 
     with get_session() as session:
+        assert_financial_year_unlocked(session, payment_ts, context="Bill payment edit")
         b = session.get(Bill, bill_id)
         if not b:
             raise HTTPException(status_code=404, detail="Bill not found")
@@ -1224,6 +1266,8 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
 
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
+        session.commit()
+        post_bill_payment_voucher(session, b, int(p.id), p.received_at, float(p.cash_amount or 0), float(p.online_amount or 0), p.note)
         session.commit()
         return result
 
@@ -1261,6 +1305,7 @@ def list_bill_payments(bill_id: int):
 
 @router.delete("/{bill_id}/payments/{payment_id}")
 def undo_bill_payment(bill_id: int, payment_id: int):
+    require_min_role("MANAGER", context="Bill payment delete")
     with get_session() as session:
         b = session.get(Bill, bill_id)
         if not b:
@@ -1271,6 +1316,7 @@ def undo_bill_payment(bill_id: int, payment_id: int):
         p = session.get(BillPayment, payment_id)
         if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Payment not found")
+        assert_financial_year_unlocked(session, p.received_at, context="Bill payment delete")
 
         p.is_deleted = True
         p.deleted_at = now_ts()
@@ -1279,11 +1325,14 @@ def undo_bill_payment(bill_id: int, payment_id: int):
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
         session.commit()
+        mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(p.id))
+        session.commit()
         return result
 
 
 @router.post("/{bill_id}/payments/{payment_id}/recover")
 def recover_bill_payment(bill_id: int, payment_id: int):
+    require_min_role("MANAGER", context="Bill payment recover")
     with get_session() as session:
         b = session.get(Bill, bill_id)
         if not b:
@@ -1294,6 +1343,7 @@ def recover_bill_payment(bill_id: int, payment_id: int):
         p = session.get(BillPayment, payment_id)
         if not p or int(p.bill_id) != int(bill_id) or not bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Deleted payment not found")
+        assert_financial_year_unlocked(session, p.received_at, context="Bill payment recover")
 
         p.is_deleted = False
         p.deleted_at = None
@@ -1301,6 +1351,8 @@ def recover_bill_payment(bill_id: int, payment_id: int):
 
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
+        session.commit()
+        post_bill_payment_voucher(session, b, int(p.id), p.received_at, float(p.cash_amount or 0), float(p.online_amount or 0), p.note)
         session.commit()
         return result
 

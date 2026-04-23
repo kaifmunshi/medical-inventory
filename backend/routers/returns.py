@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional, Dict
 from sqlmodel import select
 from datetime import datetime
+from backend.controls import assert_financial_year_unlocked
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
@@ -328,6 +329,7 @@ def create_return(payload: ReturnCreate):
         raise HTTPException(status_code=400, detail="Refund amounts cannot be negative")
 
     with get_session() as session:
+        assert_financial_year_unlocked(session, now_ts(), context="Return creation")
         sold_lookup: Dict[int, int] = {}
         returned_lookup: Dict[int, int] = {}
         charged_unit_lookup: Dict[int, float] = {}
@@ -579,6 +581,7 @@ def create_exchange(payload: ExchangeCreate):
         raise HTTPException(status_code=400, detail="Payment/refund amounts cannot be negative")
 
     with get_session() as session:
+        assert_financial_year_unlocked(session, now_ts(), context="Exchange creation")
         sold_lookup = {}
         returned_lookup = {}
         charged_unit_lookup = {}

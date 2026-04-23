@@ -22,10 +22,17 @@ import {
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import SearchIcon from '@mui/icons-material/Search'
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTheme } from '@mui/material/styles'
 
-import { listItemsPage, getGroupLedger } from '../../services/inventory'
+import {
+  applyStockLedgerReconciliation,
+  getGroupLedger,
+  getStockLedgerReconciliation,
+  listItemsPage,
+} from '../../services/inventory'
+import { useToast } from '../../components/ui/Toaster'
+import { formatLedgerNote } from '../../lib/stockLedger'
 
 function toCSV(rows: string[][]) {
   return rows
@@ -55,6 +62,10 @@ function toIsoDateOnly(exp?: string | null) {
   return s.length > 10 ? s.slice(0, 10) : s
 }
 
+function formatSigned(value: number) {
+  return `${value > 0 ? '+' : ''}${value}`
+}
+
 function groupKey(it: any) {
   const name = String(it?.name ?? '').trim().toLowerCase()
   const brand = String(it?.brand ?? '').trim().toLowerCase()
@@ -75,15 +86,35 @@ type GroupRow = {
 export default function StockLedgerReport(props: {
   from: string
   to: string
+  initialSearch?: string
+  initialReason?: string
+  focusName?: string
+  focusBrand?: string
+  autoOpenLedger?: boolean
+  autoOpenReconcile?: boolean
   setExportFn: (fn: () => void) => void
   setExportDisabled: (v: boolean) => void
   setExtraControls: (node: React.ReactNode) => void
 }) {
-  const { from, to, setExportFn, setExportDisabled, setExtraControls } = props
+  const {
+    from,
+    to,
+    initialSearch,
+    initialReason,
+    focusName,
+    focusBrand,
+    autoOpenLedger,
+    autoOpenReconcile,
+    setExportFn,
+    setExportDisabled,
+    setExtraControls,
+  } = props
 
   const LIMIT = 30
   const theme = useTheme()
   const isMobile = useMediaQuery(theme.breakpoints.down('md'))
+  const toast = useToast()
+  const queryClient = useQueryClient()
 
   // list search
   const [itemSearch, setItemSearch] = useState('')
@@ -98,13 +129,30 @@ export default function StockLedgerReport(props: {
   // ledger filters
   const [ledgerReason, setLedgerReason] = useState<string>('') // empty = all
   const [ledgerOpen, setLedgerOpen] = useState(false)
+  const [reconOpen, setReconOpen] = useState(false)
+  const [reconShowBalanced, setReconShowBalanced] = useState(false)
 
   const listRef = useRef<HTMLDivElement | null>(null)
+  const autoOpenedLedgerKeyRef = useRef('')
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedItemSearch(itemSearch.trim()), 250)
     return () => clearTimeout(t)
   }, [itemSearch])
+
+  useEffect(() => {
+    const nextSearch = String(initialSearch || '').trim()
+    setItemSearch(nextSearch)
+    setDebouncedItemSearch(nextSearch)
+  }, [initialSearch])
+
+  useEffect(() => {
+    setLedgerReason(String(initialReason || '').trim())
+  }, [initialReason])
+
+  useEffect(() => {
+    if (autoOpenReconcile) setReconOpen(true)
+  }, [autoOpenReconcile])
 
   // ✅ Items list
   const qItems = useInfiniteQuery({
@@ -195,6 +243,23 @@ export default function StockLedgerReport(props: {
     return groupedAll.filter((g) => Number(g.totalStock || 0) > 0)
   }, [groupedAll, showOutOfStock])
 
+  useEffect(() => {
+    if (!autoOpenLedger || !focusName) return
+    const focusNameKey = focusName.trim().toLowerCase()
+    const focusBrandKey = String(focusBrand || '').trim().toLowerCase()
+    const match = groupedAll.find(
+      (group) =>
+        group.name.trim().toLowerCase() === focusNameKey &&
+        group.brand.trim().toLowerCase() === focusBrandKey,
+    )
+    if (!match) return
+    if (autoOpenedLedgerKeyRef.current === match.key) return
+
+    autoOpenedLedgerKeyRef.current = match.key
+    setPickedGroup((prev) => (prev?.key === match.key ? prev : match))
+    setLedgerOpen(true)
+  }, [autoOpenLedger, focusBrand, focusName, groupedAll])
+
   // ✅ Ledger query (GROUP)
   const qLedger = useInfiniteQuery({
     queryKey: ['rpt-stock-ledger-group', pickedGroup?.key, from, to, ledgerReason],
@@ -241,6 +306,45 @@ export default function StockLedgerReport(props: {
     }))
   }, [ledgerRaw])
 
+  const reconQ = useQuery({
+    queryKey: ['stock-ledger-reconciliation', debouncedItemSearch, reconShowBalanced],
+    queryFn: () =>
+      getStockLedgerReconciliation({
+        q: debouncedItemSearch || undefined,
+        include_archived: true,
+        include_balanced: reconShowBalanced,
+        limit: 200,
+        offset: 0,
+      }),
+    enabled: reconOpen,
+  })
+
+  const applyReconM = useMutation({
+    mutationFn: ({ applySynthetic }: { applySynthetic: boolean }) =>
+      applyStockLedgerReconciliation({
+        q: debouncedItemSearch || undefined,
+        include_archived: true,
+        include_balanced: reconShowBalanced,
+        apply_synthetic: applySynthetic,
+      }),
+    onSuccess: (res, vars) => {
+      toast.push(
+        vars.applySynthetic
+          ? `Repaired ${res.applied_items} item rows. Added ${res.deterministic_rows_inserted} source backfills and ${res.synthetic_rows_inserted} reconciliation rows.`
+          : `Added ${res.deterministic_rows_inserted} deterministic source backfills.`,
+        'success',
+      )
+      queryClient.invalidateQueries({ queryKey: ['stock-ledger-reconciliation'] })
+      queryClient.invalidateQueries({ queryKey: ['rpt-stock-ledger-group'] })
+      queryClient.invalidateQueries({ queryKey: ['rpt-stock-items-page'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-ledger-group'] })
+    },
+    onError: (err: any) => {
+      toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to apply reconciliation'), 'error')
+    },
+  })
+
   // ✅ Header controls (Reports top bar)
   useEffect(() => {
     setExtraControls(
@@ -267,6 +371,7 @@ export default function StockLedgerReport(props: {
 
           {/* ✅ include these two so user can filter properly */}
           <MenuItem value="PURCHASE">PURCHASE</MenuItem>
+          <MenuItem value="PURCHASE_CANCEL">PURCHASE_CANCEL</MenuItem>
           <MenuItem value="SALE">SALE</MenuItem>
 
           <MenuItem value="OPENING">OPENING</MenuItem>
@@ -277,7 +382,26 @@ export default function StockLedgerReport(props: {
           <MenuItem value="RETURN">RETURN</MenuItem>
           <MenuItem value="EXCHANGE_IN">EXCHANGE_IN</MenuItem>
           <MenuItem value="EXCHANGE_OUT">EXCHANGE_OUT</MenuItem>
+          <MenuItem value="PACK_OPEN_IN">PACK_OPEN_IN</MenuItem>
+          <MenuItem value="PACK_OPEN_OUT">PACK_OPEN_OUT</MenuItem>
+          <MenuItem value="RECON_ADJUST">RECON_ADJUST</MenuItem>
         </TextField>
+
+        <Button
+          variant={reconOpen ? 'contained' : 'outlined'}
+          color="warning"
+          onClick={() => setReconOpen(true)}
+          sx={{ borderRadius: 999, fontWeight: 900 }}
+        >
+          Reconcile Ledger
+          {reconQ.data?.mismatched_rows ? ` (${reconQ.data.mismatched_rows})` : ''}
+        </Button>
+
+        {reconOpen && (
+          <Button variant="outlined" onClick={() => setReconOpen(false)} sx={{ borderRadius: 999, fontWeight: 900 }}>
+            Close Reconcile
+          </Button>
+        )}
 
         {ledgerOpen && (
           <Button variant="outlined" onClick={() => setLedgerOpen(false)} sx={{ borderRadius: 999, fontWeight: 900 }}>
@@ -287,7 +411,7 @@ export default function StockLedgerReport(props: {
       </>
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ledgerReason, ledgerOpen, showOutOfStock, outCount])
+  }, [ledgerReason, ledgerOpen, outCount, reconOpen, reconQ.data?.mismatched_rows, showOutOfStock])
 
   // ✅ Export (include batch details)
   useEffect(() => {
@@ -322,7 +446,7 @@ export default function StockLedgerReport(props: {
         String(r.ref_id ?? ''),
         String(r.before ?? ''),
         String(r.after ?? ''),
-        String(r.note ?? ''),
+        String(formatLedgerNote(r.note) || ''),
       ])
       const csv = toCSV([header, ...body])
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
@@ -346,6 +470,13 @@ export default function StockLedgerReport(props: {
   ])
 
   const currentStock = qLedger.data?.pages?.[0]?.current_stock ?? pickedGroup?.totalStock ?? '-'
+  const reconRows = reconQ.data?.items ?? []
+  const reconSafeCount = reconQ.data?.deterministic_rows ?? 0
+  const reconSyntheticCount = reconQ.data?.synthetic_rows ?? 0
+  const reconBlockedCount = reconRows.reduce(
+    (sum, row) => sum + row.missing_entries.filter((entry) => !entry.safe_to_apply && entry.missing_delta !== 0).length,
+    0,
+  )
 
   const deltaChip = (delta: number) => {
     const isPos = delta > 0
@@ -371,6 +502,18 @@ export default function StockLedgerReport(props: {
   const reasonChip = (reason: string) => (
     <Chip size="small" label={reason || '-'} variant="outlined" sx={{ borderRadius: 999, fontWeight: 800 }} />
   )
+
+  const statusChip = (status: string) => {
+    const palette =
+      status === 'BALANCED'
+        ? { bgcolor: 'rgba(46,125,50,0.14)', color: 'success.main' }
+        : status === 'DETERMINISTIC_ONLY'
+          ? { bgcolor: 'rgba(25,118,210,0.12)', color: 'primary.main' }
+          : status === 'RECON_ONLY'
+            ? { bgcolor: 'rgba(211,47,47,0.14)', color: 'error.main' }
+            : { bgcolor: 'rgba(237,108,2,0.14)', color: 'warning.dark' }
+    return <Chip size="small" label={status} sx={{ borderRadius: 999, fontWeight: 900, ...palette }} />
+  }
 
   function displayReason(r: any) {
     // Show exact backend reason to avoid hiding real ledger events.
@@ -507,9 +650,12 @@ export default function StockLedgerReport(props: {
                     <td>{r.after}</td>
                     <td>
                       {r.note ? (
-                        <Tooltip title={r.note}>
+                        <Tooltip title={formatLedgerNote(r.note)}>
                           <span style={{ cursor: 'help' }}>
-                            {String(r.note).length > 26 ? `${String(r.note).slice(0, 26)}…` : r.note}
+                            {(() => {
+                              const note = formatLedgerNote(r.note)
+                              return note.length > 26 ? `${note.slice(0, 26)}…` : note
+                            })()}
                           </span>
                         </Tooltip>
                       ) : (
@@ -549,6 +695,214 @@ export default function StockLedgerReport(props: {
 
   return (
     <>
+      <Dialog
+        open={reconOpen}
+        onClose={() => setReconOpen(false)}
+        fullWidth
+        maxWidth="xl"
+        fullScreen={isMobile}
+        PaperProps={{
+          sx: {
+            borderRadius: isMobile ? 0 : 4,
+          },
+        }}
+      >
+        <DialogTitle sx={{ pb: 1 }}>
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} justifyContent="space-between">
+            <Box>
+              <Typography variant="h6" sx={{ fontWeight: 950 }}>
+                Stock Ledger Reconciliation
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Using the current search filter: {debouncedItemSearch || 'all items'}
+              </Typography>
+            </Box>
+
+            <Stack direction="row" gap={1} flexWrap="wrap" alignItems="center">
+              <Chip label={`Rows: ${reconQ.data?.total_rows ?? 0}`} sx={{ borderRadius: 999, fontWeight: 900 }} />
+              <Chip
+                label={`Safe backfills: ${reconSafeCount}`}
+                sx={{ borderRadius: 999, fontWeight: 900, bgcolor: 'rgba(25,118,210,0.10)', color: 'primary.main' }}
+              />
+              <Chip
+                label={`Synthetic fills: ${reconSyntheticCount}`}
+                sx={{ borderRadius: 999, fontWeight: 900, bgcolor: 'rgba(211,47,47,0.10)', color: 'error.main' }}
+              />
+              <Chip
+                label={`Blocked gaps: ${reconBlockedCount}`}
+                sx={{ borderRadius: 999, fontWeight: 900, bgcolor: 'rgba(237,108,2,0.12)', color: 'warning.dark' }}
+              />
+            </Stack>
+          </Stack>
+        </DialogTitle>
+
+        <DialogContent sx={{ pt: 1 }}>
+          <Stack gap={2}>
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} justifyContent="space-between">
+              <FormControlLabel
+                sx={{ m: 0 }}
+                control={
+                  <Switch checked={reconShowBalanced} onChange={(e) => setReconShowBalanced(e.target.checked)} />
+                }
+                label="Include balanced rows"
+              />
+
+              <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} justifyContent="flex-end">
+                <Button
+                  variant="outlined"
+                  onClick={() => applyReconM.mutate({ applySynthetic: false })}
+                  disabled={applyReconM.isPending || reconSafeCount === 0}
+                  sx={{ borderRadius: 999, fontWeight: 900 }}
+                >
+                  {applyReconM.isPending ? 'Applying…' : 'Apply Deterministic Only'}
+                </Button>
+                <Button
+                  variant="contained"
+                  color="warning"
+                  onClick={() => applyReconM.mutate({ applySynthetic: true })}
+                  disabled={applyReconM.isPending || reconRows.length === 0}
+                  sx={{ borderRadius: 999, fontWeight: 900 }}
+                >
+                  {applyReconM.isPending ? 'Applying…' : 'Apply Full Repair'}
+                </Button>
+              </Stack>
+            </Stack>
+
+            <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 3, bgcolor: 'rgba(15,23,42,0.02)' }}>
+              <Typography variant="body2" color="text.secondary">
+                Deterministic backfills recreate missing rows from source documents. Full repair also inserts
+                `RECON_ADJUST` rows where the old history cannot be rebuilt exactly.
+              </Typography>
+            </Paper>
+
+            <Box sx={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Item</th>
+                    <th>Status</th>
+                    <th>Current</th>
+                    <th>Ledger</th>
+                    <th>Deterministic</th>
+                    <th>Recon</th>
+                    <th>Missing Entries</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {reconQ.isLoading ? (
+                    Array.from({ length: 8 }).map((_, i) => (
+                      <tr key={`recon-sk-${i}`}>
+                        <td colSpan={7}>
+                          <Box py={0.75}>
+                            <Skeleton variant="rounded" height={44} />
+                          </Box>
+                        </td>
+                      </tr>
+                    ))
+                  ) : reconRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={7}>
+                        <Box p={2} color="text.secondary">
+                          No reconciliation gaps found for this filter.
+                        </Box>
+                      </td>
+                    </tr>
+                  ) : (
+                    reconRows.map((row) => (
+                      <tr key={`recon-${row.item_id}`}>
+                        <td>
+                          <Stack gap={0.25}>
+                            <Typography sx={{ fontWeight: 900 }}>{row.item_name}</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              #{row.item_id} • Brand: {row.brand || '-'} • Exp: {formatExpiry(row.expiry_date)} • MRP:{' '}
+                              {row.mrp} • Rack: {row.rack_number || 0}
+                              {row.is_archived ? ' • Archived' : ''}
+                            </Typography>
+                          </Stack>
+                        </td>
+                        <td>{statusChip(row.status)}</td>
+                        <td>{deltaChip(row.current_stock)}</td>
+                        <td>{deltaChip(row.ledger_delta_total)}</td>
+                        <td>{deltaChip(row.deterministic_gap)}</td>
+                        <td>{deltaChip(row.suggested_recon_delta)}</td>
+                        <td>
+                          {row.missing_entries.length === 0 ? (
+                            <Typography variant="caption" color="text.secondary">
+                              No source gaps
+                            </Typography>
+                          ) : (
+                            <Stack gap={1} sx={{ minWidth: 320, py: 0.5 }}>
+                              {row.missing_entries.map((entry, index) => (
+                                <Paper
+                                  key={`${row.item_id}-${entry.reason}-${entry.ref_type || 'na'}-${entry.ref_id ?? 'na'}-${index}`}
+                                  variant="outlined"
+                                  sx={{
+                                    p: 1,
+                                    borderRadius: 2,
+                                    bgcolor: entry.safe_to_apply
+                                      ? 'rgba(25,118,210,0.06)'
+                                      : 'rgba(237,108,2,0.08)',
+                                  }}
+                                >
+                                  <Stack direction="row" gap={0.75} flexWrap="wrap" alignItems="center" sx={{ mb: 0.5 }}>
+                                    {reasonChip(entry.reason)}
+                                    <Chip
+                                      size="small"
+                                      label={entry.safe_to_apply ? 'Safe backfill' : 'Needs recon'}
+                                      sx={{
+                                        borderRadius: 999,
+                                        fontWeight: 800,
+                                        bgcolor: entry.safe_to_apply
+                                          ? 'rgba(25,118,210,0.12)'
+                                          : 'rgba(237,108,2,0.14)',
+                                        color: entry.safe_to_apply ? 'primary.main' : 'warning.dark',
+                                      }}
+                                    />
+                                    {deltaChip(entry.missing_delta)}
+                                    <Typography variant="caption" color="text.secondary">
+                                      Expected {formatSigned(entry.expected_delta)} vs actual {formatSigned(entry.actual_delta)}
+                                    </Typography>
+                                  </Stack>
+                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                    {entry.ref_type ? `${entry.ref_type}${entry.ref_id ? ` #${entry.ref_id}` : ''}` : 'No ref'}
+                                    {entry.source_ts ? ` • ${entry.source_ts}` : ''}
+                                  </Typography>
+                                  {entry.note && (
+                                    <Typography variant="caption" sx={{ display: 'block', mt: 0.25 }}>
+                                      {entry.note}
+                                    </Typography>
+                                  )}
+                                </Paper>
+                              ))}
+                            </Stack>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </Box>
+
+            {reconQ.isError && (
+              <Typography variant="body2" color="error">
+                Failed to load reconciliation report.
+              </Typography>
+            )}
+
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} justifyContent="space-between">
+              <Typography variant="body2" color="text.secondary">
+                Search from the left panel narrows this report too, so you can reconcile one product family at a time.
+              </Typography>
+              <Button variant="outlined" onClick={() => setReconOpen(false)} sx={{ borderRadius: 999, fontWeight: 900 }}>
+                Close
+              </Button>
+            </Stack>
+          </Stack>
+        </DialogContent>
+      </Dialog>
+
       <Dialog
         open={ledgerOpen}
         onClose={() => setLedgerOpen(false)}

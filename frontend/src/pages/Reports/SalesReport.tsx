@@ -117,10 +117,11 @@ export default function SalesReport(props: {
   viewMode: ViewMode
   groupBy: GroupBy
   deletedFilter: DeletedFilter
+  focusBillId?: number | null
   setExportFn: (fn: () => void) => void
   setExportDisabled: (v: boolean) => void
 }) {
-  const { from, to, q, viewMode, groupBy, deletedFilter, setExportFn, setExportDisabled } = props
+  const { from, to, q, viewMode, groupBy, deletedFilter, focusBillId, setExportFn, setExportDisabled } = props
   const toast = useToast()
 
   const [debouncedQ, setDebouncedQ] = useState('')
@@ -136,6 +137,7 @@ export default function SalesReport(props: {
   const [detail, setDetail] = useState<any | null>(null)
   const [editOpen, setEditOpen] = useState(false)
   const [editBill, setEditBill] = useState<any | null>(null)
+  const lastFocusedBillRef = useRef<number | null>(null)
   const detailCustomer = useMemo(
     () => parseCustomerFromNotes(String(detail?.notes || '')),
     [detail?.notes]
@@ -299,6 +301,37 @@ export default function SalesReport(props: {
     await qSales.refetch()
     if (detail?.id === updated?.id) setDetail(updated)
   }
+
+  useEffect(() => {
+    const billId = Number(focusBillId || 0) || null
+    if (!billId) {
+      lastFocusedBillRef.current = null
+      return
+    }
+    if (lastFocusedBillRef.current === billId) return
+
+    let active = true
+    lastFocusedBillRef.current = billId
+    setOpen(true)
+    setDetail(null)
+
+    ;(async () => {
+      try {
+        const bill = await getBill(billId)
+        if (active) setDetail(bill)
+      } catch (err: any) {
+        if (!active) return
+        setOpen(false)
+        setDetail(null)
+        lastFocusedBillRef.current = null
+        toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to open bill'), 'error')
+      }
+    })()
+
+    return () => {
+      active = false
+    }
+  }, [focusBillId, toast])
 
   // export
   useEffect(() => {

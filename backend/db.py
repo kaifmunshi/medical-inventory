@@ -60,6 +60,30 @@ def migrate_db():
                 "ALTER TABLE item ADD COLUMN cost_price REAL NOT NULL DEFAULT 0"
             ))
 
+        # Older client databases may still be missing timestamps that the current Item model selects.
+        if "created_at" not in col_names:
+            session.exec(text(
+                "ALTER TABLE item ADD COLUMN created_at TEXT"
+            ))
+            session.exec(text(
+                "UPDATE item SET created_at = :ts WHERE created_at IS NULL OR TRIM(created_at) = ''"
+            ).bindparams(ts=_now_ts()))
+
+        if "updated_at" not in col_names:
+            session.exec(text(
+                "ALTER TABLE item ADD COLUMN updated_at TEXT"
+            ))
+            session.exec(text(
+                "UPDATE item SET updated_at = COALESCE(NULLIF(created_at, ''), :ts) WHERE updated_at IS NULL OR TRIM(updated_at) = ''"
+            ).bindparams(ts=_now_ts()))
+
+        session.exec(text(
+            "UPDATE item SET created_at = :ts WHERE created_at IS NULL OR TRIM(created_at) = ''"
+        ).bindparams(ts=_now_ts()))
+        session.exec(text(
+            "UPDATE item SET updated_at = COALESCE(NULLIF(created_at, ''), :ts) WHERE updated_at IS NULL OR TRIM(updated_at) = ''"
+        ).bindparams(ts=_now_ts()))
+
         session.commit()
 
         # ✅ helpful indexes (safe to run repeatedly)
@@ -226,6 +250,51 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_product_is_active ON product (is_active)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_product_loose_sale_enabled ON product (loose_sale_enabled)"))
         session.commit()
+
+        # ---------- customer / requested item migration ----------
+        customer_cols = session.exec(text("PRAGMA table_info(customer)")).all()
+        customer_col_names = {c[1] for c in customer_cols}
+        if customer_cols:
+            if "address_line" not in customer_col_names:
+                session.exec(text("ALTER TABLE customer ADD COLUMN address_line TEXT"))
+            if "created_at" not in customer_col_names:
+                session.exec(text("ALTER TABLE customer ADD COLUMN created_at TEXT"))
+            if "updated_at" not in customer_col_names:
+                session.exec(text("ALTER TABLE customer ADD COLUMN updated_at TEXT"))
+
+            session.exec(text(
+                "UPDATE customer SET created_at = :ts WHERE created_at IS NULL OR TRIM(created_at) = ''"
+            ).bindparams(ts=_now_ts()))
+            session.exec(text(
+                "UPDATE customer SET updated_at = COALESCE(NULLIF(created_at, ''), :ts) WHERE updated_at IS NULL OR TRIM(updated_at) = ''"
+            ).bindparams(ts=_now_ts()))
+
+            session.exec(text("CREATE INDEX IF NOT EXISTS ix_customer_name ON customer (name)"))
+            session.exec(text("CREATE INDEX IF NOT EXISTS ix_customer_phone ON customer (phone)"))
+            session.commit()
+
+        requested_item_cols = session.exec(text("PRAGMA table_info(requesteditem)")).all()
+        requested_item_col_names = {c[1] for c in requested_item_cols}
+        if requested_item_cols:
+            if "customer_name" not in requested_item_col_names:
+                session.exec(text("ALTER TABLE requesteditem ADD COLUMN customer_name TEXT"))
+            if "notes" not in requested_item_col_names:
+                session.exec(text("ALTER TABLE requesteditem ADD COLUMN notes TEXT"))
+            if "created_at" not in requested_item_col_names:
+                session.exec(text("ALTER TABLE requesteditem ADD COLUMN created_at TEXT"))
+            if "updated_at" not in requested_item_col_names:
+                session.exec(text("ALTER TABLE requesteditem ADD COLUMN updated_at TEXT"))
+
+            session.exec(text(
+                "UPDATE requesteditem SET created_at = :ts WHERE created_at IS NULL OR TRIM(created_at) = ''"
+            ).bindparams(ts=_now_ts()))
+            session.exec(text(
+                "UPDATE requesteditem SET updated_at = COALESCE(NULLIF(created_at, ''), :ts) WHERE updated_at IS NULL OR TRIM(updated_at) = ''"
+            ).bindparams(ts=_now_ts()))
+
+            session.exec(text("CREATE INDEX IF NOT EXISTS ix_requesteditem_mobile ON requesteditem (mobile)"))
+            session.exec(text("CREATE INDEX IF NOT EXISTS ix_requesteditem_is_available ON requesteditem (is_available)"))
+            session.commit()
 
         # ---------- inventory lot migration ----------
         session.exec(text("""
@@ -729,19 +798,6 @@ def migrate_db():
                     "end_date": end_date,
                     "ts": _now_ts(),
                 },
-            )
-            session.commit()
-
-        # ---------- default owner user ----------
-        user_count_row = session.exec(text("SELECT COUNT(*) FROM appuser")).one()
-        user_count = user_count_row[0] if isinstance(user_count_row, tuple) or hasattr(user_count_row, "__getitem__") else user_count_row
-        if int(user_count or 0) == 0:
-            session.exec(
-                text("""
-                    INSERT INTO appuser (name, role, pin, is_active, created_at, updated_at)
-                    VALUES ('Owner', 'OWNER', NULL, 1, :ts, :ts)
-                """),
-                {"ts": _now_ts()},
             )
             session.commit()
 

@@ -80,6 +80,11 @@ def _ensure_owner_safety(session, *, target_user_id: int, next_role: str, next_i
         raise HTTPException(status_code=400, detail="At least one active OWNER user is required")
 
 
+def _has_any_users(session) -> bool:
+    first_row = session.exec(select(AppUser.id).limit(1)).first()
+    return first_row is not None
+
+
 @router.post("/session/login", response_model=UserSessionLoginOut)
 def login_user_session(payload: UserSessionLoginIn):
     with get_session() as session:
@@ -111,7 +116,6 @@ def list_users(active_only: bool = Query(True)):
 
 @router.post("/", response_model=AppUserOut, status_code=201)
 def create_user(payload: AppUserCreate):
-    require_min_role("OWNER", context="User creation")
     name = _clean(payload.name)
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
@@ -119,6 +123,8 @@ def create_user(payload: AppUserCreate):
     pin = _normalize_pin(payload.pin)
 
     with get_session() as session:
+        if _has_any_users(session):
+            require_min_role("OWNER", context="User creation")
         _ensure_name_available(session, name=name)
         ts = datetime.now().isoformat(timespec="seconds")
         row = AppUser(name=name, role=role, pin=pin, is_active=True, created_at=ts, updated_at=ts)

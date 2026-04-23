@@ -50,7 +50,7 @@ function pinError(pin: string) {
 export default function Settings() {
   const toast = useToast()
   const queryClient = useQueryClient()
-  const { currentUser, hasMinRole, shortcuts, setShortcuts, promptSwitchUser } = useUserSession()
+  const { currentUser, hasMinRole, shortcuts, setShortcuts, promptSwitchUser, hasConfiguredUsers } = useUserSession()
 
   const today = new Date()
   const currentStartYear = today.getMonth() >= 3 ? today.getFullYear() : today.getFullYear() - 1
@@ -79,7 +79,8 @@ export default function Settings() {
   const yearPreview = useMemo(() => financialYearForStart(createYearStart), [createYearStart])
   const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
   const canManageYears = hasMinRole('MANAGER')
-  const canManageUsers = hasMinRole('OWNER')
+  const totalUsers = (usersQ.data || []).length
+  const canManageUsers = hasMinRole('OWNER') || totalUsers === 0
   const shortcutCount = shortcuts.length
   const shortcutLookup = useMemo(() => new Map(shortcuts.map((item) => [item.to, item])), [shortcuts])
   const usedHotkeys = useMemo(
@@ -288,9 +289,11 @@ export default function Settings() {
           </Stack>
 
           <Stack direction={{ xs: 'column', sm: 'row' }} gap={0.75} alignItems={{ sm: 'flex-start' }}>
-            <Button variant="outlined" onClick={promptSwitchUser}>
-              Switch User
-            </Button>
+            {hasConfiguredUsers ? (
+              <Button variant="outlined" onClick={promptSwitchUser}>
+                Switch User
+              </Button>
+            ) : null}
             <Button variant="contained" onClick={() => setCreateYearOpen(true)} disabled={!canManageYears}>
               Add Financial Year
             </Button>
@@ -486,11 +489,17 @@ export default function Settings() {
             </Typography>
           </Box>
           <Button variant="contained" onClick={openCreateUser} disabled={!canManageUsers}>
-            Add User
+            {totalUsers === 0 ? 'Create First User' : 'Add User'}
           </Button>
         </Stack>
 
-        {!canManageUsers ? <Alert severity="info" sx={{ mb: 1.25 }}>Owner sign-in required to manage users.</Alert> : null}
+        {totalUsers === 0 ? (
+          <Alert severity="info" sx={{ mb: 1.25 }}>
+            No users are configured yet. The app will stay in open mode until you create the first user. PIN will only be asked for users that have one set.
+          </Alert>
+        ) : null}
+
+        {!canManageUsers && totalUsers > 0 ? <Alert severity="info" sx={{ mb: 1.25 }}>Owner sign-in required to manage users.</Alert> : null}
 
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">

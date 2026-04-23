@@ -31,6 +31,7 @@ type UserSessionContextValue = {
   currentUser: AppUser | null
   shortcuts: StoredShortcutItem[]
   setShortcuts: (shortcuts: StoredShortcutItem[]) => void
+  hasConfiguredUsers: boolean
   signOut: () => void
   promptSwitchUser: () => void
   hasMinRole: (role: UserRole) => boolean
@@ -72,7 +73,7 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
     const stored = loadStoredUserSession()
     setSession(stored)
     setReady(true)
-    setLoginOpen(!stored)
+    setLoginOpen(false)
   }, [])
 
   useEffect(() => {
@@ -86,8 +87,19 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
   const usersQ = useQuery<AppUser[], Error>({
     queryKey: ['session-active-users'],
     queryFn: () => fetchUsers({ active_only: true }),
-    enabled: ready && loginOpen,
+    enabled: ready,
   })
+
+  const hasConfiguredUsers = (usersQ.data || []).length > 0
+
+  useEffect(() => {
+    if (!ready || usersQ.isLoading) return
+    if (session?.user?.id) {
+      setLoginOpen(false)
+      return
+    }
+    setLoginOpen(hasConfiguredUsers)
+  }, [ready, usersQ.isLoading, hasConfiguredUsers, session?.user?.id])
 
   useEffect(() => {
     if (!loginOpen) return
@@ -118,12 +130,16 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
   function signOut() {
     clearStoredUserSession()
     setSession(null)
-    setLoginOpen(true)
+    setLoginOpen(hasConfiguredUsers)
     setSelectedUserId('')
     setPin('')
   }
 
   function promptSwitchUser() {
+    if (!hasConfiguredUsers) {
+      toast.push('No active users are configured yet', 'info')
+      return
+    }
     setLoginOpen(true)
     setPin('')
   }
@@ -158,17 +174,18 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
       currentUser: session?.user || null,
       shortcuts,
       setShortcuts,
+      hasConfiguredUsers,
       signOut,
       promptSwitchUser,
       hasMinRole,
     }),
-    [session, shortcuts],
+    [session, shortcuts, hasConfiguredUsers],
   )
 
   return (
     <UserSessionContext.Provider value={value}>
       {children}
-      <Dialog open={ready && loginOpen} fullWidth maxWidth="xs">
+      <Dialog open={ready && loginOpen && hasConfiguredUsers} fullWidth maxWidth="xs">
         <DialogTitle>{session ? 'Switch User' : 'Sign In'}</DialogTitle>
         <DialogContent dividers>
           <Stack gap={2} sx={{ mt: 1 }}>
@@ -207,9 +224,9 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
                 type="password"
                 fullWidth
               />
-            ) : (
+            ) : selectedUser ? (
               <Alert severity="info">This user does not have a PIN set.</Alert>
-            )}
+            ) : null}
           </Stack>
         </DialogContent>
         <DialogActions>

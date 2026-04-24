@@ -2,12 +2,23 @@ import { useEffect, useMemo, useState } from 'react'
 import { Box, Button, Dialog, DialogTitle, DialogContent, Stack, TextField } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 // ✅ value import
-import { listBills } from '../../services/billing'
+import { listAllBills } from '../../services/billing'
 // ✅ type-only import
 import type { Bill } from '../../services/billing'
+import { fetchFinancialYears } from '../../services/settings'
+import type { FinancialYear } from '../../lib/types'
 
 // ✅ correct path to lib/date from components/billing/*
 import { toYMD } from '../../lib/date'
+
+function previousFinancialYear(years: FinancialYear[], activeYear: FinancialYear | null) {
+  if (!activeYear) return null
+  return (
+    [...years]
+      .filter((year) => year.end_date < activeYear.start_date)
+      .sort((a, b) => b.start_date.localeCompare(a.start_date))[0] || null
+  )
+}
 
 export default function BillPickerDialog({
   open, onClose, onPick
@@ -21,9 +32,19 @@ export default function BillPickerDialog({
 
   const { data, refetch, isFetching } = useQuery({
     queryKey:['bill-picker', from, to, offset],
-    queryFn:()=>listBills({ from_date: from, to_date: to, limit: 20, offset }),
+    queryFn:async()=>{
+      const rows = await listAllBills({ from_date: from || undefined, to_date: to || undefined })
+      return rows.slice(offset, offset + 20)
+    },
     enabled: open
   })
+  const yearsQ = useQuery({
+    queryKey: ['bill-picker-financial-years'],
+    queryFn: fetchFinancialYears,
+    enabled: open,
+  })
+  const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
+  const prevYear = useMemo(() => previousFinancialYear(yearsQ.data || [], activeYear), [activeYear, yearsQ.data])
 
   useEffect(()=>{ if(open) refetch() }, [open])
 
@@ -72,6 +93,43 @@ export default function BillPickerDialog({
             disabled={isFetching}
           >
             Search
+          </Button>
+        </Stack>
+
+        <Stack direction={{xs:'column', md:'row'}} gap={1} sx={{ mb:2 }}>
+          {activeYear ? (
+            <Button
+              variant="outlined"
+              onClick={() => {
+                setOffset(0)
+                setFrom(activeYear.start_date)
+                setTo(activeYear.end_date)
+              }}
+            >
+              Current FY
+            </Button>
+          ) : null}
+          {prevYear ? (
+            <Button
+              variant="outlined"
+              onClick={() => {
+                setOffset(0)
+                setFrom(prevYear.start_date)
+                setTo(prevYear.end_date)
+              }}
+            >
+              Previous FY
+            </Button>
+          ) : null}
+          <Button
+            variant="outlined"
+            onClick={() => {
+              setOffset(0)
+              setFrom('')
+              setTo('')
+            }}
+          >
+            All Bills
           </Button>
         </Stack>
 

@@ -1,17 +1,29 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Box, Button, Paper, Stack, TextField, Typography, MenuItem } from '@mui/material'
 import { useSearchParams } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 
 import SalesReport from './SalesReport'
 import ReturnsReport from './ReturnsReport'
 import StockLedgerReport from './StockLedgerReport'
 import ItemSalesReport from './ItemSalesReport'
 import { last15DaysRange } from '../../lib/date'
+import { fetchFinancialYears } from '../../services/settings'
+import type { FinancialYear } from '../../lib/types'
 
 type Tab = 'sales' | 'returns' | 'stock' | 'item_sales'
 type ViewMode = 'details' | 'aggregate'
 type GroupBy = 'day' | 'month'
 type DeletedFilter = 'active' | 'deleted' | 'all'
+
+function previousFinancialYear(years: FinancialYear[], activeYear: FinancialYear | null) {
+  if (!activeYear) return null
+  return (
+    [...years]
+      .filter((year) => year.end_date < activeYear.start_date)
+      .sort((a, b) => b.start_date.localeCompare(a.start_date))[0] || null
+  )
+}
 
 export default function Reports() {
   // ✅ default = last 15 days
@@ -32,6 +44,12 @@ export default function Reports() {
   const [extraControls, setExtraControls] = useState<ReactNode>(null)
   const [exportDisabled, setExportDisabled] = useState(true)
   const [exportFn, setExportFn] = useState<() => void>(() => () => {})
+  const yearsQ = useQuery({
+    queryKey: ['reports-financial-years'],
+    queryFn: fetchFinancialYears,
+  })
+  const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
+  const prevYear = useMemo(() => previousFinancialYear(yearsQ.data || [], activeYear), [activeYear, yearsQ.data])
 
   const incomingState = useMemo<{
     tab: Tab
@@ -187,6 +205,30 @@ export default function Reports() {
               onChange={(e) => setTo(e.target.value)}
               InputLabelProps={{ shrink: true }}
             />
+
+            {activeYear ? (
+              <Button
+                variant="outlined"
+                onClick={() => {
+                  setFrom(activeYear.start_date)
+                  setTo(activeYear.end_date)
+                }}
+              >
+                Current FY
+              </Button>
+            ) : null}
+
+            {prevYear ? (
+              <Button
+                variant="outlined"
+                onClick={() => {
+                  setFrom(prevYear.start_date)
+                  setTo(prevYear.end_date)
+                }}
+              >
+                Previous FY
+              </Button>
+            ) : null}
 
             {tab === 'sales' && viewMode === 'details' && (
               <TextField

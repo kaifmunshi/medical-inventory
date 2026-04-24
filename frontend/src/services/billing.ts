@@ -93,6 +93,26 @@ export async function listBills(params: {
   return data
 }
 
+export async function listAllBills(params: {
+  q?: string
+  from_date?: string
+  to_date?: string
+  deleted_filter?: 'active' | 'deleted' | 'all'
+} = {}) {
+  const out: Bill[] = []
+  let offset = 0
+  const limit = 500
+
+  while (true) {
+    const rows = await listBills({ ...params, limit, offset })
+    out.push(...(rows || []))
+    if (!rows || rows.length < limit) break
+    offset += limit
+  }
+
+  return out
+}
+
 export async function softDeleteBill(billId: number) {
   const { data } = await api.delete(`/billing/${billId}`)
   return data as { bill_id: number; is_deleted: boolean; deleted_at: string | null }

@@ -25,7 +25,7 @@ import {
 } from '@mui/material'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { listBills, getPaymentsSummary } from '../services/billing'
+import { listBills, listAllBills, getPaymentsSummary } from '../services/billing'
 import { listReturns } from '../services/returns'
 import { listItemsPage } from '../services/inventory'
 import { todayRange } from '../lib/date'
@@ -339,7 +339,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
   // -------- Credit Pending (ALL dates) --------
   const qAllBillsForPending = useQuery({
     queryKey: ['dash-credit-pending-all'],
-    queryFn: () => listBills({ limit: 500, offset: 0 }),
+    queryFn: () => listAllBills(),
   })
 
   const creditPendingAllDates = useMemo(() => {

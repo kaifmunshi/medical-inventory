@@ -24,7 +24,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   editBillPayment,
   getBill,
-  listBills,
+  listAllBills,
   receivePayment,
   listBillPayments,
   recoverBillPayment,
@@ -33,6 +33,8 @@ import {
 import { getExchangeByReturn, listExchangeRecords } from '../services/returns'
 import { todayRange } from '../lib/date'
 import ConfirmDialog from '../components/ui/ConfirmDialog'
+import { fetchFinancialYears } from '../services/settings'
+import type { FinancialYear } from '../lib/types'
 
 function itemsPreview(items: any[], max = 6) {
   const names = (items || []).map(
@@ -134,6 +136,15 @@ function billHasUndoableCreditComponent(bill: any, payments: any[]) {
   })
 }
 
+function previousFinancialYear(years: FinancialYear[], activeYear: FinancialYear | null) {
+  if (!activeYear) return null
+  return (
+    [...years]
+      .filter((year) => year.end_date < activeYear.start_date)
+      .sort((a, b) => b.start_date.localeCompare(a.start_date))[0] || null
+  )
+}
+
 // ✅ small colored status chip
 function StatusChip({ status }: { status: any }) {
   const s = String(status || '').toUpperCase()
@@ -196,16 +207,20 @@ export default function CreditBills() {
   )
 
   const qBills = useQuery({
-    queryKey: ['credit-bills', appliedFrom, appliedTo, q],
-    // ✅ date range applies ONLY when user clicks "Apply Range"
+    queryKey: ['credit-bills', appliedFrom, appliedTo],
+    // date range applies only when user clicks a range button.
     queryFn: () =>
-      listBills({
+      listAllBills({
         from_date: appliedFrom || undefined,
         to_date: appliedTo || undefined,
-        q,
-        limit: 500,
       }),
   })
+  const yearsQ = useQuery({
+    queryKey: ['credit-bills-financial-years'],
+    queryFn: fetchFinancialYears,
+  })
+  const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
+  const prevYear = useMemo(() => previousFinancialYear(yearsQ.data || [], activeYear), [activeYear, yearsQ.data])
   const qExchanges = useQuery({
     queryKey: ['credit-bills-exchanges', appliedFrom, appliedTo],
     queryFn: async () => {
@@ -642,6 +657,36 @@ export default function CreditBills() {
               >
                 Apply Range
               </Button>
+
+              {activeYear ? (
+                <Button
+                  variant="outlined"
+                  onClick={() => {
+                    setUiFrom(activeYear.start_date)
+                    setUiTo(activeYear.end_date)
+                    setAppliedFrom(activeYear.start_date)
+                    setAppliedTo(activeYear.end_date)
+                  }}
+                  disabled={qBills.isFetching}
+                >
+                  Current FY
+                </Button>
+              ) : null}
+
+              {prevYear ? (
+                <Button
+                  variant="outlined"
+                  onClick={() => {
+                    setUiFrom(prevYear.start_date)
+                    setUiTo(prevYear.end_date)
+                    setAppliedFrom(prevYear.start_date)
+                    setAppliedTo(prevYear.end_date)
+                  }}
+                  disabled={qBills.isFetching}
+                >
+                  Previous FY
+                </Button>
+              ) : null}
 
               <Button
                 variant="outlined"

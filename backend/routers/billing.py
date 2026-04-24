@@ -218,14 +218,14 @@ def list_bills(
             stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
         elif deleted_filter == "deleted":
             stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
+
+        if from_date:
+            stmt = stmt.where(Bill.date_time >= f"{from_date}T00:00:00")
+        if to_date:
+            stmt = stmt.where(Bill.date_time <= f"{to_date}T23:59:59")
+
         stmt = stmt.order_by(Bill.id.desc()).limit(limit).offset(offset)
         rows = session.exec(stmt).all()
-
-        # simple date filter (string compare is fine with ISO if provided)
-        if from_date:
-            rows = [b for b in rows if (b.date_time or "")[:10] >= from_date]
-        if to_date:
-            rows = [b for b in rows if (b.date_time or "")[:10] <= to_date]
 
         out: List[BillOut] = []
         for b in rows:

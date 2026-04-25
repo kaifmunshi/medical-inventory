@@ -41,6 +41,8 @@ import { listExchangeRecords, listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
+import { fetchFinancialYears } from '../../services/settings'
+import { financialYearDisplayName } from '../../lib/financialYear'
 
 function money(n: number | string | null | undefined) {
   return Number(n || 0).toFixed(2)
@@ -167,10 +169,12 @@ export default function BankBookPage() {
   const today = useMemo(() => toYMD(new Date()), [])
   const [selectedDate, setSelectedDate] = useState(today)
   const [recordsFilter, setRecordsFilter] = useState<'DAY' | 'ALL'>('DAY')
-  const [allView, setAllView] = useState<'ALL' | 'WEEK' | 'MONTH'>('ALL')
+  const [allView, setAllView] = useState<'ALL' | 'WEEK' | 'MONTH' | 'CUSTOM'>('ALL')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [allAnchorDate, setAllAnchorDate] = useState(today)
   const [debouncedAllAnchorDate, setDebouncedAllAnchorDate] = useState(today)
+  const [rangeFrom, setRangeFrom] = useState(today)
+  const [rangeTo, setRangeTo] = useState(today)
 
   const [entryType, setEntryType] = useState<BankbookType>('RECEIPT')
   const [entryMode, setEntryMode] = useState<BankbookMode>('UPI')
@@ -199,6 +203,12 @@ export default function BankBookPage() {
     if (recordsFilter === 'DAY') setEntryDate(selectedDate)
   }, [recordsFilter, selectedDate])
 
+  const yearsQ = useQuery({
+    queryKey: ['bankbook-financial-years'],
+    queryFn: fetchFinancialYears,
+  })
+  const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
+
   useEffect(() => {
     if (entryMode !== 'BANK_DEPOSIT' && entryType !== 'CONTRA') return
     const trimmed = note.trim()
@@ -225,8 +235,14 @@ export default function BankBookPage() {
   const allRange = useMemo(() => {
     if (allView === 'WEEK') return weekRange(debouncedAllAnchorDate)
     if (allView === 'MONTH') return monthRange(debouncedAllAnchorDate)
-    return { from: undefined as string | undefined, to: undefined as string | undefined }
-  }, [allView, debouncedAllAnchorDate])
+    if (allView === 'CUSTOM') return { from: rangeFrom || undefined, to: rangeTo || undefined }
+    return { from: activeYear?.start_date, to: activeYear?.end_date }
+  }, [activeYear?.end_date, activeYear?.start_date, allView, debouncedAllAnchorDate, rangeFrom, rangeTo])
+  const canLoadAllRange =
+    recordsFilter === 'ALL' &&
+    (allView === 'CUSTOM'
+      ? Boolean(allRange.from && allRange.to && allRange.from <= allRange.to)
+      : allView !== 'ALL' || Boolean(activeYear))
 
   const qDay = useQuery({
     queryKey: ['bankbook-day', selectedDate],
@@ -272,7 +288,7 @@ export default function BankBookPage() {
       }
       return out
     },
-    enabled: recordsFilter === 'ALL',
+    enabled: canLoadAllRange,
   })
 
   const qAllPayments = useQuery({
@@ -289,7 +305,7 @@ export default function BankBookPage() {
       }
       return out
     },
-    enabled: recordsFilter === 'ALL',
+    enabled: canLoadAllRange,
   })
 
   const qAllReturns = useQuery({
@@ -306,7 +322,7 @@ export default function BankBookPage() {
       }
       return out
     },
-    enabled: recordsFilter === 'ALL',
+    enabled: canLoadAllRange,
   })
 
   const qAllExchanges = useQuery({
@@ -323,7 +339,7 @@ export default function BankBookPage() {
       }
       return out
     },
-    enabled: recordsFilter === 'ALL',
+    enabled: canLoadAllRange,
   })
 
   const qAllCashbookContra = useQuery({
@@ -340,7 +356,7 @@ export default function BankBookPage() {
       }
       return out
     },
-    enabled: recordsFilter === 'ALL',
+    enabled: canLoadAllRange,
   })
 
   const mCreate = useMutation({
@@ -603,7 +619,9 @@ export default function BankBookPage() {
 
   const manualRowsDay = useMemo(() => {
     const rows = (day?.entries || []) as any[]
-    return rows.map((r) => ({ ...r, source: 'BANKBOOK' as const }))
+    return rows
+      .filter((r) => String(r?.entry_type || '').toUpperCase() !== 'OPENING')
+      .map((r) => ({ ...r, source: 'BANKBOOK' as const }))
   }, [day?.entries])
 
   const manualRowsAll = useMemo(() => {
@@ -759,23 +777,32 @@ export default function BankBookPage() {
             sx={{ minWidth: 150, ml: { sm: 'auto' } }}
           >
             <MenuItem value="DAY">Selected Day</MenuItem>
-            <MenuItem value="ALL">All Records</MenuItem>
+            <MenuItem value="ALL">Current FY Records</MenuItem>
           </TextField>
-          <Stack direction="row" spacing={1} sx={{ ml: { sm: 'auto' } }}>
-            <Button variant="outlined" onClick={() => setSelectedDate(addDays(selectedDate, -1))}>
-              Previous Day
-            </Button>
-            <Button variant="outlined" onClick={() => setSelectedDate(today)} disabled={selectedDate === today}>
-              Today
-            </Button>
-            <Button
-              variant="outlined"
-              onClick={() => setSelectedDate(addDays(selectedDate, 1))}
-              disabled={!canGoNext || recordsFilter === 'ALL'}
-            >
-              Next Day
-            </Button>
-          </Stack>
+          {recordsFilter === 'DAY' ? (
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} sx={{ ml: { sm: 'auto' } }}>
+              <TextField
+                size="small"
+                label="Date"
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 170 }}
+              />
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                <Button variant="outlined" onClick={() => setSelectedDate(addDays(selectedDate, -1))}>
+                  Previous Day
+                </Button>
+                <Button variant="outlined" onClick={() => setSelectedDate(today)} disabled={selectedDate === today}>
+                  Today
+                </Button>
+                <Button variant="outlined" onClick={() => setSelectedDate(addDays(selectedDate, 1))} disabled={!canGoNext}>
+                  Next Day
+                </Button>
+              </Stack>
+            </Stack>
+          ) : null}
         </Stack>
         {recordsFilter === 'DAY' ? (
           <Stack sx={{ mt: 1 }} spacing={0.25}>
@@ -783,20 +810,20 @@ export default function BankBookPage() {
               Date: {selectedDate}
             </Typography>
             <Typography variant="body2" sx={{ color: 'error.main' }}>
-              Note : Opening balance is carried from previous day closing.
+              Note: user-entered opening balance is treated as the actual opening. If none is set, it is carried from previous day closing.
             </Typography>
           </Stack>
         ) : (
           <Stack sx={{ mt: 1 }} spacing={1}>
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} sx={{ width: '100%' }}>
-              <Stack direction="row" spacing={1}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
                 <Button
                   variant="outlined"
                   size="small"
                   onClick={() => setAllView('ALL')}
                   sx={allView === 'ALL' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
                 >
-                  All
+                  Current FY
                 </Button>
                 <Button
                   variant="outlined"
@@ -814,9 +841,41 @@ export default function BankBookPage() {
                 >
                   Month
                 </Button>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => setAllView('CUSTOM')}
+                  sx={allView === 'CUSTOM' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
+                >
+                  Custom
+                </Button>
               </Stack>
-              {allView !== 'ALL' ? (
-                <Stack direction="row" spacing={1} sx={{ ml: { sm: 'auto' }, justifyContent: { sm: 'flex-end' } }}>
+              {allView === 'CUSTOM' ? (
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ ml: { sm: 'auto' }, justifyContent: { sm: 'flex-end' } }}>
+                  <TextField
+                    size="small"
+                    label="From"
+                    type="date"
+                    value={rangeFrom}
+                    onChange={(e) => setRangeFrom(e.target.value)}
+                    InputLabelProps={{ shrink: true }}
+                    sx={{ minWidth: 160 }}
+                  />
+                  <TextField
+                    size="small"
+                    label="To"
+                    type="date"
+                    value={rangeTo}
+                    onChange={(e) => setRangeTo(e.target.value)}
+                    InputLabelProps={{ shrink: true }}
+                    sx={{ minWidth: 160 }}
+                  />
+                  <Button variant="outlined" size="small" onClick={() => { setRangeFrom(today); setRangeTo(today) }}>
+                    Today
+                  </Button>
+                </Stack>
+              ) : allView !== 'ALL' ? (
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ ml: { sm: 'auto' }, justifyContent: { sm: 'flex-end' } }}>
                   <Button
                     variant="outlined"
                     size="small"
@@ -840,7 +899,11 @@ export default function BankBookPage() {
             </Stack>
             <Typography variant="body2" color="text.secondary">
               {allView === 'ALL'
-                ? 'Showing full bank book history (all records).'
+                ? `Showing current financial year${activeYear ? `: ${financialYearDisplayName(activeYear)} (${activeYear.start_date} to ${activeYear.end_date})` : '.'}`
+                : allView === 'CUSTOM' && !canLoadAllRange
+                  ? 'Choose a valid custom date range.'
+                : allView === 'CUSTOM'
+                  ? `Showing custom range: ${allRange.from} to ${allRange.to}`
                 : `Showing ${allView.toLowerCase()} view: ${allRange.from} to ${allRange.to}`}
             </Typography>
           </Stack>

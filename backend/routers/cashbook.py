@@ -34,7 +34,7 @@ def _range_bounds(from_date: Optional[str], to_date: Optional[str]):
     return start_iso, end_iso
 
 
-VALID_ENTRY_TYPES = {"RECEIPT", "WITHDRAWAL", "EXPENSE", "CONTRA"}
+VALID_ENTRY_TYPES = {"RECEIPT", "WITHDRAWAL", "EXPENSE", "CONTRA", "OPENING"}
 
 
 def _sum_rows(rows: List[CashbookEntry]):
@@ -116,13 +116,22 @@ def _sum_exchange_cash_in(session, *, start_iso: Optional[str] = None, end_iso: 
     return round(total, 2)
 
 
+def _opening_anchor(session, *, day_end: str):
+    return session.exec(
+        select(CashbookEntry)
+        .where(CashbookEntry.entry_type == "OPENING")
+        .where(CashbookEntry.created_at <= day_end)
+        .order_by(CashbookEntry.created_at.desc(), CashbookEntry.id.desc())
+    ).first()
+
+
 @router.post("/", response_model=CashbookOut)
 def create_entry(payload: CashbookCreate):
     et = (payload.entry_type or "").strip().upper()
     if et not in VALID_ENTRY_TYPES:
         raise HTTPException(
             status_code=400,
-            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE or CONTRA",
+            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, CONTRA or OPENING",
         )
 
     amt = float(payload.amount or 0)
@@ -156,7 +165,7 @@ def update_entry(entry_id: int, payload: CashbookCreate):
     if et not in VALID_ENTRY_TYPES:
         raise HTTPException(
             status_code=400,
-            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE or CONTRA",
+            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, CONTRA or OPENING",
         )
 
     amt = float(payload.amount or 0)
@@ -240,14 +249,21 @@ def day_cashbook(date: str = Query(..., description="YYYY-MM-DD")):
     prev_end = f"{prev_date}T23:59:59.999999"
 
     with get_session() as session:
-        opening_rows = session.exec(
-            select(CashbookEntry).where(CashbookEntry.created_at <= prev_end)
-        ).all()
+        anchor = _opening_anchor(session, day_end=day_end)
+        anchor_amount = float(getattr(anchor, "amount", 0) or 0) if anchor else 0.0
+        anchor_ts = str(getattr(anchor, "created_at", "") or "") if anchor else None
+        anchor_effective_start = f"{anchor_ts[:10]}T00:00:00" if anchor_ts and len(anchor_ts) >= 10 else None
+
+        opening_stmt = select(CashbookEntry).where(CashbookEntry.created_at <= prev_end)
+        if anchor_effective_start:
+            opening_stmt = opening_stmt.where(CashbookEntry.created_at >= anchor_effective_start)
+        opening_rows = session.exec(opening_stmt).all()
         opening_balance = (
-            _sum_rows(opening_rows)["net_change"]
-            + _sum_bill_cash(session, end_iso=prev_end)
-            + _sum_exchange_cash_in(session, end_iso=prev_end)
-            - _sum_return_cash(session, end_iso=prev_end)
+            anchor_amount
+            + _sum_rows(opening_rows)["net_change"]
+            + _sum_bill_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
+            + _sum_exchange_cash_in(session, start_iso=anchor_effective_start, end_iso=prev_end)
+            - _sum_return_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
         )
 
         day_rows = session.exec(

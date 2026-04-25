@@ -152,11 +152,11 @@ def _sum_cashbook_contra(session, *, start_iso: Optional[str] = None, end_iso: O
     return round(total, 2)
 
 
-def _opening_anchor(session, *, day_start: str):
+def _opening_anchor(session, *, day_end: str):
     return session.exec(
         select(BankbookEntry)
         .where(BankbookEntry.entry_type == "OPENING")
-        .where(BankbookEntry.created_at <= day_start)
+        .where(BankbookEntry.created_at <= day_end)
         .order_by(BankbookEntry.created_at.desc(), BankbookEntry.id.desc())
     ).first()
 
@@ -307,23 +307,24 @@ def day_bankbook(date: str = Query(..., description="YYYY-MM-DD")):
     prev_end = f"{prev_date}T23:59:59.999999"
 
     with get_session() as session:
-        anchor = _opening_anchor(session, day_start=day_start)
+        anchor = _opening_anchor(session, day_end=day_end)
         anchor_amount = float(getattr(anchor, "amount", 0) or 0) if anchor else 0.0
         anchor_ts = str(getattr(anchor, "created_at", "") or "") if anchor else None
+        anchor_effective_start = f"{anchor_ts[:10]}T00:00:00" if anchor_ts and len(anchor_ts) >= 10 else None
 
         opening_stmt = select(BankbookEntry).where(BankbookEntry.created_at <= prev_end)
-        if anchor_ts:
-            opening_stmt = opening_stmt.where(BankbookEntry.created_at > anchor_ts)
+        if anchor_effective_start:
+            opening_stmt = opening_stmt.where(BankbookEntry.created_at >= anchor_effective_start)
         opening_rows = session.exec(opening_stmt).all()
         opening_summary = _sum_rows(opening_rows)
         opening_balance = (
             anchor_amount
             + opening_summary["net_change"]
-            + _sum_bill_online(session, start_iso=anchor_ts, end_iso=prev_end)
-            + _sum_exchange_online_in(session, start_iso=anchor_ts, end_iso=prev_end)
-            + _sum_cashbook_contra(session, start_iso=anchor_ts, end_iso=prev_end)
-            - _sum_return_online(session, start_iso=anchor_ts, end_iso=prev_end)
-            - _sum_exchange_online_out(session, start_iso=anchor_ts, end_iso=prev_end)
+            + _sum_bill_online(session, start_iso=anchor_effective_start, end_iso=prev_end)
+            + _sum_exchange_online_in(session, start_iso=anchor_effective_start, end_iso=prev_end)
+            + _sum_cashbook_contra(session, start_iso=anchor_effective_start, end_iso=prev_end)
+            - _sum_return_online(session, start_iso=anchor_effective_start, end_iso=prev_end)
+            - _sum_exchange_online_out(session, start_iso=anchor_effective_start, end_iso=prev_end)
         )
 
         day_rows = session.exec(

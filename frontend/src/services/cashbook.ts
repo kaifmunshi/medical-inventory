@@ -1,7 +1,7 @@
 // frontend/src/services/cashbook.ts
 import api from './api'
 
-export type CashbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE' | 'CONTRA'
+export type CashbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE' | 'CONTRA' | 'OPENING'
 
 export type CashbookCreate = {
   entry_type: CashbookType

@@ -23,6 +23,7 @@ import {
   fetchPartyReceipts,
   fetchReceiptAdjustments,
 } from '../../services/parties'
+import { listPayments, type BillPaymentRow } from '../../services/billing'
 import type { Customer, DebtorLedgerRow, OpenBill, Party, PartyReceipt, ReceiptBillAdjustment } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 import { buildSalesReportLink } from '../../lib/reportLinks'
@@ -107,6 +108,23 @@ export default function CustomerLedgerPage() {
     enabled: Boolean(selectedParty?.id),
   })
 
+  const allPaymentsQ = useQuery<BillPaymentRow[], Error>({
+    queryKey: ['customer-ledger-bill-payments', selectedParty?.id],
+    queryFn: async () => {
+      const out: BillPaymentRow[] = []
+      let offset = 0
+      const limit = 500
+      while (true) {
+        const rows = await listPayments({ limit, offset })
+        out.push(...(rows || []))
+        if (!rows || rows.length < limit) break
+        offset += limit
+      }
+      return out
+    },
+    enabled: Boolean(selectedParty?.id),
+  })
+
   const receiptM = useMutation({
     mutationFn: ({
       partyId,
@@ -128,6 +146,7 @@ export default function CustomerLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] })
       queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
       queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
       queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
       setReceiptOpen(false)
       setMode('cash')
@@ -156,6 +175,70 @@ export default function CustomerLedgerPage() {
     }
     return map
   }, [adjustments])
+
+  const adjustmentDetails = useMemo(() => {
+    const map = new Map<number, ReceiptBillAdjustment[]>()
+    for (const row of adjustments) {
+      const receiptId = Number(row.receipt_id)
+      const existing = map.get(receiptId) || []
+      existing.push(row)
+      map.set(receiptId, existing)
+    }
+    return map
+  }, [adjustments])
+
+  const receiptHistory = useMemo(() => {
+    const billIds = new Set(ledgerRows.map((row) => Number(row.bill_id)))
+    const partyReceiptRows = receipts.map((receipt) => {
+      const lines = adjustmentDetails.get(Number(receipt.id)) || []
+      const adjusted = adjustmentMap.get(Number(receipt.id)) || 0
+      const allocation =
+        lines.length > 0
+          ? lines.map((line) => `Bill #${line.bill_id}: ${money(line.adjusted_amount)}`).join(', ')
+          : Number(receipt.unallocated_amount || 0) > 0
+            ? 'On account'
+            : '-'
+      return {
+        id: `party-${receipt.id}`,
+        receiptId: receipt.id,
+        when: receipt.received_at,
+        source: 'Customer receipt',
+        mode: receipt.mode,
+        cash: Number(receipt.cash_amount || 0),
+        online: Number(receipt.online_amount || 0),
+        total: Number(receipt.total_amount || 0),
+        adjusted,
+        onAccount: Number(receipt.unallocated_amount || 0),
+        allocation,
+        note: receipt.note || '',
+      }
+    })
+
+    const directPaymentRows = ((allPaymentsQ.data || []) as any[])
+      .filter((payment) => billIds.has(Number(payment.bill_id)))
+      .filter((payment) => !/^party receipt #/i.test(String(payment.note || '').trim()))
+      .map((payment) => {
+        const cash = Number(payment.cash_amount || 0)
+        const online = Number(payment.online_amount || 0)
+        const total = cash + online
+        return {
+          id: `bill-payment-${payment.id}`,
+          receiptId: payment.id,
+          when: payment.received_at,
+          source: 'Bill payment',
+          mode: payment.mode,
+          cash,
+          online,
+          total,
+          adjusted: total,
+          onAccount: 0,
+          allocation: `Bill #${payment.bill_id}: ${money(total)}`,
+          note: payment.note || '',
+        }
+      })
+
+    return [...partyReceiptRows, ...directPaymentRows].sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')))
+  }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receipts])
 
   function openReceiptDialog() {
     setAdjustmentDrafts(
@@ -231,7 +314,7 @@ export default function CustomerLedgerPage() {
             </div>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
               <Typography fontWeight={700}>Outstanding: {money(totalOutstanding)}</Typography>
-              <Typography>Total Receipts: {money(receipts.reduce((sum, row) => sum + Number(row.total_amount || 0), 0))}</Typography>
+              <Typography>Total Receipts: {money(receiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0))}</Typography>
             </Stack>
           </Stack>
         </Paper>
@@ -344,35 +427,45 @@ export default function CustomerLedgerPage() {
       </Paper>
 
       <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>Receipts</Typography>
+        <Typography variant="h6" sx={{ mb: 2 }}>Receipt History</Typography>
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
             <thead>
               <tr>
                 <th>Receipt ID</th>
                 <th>When</th>
+                <th>Source</th>
                 <th>Mode</th>
+                <th>Cash</th>
+                <th>Online</th>
                 <th>Total</th>
-                <th>Adjusted</th>
+                <th>Applied</th>
                 <th>On Account</th>
+                <th>Allocation</th>
                 <th>Note</th>
               </tr>
             </thead>
             <tbody>
-              {receipts.map((receipt) => (
-                <tr key={receipt.id}>
-                  <td>{receipt.id}</td>
-                  <td>{receipt.received_at}</td>
-                  <td>{receipt.mode}</td>
-                  <td>{money(receipt.total_amount)}</td>
-                  <td>{money(adjustmentMap.get(Number(receipt.id)) || 0)}</td>
-                  <td>{money(receipt.unallocated_amount)}</td>
-                  <td>{receipt.note || '-'}</td>
-                </tr>
-              ))}
-              {receipts.length === 0 && (
+              {receiptHistory.map((receipt) => {
+                return (
+                  <tr key={receipt.id}>
+                    <td>{receipt.receiptId}</td>
+                    <td>{receipt.when}</td>
+                    <td>{receipt.source}</td>
+                    <td>{receipt.mode}</td>
+                    <td>{money(receipt.cash)}</td>
+                    <td>{money(receipt.online)}</td>
+                    <td>{money(receipt.total)}</td>
+                    <td>{money(receipt.adjusted)}</td>
+                    <td>{money(receipt.onAccount)}</td>
+                    <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{receipt.allocation}</td>
+                    <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{receipt.note || '-'}</td>
+                  </tr>
+                )
+              })}
+              {receiptHistory.length === 0 && (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={11}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No receipts recorded for this customer yet.' : 'Select a customer to view receipts.'}
                     </Box>

@@ -5,27 +5,29 @@ import {
   Button,
   IconButton,
   InputAdornment,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
+  MenuItem,
   Paper,
   Stack,
+  Switch,
   TextField,
   Typography,
   Tooltip,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
   Chip,
   useMediaQuery,
 } from '@mui/material'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery, useQueryClient, useMutation } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import {
   listItemsPage,
   createItem,
   updateItem,
-  deleteItem,
   adjustStock,
 } from '../../services/inventory'
 
@@ -33,7 +35,6 @@ import Loading from '../../components/ui/Loading'
 import ItemForm from './ItemForm'
 import type { ItemFormValues } from './ItemForm'
 import EditIcon from '@mui/icons-material/Edit'
-import DeleteIcon from '@mui/icons-material/Delete'
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'
 import CloseIcon from '@mui/icons-material/Close'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
@@ -41,6 +42,16 @@ import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 
 import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
+import {
+  createBrand,
+  createCategory,
+  createProduct,
+  fetchBrands,
+  fetchCategories,
+  fetchProducts,
+  updateProduct,
+  type ProductPayload,
+} from '../../services/products'
 
 function formatExpiry(exp?: string | null) {
   if (!exp) return '-'
@@ -73,14 +84,30 @@ export default function Inventory() {
   const [debouncedQ, setDebouncedQ] = useState('') // ✅ debounce search input
   const [rackQ, setRackQ] = useState(searchParams.get('rack') || '')
   const [debouncedRackQ, setDebouncedRackQ] = useState('')
+  const [brandFilter, setBrandFilter] = useState(searchParams.get('brand') || '')
+  const [categoryFilter, setCategoryFilter] = useState(searchParams.get('category') || '')
 
   const [openForm, setOpenForm] = useState(false)
   const [editing, setEditing] = useState<any | null>(null)
+  const [productOpen, setProductOpen] = useState(false)
+  const [productId, setProductId] = useState<number | null>(null)
+  const [productBrandOpen, setProductBrandOpen] = useState(false)
+  const [productCategoryOpen, setProductCategoryOpen] = useState(false)
+  const [productBrandName, setProductBrandName] = useState('')
+  const [productCategoryName, setProductCategoryName] = useState('')
+  const [productForm, setProductForm] = useState<ProductPayload>({
+    name: '',
+    brand: '',
+    category_id: undefined,
+    default_rack_number: 0,
+    printed_price: 0,
+    loose_sale_enabled: false,
+    parent_unit_name: '',
+    child_unit_name: '',
+    default_conversion_qty: undefined,
+  })
   const [adjustId, setAdjustId] = useState<number | null>(null)
   const [adjustName, setAdjustName] = useState<string>('')
-
-  // which item is pending delete confirmation
-  const [deleteTarget, setDeleteTarget] = useState<any | null>(null)
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
 
   // ✅ Debounce typing to avoid calling API on every keystroke
@@ -95,6 +122,8 @@ export default function Inventory() {
   useEffect(() => {
     setQ(searchParams.get('q') || '')
     setRackQ(searchParams.get('rack') || '')
+    setBrandFilter(searchParams.get('brand') || '')
+    setCategoryFilter(searchParams.get('category') || '')
   }, [searchParams])
 
   const qc = useQueryClient()
@@ -109,7 +138,7 @@ export default function Inventory() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['inventory-items', debouncedQ, debouncedRackQ],
+    queryKey: ['inventory-items', debouncedQ, debouncedRackQ, brandFilter, categoryFilter],
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
       try {
@@ -117,7 +146,10 @@ export default function Inventory() {
           debouncedRackQ !== '' && /^\d+$/.test(debouncedRackQ)
             ? Number(debouncedRackQ)
             : undefined
-        return await listItemsPage(debouncedQ, LIMIT, pageParam, rackFilter)
+        return await listItemsPage(debouncedQ, LIMIT, pageParam, rackFilter, {
+          brand: brandFilter || undefined,
+          category_id: categoryFilter ? Number(categoryFilter) : undefined,
+        })
       } catch (err: any) {
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load inventory'
         toast.push(String(msg), 'error')
@@ -128,7 +160,19 @@ export default function Inventory() {
   })
 
   const rows = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data])
-  const hasFilters = q.trim() !== '' || rackQ.trim() !== ''
+  const hasFilters = q.trim() !== '' || rackQ.trim() !== '' || brandFilter !== '' || categoryFilter !== ''
+
+  const brandsQ = useQuery({ queryKey: ['inventory-brands'], queryFn: () => fetchBrands({ active_only: true }) })
+  const categoriesQ = useQuery({ queryKey: ['inventory-categories'], queryFn: () => fetchCategories({ active_only: true }) })
+  const productsQ = useQuery({
+    queryKey: ['inventory-products-master'],
+    queryFn: () => fetchProducts({ active_only: true, limit: 2000 }),
+  })
+  const categoryNameById = useMemo(() => {
+    const map = new Map<number, string>()
+    for (const c of categoriesQ.data || []) map.set(Number(c.id), c.name)
+    return map
+  }, [categoriesQ.data])
 
   useEffect(() => {
     const el = loadMoreRef.current
@@ -198,6 +242,8 @@ export default function Inventory() {
         key,
         name: sorted[0]?.name,
         brand: sorted[0]?.brand,
+        category_id: sorted[0]?.category_id,
+        categoryName: sorted[0]?.category_id ? categoryNameById.get(Number(sorted[0].category_id)) || '-' : '-',
         rackLabel,
         expiryLabel,
         mrpLabel,
@@ -220,7 +266,7 @@ export default function Inventory() {
     })
 
     return list
-  }, [rows])
+  }, [rows, categoryNameById])
 
   const mCreate = useMutation({
     mutationFn: (payload: ItemFormValues) => createItem(payload),
@@ -253,21 +299,6 @@ export default function Inventory() {
     },
   })
 
-  const mDelete = useMutation({
-    mutationFn: (id: number) => deleteItem(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['inventory-items'] })
-      qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
-      qc.invalidateQueries({ queryKey: ['dash-inventory'] })
-      toast.push('Batch archived', 'warning')
-      setDeleteTarget(null)
-    },
-    onError: (err: any) => {
-      const msg = err?.response?.data?.detail || err?.message || 'Archive failed'
-      toast.push(String(msg), 'error')
-    },
-  })
-
   const mAdjust = useMutation({
     mutationFn: ({ id, delta }: { id: number; delta: number }) => adjustStock(id, delta),
     onSuccess: () => {
@@ -278,6 +309,65 @@ export default function Inventory() {
     },
     onError: (err: any) => {
       const msg = err?.response?.data?.detail || err?.message || 'Adjust stock failed'
+      toast.push(String(msg), 'error')
+    },
+  })
+
+  const mSaveProduct = useMutation({
+    mutationFn: () => {
+      const payload: ProductPayload = {
+        ...productForm,
+        name: productForm.name.trim(),
+        brand: productForm.brand?.trim() || undefined,
+        category_id: productForm.category_id || undefined,
+        default_rack_number: Number(productForm.default_rack_number || 0),
+        printed_price: Number(productForm.printed_price || 0),
+        parent_unit_name: productForm.loose_sale_enabled ? productForm.parent_unit_name?.trim() || 'Pack' : undefined,
+        child_unit_name: productForm.loose_sale_enabled ? productForm.child_unit_name?.trim() || 'Unit' : undefined,
+        default_conversion_qty: productForm.loose_sale_enabled ? Number(productForm.default_conversion_qty || 1) : undefined,
+      }
+      return productId ? updateProduct(productId, payload) : createProduct(payload)
+    },
+    onSuccess: () => {
+      setProductOpen(false)
+      qc.invalidateQueries({ queryKey: ['inventory-products-master'] })
+      qc.invalidateQueries({ queryKey: ['inventory-items'] })
+      toast.push('Product master saved', 'success')
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Product save failed'
+      toast.push(String(msg), 'error')
+    },
+  })
+
+  const mCreateProductBrand = useMutation({
+    mutationFn: createBrand,
+    onSuccess: (brand) => {
+      setProductForm((prev) => ({ ...prev, brand: brand.name }))
+      setProductBrandName('')
+      setProductBrandOpen(false)
+      qc.invalidateQueries({ queryKey: ['inventory-brands'] })
+      qc.invalidateQueries({ queryKey: ['brand-master'] })
+      toast.push('Brand added', 'success')
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to add brand'
+      toast.push(String(msg), 'error')
+    },
+  })
+
+  const mCreateProductCategory = useMutation({
+    mutationFn: createCategory,
+    onSuccess: (category) => {
+      setProductForm((prev) => ({ ...prev, category_id: Number(category.id) }))
+      setProductCategoryName('')
+      setProductCategoryOpen(false)
+      qc.invalidateQueries({ queryKey: ['inventory-categories'] })
+      qc.invalidateQueries({ queryKey: ['product-categories-master'] })
+      toast.push('Category added', 'success')
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Failed to add category'
       toast.push(String(msg), 'error')
     },
   })
@@ -295,23 +385,26 @@ export default function Inventory() {
     setAdjustName(row.name)
   }
 
-  function handleDeleteClick(row: any) {
-    setDeleteTarget(row)
-  }
-
-  function handleConfirmDelete() {
-    if (!deleteTarget) return
-    mDelete.mutate(deleteTarget.id)
-  }
-
-  function handleCancelDelete() {
-    setDeleteTarget(null)
-  }
-  function openRelatedProduct(name?: string | null, brand?: string | null) {
-    const params = new URLSearchParams()
-    if (name) params.set('q', String(name))
-    if (brand) params.set('brand', String(brand))
-    navigate(`/products?${params.toString()}`)
+  function openRelatedProduct(group: any) {
+    const name = String(group?.name || '')
+    const brand = String(group?.brand || '')
+    const product = (productsQ.data || []).find((p) => {
+      return String(p.name || '').trim().toLowerCase() === name.trim().toLowerCase()
+        && String(p.brand || '').trim().toLowerCase() === brand.trim().toLowerCase()
+    })
+    setProductId(product?.id ? Number(product.id) : null)
+    setProductForm({
+      name,
+      brand,
+      category_id: product?.category_id || group?.category_id || undefined,
+      default_rack_number: product?.default_rack_number ?? Number(group?.rackLabel || group?.displayItems?.[0]?.rack_number || 0),
+      printed_price: product?.printed_price ?? Number(group?.displayItems?.[0]?.mrp || 0),
+      loose_sale_enabled: Boolean(product?.loose_sale_enabled),
+      parent_unit_name: product?.parent_unit_name || '',
+      child_unit_name: product?.child_unit_name || '',
+      default_conversion_qty: product?.default_conversion_qty || undefined,
+    })
+    setProductOpen(true)
   }
 
   function openStockCardForGroup(group: any) {
@@ -404,6 +497,38 @@ export default function Inventory() {
             }}
           />
 
+          <TextField
+            select
+            label="Brand"
+            value={brandFilter}
+            onChange={(e) => setBrandFilter(e.target.value)}
+            size="small"
+            sx={{ width: { xs: '100%', md: 190 }, '& .MuiOutlinedInput-root': { borderRadius: 2.5, background: '#fff', minHeight: 46 } }}
+          >
+            <MenuItem value="">All Brands</MenuItem>
+            {(brandsQ.data || []).map((brand) => (
+              <MenuItem key={brand.id} value={brand.name}>
+                {brand.name}
+              </MenuItem>
+            ))}
+          </TextField>
+
+          <TextField
+            select
+            label="Category"
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            size="small"
+            sx={{ width: { xs: '100%', md: 210 }, '& .MuiOutlinedInput-root': { borderRadius: 2.5, background: '#fff', minHeight: 46 } }}
+          >
+            <MenuItem value="">All Categories</MenuItem>
+            {(categoriesQ.data || []).map((category) => (
+              <MenuItem key={category.id} value={String(category.id)}>
+                {category.name}
+              </MenuItem>
+            ))}
+          </TextField>
+
           <Button variant="contained" onClick={handleAdd} sx={{ minWidth: { md: 132 }, height: 46 }}>
             Add Item
           </Button>
@@ -425,6 +550,8 @@ export default function Inventory() {
               onClick={() => {
                 setQ('')
                 setRackQ('')
+                setBrandFilter('')
+                setCategoryFilter('')
               }}
               sx={{ alignSelf: { xs: 'flex-start', sm: 'center' } }}
             >
@@ -476,6 +603,7 @@ export default function Inventory() {
                     <th>Name</th>
                     <th>Rack</th>
                     <th>Brand</th>
+                    <th>Category</th>
                     <th>Earliest Expiry</th>
                     <th>MRP</th>
                     <th>Total Stock</th>
@@ -525,6 +653,7 @@ export default function Inventory() {
 
                         <td>{g.rackLabel}</td>
                         <td>{g.brand || '-'}</td>
+                        <td>{g.categoryName || '-'}</td>
                         <td>{g.expiryLabel}</td>
                         <td>{g.mrpLabel}</td>
 
@@ -538,11 +667,11 @@ export default function Inventory() {
 
                         <td>
                           <Stack direction="row" gap={1}>
-                            <Tooltip title="Open Product Master">
+                            <Tooltip title="Manage Product">
                               <Button
                                 size="small"
                                 variant="outlined"
-                                onClick={() => openRelatedProduct(g.name, g.brand)}
+                                onClick={() => openRelatedProduct(g)}
                                 sx={{ minWidth: 0 }}
                               >
                                 Product
@@ -563,17 +692,6 @@ export default function Inventory() {
                             <Tooltip title="Adjust Stock (earliest visible batch)">
                               <IconButton size="small" onClick={() => handleAdjust(g.displayItems[0])}>
                                 <AddCircleOutlineIcon fontSize="small" />
-                              </IconButton>
-                            </Tooltip>
-
-                            <Tooltip title="Archive (earliest visible batch)">
-                              <IconButton
-                                size="small"
-                                color="error"
-                                onClick={() => handleDeleteClick(g.displayItems[0])}
-                                disabled={mDelete.isPending}
-                              >
-                                <DeleteIcon fontSize="small" />
                               </IconButton>
                             </Tooltip>
                           </Stack>
@@ -603,6 +721,7 @@ export default function Inventory() {
                                 </td>
                                 <td>{it.rack_number ?? 0}</td>
                                 <td>{g.brand || '-'}</td>
+                                <td>{g.categoryName || '-'}</td>
                                 <td>{formatExpiry(it.expiry_date)}</td>
                                 <td>{Number(it.mrp || 0)}</td>
                                 <td>
@@ -629,17 +748,6 @@ export default function Inventory() {
                                     <Tooltip title="Adjust stock">
                                       <IconButton size="small" onClick={() => handleAdjust(it)}>
                                         <AddCircleOutlineIcon fontSize="small" />
-                                      </IconButton>
-                                    </Tooltip>
-
-                                    <Tooltip title="Archive this batch">
-                                      <IconButton
-                                        size="small"
-                                        color="error"
-                                        onClick={() => handleDeleteClick(it)}
-                                        disabled={mDelete.isPending}
-                                      >
-                                        <DeleteIcon fontSize="small" />
                                       </IconButton>
                                     </Tooltip>
                                   </Stack>
@@ -684,6 +792,175 @@ export default function Inventory() {
         }}
       />
 
+      <Dialog open={productOpen} onClose={() => setProductOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>{productId ? 'Manage Product' : 'Add Product Master'}</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} sx={{ pt: 1 }}>
+            <TextField
+              label="Product Name"
+              value={productForm.name}
+              onChange={(e) => setProductForm((prev) => ({ ...prev, name: e.target.value }))}
+              fullWidth
+            />
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+              <TextField
+                select
+                label="Brand"
+                value={productForm.brand || ''}
+                onChange={(e) => setProductForm((prev) => ({ ...prev, brand: e.target.value }))}
+                fullWidth
+              >
+                <MenuItem value="">No Brand</MenuItem>
+                {(brandsQ.data || []).map((brand) => (
+                  <MenuItem key={brand.id} value={brand.name}>
+                    {brand.name}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <Button variant="outlined" onClick={() => setProductBrandOpen(true)} sx={{ whiteSpace: 'nowrap' }}>
+                New Brand
+              </Button>
+            </Stack>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+              <TextField
+                select
+                label="Category"
+                value={productForm.category_id ? String(productForm.category_id) : ''}
+                onChange={(e) => setProductForm((prev) => ({ ...prev, category_id: e.target.value ? Number(e.target.value) : undefined }))}
+                fullWidth
+              >
+                <MenuItem value="">No Category</MenuItem>
+                {(categoriesQ.data || []).map((category) => (
+                  <MenuItem key={category.id} value={String(category.id)}>
+                    {category.name}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <Button variant="outlined" onClick={() => setProductCategoryOpen(true)} sx={{ whiteSpace: 'nowrap' }}>
+                New Category
+              </Button>
+            </Stack>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+              <TextField
+                label="Default Rack"
+                type="number"
+                value={productForm.default_rack_number ?? 0}
+                onChange={(e) => setProductForm((prev) => ({ ...prev, default_rack_number: Number(e.target.value || 0) }))}
+                fullWidth
+              />
+              <TextField
+                label="Printed Price"
+                type="number"
+                value={productForm.printed_price ?? 0}
+                onChange={(e) => setProductForm((prev) => ({ ...prev, printed_price: Number(e.target.value || 0) }))}
+                fullWidth
+              />
+            </Stack>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={Boolean(productForm.loose_sale_enabled)}
+                  onChange={(e) => setProductForm((prev) => ({ ...prev, loose_sale_enabled: e.target.checked }))}
+                />
+              }
+              label="Enable loose stock"
+            />
+            {productForm.loose_sale_enabled ? (
+              <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+                <TextField
+                  label="Parent Unit"
+                  value={productForm.parent_unit_name || ''}
+                  onChange={(e) => setProductForm((prev) => ({ ...prev, parent_unit_name: e.target.value }))}
+                  placeholder="Strip"
+                  fullWidth
+                />
+                <TextField
+                  label="Loose Unit"
+                  value={productForm.child_unit_name || ''}
+                  onChange={(e) => setProductForm((prev) => ({ ...prev, child_unit_name: e.target.value }))}
+                  placeholder="Tablet"
+                  fullWidth
+                />
+                <TextField
+                  label="Units per Parent"
+                  type="number"
+                  value={productForm.default_conversion_qty ?? ''}
+                  onChange={(e) => setProductForm((prev) => ({ ...prev, default_conversion_qty: e.target.value ? Number(e.target.value) : undefined }))}
+                  inputProps={{ min: 1, step: 1 }}
+                  fullWidth
+                />
+              </Stack>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setProductOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => mSaveProduct.mutate()}
+            disabled={!productForm.name.trim() || mSaveProduct.isPending}
+          >
+            {mSaveProduct.isPending ? 'Saving...' : 'Save Product'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={productBrandOpen} onClose={() => setProductBrandOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Add Brand</DialogTitle>
+        <DialogContent dividers>
+          <TextField
+            label="Brand Name"
+            value={productBrandName}
+            onChange={(e) => setProductBrandName(e.target.value)}
+            autoFocus
+            fullWidth
+            sx={{ mt: 1 }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setProductBrandOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => {
+              const name = productBrandName.trim()
+              if (!name) return toast.push('Brand name is required', 'error')
+              mCreateProductBrand.mutate(name)
+            }}
+            disabled={mCreateProductBrand.isPending}
+          >
+            Save Brand
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={productCategoryOpen} onClose={() => setProductCategoryOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Add Category</DialogTitle>
+        <DialogContent dividers>
+          <TextField
+            label="Category Name"
+            value={productCategoryName}
+            onChange={(e) => setProductCategoryName(e.target.value)}
+            autoFocus
+            fullWidth
+            sx={{ mt: 1 }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setProductCategoryOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => {
+              const name = productCategoryName.trim()
+              if (!name) return toast.push('Category name is required', 'error')
+              mCreateProductCategory.mutate(name)
+            }}
+            disabled={mCreateProductCategory.isPending}
+          >
+            Save Category
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <AdjustStockDialog
         open={adjustId != null}
         itemName={adjustName}
@@ -697,24 +974,6 @@ export default function Inventory() {
           setAdjustName('')
         }}
       />
-
-      {/* Delete confirmation dialog */}
-      <Dialog open={Boolean(deleteTarget)} onClose={handleCancelDelete} maxWidth="xs" fullWidth>
-        <DialogTitle>Archive Batch</DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2">
-            {deleteTarget
-              ? `Archive batch "${deleteTarget.name}"? Only zero-stock batches can be archived, and the stock history is preserved.`
-              : ''}
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleCancelDelete}>Cancel</Button>
-          <Button onClick={handleConfirmDelete} color="warning" variant="contained" disabled={mDelete.isPending}>
-            Archive
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Stack>
   )
 }

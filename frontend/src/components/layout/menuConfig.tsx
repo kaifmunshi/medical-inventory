@@ -73,7 +73,7 @@ export const appMenuGroups: AppMenuGroup[] = [
     icon: <PointOfSale fontSize="small" />,
     items: [
       { to: '/billing', label: 'Billing', icon: <PointOfSale fontSize="small" />, hint: 'Sales and billing' },
-      { to: '/purchases', label: 'Purchase Order', icon: <ShoppingCart fontSize="small" />, hint: 'Supplier purchases and inward stock' },
+      { to: '/purchases', label: 'Purchase', icon: <ShoppingCart fontSize="small" />, hint: 'Supplier purchases and inward stock' },
       { to: '/returns', label: 'Returns', icon: <AssignmentReturn fontSize="small" />, hint: 'Returns and refunds' },
       { to: '/exchange', label: 'Exchange', icon: <SwapHoriz fontSize="small" />, hint: 'Exchange workflow' },
     ],

@@ -37,7 +37,7 @@ def _clean_text(raw: Optional[str]) -> Optional[str]:
 
 def _expected_financial_year_label(start_date: str) -> str:
     start_year = int(start_date[:4])
-    return f"FY {str(start_year)[-2:]}-{str(start_year + 1)[-2:]}"
+    return f"FY {start_year}-{str(start_year + 1)[-2:]}"
 
 
 def _validate_financial_year_range(start_date: str, end_date: str) -> None:

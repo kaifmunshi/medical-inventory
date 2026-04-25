@@ -12,6 +12,7 @@ import {
   Tab,
   Tabs,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
@@ -272,7 +273,53 @@ export default function StockCardPage() {
     [batchLedgerQ.data]
   )
 
-  const activeRows = tab === 'batch' ? batchRows : productRows
+  const productRowsWithOpening = useMemo(() => {
+    if (!from || productSummaryQ.isLoading) return productRows
+    const opening = Number(productSummaryQ.data?.opening_stock || 0)
+    return [
+      ...productRows,
+      {
+        id: -1,
+        ts: `${from}T00:00:00`,
+        delta: opening,
+        reason: 'OPENING',
+        ref_type: null,
+        ref_id: null,
+        note: `Opening stock at ${from}`,
+        item_id: 0,
+        expiry_date: null,
+        mrp: null,
+        rack_number: null,
+        balance_before: 0,
+        balance_after: opening,
+      },
+    ]
+  }, [from, productRows, productSummaryQ.data?.opening_stock, productSummaryQ.isLoading])
+
+  const batchRowsWithOpening = useMemo(() => {
+    if (!from || batchSummaryQ.isLoading || !currentBatch?.id) return batchRows
+    const opening = Number(batchSummaryQ.data?.opening_stock || 0)
+    return [
+      ...batchRows,
+      {
+        id: -2,
+        ts: `${from}T00:00:00`,
+        delta: opening,
+        reason: 'OPENING',
+        ref_type: null,
+        ref_id: null,
+        note: `Opening stock at ${from}`,
+        item_id: Number(currentBatch.id),
+        expiry_date: currentBatch.expiry_date,
+        mrp: currentBatch.mrp,
+        rack_number: currentBatch.rack_number,
+        balance_before: 0,
+        balance_after: opening,
+      },
+    ]
+  }, [batchRows, batchSummaryQ.data?.opening_stock, batchSummaryQ.isLoading, currentBatch, from])
+
+  const activeRows = tab === 'batch' ? batchRowsWithOpening : productRowsWithOpening
 
   useEffect(() => {
     if (!activeRows.length) {
@@ -349,13 +396,6 @@ export default function StockCardPage() {
     navigate(buildProductSearch(name, brand || undefined))
   }
 
-  function openInventoryList() {
-    const params = new URLSearchParams()
-    params.set('q', name)
-    if (currentBatch?.rack_number != null) params.set('rack', String(currentBatch.rack_number))
-    navigate(`/inventory?${params.toString()}`)
-  }
-
   function openSourcePage() {
     if (!selectedMovement) return
     const refId = Number(selectedMovement.ref_id || 0) || null
@@ -412,7 +452,7 @@ export default function StockCardPage() {
   }
 
   function summaryMetric(label: string, value: string, helper?: string) {
-    return (
+    const tile = (
       <Paper
         variant="outlined"
         sx={{
@@ -436,6 +476,11 @@ export default function StockCardPage() {
         ) : null}
       </Paper>
     )
+    return helper ? (
+      <Tooltip title={helper} arrow>
+        {tile}
+      </Tooltip>
+    ) : tile
   }
 
   function renderSourceDetails() {
@@ -640,7 +685,9 @@ export default function StockCardPage() {
                       <td>{formatDateTime(row.ts)}</td>
                       <td>
                         <Stack gap={0.2}>
-                          <Typography sx={{ fontWeight: 800 }}>#{row.item_id}</Typography>
+                          <Typography sx={{ fontWeight: 800 }}>
+                            {Number(row.item_id || 0) > 0 ? `#${row.item_id}` : 'Product'}
+                          </Typography>
                           <Typography variant="caption" color="text.secondary">
                             Exp {formatExpiry(row.expiry_date)} • MRP {row.mrp ?? '-'}
                           </Typography>
@@ -757,7 +804,7 @@ export default function StockCardPage() {
             {summaryMetric(
               'Batches',
               `${groupQ.data.active_batch_count} / ${groupQ.data.total_batch_count}`,
-              groupQ.data.archived_batch_count ? `${groupQ.data.archived_batch_count} archived` : undefined
+              'In-stock batches / total batches'
             )}
           </Stack>
         </Stack>
@@ -813,7 +860,6 @@ export default function StockCardPage() {
             <Button variant="outlined" onClick={() => quickRange(30)} size="small">30D</Button>
             <Button variant="outlined" onClick={() => quickRange(90)} size="small">90D</Button>
             <Button variant="outlined" onClick={() => quickRange('all')} size="small">All Time</Button>
-            <Button variant="outlined" onClick={openInventoryList} size="small">Back to Inventory</Button>
           </Stack>
         </Stack>
       </Paper>
@@ -844,7 +890,11 @@ export default function StockCardPage() {
             {summaryMetric('Inward Qty', String(productSummaryQ.data?.inward_qty ?? '-'), 'Purchases, returns, positive adjustments')}
             {summaryMetric('Outward Qty', String(productSummaryQ.data?.outward_qty ?? '-'), 'Sales, exchange out, negative adjustments')}
             {summaryMetric('Closing Stock', String(productSummaryQ.data?.closing_stock ?? '-'), to ? `At ${formatExpiry(to)}` : 'Latest ledger close')}
-            {summaryMetric('Ledger Gap', formatSigned(productSummaryQ.data?.ledger_balance_gap ?? 0), '0 means ledger matches stock')}
+            {summaryMetric(
+              'Ledger Gap',
+              formatSigned(productSummaryQ.data?.ledger_balance_gap ?? 0),
+              `Gap = current stock (${productSummaryQ.data?.current_stock ?? '-'}) - total ledger movement balance. 0 means ledger matches stock.`
+            )}
           </Stack>
 
           <Stack direction={{ xs: 'column', xl: 'row' }} gap={1.5}>
@@ -872,7 +922,7 @@ export default function StockCardPage() {
                 Recent Product Movements
               </Typography>
               {renderLedgerTable(
-                productRows.slice(0, 6),
+                productRowsWithOpening.slice(0, 6),
                 productLedgerQ.isLoading,
                 productLedgerQ.hasNextPage,
                 () => productLedgerQ.fetchNextPage(),
@@ -895,8 +945,12 @@ export default function StockCardPage() {
                     </Typography>
                     <Stack direction="row" gap={1} flexWrap="wrap">
                       <Chip size="small" label={`Stock ${currentBatch.stock}`} />
-                      {currentBatch.is_archived ? <Chip size="small" label="Archived" variant="outlined" /> : null}
-                      <Chip size="small" label={`Batch Gap ${formatSigned(batchSummaryQ.data?.ledger_balance_gap ?? 0)}`} variant="outlined" />
+                      <Tooltip
+                        title={`Gap = current batch stock (${batchSummaryQ.data?.current_stock ?? '-'}) - total ledger movement balance for this batch.`}
+                        arrow
+                      >
+                        <Chip size="small" label={`Batch Gap ${formatSigned(batchSummaryQ.data?.ledger_balance_gap ?? 0)}`} variant="outlined" />
+                      </Tooltip>
                     </Stack>
                     <Button variant="outlined" onClick={() => setTab('batch')} size="small">
                       Open Batch Ledger
@@ -934,7 +988,7 @@ export default function StockCardPage() {
             </Paper>
 
             {renderLedgerTable(
-              productRows,
+              productRowsWithOpening,
               productLedgerQ.isLoading,
               Boolean(productLedgerQ.hasNextPage),
               () => productLedgerQ.fetchNextPage(),
@@ -970,7 +1024,6 @@ export default function StockCardPage() {
                   {batches.map((batch) => (
                     <MenuItem key={batch.id} value={batch.id}>
                       #{batch.id} • Exp {formatExpiry(batch.expiry_date)} • MRP {batch.mrp} • Stock {batch.stock}
-                      {batch.is_archived ? ' • Archived' : ''}
                     </MenuItem>
                   ))}
                 </TextField>
@@ -981,12 +1034,17 @@ export default function StockCardPage() {
                 <Chip size="small" label={`Inward ${batchSummaryQ.data?.inward_qty ?? '-'}`} variant="outlined" />
                 <Chip size="small" label={`Outward ${batchSummaryQ.data?.outward_qty ?? '-'}`} variant="outlined" />
                 <Chip size="small" label={`Closing ${batchSummaryQ.data?.closing_stock ?? '-'}`} color="primary" />
-                <Chip size="small" label={`Gap ${formatSigned(batchSummaryQ.data?.ledger_balance_gap ?? 0)}`} variant="outlined" />
+                <Tooltip
+                  title={`Gap = current batch stock (${batchSummaryQ.data?.current_stock ?? '-'}) - total ledger movement balance for this batch.`}
+                  arrow
+                >
+                  <Chip size="small" label={`Gap ${formatSigned(batchSummaryQ.data?.ledger_balance_gap ?? 0)}`} variant="outlined" />
+                </Tooltip>
               </Stack>
             </Paper>
 
             {renderLedgerTable(
-              batchRows,
+              batchRowsWithOpening,
               batchLedgerQ.isLoading,
               Boolean(batchLedgerQ.hasNextPage),
               () => batchLedgerQ.fetchNextPage(),
@@ -1011,8 +1069,7 @@ export default function StockCardPage() {
             </Box>
             <Stack direction="row" gap={1} flexWrap="wrap">
               <Chip size="small" label={`Total ${groupQ.data.total_batch_count}`} />
-              <Chip size="small" label={`Active ${groupQ.data.active_batch_count}`} variant="outlined" />
-              <Chip size="small" label={`Archived ${groupQ.data.archived_batch_count}`} variant="outlined" />
+              <Chip size="small" label={`In stock ${groupQ.data.active_batch_count}`} variant="outlined" />
             </Stack>
           </Stack>
 
@@ -1048,7 +1105,7 @@ export default function StockCardPage() {
                       <td>{batch.rack_number || 0}</td>
                       <td>
                         <Stack direction="row" gap={1} flexWrap="wrap">
-                          {batch.is_archived ? statusChip('Archived') : statusChip('Live', Number(batch.stock || 0) > 0 ? 'success' : 'default')}
+                          {statusChip(Number(batch.stock || 0) > 0 ? 'In Stock' : 'Zero Stock', Number(batch.stock || 0) > 0 ? 'success' : 'default')}
                           {days != null && days <= 90 ? statusChip('Near Expiry', 'warning') : null}
                         </Stack>
                       </td>

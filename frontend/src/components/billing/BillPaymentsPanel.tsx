@@ -12,7 +12,6 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
@@ -20,12 +19,9 @@ import {
   getBill,
   listBillPayments,
   receivePayment,
-  recoverBillPayment,
-  undoBillPayment,
   type BillPaymentRow,
 } from '../../services/billing'
 import { todayRange } from '../../lib/date'
-import ConfirmDialog from '../ui/ConfirmDialog'
 
 function money(n: number | string | undefined | null) {
   return Number(n || 0).toFixed(2)
@@ -48,8 +44,6 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   const [online, setOnline] = useState<number | ''>('')
   const [note, setNote] = useState('')
   const [paymentDate, setPaymentDate] = useState(todayFrom)
-  const [undoPaymentRow, setUndoPaymentRow] = useState<BillPaymentRow | null>(null)
-  const [recoverPaymentRow, setRecoverPaymentRow] = useState<BillPaymentRow | null>(null)
   const [editPaymentRow, setEditPaymentRow] = useState<BillPaymentRow | null>(null)
 
   const qPayments = useQuery({
@@ -65,7 +59,6 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
 
   const payments = Array.isArray(qPayments.data) ? qPayments.data : []
   const activePayments = useMemo(() => payments.filter((p) => !p?.is_deleted), [payments])
-  const deletedPayments = useMemo(() => payments.filter((p) => p?.is_deleted), [payments])
 
   async function syncBillAndPayments() {
     if (!bill?.id) return
@@ -183,22 +176,6 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
     },
   })
 
-  const mUndoPay = useMutation({
-    mutationFn: async (payment: BillPaymentRow) => undoBillPayment(Number(bill.id), Number(payment.id)),
-    onSuccess: async () => {
-      setUndoPaymentRow(null)
-      await syncBillAndPayments()
-    },
-  })
-
-  const mRecoverPay = useMutation({
-    mutationFn: async (payment: BillPaymentRow) => recoverBillPayment(Number(bill.id), Number(payment.id)),
-    onSuccess: async () => {
-      setRecoverPaymentRow(null)
-      await syncBillAndPayments()
-    },
-  })
-
   return (
     <>
       {!bill?.is_deleted ? (
@@ -254,9 +231,6 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                       <IconButton size="small" onClick={() => openEditPayment(p)} disabled={mEditPay.isPending} color="primary" sx={{ p: 0.25 }}>
                         <EditOutlinedIcon fontSize="small" />
                       </IconButton>
-                      <IconButton size="small" color="error" onClick={() => setUndoPaymentRow(p)} disabled={mUndoPay.isPending} sx={{ p: 0.25 }}>
-                        <DeleteOutlineIcon fontSize="small" />
-                      </IconButton>
                     </Box>
                   </td>
                 </tr>
@@ -274,95 +248,6 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
           </table>
         </Box>
       )}
-
-      <Typography variant="subtitle1">Deleted Payment History</Typography>
-      <Box sx={{ overflowX: 'auto' }}>
-        <table className="table">
-          <thead>
-            <tr>
-              <th style={{ width: 120 }}>Date</th>
-              <th>Mode</th>
-              <th>Cash</th>
-              <th>Online</th>
-              <th style={{ minWidth: 220 }}>Note</th>
-              <th style={{ width: 120 }}>Deleted</th>
-              <th style={{ width: 64 }}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {deletedPayments.map((p) => (
-              <tr key={`deleted-${p.id}`}>
-                <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {p.received_at ? String(p.received_at).slice(0, 10) : '-'}
-                </td>
-                <td>{p.mode || '-'}</td>
-                <td>{money(p.cash_amount)}</td>
-                <td>{money(p.online_amount)}</td>
-                <td style={{ minWidth: 220 }}>{p.note || ''}</td>
-                <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {p.deleted_at ? String(p.deleted_at).slice(0, 10) : '-'}
-                </td>
-                <td align="right">
-                  <Button size="small" variant="outlined" onClick={() => setRecoverPaymentRow(p)} disabled={mRecoverPay.isPending} sx={{ minWidth: 0, px: 1 }}>
-                    Recover
-                  </Button>
-                </td>
-              </tr>
-            ))}
-            {deletedPayments.length === 0 && (
-              <tr>
-                <td colSpan={7}>
-                  <Box p={2} color="text.secondary">
-                    No deleted payments.
-                  </Box>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </Box>
-
-      <ConfirmDialog
-        open={Boolean(undoPaymentRow)}
-        title="Undo Payment"
-        onClose={() => {
-          if (!mUndoPay.isPending) setUndoPaymentRow(null)
-        }}
-        onConfirm={() => {
-          if (undoPaymentRow) mUndoPay.mutate(undoPaymentRow)
-        }}
-      >
-        <Typography sx={{ mt: 1 }}>
-          Undo payment of Rs.{money(Number(undoPaymentRow?.cash_amount || 0) + Number(undoPaymentRow?.online_amount || 0))}
-          {undoPaymentRow?.received_at ? ` received at ${undoPaymentRow.received_at}` : ''}?
-        </Typography>
-        {mUndoPay.isError ? (
-          <Typography color="error" sx={{ mt: 1 }}>
-            {(mUndoPay.error as any)?.message || 'Undo failed'}
-          </Typography>
-        ) : null}
-      </ConfirmDialog>
-
-      <ConfirmDialog
-        open={Boolean(recoverPaymentRow)}
-        title="Recover Payment"
-        onClose={() => {
-          if (!mRecoverPay.isPending) setRecoverPaymentRow(null)
-        }}
-        onConfirm={() => {
-          if (recoverPaymentRow) mRecoverPay.mutate(recoverPaymentRow)
-        }}
-      >
-        <Typography sx={{ mt: 1 }}>
-          Recover payment of Rs.{money(Number(recoverPaymentRow?.cash_amount || 0) + Number(recoverPaymentRow?.online_amount || 0))}
-          {recoverPaymentRow?.received_at ? ` received at ${recoverPaymentRow.received_at}` : ''}?
-        </Typography>
-        {mRecoverPay.isError ? (
-          <Typography color="error" sx={{ mt: 1 }}>
-            {(mRecoverPay.error as any)?.message || 'Recover failed'}
-          </Typography>
-        ) : null}
-      </ConfirmDialog>
 
       <Dialog open={Boolean(editPaymentRow)} onClose={() => !mEditPay.isPending && setEditPaymentRow(null)} fullWidth maxWidth="sm">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

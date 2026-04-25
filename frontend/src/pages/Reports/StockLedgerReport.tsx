@@ -817,7 +817,6 @@ export default function StockLedgerReport(props: {
                             <Typography variant="caption" color="text.secondary">
                               #{row.item_id} • Brand: {row.brand || '-'} • Exp: {formatExpiry(row.expiry_date)} • MRP:{' '}
                               {row.mrp} • Rack: {row.rack_number || 0}
-                              {row.is_archived ? ' • Archived' : ''}
                             </Typography>
                           </Stack>
                         </td>

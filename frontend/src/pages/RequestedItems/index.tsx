@@ -17,15 +17,12 @@ import {
   TableCell,
   Paper,
   Stack,
-  IconButton,
 } from '@mui/material'
-import DeleteIcon from '@mui/icons-material/Delete'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   fetchRequestedItems,
   createRequestedItem,
   toggleRequestedItemAvailability,
-  deleteRequestedItem,
 } from '../../services/requestedItems'
 import type { RequestedItem } from '../../lib/types'
 
@@ -47,9 +44,6 @@ export default function RequestedItemsPage() {
   const [mobileError, setMobileError] = useState('') // 👈 NEW
   const [itemName, setItemName] = useState('')
   const [notes, setNotes] = useState('')
-
-  // for delete dialog
-  const [deleteTarget, setDeleteTarget] = useState<RequestedItem | null>(null)
 
   const { data, isLoading, isError, error } = useQuery<RequestedItem[], Error>({
     queryKey: ['requested-items'],
@@ -82,14 +76,6 @@ export default function RequestedItemsPage() {
     },
   })
 
-  const deleteMutation = useMutation({
-    mutationFn: (id: number) => deleteRequestedItem(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['requested-items'] })
-      setDeleteTarget(null)
-    },
-  })
-
   // ---------- Handlers ----------
 
   const handleSubmit = () => {
@@ -107,19 +93,6 @@ export default function RequestedItemsPage() {
       item_name: itemName.trim(),
       notes: notes.trim() || undefined,
     })
-  }
-
-  const handleDeleteClick = (row: RequestedItem) => {
-    setDeleteTarget(row)
-  }
-
-  const handleConfirmDelete = () => {
-    if (!deleteTarget) return
-    deleteMutation.mutate(deleteTarget.id)
-  }
-
-  const handleCancelDelete = () => {
-    setDeleteTarget(null)
   }
 
   // Mobile input change: keep only digits & max 10
@@ -197,15 +170,6 @@ export default function RequestedItemsPage() {
                   <TableCell>{row.mobile}</TableCell>
                   <TableCell>{row.notes || '-'}</TableCell>
                   <TableCell>{formatDate(row.created_at)}</TableCell>
-                  <TableCell align="center">
-                    <IconButton
-                      size="small"
-                      onClick={() => handleDeleteClick(row)}
-                      disabled={deleteMutation.isPending}
-                    >
-                      <DeleteIcon fontSize="small" />
-                    </IconButton>
-                  </TableCell>
                 </TableRow>
               ))}
               {rows && rows.length === 0 && (
@@ -276,33 +240,6 @@ export default function RequestedItemsPage() {
         </DialogActions>
       </Dialog>
 
-      {/* Delete confirmation dialog */}
-      <Dialog
-        open={Boolean(deleteTarget)}
-        onClose={handleCancelDelete}
-        maxWidth="xs"
-        fullWidth
-      >
-        <DialogTitle>Delete Requested Item</DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2">
-            {deleteTarget
-              ? `Delete request "${deleteTarget.item_name}" for ${deleteTarget.mobile}?`
-              : ''}
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleCancelDelete}>Cancel</Button>
-          <Button
-            onClick={handleConfirmDelete}
-            color="error"
-            variant="contained"
-            disabled={deleteMutation.isPending}
-          >
-            Delete
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   )
 }

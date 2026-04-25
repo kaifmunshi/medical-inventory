@@ -2,22 +2,16 @@ import { useMemo, useState } from 'react'
 import {
   Box,
   Button,
-  Chip,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  FormControlLabel,
-  IconButton,
   Paper,
   Stack,
-  Switch,
   TextField,
   Typography,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
-import ArchiveIcon from '@mui/icons-material/Archive'
-import UnarchiveIcon from '@mui/icons-material/Unarchive'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createBrand, fetchBrands, updateBrand } from '../../services/products'
 import type { Brand } from '../../lib/types'
@@ -43,14 +37,13 @@ export default function BrandMasterPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const [q, setQ] = useState('')
-  const [showInactive, setShowInactive] = useState(false)
   const [open, setOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<Brand | null>(null)
   const [name, setName] = useState('')
 
   const brandsQ = useQuery<Brand[], Error>({
-    queryKey: ['brand-master', showInactive],
-    queryFn: () => fetchBrands({ active_only: !showInactive }),
+    queryKey: ['brand-master'],
+    queryFn: () => fetchBrands({ active_only: true }),
   })
 
   const createM = useMutation({
@@ -96,7 +89,6 @@ export default function BrandMasterPage() {
 
   function resetFilters() {
     setQ('')
-    setShowInactive(false)
   }
 
   function saveCreate() {
@@ -116,10 +108,6 @@ export default function BrandMasterPage() {
       return
     }
     updateM.mutate({ id: Number(editTarget.id), payload: { name: clean } })
-  }
-
-  function toggleActive(row: Brand) {
-    updateM.mutate({ id: Number(row.id), payload: { is_active: !row.is_active } })
   }
 
   return (
@@ -142,11 +130,6 @@ export default function BrandMasterPage() {
           <Button variant="outlined" onClick={resetFilters} sx={{ minWidth: 120 }}>
             Reset Filters
           </Button>
-          <FormControlLabel
-            control={<Switch checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />}
-            label="Show inactive"
-            sx={{ minWidth: 160 }}
-          />
         </Stack>
       </Paper>
 
@@ -156,38 +139,21 @@ export default function BrandMasterPage() {
             <thead>
               <tr>
                 <th>Name</th>
-                <th>Status</th>
                 <th>Created</th>
                 <th>Updated</th>
-                <th></th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={row.id} onDoubleClick={() => openEdit(row)} style={{ cursor: 'pointer' }}>
                   <td>{row.name}</td>
-                  <td>
-                    <Chip
-                      size="small"
-                      label={row.is_active ? 'Active' : 'Inactive'}
-                      color={row.is_active ? 'success' : 'default'}
-                      variant={row.is_active ? 'filled' : 'outlined'}
-                    />
-                  </td>
                   <td>{formatDate(row.created_at)}</td>
                   <td>{formatDate(row.updated_at)}</td>
-                  <td>
-                    <Stack direction="row" gap={1}>
-                      <IconButton size="small" color={row.is_active ? 'warning' : 'success'} onClick={() => toggleActive(row)}>
-                        {row.is_active ? <ArchiveIcon fontSize="small" /> : <UnarchiveIcon fontSize="small" />}
-                      </IconButton>
-                    </Stack>
-                  </td>
                 </tr>
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={5}>
+                  <td colSpan={3}>
                     <Box p={2} color="text.secondary">No brands found.</Box>
                   </td>
                 </tr>

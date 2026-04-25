@@ -1,7 +1,7 @@
 // frontend/src/services/cashbook.ts
 import api from './api'
 
-export type CashbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE'
+export type CashbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE' | 'CONTRA'
 
 export type CashbookCreate = {
   entry_type: CashbookType
@@ -29,6 +29,11 @@ export type CashbookEntry = {
 
 export async function createCashbookEntry(payload: CashbookCreate) {
   const { data } = await api.post('/cashbook/', payload)
+  return data
+}
+
+export async function updateCashbookEntry(entry_id: number, payload: CashbookCreate) {
+  const { data } = await api.patch(`/cashbook/entry/${entry_id}`, payload)
   return data
 }
 

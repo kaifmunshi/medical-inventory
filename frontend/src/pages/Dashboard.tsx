@@ -18,12 +18,9 @@ import {
   Divider,
   TextField,
   MenuItem,
-  IconButton,
-  Chip,
   TableContainer,
   TablePagination,
 } from '@mui/material'
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { listBills, listAllBills, getPaymentsSummary } from '../services/billing'
 import { listReturns } from '../services/returns'
@@ -34,7 +31,6 @@ import {
   getCashbookSummary,
   listCashbookEntries,
   type CashbookEntry,
-  deleteCashbookEntry,
 } from '../services/cashbook'
 
 function formatExpiry(exp?: string | null) {
@@ -125,41 +121,6 @@ export default function Dashboard() {
   const [cbType, setCbType] = useState<'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE'>('EXPENSE')
   const [cbAmount, setCbAmount] = useState<string>('')
   const [cbNote, setCbNote] = useState<string>('')
-
-  // ✅ NEW: beautiful delete confirmation dialog state
-  const [openDeleteCb, setOpenDeleteCb] = useState(false)
-  const [selectedCb, setSelectedCb] = useState<CashbookEntry | null>(null)
-
-  function openDeleteDialog(entry: CashbookEntry) {
-    setSelectedCb(entry)
-    setOpenDeleteCb(true)
-  }
-
-  function closeDeleteDialog() {
-    if (mDeleteCashbookEntry.isPending) return
-    setOpenDeleteCb(false)
-    setSelectedCb(null)
-  }
-
-  const typeLabel = (t?: string) => {
-    const et = String(t || '').toUpperCase()
-    if (et === 'RECEIPT') return 'Receipt'
-    if (et === 'WITHDRAWAL') return 'Withdrawal'
-    return 'Expense'
-  }
-
-  const typeChipSx = (t?: string) => {
-    const et = String(t || '').toUpperCase()
-    return {
-      fontWeight: 800,
-      borderRadius: 999,
-      ...(et === 'RECEIPT'
-        ? { bgcolor: 'rgba(46,125,50,0.12)', color: 'success.main' }
-        : et === 'WITHDRAWAL'
-          ? { bgcolor: 'rgba(25,118,210,0.12)', color: 'primary.main' }
-          : { bgcolor: 'rgba(211,47,47,0.12)', color: 'error.main' }),
-    }
-  }
 
   // Cashbook History (custom range)
   const [openCashbookHistory, setOpenCashbookHistory] = useState(false)
@@ -478,16 +439,6 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       setCbAmount('')
       setCbNote('')
       setOpenCashbook(false)
-      qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
-      qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
-      qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
-    },
-  })
-
-  // ✅ delete specific entry
-  const mDeleteCashbookEntry = useMutation({
-    mutationFn: (id: number) => deleteCashbookEntry(id),
-    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
@@ -894,9 +845,6 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
                     <TableCell>Type</TableCell>
                     <TableCell>Note</TableCell>
                     <TableCell align="right">Amount</TableCell>
-                    <TableCell align="center" width={80}>
-                      Action
-                    </TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -906,16 +854,6 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
                       <TableCell>{r.entry_type}</TableCell>
                       <TableCell>{r.note || '-'}</TableCell>
                       <TableCell align="right">₹{to2(r.amount).toFixed(2)}</TableCell>
-                      <TableCell align="center">
-                        <IconButton
-                          size="small"
-                          color="error"
-                          onClick={() => openDeleteDialog(r)}
-                          disabled={mDeleteCashbookEntry.isPending}
-                        >
-                          <DeleteOutlineIcon fontSize="small" />
-                        </IconButton>
-                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -926,75 +864,6 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
               <Button onClick={() => setOpenCashbookHistory(false)}>Close</Button>
             </Stack>
           </Stack>
-        </DialogContent>
-      </Dialog>
-
-      {/* ✅ Beautiful Cashbook Delete Confirmation */}
-      <Dialog open={openDeleteCb} onClose={closeDeleteDialog} fullWidth maxWidth="xs">
-        <DialogTitle sx={{ fontWeight: 800 }}>Delete entry?</DialogTitle>
-        <DialogContent>
-          {selectedCb ? (
-            <Stack spacing={1.5} mt={1}>
-              <Stack direction="row" justifyContent="space-between" alignItems="center">
-                <Chip label={typeLabel(selectedCb.entry_type)} size="small" sx={typeChipSx(selectedCb.entry_type)} />
-                <Typography variant="h6" sx={{ fontWeight: 900 }}>
-                  ₹{to2(selectedCb.amount).toFixed(2)}
-                </Typography>
-              </Stack>
-
-              <Paper sx={{ p: 1.25, borderRadius: 2, bgcolor: 'rgba(255,255,255,0.92)' }}>
-                <Stack spacing={0.75}>
-                  <Stack direction="row" justifyContent="space-between" gap={2}>
-                    <Typography variant="caption" color="text.secondary">
-                      Date/Time
-                    </Typography>
-                    <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                      {String(selectedCb.created_at).replace('T', ' ')}
-                    </Typography>
-                  </Stack>
-
-                  <Stack direction="row" justifyContent="space-between" gap={2}>
-                    <Typography variant="caption" color="text.secondary">
-                      Note
-                    </Typography>
-                    <Typography variant="body2" sx={{ fontWeight: 700, textAlign: 'right' }}>
-                      {selectedCb.note?.trim() ? selectedCb.note : '—'}
-                    </Typography>
-                  </Stack>
-                </Stack>
-              </Paper>
-
-              <Typography variant="caption" color="text.secondary">
-                This action cannot be undone.
-              </Typography>
-
-              <Stack direction="row" justifyContent="flex-end" gap={1} mt={1}>
-                <Button onClick={closeDeleteDialog} disabled={mDeleteCashbookEntry.isPending}>
-                  Cancel
-                </Button>
-                <Button
-                  variant="contained"
-                  color="error"
-                  onClick={() => {
-                    if (!selectedCb?.id) return
-                    mDeleteCashbookEntry.mutate(Number(selectedCb.id), {
-                      onSuccess: () => {
-                        setOpenDeleteCb(false)
-                        setSelectedCb(null)
-                      },
-                    })
-                  }}
-                  disabled={mDeleteCashbookEntry.isPending}
-                >
-                  {mDeleteCashbookEntry.isPending ? 'Deleting…' : 'Delete'}
-                </Button>
-              </Stack>
-            </Stack>
-          ) : (
-            <Typography color="text.secondary" mt={1}>
-              No entry selected.
-            </Typography>
-          )}
         </DialogContent>
       </Dialog>
 

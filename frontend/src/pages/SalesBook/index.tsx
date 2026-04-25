@@ -4,6 +4,12 @@ import {
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
+  MenuItem,
   Paper,
   Stack,
   Table,
@@ -17,14 +23,19 @@ import {
   TextField,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
 } from '@mui/material'
-import { useQuery } from '@tanstack/react-query'
+import CloseIcon from '@mui/icons-material/Close'
+import EditIcon from '@mui/icons-material/Edit'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { last15DaysRange, toYMD } from '../../lib/date'
-import { listBills, listPayments } from '../../services/billing'
+import { getBill, listBills, listPayments } from '../../services/billing'
 import { listReturns } from '../../services/returns'
-import { listCashbookEntries } from '../../services/cashbook'
+import { listCashbookEntries, updateCashbookEntry, type CashbookType } from '../../services/cashbook'
+import { listBankbookEntries, updateBankbookEntry, type BankbookMode, type BankbookType } from '../../services/bankbook'
 import { fetchPurchases } from '../../services/purchases'
+import BillEditDialog from '../../components/billing/BillEditDialog'
 
 type DayRow = {
   date: string
@@ -44,6 +55,7 @@ type DayRow = {
 }
 
 type ViewMode = 'daily' | 'weekly' | 'monthly'
+type DetailKind = 'sales' | 'outflow' | 'net'
 type DisplayRow = DayRow & {
   sortKey: string
   title: string
@@ -52,6 +64,10 @@ type DisplayRow = DayRow & {
 
 function money(n: number | string | null | undefined) {
   return Number(n || 0).toFixed(2)
+}
+
+function errorMessage(err: any, fallback: string) {
+  return String(err?.response?.data?.detail || err?.message || fallback)
 }
 
 function to2(n: number) {
@@ -75,11 +91,17 @@ function BreakdownCell(props: {
   lines: BreakdownLine[]
   totalColor?: string
   compact?: boolean
+  onClick?: () => void
 }) {
   const totalSize = props.compact ? 14 : 15
   const lineSize = props.compact ? 11 : 12
   return (
-    <Stack alignItems="flex-start" spacing={props.compact ? 0.125 : 0.25}>
+    <Stack
+      alignItems="flex-start"
+      spacing={props.compact ? 0.125 : 0.25}
+      onClick={props.onClick}
+      sx={props.onClick ? { cursor: 'pointer', borderRadius: 1, p: 0.25, '&:hover': { bgcolor: 'action.hover' } } : undefined}
+    >
       <Typography sx={{ fontSize: totalSize, fontWeight: 800, color: props.totalColor || 'text.primary' }}>
         {props.totalLabel}: ₹{money(props.total)}
       </Typography>
@@ -179,6 +201,19 @@ async function fetchAllCashbook(from_date: string, to_date: string) {
   return out
 }
 
+async function fetchAllBankbook(from_date: string, to_date: string) {
+  const out: any[] = []
+  const limit = 500
+  let offset = 0
+  while (true) {
+    const rows = await listBankbookEntries({ from_date, to_date, limit, offset })
+    out.push(...(rows || []))
+    if (!rows || rows.length < limit) break
+    offset += limit
+  }
+  return out
+}
+
 async function fetchAllPurchases(from_date: string, to_date: string) {
   const out: any[] = []
   const limit = 500
@@ -193,12 +228,24 @@ async function fetchAllPurchases(from_date: string, to_date: string) {
 }
 
 export default function SalesBookPage() {
+  const qc = useQueryClient()
   const r = useMemo(() => last15DaysRange(), [])
   const [from, setFrom] = useState(r.from)
   const [to, setTo] = useState(r.to)
   const [viewMode, setViewMode] = useState<ViewMode>('daily')
   const [density, setDensity] = useState<'compact' | 'comfortable'>('comfortable')
   const [dateSort, setDateSort] = useState<'asc' | 'desc'>('asc')
+  const [detail, setDetail] = useState<{ row: DisplayRow; kind: DetailKind } | null>(null)
+  const [billEditOpen, setBillEditOpen] = useState(false)
+  const [billLoading, setBillLoading] = useState(false)
+  const [billDetail, setBillDetail] = useState<any | null>(null)
+  const [bookEdit, setBookEdit] = useState<any | null>(null)
+  const [bookType, setBookType] = useState<CashbookType | BankbookType>('EXPENSE')
+  const [bookMode, setBookMode] = useState<BankbookMode>('UPI')
+  const [bookDate, setBookDate] = useState('')
+  const [bookAmount, setBookAmount] = useState('')
+  const [bookCharges, setBookCharges] = useState('')
+  const [bookNote, setBookNote] = useState('')
   const validRange = Boolean(from && to && from <= to)
 
   const qBills = useQuery({
@@ -225,13 +272,25 @@ export default function SalesBookPage() {
     enabled: validRange,
   })
 
+  const qBankbook = useQuery({
+    queryKey: ['sales-book-bankbook', from, to],
+    queryFn: () => fetchAllBankbook(from, to),
+    enabled: validRange,
+  })
+
   const qPurchases = useQuery({
     queryKey: ['sales-book-purchases', from, to],
     queryFn: () => fetchAllPurchases(from, to),
     enabled: validRange,
   })
 
-  const loading = qBills.isLoading || qPayments.isLoading || qReturns.isLoading || qCashbook.isLoading || qPurchases.isLoading
+  const loading =
+    qBills.isLoading ||
+    qPayments.isLoading ||
+    qReturns.isLoading ||
+    qCashbook.isLoading ||
+    qBankbook.isLoading ||
+    qPurchases.isLoading
 
   const rows = useMemo(() => {
     if (!validRange) return [] as DayRow[]
@@ -241,6 +300,7 @@ export default function SalesBookPage() {
     const returnsMap = new Map<string, number>()
     const purchaseMap = new Map<string, number>()
     const cashbookMap = new Map<string, { expenses: number; withdrawals: number }>()
+    const bankbookMap = new Map<string, { expenses: number; withdrawals: number }>()
 
     for (const b of (qBills.data || []) as any[]) {
       const d = String(b?.date_time || '').slice(0, 10)
@@ -282,8 +342,19 @@ export default function SalesBookPage() {
       const t = String(c?.entry_type || '').toUpperCase()
       const prev = cashbookMap.get(d) || { expenses: 0, withdrawals: 0 }
       if (t === 'EXPENSE') prev.expenses += Number(c?.amount || 0)
-      if (t === 'WITHDRAWAL') prev.withdrawals += Number(c?.amount || 0)
+      if (t === 'WITHDRAWAL' || t === 'CONTRA') prev.withdrawals += Number(c?.amount || 0)
       cashbookMap.set(d, prev)
+    }
+
+    for (const b0 of (qBankbook.data || []) as any[]) {
+      const d = String(b0?.created_at || '').slice(0, 10)
+      if (!d) continue
+      const t = String(b0?.entry_type || '').toUpperCase()
+      const mode = String(b0?.mode || '').toUpperCase()
+      const prev = bankbookMap.get(d) || { expenses: 0, withdrawals: 0 }
+      if (t === 'EXPENSE') prev.expenses += Number(b0?.amount || 0) + Number(b0?.txn_charges || 0)
+      if (t === 'WITHDRAWAL' && mode !== 'BANK_DEPOSIT') prev.withdrawals += Number(b0?.amount || 0)
+      bankbookMap.set(d, prev)
     }
 
     const out: DayRow[] = []
@@ -293,10 +364,13 @@ export default function SalesBookPage() {
       const rt = returnsMap.get(d) || 0
       const purchaseAmount = purchaseMap.get(d) || 0
       const cb = cashbookMap.get(d) || { expenses: 0, withdrawals: 0 }
+      const bank = bankbookMap.get(d) || { expenses: 0, withdrawals: 0 }
       const collected = p.cash + p.online
       const returnsCashOnline = rt
-      const cashOut = cb.expenses + cb.withdrawals
-      const pnl = b.billed - returnsCashOnline - cb.expenses - purchaseAmount
+      const expenses = cb.expenses + bank.expenses
+      const withdrawals = cb.withdrawals + bank.withdrawals
+      const cashOut = expenses + withdrawals
+      const pnl = b.billed - returnsCashOnline - expenses - purchaseAmount
 
       out.push({
         date: d,
@@ -307,16 +381,16 @@ export default function SalesBookPage() {
         credit: to2(b.credit),
         returns: to2(returnsCashOnline),
         purchases: to2(purchaseAmount),
-        expenses: to2(cb.expenses),
-        withdrawals: to2(cb.withdrawals),
-        outflow: to2(returnsCashOnline + cb.expenses + cb.withdrawals + purchaseAmount),
+        expenses: to2(expenses),
+        withdrawals: to2(withdrawals),
+        outflow: to2(returnsCashOnline + expenses + withdrawals + purchaseAmount),
         netCash: to2(p.cash - returnsCashOnline - cashOut),
         netOnline: to2(p.online),
         net: to2(pnl),
       })
     }
     return out
-  }, [validRange, from, to, qBills.data, qPayments.data, qReturns.data, qCashbook.data, qPurchases.data])
+  }, [validRange, from, to, qBills.data, qPayments.data, qReturns.data, qCashbook.data, qBankbook.data, qPurchases.data])
 
   const displayRows = useMemo(() => {
     if (viewMode === 'daily') {
@@ -418,6 +492,185 @@ export default function SalesBookPage() {
     return copy
   }, [displayRows, dateSort])
 
+  function rangeForRow(row: DisplayRow) {
+    if (viewMode === 'weekly') return { from: row.sortKey, to: endOfWeekYmd(row.sortKey) }
+    if (viewMode === 'monthly') return { from: row.sortKey, to: monthEndYmd(row.sortKey) }
+    return { from: row.date, to: row.date }
+  }
+
+  function inRange(ts: any, row: DisplayRow) {
+    const d = String(ts || '').slice(0, 10)
+    const rr = rangeForRow(row)
+    return d >= rr.from && d <= rr.to
+  }
+
+  const detailRows = useMemo(() => {
+    if (!detail) return [] as any[]
+    const row = detail.row
+    const kind = detail.kind
+    const lines: any[] = []
+    if (kind === 'sales' || kind === 'net') {
+      for (const b of (qBills.data || []) as any[]) {
+        if (!inRange(b?.date_time, row)) continue
+        lines.push({
+          source: 'Bill',
+          id: b.id,
+          ts: b.date_time,
+          note: b.customer_name || b.notes || `Bill #${b.id}`,
+          amount: Number(b.total_amount || 0),
+          direction: 1,
+          editable: true,
+        })
+      }
+      if (kind === 'sales') {
+        for (const p of (qPayments.data || []) as any[]) {
+          if (!inRange(p?.received_at, row)) continue
+          lines.push({
+            source: 'Receipt',
+            id: p.id,
+            ts: p.received_at,
+            note: `Bill #${p.bill_id} payment`,
+            amount: Number(p.cash_amount || 0) + Number(p.online_amount || 0),
+            direction: 1,
+            split: `Cash ${money(p.cash_amount)} / Online ${money(p.online_amount)}`,
+            editable: true,
+            targetBillId: Number(p.bill_id || 0),
+          })
+        }
+      }
+    }
+    if (kind === 'outflow' || kind === 'net') {
+      for (const r0 of (qReturns.data || []) as any[]) {
+        if (!inRange(r0?.date_time, row)) continue
+        lines.push({
+          source: 'Return',
+          id: r0.id,
+          ts: r0.date_time,
+          note: r0.notes || `Return #${r0.id}`,
+          amount: Number(r0.refund_cash || 0) + Number(r0.refund_online || 0),
+          direction: -1,
+        })
+      }
+      for (const p of (qPurchases.data || []) as any[]) {
+        if (!inRange(p?.invoice_date, row)) continue
+        lines.push({
+          source: 'Purchase',
+          id: p.id,
+          ts: p.invoice_date,
+          note: p.invoice_number || p.notes || `Purchase #${p.id}`,
+          amount: Number(p.total_amount || 0),
+          direction: -1,
+        })
+      }
+      for (const c of (qCashbook.data || []) as any[]) {
+        if (!inRange(c?.created_at, row)) continue
+        const type = String(c?.entry_type || '').toUpperCase()
+        if (kind === 'net' && type !== 'EXPENSE') continue
+        if (kind !== 'net' && type !== 'EXPENSE' && type !== 'WITHDRAWAL' && type !== 'CONTRA') continue
+        lines.push({
+          source: type === 'CONTRA' ? 'Contra' : type === 'EXPENSE' ? 'Expense' : 'Withdrawal',
+          id: c.id,
+          ts: c.created_at,
+          note: c.note || `Cashbook ${type.toLowerCase()}`,
+          amount: Number(c.amount || 0),
+          direction: -1,
+          editable: true,
+          book: 'cashbook',
+          raw: c,
+        })
+      }
+      for (const b0 of (qBankbook.data || []) as any[]) {
+        if (!inRange(b0?.created_at, row)) continue
+        const type = String(b0?.entry_type || '').toUpperCase()
+        const mode = String(b0?.mode || '').toUpperCase()
+        if (kind === 'net' && type !== 'EXPENSE') continue
+        if (kind !== 'net' && type !== 'EXPENSE' && type !== 'WITHDRAWAL') continue
+        if (type === 'WITHDRAWAL' && mode === 'BANK_DEPOSIT') continue
+        lines.push({
+          source: type === 'EXPENSE' ? 'Bank Expense' : 'Bank Withdrawal',
+          id: b0.id,
+          ts: b0.created_at,
+          note: b0.note || `Bankbook ${type.toLowerCase()}`,
+          amount: Number(b0.amount || 0) + (type === 'EXPENSE' ? Number(b0.txn_charges || 0) : 0),
+          direction: -1,
+          split: Number(b0.txn_charges || 0) > 0 ? `Entry ${money(b0.amount)} / Charges ${money(b0.txn_charges)}` : undefined,
+          editable: true,
+          book: 'bankbook',
+          raw: b0,
+        })
+      }
+    }
+    return lines.sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')))
+  }, [detail, qBills.data, qPayments.data, qReturns.data, qPurchases.data, qCashbook.data, qBankbook.data, viewMode])
+
+  const detailTotals = useMemo(() => {
+    let inflow = 0
+    let outflow = 0
+    for (const line of detailRows) {
+      const amount = Number(line.amount || 0)
+      if (Number(line.direction || 0) < 0) outflow += amount
+      else inflow += amount
+    }
+    return { inflow: to2(inflow), outflow: to2(outflow), net: to2(inflow - outflow) }
+  }, [detailRows])
+
+  async function editBillFromDetail(billId: number) {
+    setBillLoading(true)
+    try {
+      const bill = await getBill(billId)
+      setBillDetail(bill)
+      setBillEditOpen(true)
+    } finally {
+      setBillLoading(false)
+    }
+  }
+
+  function openBookEdit(line: any) {
+    const raw = line.raw || {}
+    const type = String(raw.entry_type || 'EXPENSE').toUpperCase()
+    setBookEdit(line)
+    setBookType(type as CashbookType | BankbookType)
+    setBookMode(String(raw.mode || 'UPI').toUpperCase() as BankbookMode)
+    setBookDate(String(raw.created_at || '').slice(0, 10))
+    setBookAmount(String(Number(raw.amount || 0)))
+    setBookCharges(String(Number(raw.txn_charges || 0)))
+    setBookNote(String(raw.note || ''))
+  }
+
+  const mUpdateBook = useMutation({
+    mutationFn: () => {
+      const id = Number(bookEdit?.id)
+      if (bookEdit?.book === 'bankbook') {
+        return updateBankbookEntry(id, {
+          entry_type: bookType as BankbookType,
+          mode: bookType === 'CONTRA' ? 'BANK_DEPOSIT' : bookMode,
+          amount: Number(bookAmount),
+          txn_charges: bookType === 'CONTRA' ? 0 : Number(bookCharges || 0),
+          note: bookNote.trim() || undefined,
+          entry_date: bookDate,
+        })
+      }
+      return updateCashbookEntry(id, {
+        entry_type: bookType as CashbookType,
+        amount: Number(bookAmount),
+        note: bookNote.trim() || undefined,
+        entry_date: bookDate,
+      })
+    },
+    onSuccess: () => {
+      setBookEdit(null)
+      qCashbook.refetch()
+      qBankbook.refetch()
+      qc.invalidateQueries({ queryKey: ['cashbook-day'] })
+      qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
+    },
+  })
+
+  const pnlTooltip =
+    'P&L = Sales billed - Returns - Cashbook/Bankbook expenses - Purchases. Withdrawals and contra entries affect cash flow, not profit/loss.'
+
   return (
     <Stack spacing={2}>
       <Paper sx={{ p: 2 }}>
@@ -488,7 +741,9 @@ export default function SalesBookPage() {
           <Chip label={`Purchases ₹${money(totals.purchases)}`} color="warning" />
           <Chip label={`Collections ₹${money(totals.collected)}`} color="success" />
           <Chip label={`Outflow ₹${money(totals.outflow)}`} color="warning" />
-          <Chip label={`P&L ₹${money(totals.net)}`} color={totals.net < 0 ? 'error' : 'primary'} />
+          <Tooltip title={pnlTooltip}>
+            <Chip label={`P&L ₹${money(totals.net)}`} color={totals.net < 0 ? 'error' : 'primary'} />
+          </Tooltip>
         </Stack>
       </Paper>
 
@@ -569,6 +824,7 @@ export default function SalesBookPage() {
                         totalLabel="Sales"
                         total={r0.billed}
                         compact={density === 'compact'}
+                        onClick={() => setDetail({ row: r0, kind: 'sales' })}
                         lines={[
                           { label: 'Collected', value: r0.collected },
                           { label: 'Credit', value: r0.credit },
@@ -582,6 +838,7 @@ export default function SalesBookPage() {
                         totalLabel="Outflow"
                         total={r0.outflow}
                         compact={density === 'compact'}
+                        onClick={() => setDetail({ row: r0, kind: 'outflow' })}
                         lines={[
                           { label: 'Returns', value: r0.returns },
                           { label: 'Purchases', value: r0.purchases },
@@ -602,16 +859,21 @@ export default function SalesBookPage() {
                             color: r0.net < 0 ? '#d32f2f' : '#2e7d32',
                           }}
                         />
-                        <BreakdownCell
-                          totalLabel="P&L"
-                          total={r0.net}
-                          compact={density === 'compact'}
-                          totalColor={r0.net < 0 ? '#d32f2f' : '#2e7d32'}
-                          lines={[
-                            { label: 'Cash Flow', value: r0.netCash },
-                            { label: 'Online Flow', value: r0.netOnline },
-                          ]}
-                        />
+                        <Tooltip title={pnlTooltip}>
+                          <Box>
+                            <BreakdownCell
+                              totalLabel="P&L"
+                              total={r0.net}
+                              compact={density === 'compact'}
+                              totalColor={r0.net < 0 ? '#d32f2f' : '#2e7d32'}
+                              onClick={() => setDetail({ row: r0, kind: 'net' })}
+                              lines={[
+                                { label: 'Cash Flow', value: r0.netCash },
+                                { label: 'Online Flow', value: r0.netOnline },
+                              ]}
+                            />
+                          </Box>
+                        </Tooltip>
                       </Stack>
                     </TableCell>
                   </TableRow>
@@ -680,6 +942,211 @@ export default function SalesBookPage() {
           </Button>
         </Stack>
       </Paper>
+      <Dialog open={!!detail} onClose={() => setDetail(null)} fullWidth maxWidth="md">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          {detail ? `${detail.kind === 'sales' ? 'Sales' : detail.kind === 'outflow' ? 'Outflow' : 'P&L'} Entries - ${detail.row.title}` : 'Entries'}
+          <IconButton size="small" onClick={() => setDetail(null)}>
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          {detail?.kind === 'net' ? (
+            <Alert severity="info" sx={{ mb: 1.5 }}>
+              {pnlTooltip}
+            </Alert>
+          ) : null}
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
+            <Chip
+              size="small"
+              label={`Inflow ₹${money(detailTotals.inflow)}`}
+              sx={{ fontWeight: 800, bgcolor: 'rgba(46,125,50,0.12)', color: '#2e7d32' }}
+            />
+            <Chip
+              size="small"
+              label={`Outflow ₹${money(detailTotals.outflow)}`}
+              sx={{ fontWeight: 800, bgcolor: 'rgba(211,47,47,0.12)', color: '#d32f2f' }}
+            />
+            <Chip
+              size="small"
+              label={`Net ₹${money(detailTotals.net)}`}
+              sx={{
+                fontWeight: 800,
+                bgcolor: detailTotals.net < 0 ? 'rgba(211,47,47,0.12)' : 'rgba(46,125,50,0.12)',
+                color: detailTotals.net < 0 ? '#d32f2f' : '#2e7d32',
+              }}
+            />
+          </Stack>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Date</TableCell>
+                <TableCell>Source</TableCell>
+                <TableCell>Note</TableCell>
+                <TableCell align="right">Amount</TableCell>
+                <TableCell align="right">Action</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {detailRows.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5}>No source entries found.</TableCell>
+                </TableRow>
+              ) : (
+                detailRows.map((line, idx) => {
+                  const isOutflow = Number(line.direction || 0) < 0
+                  const amountColor = isOutflow ? '#d32f2f' : '#2e7d32'
+                  return (
+                  <TableRow
+                    key={`${line.source}-${line.id}-${idx}`}
+                    sx={{
+                      '& td': {
+                        bgcolor: isOutflow ? 'rgba(211,47,47,0.035)' : 'rgba(46,125,50,0.035)',
+                      },
+                    }}
+                  >
+                    <TableCell>{String(line.ts || '').slice(0, 10) || '-'}</TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        label={line.source}
+                        sx={{
+                          height: 22,
+                          fontWeight: 800,
+                          bgcolor: isOutflow ? 'rgba(211,47,47,0.12)' : 'rgba(46,125,50,0.12)',
+                          color: amountColor,
+                        }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Stack spacing={0.25}>
+                        <Typography variant="body2">{line.note || '-'}</Typography>
+                        {line.split ? <Typography variant="caption" color="text.secondary">{line.split}</Typography> : null}
+                      </Stack>
+                    </TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 900, color: amountColor }}>
+                      {isOutflow ? '-' : '+'}₹{money(line.amount)}
+                    </TableCell>
+                    <TableCell align="right">
+                      {line.editable ? (
+                        <Button
+                          size="small"
+                          startIcon={<EditIcon />}
+                          onClick={() => (line.book ? openBookEdit(line) : editBillFromDetail(Number(line.targetBillId || line.id)))}
+                          disabled={billLoading || mUpdateBook.isPending}
+                        >
+                          Edit
+                        </Button>
+                      ) : (
+                        '-'
+                      )}
+                    </TableCell>
+                  </TableRow>
+                  )
+                })
+              )}
+            </TableBody>
+          </Table>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDetail(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+      <BillEditDialog
+        open={billEditOpen}
+        bill={billDetail}
+        onClose={() => setBillEditOpen(false)}
+        onSaved={(updated) => {
+          setBillDetail(updated)
+          qBills.refetch()
+          qPayments.refetch()
+        }}
+      />
+      <Dialog open={!!bookEdit} onClose={() => setBookEdit(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Edit {bookEdit?.book === 'bankbook' ? 'Bank Book' : 'Cashbook'} Entry</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <TextField
+              select
+              label="Entry Type"
+              value={bookType}
+              onChange={(e) => {
+                const next = e.target.value as CashbookType | BankbookType
+                setBookType(next)
+                if (bookEdit?.book === 'bankbook' && next === 'CONTRA') setBookMode('BANK_DEPOSIT')
+              }}
+              fullWidth
+            >
+              <MenuItem value="RECEIPT">Receipt</MenuItem>
+              <MenuItem value="EXPENSE">Expense</MenuItem>
+              <MenuItem value="WITHDRAWAL">Withdrawal</MenuItem>
+              <MenuItem value="CONTRA">Contra</MenuItem>
+            </TextField>
+            {bookEdit?.book === 'bankbook' && bookType !== 'CONTRA' ? (
+              <TextField
+                select
+                label="Mode"
+                value={bookMode}
+                onChange={(e) => setBookMode(e.target.value as BankbookMode)}
+                fullWidth
+              >
+                <MenuItem value="UPI">UPI</MenuItem>
+                <MenuItem value="NEFT">NEFT</MenuItem>
+                <MenuItem value="RTGS">RTGS</MenuItem>
+                <MenuItem value="IMPS">IMPS</MenuItem>
+                <MenuItem value="BANK_DEPOSIT">Bank Deposit (Contra)</MenuItem>
+              </TextField>
+            ) : null}
+            <TextField
+              label="Entry Date"
+              type="date"
+              value={bookDate}
+              onChange={(e) => setBookDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              label="Amount"
+              type="number"
+              value={bookAmount}
+              onChange={(e) => setBookAmount(e.target.value)}
+              inputProps={{ min: 0, step: '0.01' }}
+              fullWidth
+            />
+            {bookEdit?.book === 'bankbook' ? (
+              <TextField
+                label="Txn Charges"
+                type="number"
+                value={bookCharges}
+                onChange={(e) => setBookCharges(e.target.value)}
+                inputProps={{ min: 0, step: '0.01' }}
+                disabled={bookType === 'CONTRA'}
+                fullWidth
+              />
+            ) : null}
+            <TextField
+              label="Note"
+              value={bookNote}
+              onChange={(e) => setBookNote(e.target.value)}
+              multiline
+              minRows={2}
+              fullWidth
+            />
+            {mUpdateBook.isError ? (
+              <Alert severity="error">{errorMessage(mUpdateBook.error, 'Failed to update entry.')}</Alert>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBookEdit(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => mUpdateBook.mutate()}
+            disabled={!bookEdit || !bookDate || Number(bookAmount) <= 0 || mUpdateBook.isPending}
+          >
+            {mUpdateBook.isPending ? 'Saving...' : 'Save Changes'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   )
 }

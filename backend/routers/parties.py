@@ -407,7 +407,10 @@ def list_party_receipts(party_id: int) -> List[PartyReceiptOut]:
         if not party or party.party_group != "SUNDRY_DEBTOR":
             raise HTTPException(status_code=404, detail="Debtor party not found")
         rows = session.exec(
-            select(PartyReceipt).where(PartyReceipt.party_id == party_id).order_by(PartyReceipt.id.desc())
+            select(PartyReceipt)
+            .where(PartyReceipt.party_id == party_id)
+            .where(PartyReceipt.is_deleted == False)  # noqa: E712
+            .order_by(PartyReceipt.id.desc())
         ).all()
         return [PartyReceiptOut(**row.dict()) for row in rows]
 
@@ -423,6 +426,7 @@ def list_receipt_adjustments(party_id: int) -> List[ReceiptBillAdjustmentOut]:
             select(ReceiptBillAdjustment)
             .join(PartyReceipt, PartyReceipt.id == ReceiptBillAdjustment.receipt_id)
             .where(PartyReceipt.party_id == party_id)
+            .where(PartyReceipt.is_deleted == False)  # noqa: E712
             .order_by(ReceiptBillAdjustment.id.desc())
         ).all()
         return [ReceiptBillAdjustmentOut(**row.dict()) for row in rows]

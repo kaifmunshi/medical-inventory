@@ -60,6 +60,8 @@ class ItemOut(BaseModel):
     id: int
     name: str
     brand: Optional[str] = None
+    product_id: Optional[int] = None
+    category_id: Optional[int] = None
     expiry_date: Optional[str] = None
     mrp: float
     stock: int
@@ -845,6 +847,8 @@ def list_items(
     request: Request,
     q: Optional[str] = Query(None, description="Search in name/brand"),
     rack_number: Optional[int] = Query(None, ge=0, description="Filter by exact rack number"),
+    brand: Optional[str] = Query(None, description="Filter by exact brand"),
+    category_id: Optional[int] = Query(None, ge=0, description="Filter by product category"),
     limit: Optional[int] = Query(None, ge=1, le=500),
     offset: Optional[int] = Query(None, ge=0),
 
@@ -880,6 +884,10 @@ def list_items(
             )
         if rack_number is not None:
             base_stmt = base_stmt.where(Item.rack_number == rack_number)
+        if brand:
+            base_stmt = base_stmt.where(func.lower(func.coalesce(Item.brand, "")) == brand.strip().lower())
+        if category_id is not None:
+            base_stmt = base_stmt.where(Item.category_id == category_id)
 
         ...
 

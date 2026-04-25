@@ -34,6 +34,9 @@ def _range_bounds(from_date: Optional[str], to_date: Optional[str]):
     return start_iso, end_iso
 
 
+VALID_ENTRY_TYPES = {"RECEIPT", "WITHDRAWAL", "EXPENSE", "CONTRA"}
+
+
 def _sum_rows(rows: List[CashbookEntry]):
     receipts = 0.0
     withdrawals = 0.0
@@ -45,7 +48,7 @@ def _sum_rows(rows: List[CashbookEntry]):
             continue
         if et == "RECEIPT":
             receipts += amt
-        elif et == "WITHDRAWAL":
+        elif et in ("WITHDRAWAL", "CONTRA"):
             withdrawals += amt
         else:
             expenses += amt
@@ -116,10 +119,10 @@ def _sum_exchange_cash_in(session, *, start_iso: Optional[str] = None, end_iso: 
 @router.post("/", response_model=CashbookOut)
 def create_entry(payload: CashbookCreate):
     et = (payload.entry_type or "").strip().upper()
-    if et not in ("RECEIPT", "WITHDRAWAL", "EXPENSE"):
+    if et not in VALID_ENTRY_TYPES:
         raise HTTPException(
             status_code=400,
-            detail="entry_type must be RECEIPT, WITHDRAWAL or EXPENSE",
+            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE or CONTRA",
         )
 
     amt = float(payload.amount or 0)
@@ -140,6 +143,43 @@ def create_entry(payload: CashbookCreate):
             note=(payload.note or None),
             created_at=created_at,
         )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return row
+
+
+@router.patch("/entry/{entry_id}", response_model=CashbookOut)
+def update_entry(entry_id: int, payload: CashbookCreate):
+    require_min_role("MANAGER", context="Cashbook entry edit")
+    et = (payload.entry_type or "").strip().upper()
+    if et not in VALID_ENTRY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE or CONTRA",
+        )
+
+    amt = float(payload.amount or 0)
+    if amt <= 0:
+        raise HTTPException(status_code=400, detail="amount must be > 0")
+
+    with get_session() as session:
+        row = session.exec(select(CashbookEntry).where(CashbookEntry.id == entry_id)).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="cashbook entry not found")
+
+        assert_financial_year_unlocked(session, row.created_at, context="Cashbook entry edit")
+        created_at = row.created_at
+        if payload.entry_date:
+            day_dt = _parse_ymd(payload.entry_date)
+            time_part = str(row.created_at or "")[11:19] if len(str(row.created_at or "")) >= 19 else datetime.now().strftime("%H:%M:%S")
+            created_at = f"{day_dt.date().isoformat()}T{time_part}"
+            assert_financial_year_unlocked(session, created_at, context="Cashbook entry edit")
+
+        row.entry_type = et
+        row.amount = amt
+        row.note = payload.note or None
+        row.created_at = created_at
         session.add(row)
         session.commit()
         session.refresh(row)

@@ -51,18 +51,17 @@ export default function DayBookPage() {
   const [fromDate, setFromDate] = useState(today)
   const [toDate, setToDate] = useState(today)
   const [voucherType, setVoucherType] = useState('')
-  const [deletedFilter, setDeletedFilter] = useState<'active' | 'deleted' | 'all'>('active')
   const [query, setQuery] = useState('')
   const [includeStockJournal, setIncludeStockJournal] = useState(true)
 
   const dayBookQ = useQuery({
-    queryKey: ['voucher-day-book', fromDate, toDate, voucherType, deletedFilter, query, includeStockJournal],
+    queryKey: ['voucher-day-book', fromDate, toDate, voucherType, query, includeStockJournal],
     queryFn: () =>
       fetchVoucherDayBook({
         from_date: fromDate,
         to_date: toDate,
         voucher_type: voucherType || undefined,
-        deleted_filter: deletedFilter,
+        deleted_filter: 'active',
         q: query.trim() || undefined,
         include_stock_journal: includeStockJournal,
       }),
@@ -115,17 +114,6 @@ export default function DayBookPage() {
             {voucherTypes.filter(Boolean).map((type) => (
               <MenuItem key={type} value={type}>{type}</MenuItem>
             ))}
-          </TextField>
-          <TextField
-            select
-            label="Deleted"
-            value={deletedFilter}
-            onChange={(e) => setDeletedFilter(e.target.value as 'active' | 'deleted' | 'all')}
-            fullWidth
-          >
-            <MenuItem value="active">Active</MenuItem>
-            <MenuItem value="deleted">Deleted</MenuItem>
-            <MenuItem value="all">All</MenuItem>
           </TextField>
           <TextField
             label="Search"
@@ -192,7 +180,7 @@ export default function DayBookPage() {
                       size="small"
                       label={row.voucher_type}
                       color={rowChipColor(row.voucher_type)}
-                      variant={row.is_deleted ? 'outlined' : 'filled'}
+                      variant="filled"
                     />
                   </td>
                   <td style={{ minWidth: 170 }}>
@@ -205,7 +193,7 @@ export default function DayBookPage() {
                   <td style={{ minWidth: 92 }}>{money(row.amount)}</td>
                   <td style={{ minWidth: 92 }}>{money(row.cash_amount)}</td>
                   <td style={{ minWidth: 92 }}>{money(row.online_amount)}</td>
-                  <td style={{ minWidth: 112 }}>{row.status || (row.is_deleted ? 'DELETED' : '-')}</td>
+                  <td style={{ minWidth: 112 }}>{row.status || '-'}</td>
                   <td style={{ whiteSpace: 'normal', wordBreak: 'break-word', minWidth: 240 }}>{row.narration || '-'}</td>
                 </tr>
               ))}

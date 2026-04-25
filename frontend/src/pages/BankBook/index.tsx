@@ -5,6 +5,7 @@ import {
   Button,
   Chip,
   Dialog,
+  DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
@@ -24,17 +25,17 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import EditIcon from '@mui/icons-material/Edit'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createBankbookEntry,
-  deleteBankbookEntry,
   getBankbookDay,
   listBankbookEntries,
+  updateBankbookEntry,
   type BankbookMode,
   type BankbookType,
 } from '../../services/bankbook'
+import { listCashbookEntries } from '../../services/cashbook'
 import { getBill, listPayments } from '../../services/billing'
 import { listExchangeRecords, listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
@@ -43,6 +44,10 @@ import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 
 function money(n: number | string | null | undefined) {
   return Number(n || 0).toFixed(2)
+}
+
+function errorMessage(err: any, fallback: string) {
+  return String(err?.response?.data?.detail || err?.message || fallback)
 }
 
 function isoDate(s: string | null | undefined) {
@@ -94,6 +99,7 @@ function typeChipProps(type: string) {
   if (t === 'OPENING') return { label: 'Opening', sx: { ...baseSx, bgcolor: 'info.light', color: 'info.dark' } }
   if (t === 'RETURN') return { label: 'Refund', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
   if (t === 'SPLIT') return { label: 'Split', sx: { ...baseSx, bgcolor: '#9fe3b0', color: '#124b19' } }
+  if (t === 'CONTRA') return { label: 'Contra', sx: { ...baseSx, bgcolor: '#c7d2fe', color: '#1e3a8a' } }
   if (t === 'RECEIPT') return { label: 'Receipt', sx: { ...baseSx, bgcolor: 'success.light', color: 'success.dark' } }
   if (t === 'WITHDRAWAL') return { label: 'Withdrawal', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
   return { label: 'Expense', sx: { ...baseSx, bgcolor: 'error.light', color: 'error.dark' } }
@@ -136,13 +142,21 @@ const manualModes: Array<{ value: BankbookMode; label: string }> = [
   { value: 'BANK_DEPOSIT', label: 'Bank Deposit (Contra)' },
 ]
 
+function currentFinancialYearStart(ymd: string) {
+  const [year, month] = ymd.split('-').map(Number)
+  const startYear = (month || 1) >= 4 ? year : year - 1
+  return `${startYear}-04-01`
+}
+
 function bankDepositDefaultNote(entryType: BankbookType) {
+  if (entryType === 'CONTRA') return 'Contra entry: cash withdrawn from bank'
   if (entryType === 'RECEIPT') return 'Contra entry: cash deposited into bank'
   if (entryType === 'WITHDRAWAL') return 'Contra entry: cash withdrawn from bank'
   return 'Contra entry: bank adjustment'
 }
 
 const bankDepositDefaultNotes = [
+  bankDepositDefaultNote('CONTRA'),
   bankDepositDefaultNote('RECEIPT'),
   bankDepositDefaultNote('WITHDRAWAL'),
   bankDepositDefaultNote('EXPENSE'),
@@ -154,6 +168,7 @@ export default function BankBookPage() {
   const [selectedDate, setSelectedDate] = useState(today)
   const [recordsFilter, setRecordsFilter] = useState<'DAY' | 'ALL'>('DAY')
   const [allView, setAllView] = useState<'ALL' | 'WEEK' | 'MONTH'>('ALL')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [allAnchorDate, setAllAnchorDate] = useState(today)
   const [debouncedAllAnchorDate, setDebouncedAllAnchorDate] = useState(today)
 
@@ -167,6 +182,13 @@ export default function BankBookPage() {
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<any | null>(null)
   const [billEditOpen, setBillEditOpen] = useState(false)
+  const [editRow, setEditRow] = useState<any | null>(null)
+  const [editType, setEditType] = useState<BankbookType>('RECEIPT')
+  const [editMode, setEditMode] = useState<BankbookMode>('UPI')
+  const [editDate, setEditDate] = useState(today)
+  const [editAmount, setEditAmount] = useState('')
+  const [editTxnCharges, setEditTxnCharges] = useState('')
+  const [editNote, setEditNote] = useState('')
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedAllAnchorDate(allAnchorDate), 250)
@@ -178,13 +200,27 @@ export default function BankBookPage() {
   }, [recordsFilter, selectedDate])
 
   useEffect(() => {
-    if (entryMode !== 'BANK_DEPOSIT') return
+    if (entryMode !== 'BANK_DEPOSIT' && entryType !== 'CONTRA') return
     const trimmed = note.trim()
     const nextDefault = bankDepositDefaultNote(entryType)
     if (!trimmed || bankDepositDefaultNotes.includes(trimmed)) {
       setNote(nextDefault)
     }
   }, [entryMode, entryType, note])
+
+  useEffect(() => {
+    if (entryType === 'OPENING') {
+      setEntryMode('OPENING')
+      setEntryDate(currentFinancialYearStart(today))
+      if (!note.trim()) setNote('Opening balance as of 1 April')
+      return
+    }
+    if (entryType === 'CONTRA') {
+      setEntryMode('BANK_DEPOSIT')
+      return
+    }
+    if (entryMode === 'OPENING') setEntryMode('UPI')
+  }, [entryMode, entryType, note, today])
 
   const allRange = useMemo(() => {
     if (allView === 'WEEK') return weekRange(debouncedAllAnchorDate)
@@ -213,6 +249,12 @@ export default function BankBookPage() {
   const qDayExchanges = useQuery({
     queryKey: ['bankbook-exchanges-day', selectedDate],
     queryFn: () => listExchangeRecords({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    enabled: recordsFilter === 'DAY',
+  })
+
+  const qDayCashbookContra = useQuery({
+    queryKey: ['bankbook-cashbook-contra-day', selectedDate],
+    queryFn: () => listCashbookEntries({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
     enabled: recordsFilter === 'DAY',
   })
 
@@ -284,13 +326,30 @@ export default function BankBookPage() {
     enabled: recordsFilter === 'ALL',
   })
 
+  const qAllCashbookContra = useQuery({
+    queryKey: ['bankbook-cashbook-contra-all', allView, allRange.from, allRange.to],
+    queryFn: async () => {
+      const out: any[] = []
+      let offset = 0
+      const limit = 500
+      while (true) {
+        const rows = await listCashbookEntries({ from_date: allRange.from, to_date: allRange.to, limit, offset })
+        out.push(...(rows || []))
+        if (!rows || rows.length < limit) break
+        offset += limit
+      }
+      return out
+    },
+    enabled: recordsFilter === 'ALL',
+  })
+
   const mCreate = useMutation({
     mutationFn: () =>
       createBankbookEntry({
         entry_type: entryType,
-        mode: entryMode,
+        mode: entryType === 'CONTRA' ? 'BANK_DEPOSIT' : entryMode,
         amount: Number(amount),
-        txn_charges: Number(txnCharges || 0),
+        txn_charges: entryType === 'CONTRA' ? 0 : Number(txnCharges || 0),
         note: note.trim() || undefined,
         entry_date: entryDate,
       }),
@@ -306,18 +365,32 @@ export default function BankBookPage() {
       qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
       qc.invalidateQueries({ queryKey: ['cashbook-bankbook-contra-day'] })
       qc.invalidateQueries({ queryKey: ['cashbook-bankbook-contra-all'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
     },
   })
 
-  const mDelete = useMutation({
-    mutationFn: (id: number) => deleteBankbookEntry(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['bankbook-day', selectedDate] })
+  const mUpdate = useMutation({
+    mutationFn: () =>
+      updateBankbookEntry(Number(editRow?.id), {
+        entry_type: editType,
+        mode: editType === 'OPENING' ? 'OPENING' : editType === 'CONTRA' ? 'BANK_DEPOSIT' : editMode,
+        amount: Number(editAmount),
+        txn_charges: editType === 'CONTRA' ? 0 : Number(editTxnCharges || 0),
+        note: editNote.trim() || undefined,
+        entry_date: editDate,
+      }),
+    onSuccess: (updated: any) => {
+      setEditRow(null)
+      if (updated?.created_at) setSelectedDate(isoDate(updated.created_at))
+      qc.invalidateQueries({ queryKey: ['bankbook-day'] })
       qc.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
       qc.invalidateQueries({ queryKey: ['cashbook-day'] })
       qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
       qc.invalidateQueries({ queryKey: ['cashbook-bankbook-contra-day'] })
       qc.invalidateQueries({ queryKey: ['cashbook-bankbook-contra-all'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
     },
   })
 
@@ -339,6 +412,17 @@ export default function BankBookPage() {
     } finally {
       setBillLoading(false)
     }
+  }
+
+  function openEdit(row: any) {
+    const type = String(row.entry_type || 'RECEIPT').toUpperCase() as BankbookType
+    setEditRow(row)
+    setEditType(type)
+    setEditMode(type === 'OPENING' ? 'OPENING' : (String(row.mode || 'UPI').toUpperCase() as BankbookMode))
+    setEditDate(isoDate(row.created_at) === '-' ? today : isoDate(row.created_at))
+    setEditAmount(String(Number(row.amount || 0)))
+    setEditTxnCharges(String(Number(row.txn_charges || 0)))
+    setEditNote(String(row.note || ''))
   }
 
   const billOnlineRowsDay = useMemo(() => {
@@ -483,6 +567,40 @@ export default function BankBookPage() {
       }))
   }, [qAllExchanges.data])
 
+  const cashbookContraRowsDay = useMemo(() => {
+    const rows = (qDayCashbookContra.data || []) as any[]
+    return rows
+      .filter((r) => String(r?.entry_type || '').toUpperCase() === 'CONTRA' && Number(r?.amount || 0) > 0)
+      .map((r) => ({
+        id: `cashbook-contra-${r.id}`,
+        created_at: r.created_at,
+        entry_type: 'RECEIPT',
+        pill_type: 'CONTRA',
+        amount: Number(r.amount || 0),
+        txn_charges: 0,
+        mode: 'BANK_DEPOSIT',
+        note: r.note ? `Cashbook contra: ${r.note}` : 'Cashbook contra deposit',
+        source: 'CASHBOOK_CONTRA' as const,
+      }))
+  }, [qDayCashbookContra.data])
+
+  const cashbookContraRowsAll = useMemo(() => {
+    const rows = (qAllCashbookContra.data || []) as any[]
+    return rows
+      .filter((r) => String(r?.entry_type || '').toUpperCase() === 'CONTRA' && Number(r?.amount || 0) > 0)
+      .map((r) => ({
+        id: `cashbook-contra-${r.id}`,
+        created_at: r.created_at,
+        entry_type: 'RECEIPT',
+        pill_type: 'CONTRA',
+        amount: Number(r.amount || 0),
+        txn_charges: 0,
+        mode: 'BANK_DEPOSIT',
+        note: r.note ? `Cashbook contra: ${r.note}` : 'Cashbook contra deposit',
+        source: 'CASHBOOK_CONTRA' as const,
+      }))
+  }, [qAllCashbookContra.data])
+
   const manualRowsDay = useMemo(() => {
     const rows = (day?.entries || []) as any[]
     return rows.map((r) => ({ ...r, source: 'BANKBOOK' as const }))
@@ -547,6 +665,7 @@ export default function BankBookPage() {
             ...manualRowsDay,
             ...manualChargeRowsDay,
             ...billOnlineRowsDay,
+            ...cashbookContraRowsDay,
             ...exchangeOnlineInRowsDay,
             ...exchangeOnlineOutRowsDay,
             ...returnOnlineRowsDay,
@@ -555,28 +674,33 @@ export default function BankBookPage() {
             ...manualRowsAll,
             ...manualChargeRowsAll,
             ...billOnlineRowsAll,
+            ...cashbookContraRowsAll,
             ...exchangeOnlineInRowsAll,
             ...exchangeOnlineOutRowsAll,
             ...returnOnlineRowsAll,
           ]
     return rows.sort((a: any, b: any) => {
       const byTime = String(a.created_at || '').localeCompare(String(b.created_at || ''))
-      if (byTime !== 0) return byTime
-      return Number(a.sort_order || 0) - Number(b.sort_order || 0)
+      if (byTime !== 0) return sortDir === 'asc' ? byTime : -byTime
+      const byOrder = Number(a.sort_order || 0) - Number(b.sort_order || 0)
+      return sortDir === 'asc' ? byOrder : -byOrder
     })
   }, [
     recordsFilter,
+    sortDir,
     selectedDate,
     day?.opening_balance,
     manualRowsDay,
     manualChargeRowsDay,
     billOnlineRowsDay,
+    cashbookContraRowsDay,
     exchangeOnlineInRowsDay,
     exchangeOnlineOutRowsDay,
     returnOnlineRowsDay,
     manualRowsAll,
     manualChargeRowsAll,
     billOnlineRowsAll,
+    cashbookContraRowsAll,
     exchangeOnlineInRowsAll,
     exchangeOnlineOutRowsAll,
     returnOnlineRowsAll,
@@ -603,7 +727,7 @@ export default function BankBookPage() {
       const amt = Number(r.amount || 0)
       if (t === 'OPENING') continue
       if (t === 'RECEIPT') receipts += amt
-      else if (t === 'WITHDRAWAL') withdrawals += amt
+      else if (t === 'WITHDRAWAL' || t === 'CONTRA') withdrawals += amt
       else expenses += amt
       if (r.source === 'BANKBOOK_CHARGE') charges += amt
     }
@@ -752,23 +876,27 @@ export default function BankBookPage() {
               onChange={(e) => setEntryType(e.target.value as BankbookType)}
               sx={{ minWidth: 180 }}
             >
+              <MenuItem value="OPENING">Opening Balance (1 Apr)</MenuItem>
+              <MenuItem value="CONTRA">Contra (Bank to Cash)</MenuItem>
               <MenuItem value="RECEIPT">Receipt (Bank In)</MenuItem>
               <MenuItem value="EXPENSE">Expense (Bank Out)</MenuItem>
               <MenuItem value="WITHDRAWAL">Withdrawal (Bank Out)</MenuItem>
             </TextField>
-            <TextField
-              select
-              label="Mode"
-              value={entryMode}
-              onChange={(e) => setEntryMode(e.target.value as BankbookMode)}
-              sx={{ minWidth: 220 }}
-            >
-              {manualModes.map((mode) => (
-                <MenuItem key={mode.value} value={mode.value}>
-                  {mode.label}
-                </MenuItem>
-              ))}
-            </TextField>
+            {entryType !== 'OPENING' && entryType !== 'CONTRA' ? (
+              <TextField
+                select
+                label="Mode"
+                value={entryMode}
+                onChange={(e) => setEntryMode(e.target.value as BankbookMode)}
+                sx={{ minWidth: 220 }}
+              >
+                {manualModes.map((mode) => (
+                  <MenuItem key={mode.value} value={mode.value}>
+                    {mode.label}
+                  </MenuItem>
+                ))}
+              </TextField>
+            ) : null}
             <TextField
               label="Entry Date"
               type="date"
@@ -792,6 +920,7 @@ export default function BankBookPage() {
               onChange={(e) => setTxnCharges(e.target.value)}
               inputProps={{ min: 0, step: '0.01' }}
               sx={{ minWidth: 150 }}
+              disabled={entryType === 'CONTRA'}
               helperText="Adds a separate linked charges entry"
             />
           </Stack>
@@ -826,6 +955,14 @@ export default function BankBookPage() {
         <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
           {recordsFilter === 'DAY' ? 'Day Entries' : 'All Records'}
         </Typography>
+        <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
+          <Button size="small" variant={sortDir === 'asc' ? 'contained' : 'outlined'} onClick={() => setSortDir('asc')}>
+            Date Asc
+          </Button>
+          <Button size="small" variant={sortDir === 'desc' ? 'contained' : 'outlined'} onClick={() => setSortDir('desc')}>
+            Date Desc
+          </Button>
+        </Stack>
         <TableContainer>
           <Table size="small">
             <TableHead>
@@ -842,8 +979,16 @@ export default function BankBookPage() {
             </TableHead>
             <TableBody>
               {(recordsFilter === 'DAY'
-                ? qDay.isLoading || qDayPayments.isLoading || qDayReturns.isLoading || qDayExchanges.isLoading
-                : qAllBankbook.isLoading || qAllPayments.isLoading || qAllReturns.isLoading || qAllExchanges.isLoading) ? (
+                ? qDay.isLoading ||
+                  qDayPayments.isLoading ||
+                  qDayReturns.isLoading ||
+                  qDayExchanges.isLoading ||
+                  qDayCashbookContra.isLoading
+                : qAllBankbook.isLoading ||
+                  qAllPayments.isLoading ||
+                  qAllReturns.isLoading ||
+                  qAllExchanges.isLoading ||
+                  qAllCashbookContra.isLoading) ? (
                 <TableRow>
                   <TableCell colSpan={8}>Loading...</TableCell>
                 </TableRow>
@@ -918,6 +1063,8 @@ export default function BankBookPage() {
                             ? 'Return'
                             : row.source === 'EXCHANGE'
                               ? 'Exchange'
+                              : row.source === 'CASHBOOK_CONTRA'
+                                ? 'Cashbook Contra'
                               : row.source === 'BANKBOOK_CHARGE'
                                 ? 'Charges'
                               : row.source === 'SYSTEM'
@@ -926,13 +1073,8 @@ export default function BankBookPage() {
                       </TableCell>
                       <TableCell align="right">
                         {row.source === 'BANKBOOK' ? (
-                          <IconButton
-                            size="small"
-                            onClick={() => mDelete.mutate(row.id)}
-                            disabled={mDelete.isPending}
-                            color="error"
-                          >
-                            <DeleteOutlineIcon fontSize="small" />
+                          <IconButton size="small" onClick={() => openEdit(row)} disabled={mUpdate.isPending}>
+                            <EditIcon fontSize="small" />
                           </IconButton>
                         ) : (
                           '-'
@@ -1045,14 +1187,6 @@ export default function BankBookPage() {
                   Payment Mode: <b>{billDetail.payment_mode || '-'}</b>
                 </Typography>
                 <Typography>
-                  Deleted: <b>{billDetail.is_deleted ? 'Yes' : 'No'}</b>
-                </Typography>
-                {billDetail.is_deleted ? (
-                  <Typography>
-                    Deleted At: <b>{billDetail.deleted_at || '-'}</b>
-                  </Typography>
-                ) : null}
-                <Typography>
                   Payment Status: <b>{billDetail.payment_status || (billDetail.is_credit ? 'UNPAID' : 'PAID')}</b>
                 </Typography>
                 <Typography>
@@ -1067,18 +1201,16 @@ export default function BankBookPage() {
                     Notes: <i>{billDetail.notes}</i>
                   </Typography>
                 ) : null}
-                {!billDetail.is_deleted ? (
-                  <Box sx={{ pt: 1 }}>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={<EditIcon />}
-                      onClick={() => setBillEditOpen(true)}
-                    >
-                      Edit Bill
-                    </Button>
-                  </Box>
-                ) : null}
+                <Box sx={{ pt: 1 }}>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<EditIcon />}
+                    onClick={() => setBillEditOpen(true)}
+                  >
+                    Edit Bill
+                  </Button>
+                </Box>
               </Stack>
 
               <Divider />
@@ -1108,6 +1240,93 @@ export default function BankBookPage() {
           qc.invalidateQueries({ queryKey: ['bankbook-all-payments'] })
         }}
       />
+      <Dialog open={!!editRow} onClose={() => setEditRow(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Edit Bank Book Entry</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <TextField
+              select
+              label="Entry Type"
+              value={editType}
+              onChange={(e) => {
+                const next = e.target.value as BankbookType
+                setEditType(next)
+                if (next === 'OPENING') setEditMode('OPENING')
+                else if (next === 'CONTRA') setEditMode('BANK_DEPOSIT')
+                else if (editMode === 'OPENING') setEditMode('UPI')
+              }}
+              fullWidth
+            >
+              <MenuItem value="OPENING">Opening Balance (1 Apr)</MenuItem>
+              <MenuItem value="CONTRA">Contra (Bank to Cash)</MenuItem>
+              <MenuItem value="RECEIPT">Receipt (Bank In)</MenuItem>
+              <MenuItem value="EXPENSE">Expense (Bank Out)</MenuItem>
+              <MenuItem value="WITHDRAWAL">Withdrawal (Bank Out)</MenuItem>
+            </TextField>
+            {editType !== 'OPENING' && editType !== 'CONTRA' ? (
+              <TextField
+                select
+                label="Mode"
+                value={editMode}
+                onChange={(e) => setEditMode(e.target.value as BankbookMode)}
+                fullWidth
+              >
+                {manualModes.map((mode) => (
+                  <MenuItem key={mode.value} value={mode.value}>
+                    {mode.label}
+                  </MenuItem>
+                ))}
+              </TextField>
+            ) : null}
+            <TextField
+              label="Entry Date"
+              type="date"
+              value={editDate}
+              onChange={(e) => setEditDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              label="Amount"
+              type="number"
+              value={editAmount}
+              onChange={(e) => setEditAmount(e.target.value)}
+              inputProps={{ min: 0, step: '0.01' }}
+              fullWidth
+            />
+            <TextField
+              label="Txn Charges"
+              type="number"
+              value={editTxnCharges}
+              onChange={(e) => setEditTxnCharges(e.target.value)}
+              inputProps={{ min: 0, step: '0.01' }}
+              disabled={editType === 'OPENING' || editType === 'CONTRA'}
+              fullWidth
+            />
+            <TextField
+              label="Note"
+              value={editNote}
+              onChange={(e) => setEditNote(e.target.value)}
+              multiline
+              minRows={2}
+              fullWidth
+            />
+            {mUpdate.isError ? (
+              <Alert severity="error">{errorMessage(mUpdate.error, 'Failed to update bank record.')}</Alert>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditRow(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => mUpdate.mutate()}
+            disabled={!editRow || Number(editAmount) <= 0 || !editDate || mUpdate.isPending}
+          >
+            {mUpdate.isPending ? 'Saving...' : 'Save Changes'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   )
 }

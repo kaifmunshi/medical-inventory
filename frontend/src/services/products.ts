@@ -48,7 +48,14 @@ export async function updateCategory(id: number, payload: { name?: string; is_ac
   return res.data
 }
 
-export async function fetchProducts(params?: { q?: string; category_id?: number; active_only?: boolean }): Promise<Product[]> {
+export async function fetchProducts(params?: {
+  q?: string
+  brand?: string
+  category_id?: number
+  active_only?: boolean
+  limit?: number
+  offset?: number
+}): Promise<Product[]> {
   const res = await api.get<Product[]>('/products', { params })
   return res.data
 }

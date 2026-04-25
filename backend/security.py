@@ -109,6 +109,14 @@ def require_roles(allowed_roles: Iterable[str], *, context: str) -> None:
 def require_min_role(min_role: str, *, context: str) -> None:
     current = str(get_request_actor_role() or "").upper()
     if not current:
+        from sqlmodel import select
+        from backend.db import get_session
+        from backend.models import AppUser
+
+        with get_session() as session:
+            has_users = session.exec(select(AppUser.id).limit(1)).first() is not None
+        if not has_users:
+            return
         raise HTTPException(status_code=401, detail=f"{context} requires sign-in")
     wanted = str(min_role or "").strip().upper()
     if ROLE_ORDER.get(current, 0) < ROLE_ORDER.get(wanted, 0):

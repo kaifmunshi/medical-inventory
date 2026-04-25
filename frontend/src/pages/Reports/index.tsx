@@ -14,7 +14,6 @@ import type { FinancialYear } from '../../lib/types'
 type Tab = 'sales' | 'returns' | 'stock' | 'item_sales'
 type ViewMode = 'details' | 'aggregate'
 type GroupBy = 'day' | 'month'
-type DeletedFilter = 'active' | 'deleted' | 'all'
 
 function previousFinancialYear(years: FinancialYear[], activeYear: FinancialYear | null) {
   if (!activeYear) return null
@@ -33,7 +32,6 @@ export default function Reports() {
   const [tab, setTab] = useState<Tab>('sales')
   const [viewMode, setViewMode] = useState<ViewMode>('details')
   const [groupBy, setGroupBy] = useState<GroupBy>('day')
-  const [deletedFilter, setDeletedFilter] = useState<DeletedFilter>('active')
 
   const [from, setFrom] = useState(defaultFrom)
   const [to, setTo] = useState(defaultTo)
@@ -55,7 +53,6 @@ export default function Reports() {
     tab: Tab
     viewMode: ViewMode
     groupBy: GroupBy
-    deletedFilter: DeletedFilter
     from: string
     to: string
     q: string
@@ -69,7 +66,6 @@ export default function Reports() {
     const incomingTab = searchParams.get('tab')
     const incomingView = searchParams.get('view')
     const incomingGroupBy = searchParams.get('group_by')
-    const incomingDeletedFilter = searchParams.get('deleted_filter')
 
     return {
       tab:
@@ -78,8 +74,6 @@ export default function Reports() {
           : 'sales',
       viewMode: incomingView === 'aggregate' ? 'aggregate' : 'details',
       groupBy: incomingGroupBy === 'month' ? 'month' : 'day',
-      deletedFilter:
-        incomingDeletedFilter === 'deleted' || incomingDeletedFilter === 'all' ? incomingDeletedFilter : 'active',
       from: searchParams.has('from') ? searchParams.get('from') || '' : defaultFrom,
       to: searchParams.has('to') ? searchParams.get('to') || '' : defaultTo,
       q: searchParams.get('q') || '',
@@ -96,12 +90,10 @@ export default function Reports() {
     setTab(incomingState.tab)
     setViewMode(incomingState.viewMode)
     setGroupBy(incomingState.groupBy)
-    setDeletedFilter(incomingState.deletedFilter)
     setFrom(incomingState.from)
     setTo(incomingState.to)
     setQ(incomingState.q)
   }, [
-    incomingState.deletedFilter,
     incomingState.from,
     incomingState.groupBy,
     incomingState.q,
@@ -175,20 +167,6 @@ export default function Reports() {
                 <MenuItem value="month">Monthly</MenuItem>
                 </TextField>
               )}
-
-            {tab === 'sales' && viewMode === 'details' && (
-              <TextField
-                select
-                label="Bills"
-                value={deletedFilter}
-                onChange={(e) => setDeletedFilter(e.target.value as DeletedFilter)}
-                sx={{ width: 180 }}
-              >
-                <MenuItem value="active">Active only</MenuItem>
-                <MenuItem value="deleted">Deleted only</MenuItem>
-                <MenuItem value="all">All (active + deleted)</MenuItem>
-              </TextField>
-            )}
 
             <TextField
               label="From"
@@ -268,7 +246,7 @@ export default function Reports() {
             q={q}
             viewMode={viewMode}
             groupBy={groupBy}
-            deletedFilter={deletedFilter}
+            deletedFilter="active"
             focusBillId={incomingState.billId}
             setExportFn={setExportFn}
             setExportDisabled={setExportDisabled}

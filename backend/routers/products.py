@@ -221,6 +221,7 @@ def update_category(category_id: int, payload: CategoryUpdate) -> CategoryOut:
 @router.get("/", response_model=List[ProductOut])
 def list_products(
     q: Optional[str] = Query(None),
+    brand: Optional[str] = Query(None),
     category_id: Optional[int] = Query(None),
     active_only: bool = Query(True),
     limit: int = Query(200, ge=1, le=1000),
@@ -232,6 +233,9 @@ def list_products(
             stmt = stmt.where(Product.is_active == True)  # noqa: E712
         if category_id is not None:
             stmt = stmt.where(Product.category_id == category_id)
+        brand_name = _clean(brand)
+        if brand_name:
+            stmt = stmt.where(func.lower(func.coalesce(Product.brand, "")) == brand_name.lower())
         qq = _clean(q)
         if qq:
             like = f"%{qq.lower()}%"

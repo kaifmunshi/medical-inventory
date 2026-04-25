@@ -13,6 +13,7 @@ from backend.models import (
     BankbookOut,
     Bill,
     BillPayment,
+    CashbookEntry,
     ExchangeRecord,
     Return,
 )
@@ -20,7 +21,7 @@ from backend.security import require_min_role
 
 router = APIRouter()
 
-VALID_ENTRY_TYPES = {"RECEIPT", "WITHDRAWAL", "EXPENSE"}
+VALID_ENTRY_TYPES = {"RECEIPT", "WITHDRAWAL", "EXPENSE", "OPENING", "CONTRA"}
 VALID_MODES = {"UPI", "NEFT", "RTGS", "IMPS", "BANK_DEPOSIT"}
 
 
@@ -63,7 +64,7 @@ def _sum_rows(rows: List[BankbookEntry]):
             continue
         if et == "RECEIPT":
             receipts += amt
-        elif et == "WITHDRAWAL":
+        elif et in ("WITHDRAWAL", "CONTRA"):
             withdrawals += amt
         else:
             expenses += amt
@@ -138,14 +139,40 @@ def _sum_exchange_online_out(session, *, start_iso: Optional[str] = None, end_is
     return round(total, 2)
 
 
+def _sum_cashbook_contra(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
+    stmt = select(CashbookEntry).where(CashbookEntry.entry_type == "CONTRA")
+    if start_iso:
+        stmt = stmt.where(CashbookEntry.created_at >= start_iso)
+    if end_iso:
+        stmt = stmt.where(CashbookEntry.created_at <= end_iso)
+    rows = session.exec(stmt).all()
+    total = 0.0
+    for r in rows:
+        total += float(getattr(r, "amount", 0) or 0)
+    return round(total, 2)
+
+
+def _opening_anchor(session, *, day_start: str):
+    return session.exec(
+        select(BankbookEntry)
+        .where(BankbookEntry.entry_type == "OPENING")
+        .where(BankbookEntry.created_at <= day_start)
+        .order_by(BankbookEntry.created_at.desc(), BankbookEntry.id.desc())
+    ).first()
+
+
 @router.post("/", response_model=BankbookOut)
 def create_entry(payload: BankbookCreate):
     et = (payload.entry_type or "").strip().upper()
     if et not in VALID_ENTRY_TYPES:
-        raise HTTPException(status_code=400, detail="entry_type must be RECEIPT, WITHDRAWAL or EXPENSE")
+        raise HTTPException(status_code=400, detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, OPENING or CONTRA")
 
     mode = (payload.mode or "").strip().upper()
-    if mode not in VALID_MODES:
+    if et == "OPENING":
+        mode = "OPENING"
+    elif et == "CONTRA":
+        mode = "BANK_DEPOSIT"
+    elif mode not in VALID_MODES:
         raise HTTPException(status_code=400, detail="mode must be UPI, NEFT, RTGS, IMPS or BANK_DEPOSIT")
 
     amt = float(payload.amount or 0)
@@ -172,6 +199,54 @@ def create_entry(payload: BankbookCreate):
             note=(payload.note or None),
             created_at=created_at,
         )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return row
+
+
+@router.patch("/entry/{entry_id}", response_model=BankbookOut)
+def update_entry(entry_id: int, payload: BankbookCreate):
+    require_min_role("MANAGER", context="Bankbook entry edit")
+    et = (payload.entry_type or "").strip().upper()
+    if et not in VALID_ENTRY_TYPES:
+        raise HTTPException(status_code=400, detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, OPENING or CONTRA")
+
+    mode = (payload.mode or "").strip().upper()
+    if et == "OPENING":
+        mode = "OPENING"
+    elif et == "CONTRA":
+        mode = "BANK_DEPOSIT"
+    elif mode not in VALID_MODES:
+        raise HTTPException(status_code=400, detail="mode must be UPI, NEFT, RTGS, IMPS or BANK_DEPOSIT")
+
+    amt = float(payload.amount or 0)
+    if amt <= 0:
+        raise HTTPException(status_code=400, detail="amount must be > 0")
+
+    txn_charges = float(payload.txn_charges or 0)
+    if txn_charges < 0:
+        raise HTTPException(status_code=400, detail="txn_charges cannot be negative")
+
+    with get_session() as session:
+        row = session.exec(select(BankbookEntry).where(BankbookEntry.id == entry_id)).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="bankbook entry not found")
+
+        assert_financial_year_unlocked(session, row.created_at, context="Bankbook entry edit")
+        created_at = row.created_at
+        if payload.entry_date:
+            day_dt = _parse_ymd(payload.entry_date)
+            time_part = str(row.created_at or "")[11:19] if len(str(row.created_at or "")) >= 19 else datetime.now().strftime("%H:%M:%S")
+            created_at = f"{day_dt.date().isoformat()}T{time_part}"
+            assert_financial_year_unlocked(session, created_at, context="Bankbook entry edit")
+
+        row.entry_type = et
+        row.mode = mode
+        row.amount = amt
+        row.txn_charges = txn_charges
+        row.note = payload.note or None
+        row.created_at = created_at
         session.add(row)
         session.commit()
         session.refresh(row)
@@ -212,9 +287,10 @@ def summary(
         out = _sum_rows(rows)
         bill_online = _sum_bill_online(session, start_iso=start_iso, end_iso=end_iso)
         exchange_online_in = _sum_exchange_online_in(session, start_iso=start_iso, end_iso=end_iso)
+        cashbook_contra = _sum_cashbook_contra(session, start_iso=start_iso, end_iso=end_iso)
         return_online = _sum_return_online(session, start_iso=start_iso, end_iso=end_iso)
         exchange_online_out = _sum_exchange_online_out(session, start_iso=start_iso, end_iso=end_iso)
-        out["receipts"] = round(float(out["receipts"]) + bill_online + exchange_online_in, 2)
+        out["receipts"] = round(float(out["receipts"]) + bill_online + exchange_online_in + cashbook_contra, 2)
         out["withdrawals"] = round(float(out["withdrawals"]) + return_online + exchange_online_out, 2)
         out["bank_out"] = round(float(out["withdrawals"]) + float(out["expenses"]) + float(out["charges"]), 2)
         out["net_change"] = round(float(out["receipts"]) - float(out["bank_out"]), 2)
@@ -231,16 +307,23 @@ def day_bankbook(date: str = Query(..., description="YYYY-MM-DD")):
     prev_end = f"{prev_date}T23:59:59.999999"
 
     with get_session() as session:
-        opening_rows = session.exec(
-            select(BankbookEntry).where(BankbookEntry.created_at <= prev_end)
-        ).all()
+        anchor = _opening_anchor(session, day_start=day_start)
+        anchor_amount = float(getattr(anchor, "amount", 0) or 0) if anchor else 0.0
+        anchor_ts = str(getattr(anchor, "created_at", "") or "") if anchor else None
+
+        opening_stmt = select(BankbookEntry).where(BankbookEntry.created_at <= prev_end)
+        if anchor_ts:
+            opening_stmt = opening_stmt.where(BankbookEntry.created_at > anchor_ts)
+        opening_rows = session.exec(opening_stmt).all()
         opening_summary = _sum_rows(opening_rows)
         opening_balance = (
-            opening_summary["net_change"]
-            + _sum_bill_online(session, end_iso=prev_end)
-            + _sum_exchange_online_in(session, end_iso=prev_end)
-            - _sum_return_online(session, end_iso=prev_end)
-            - _sum_exchange_online_out(session, end_iso=prev_end)
+            anchor_amount
+            + opening_summary["net_change"]
+            + _sum_bill_online(session, start_iso=anchor_ts, end_iso=prev_end)
+            + _sum_exchange_online_in(session, start_iso=anchor_ts, end_iso=prev_end)
+            + _sum_cashbook_contra(session, start_iso=anchor_ts, end_iso=prev_end)
+            - _sum_return_online(session, start_iso=anchor_ts, end_iso=prev_end)
+            - _sum_exchange_online_out(session, start_iso=anchor_ts, end_iso=prev_end)
         )
 
         day_rows = session.exec(
@@ -252,9 +335,13 @@ def day_bankbook(date: str = Query(..., description="YYYY-MM-DD")):
         day_summary = _sum_rows(day_rows)
         bill_online_today = _sum_bill_online(session, start_iso=day_start, end_iso=day_end)
         exchange_online_in_today = _sum_exchange_online_in(session, start_iso=day_start, end_iso=day_end)
+        cashbook_contra_today = _sum_cashbook_contra(session, start_iso=day_start, end_iso=day_end)
         return_online_today = _sum_return_online(session, start_iso=day_start, end_iso=day_end)
         exchange_online_out_today = _sum_exchange_online_out(session, start_iso=day_start, end_iso=day_end)
-        day_summary["receipts"] = round(float(day_summary["receipts"]) + bill_online_today + exchange_online_in_today, 2)
+        day_summary["receipts"] = round(
+            float(day_summary["receipts"]) + bill_online_today + exchange_online_in_today + cashbook_contra_today,
+            2,
+        )
         day_summary["withdrawals"] = round(
             float(day_summary["withdrawals"]) + return_online_today + exchange_online_out_today,
             2,

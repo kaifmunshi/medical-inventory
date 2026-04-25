@@ -461,6 +461,42 @@ export default function Billing() {
     setPaymentAutoFilledOnce(true)
   }
 
+  function syncPaymentFieldsFromFinal(target: number) {
+    const next = round2(Math.max(0, Number(target || 0)))
+    if (mode === 'cash') {
+      setCash(next || '')
+      setOnline('')
+    } else if (mode === 'online') {
+      setCash('')
+      setOnline(next || '')
+    } else if (mode === 'split' && splitCombination === 'cash-online') {
+      const c = Math.min(next, Math.max(0, round2(Number(cash || 0))))
+      setCash(c || '')
+      setOnline(round2(Math.max(0, next - c)) || '')
+    }
+  }
+
+  function commitPaymentAmountBlur() {
+    let nextFinal: number | null = null
+    if (mode === 'cash') nextFinal = Number(cash || 0)
+    else if (mode === 'online') nextFinal = Number(online || 0)
+    else if (mode === 'split' && splitCombination === 'cash-online') {
+      nextFinal = Number(cash || 0) + Number(online || 0)
+    }
+    if (nextFinal === null || nextFinal <= 0) return
+    const safe = round2(nextFinal)
+    setFinalAmount(safe)
+    setFinalManuallyEdited(true)
+    applyFinalAmountToRows(safe)
+  }
+
+  function commitFinalAmountBlur() {
+    const safe = round2(Math.max(0, Number(finalAmount || 0)))
+    setFinalAmount(safe)
+    syncPaymentFieldsFromFinal(safe)
+    applyFinalAmountToRows(safe)
+  }
+
   useEffect(() => {
     if (mode !== 'split' || splitCombination !== 'cash-online') return
     if (cash === '' && online === '') return
@@ -1219,6 +1255,7 @@ export default function Billing() {
                   value={cash === '' ? '' : String(cash)}
                   onChange={(e) => handleCashAmountChange(e.target.value)}
                   onFocus={() => handleAmountFocus('cash')}
+                  onBlur={commitPaymentAmountBlur}
                   onWheel={blurOnWheel}
                   sx={{ width: 170, ...noSpinnerSx }}
                   inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
@@ -1233,6 +1270,7 @@ export default function Billing() {
                   value={online === '' ? '' : String(online)}
                   onChange={(e) => handleOnlineAmountChange(e.target.value)}
                   onFocus={() => handleAmountFocus('online')}
+                  onBlur={commitPaymentAmountBlur}
                   onWheel={blurOnWheel}
                   sx={{ width: 170, ...noSpinnerSx }}
                   inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
@@ -1297,7 +1335,7 @@ export default function Billing() {
                       setFinalAmount(Number(v || 0))
                       setFinalManuallyEdited(true)
                     }}
-                    onBlur={() => applyFinalAmountToRows(finalAmount)}
+                    onBlur={commitFinalAmountBlur}
                     onWheel={blurOnWheel}
                     sx={{ ...noSpinnerSx }}
                     inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}

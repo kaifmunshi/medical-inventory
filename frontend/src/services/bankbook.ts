@@ -1,7 +1,7 @@
 import api from './api'
 
-export type BankbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE'
-export type BankbookMode = 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | 'BANK_DEPOSIT'
+export type BankbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE' | 'OPENING' | 'CONTRA'
+export type BankbookMode = 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | 'BANK_DEPOSIT' | 'OPENING'
 
 export type BankbookCreate = {
   entry_type: BankbookType
@@ -42,6 +42,11 @@ export type BankbookDay = {
 
 export async function createBankbookEntry(payload: BankbookCreate) {
   const { data } = await api.post('/bankbook/', payload)
+  return data
+}
+
+export async function updateBankbookEntry(entry_id: number, payload: BankbookCreate) {
+  const { data } = await api.patch(`/bankbook/entry/${entry_id}`, payload)
   return data
 }
 

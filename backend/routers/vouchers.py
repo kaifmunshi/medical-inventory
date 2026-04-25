@@ -213,15 +213,19 @@ def daybook(
         receipt_stmt = select(BillPayment).where(
             BillPayment.received_at >= start_iso,
             BillPayment.received_at <= end_iso,
-            BillPayment.is_deleted == False,  # noqa: E712
         )
+        if deleted_filter == "active":
+            receipt_stmt = receipt_stmt.where(BillPayment.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            receipt_stmt = receipt_stmt.where(BillPayment.is_deleted == True)  # noqa: E712
         for payment in session.exec(receipt_stmt).all():
             bill = session.get(Bill, payment.bill_id)
             if not bill:
                 continue
-            if deleted_filter == "active" and bool(bill.is_deleted):
+            is_deleted = bool(payment.is_deleted) or bool(bill.is_deleted)
+            if deleted_filter == "active" and is_deleted:
                 continue
-            if deleted_filter == "deleted" and not bool(bill.is_deleted):
+            if deleted_filter == "deleted" and not is_deleted:
                 continue
             auto_note = str(payment.note or "").strip().lower()
             if auto_note == "auto: payment at bill creation":
@@ -248,8 +252,8 @@ def daybook(
                     ),
                     cash_amount=0.0 if bool(getattr(payment, "is_writeoff", False)) else _round2(payment.cash_amount),
                     online_amount=0.0 if bool(getattr(payment, "is_writeoff", False)) else _round2(payment.online_amount),
-                    status=bill.payment_status,
-                    is_deleted=False,
+                    status="DELETED" if is_deleted else bill.payment_status,
+                    is_deleted=is_deleted,
                 )
             )
 
@@ -279,15 +283,19 @@ def daybook(
         purchase_payment_stmt = select(PurchasePayment).where(
             PurchasePayment.paid_at >= start_iso,
             PurchasePayment.paid_at <= end_iso,
-            PurchasePayment.is_deleted == False,  # noqa: E712
         )
+        if deleted_filter == "active":
+            purchase_payment_stmt = purchase_payment_stmt.where(PurchasePayment.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            purchase_payment_stmt = purchase_payment_stmt.where(PurchasePayment.is_deleted == True)  # noqa: E712
         for payment in session.exec(purchase_payment_stmt).all():
             purchase = session.get(Purchase, payment.purchase_id)
             if not purchase:
                 continue
-            if deleted_filter == "active" and bool(purchase.is_deleted):
+            is_deleted = bool(payment.is_deleted) or bool(purchase.is_deleted)
+            if deleted_filter == "active" and is_deleted:
                 continue
-            if deleted_filter == "deleted" and not bool(purchase.is_deleted):
+            if deleted_filter == "deleted" and not is_deleted:
                 continue
             rows.append(
                 VoucherDayBookRow(
@@ -301,8 +309,8 @@ def daybook(
                     amount=_round2(payment.amount),
                     cash_amount=0.0,
                     online_amount=0.0,
-                    status=purchase.payment_status,
-                    is_deleted=False,
+                    status="DELETED" if is_deleted else purchase.payment_status,
+                    is_deleted=is_deleted,
                 )
             )
 

@@ -13,10 +13,9 @@ import {
   IconButton,
 } from '@mui/material'
 import EditIcon from '@mui/icons-material/Edit'
-import DeleteIcon from '@mui/icons-material/Delete'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createCustomer, deleteCustomer, fetchCustomers, updateCustomer } from '../../services/customers'
+import { createCustomer, fetchCustomers, updateCustomer } from '../../services/customers'
 import type { Customer } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 import { useNavigate } from 'react-router-dom'
@@ -53,7 +52,6 @@ export default function CustomersPage() {
   const [addressLine, setAddressLine] = useState('')
   const [nameError, setNameError] = useState('')
   const [editTarget, setEditTarget] = useState<Customer | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<Customer | null>(null)
 
   const customersQ = useQuery<Customer[], Error>({
     queryKey: ['customers', q],
@@ -91,18 +89,6 @@ export default function CustomersPage() {
       toast.push(String(msg), 'error')
     },
   })
-  const deleteM = useMutation({
-    mutationFn: (id: number) => deleteCustomer(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['customers'] })
-      setDeleteTarget(null)
-    },
-    onError: (err: any) => {
-      const msg = err?.response?.data?.detail || err?.message || 'Failed to delete customer'
-      toast.push(String(msg), 'error')
-    },
-  })
-
   function openAdd() {
     setName('')
     setPhone('')
@@ -215,14 +201,6 @@ export default function CustomersPage() {
                         <IconButton size="small" onClick={() => openEdit(r)} disabled={updateM.isPending}>
                           <EditIcon fontSize="small" />
                         </IconButton>
-                        <IconButton
-                          size="small"
-                          color="error"
-                          onClick={() => setDeleteTarget(r)}
-                          disabled={deleteM.isPending}
-                        >
-                          <DeleteIcon fontSize="small" />
-                        </IconButton>
                       </Stack>
                     </td>
                   </tr>
@@ -320,29 +298,6 @@ export default function CustomersPage() {
           <Button onClick={() => setEditTarget(null)}>Cancel</Button>
           <Button onClick={saveEditedCustomer} variant="contained" disabled={updateM.isPending}>
             Save
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>Delete Customer</DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2">
-            {deleteTarget ? `Delete customer "${deleteTarget.name}"?` : ''}
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDeleteTarget(null)}>Cancel</Button>
-          <Button
-            color="error"
-            variant="contained"
-            disabled={deleteM.isPending}
-            onClick={() => {
-              if (!deleteTarget) return
-              deleteM.mutate(deleteTarget.id)
-            }}
-          >
-            Delete
           </Button>
         </DialogActions>
       </Dialog>

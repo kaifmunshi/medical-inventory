@@ -6,16 +6,14 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  IconButton,
   Paper,
   Stack,
   TextField,
   Typography,
 } from '@mui/material'
-import DeleteIcon from '@mui/icons-material/Delete'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { createParty, deleteParty, fetchParties, updateParty } from '../../services/parties'
+import { createParty, fetchParties, updateParty } from '../../services/parties'
 import type { Party } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 
@@ -43,7 +41,6 @@ export default function SuppliersPage() {
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<Party | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<Party | null>(null)
   const [name, setName] = useState('')
   const [phone, setPhone] = useState('')
   const [addressLine, setAddressLine] = useState('')
@@ -74,15 +71,6 @@ export default function SuppliersPage() {
       setEditTarget(null)
     },
     onError: (err: any) => toast.push(String(err?.message || 'Failed to update supplier'), 'error'),
-  })
-
-  const deleteM = useMutation({
-    mutationFn: (id: number) => deleteParty(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['suppliers'] })
-      setDeleteTarget(null)
-    },
-    onError: (err: any) => toast.push(String(err?.message || 'Failed to archive supplier'), 'error'),
   })
 
   function resetForm() {
@@ -199,14 +187,11 @@ export default function SuppliersPage() {
                   <td>
                     <Stack direction="row" gap={1}>
                       <Button size="small" variant="outlined" onClick={() => navigate(`/purchases?new=1&supplier_id=${row.id}`)}>
-                        New Order
+                        New Purchase
                       </Button>
                       <Button size="small" onClick={() => navigate(`/supplier-ledger?supplier_id=${row.id}`)}>
                         Ledger
                       </Button>
-                      <IconButton size="small" color="error" onClick={() => setDeleteTarget(row)}>
-                        <DeleteIcon fontSize="small" />
-                      </IconButton>
                     </Stack>
                   </td>
                 </tr>
@@ -256,21 +241,6 @@ export default function SuppliersPage() {
         <DialogActions>
           <Button onClick={() => setEditTarget(null)}>Cancel</Button>
           <Button variant="contained" onClick={saveEdit} disabled={updateM.isPending}>Update</Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)}>
-        <DialogTitle>Archive Supplier?</DialogTitle>
-        <DialogContent dividers>
-          <Typography>
-            {deleteTarget ? `Mark ${deleteTarget.name} inactive?` : ''}
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDeleteTarget(null)}>Cancel</Button>
-          <Button color="error" variant="contained" onClick={() => deleteTarget && deleteM.mutate(Number(deleteTarget.id))}>
-            Archive
-          </Button>
         </DialogActions>
       </Dialog>
     </Stack>

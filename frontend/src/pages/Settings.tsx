@@ -21,6 +21,7 @@ import { useUserSession } from '../components/session/UserSessionProvider'
 import { allMenuItems } from '../components/layout/menuConfig'
 import type { AppUser, FinancialYear } from '../lib/types'
 import { type StoredShortcutItem, USER_SHORTCUT_HOTKEYS } from '../lib/userSession'
+import { financialYearDisplayName, financialYearLabelFromDates, financialYearRange } from '../lib/financialYear'
 import { createFinancialYear, fetchFinancialYears, updateFinancialYear } from '../services/settings'
 import { createUser, fetchUsers, updateUser } from '../services/users'
 
@@ -29,14 +30,14 @@ type UserRole = 'OWNER' | 'MANAGER' | 'STAFF'
 function financialYearForStart(startYear: number) {
   const safeYear = Number(startYear || 0)
   return {
-    label: `FY ${String(safeYear).slice(-2)}-${String(safeYear + 1).slice(-2)}`,
+    label: financialYearLabelFromDates(`${safeYear}-04-01`, `${safeYear + 1}-03-31`),
     start_date: `${safeYear}-04-01`,
     end_date: `${safeYear + 1}-03-31`,
   }
 }
 
 function prettyRange(year: FinancialYear) {
-  return `${year.start_date} to ${year.end_date}`
+  return financialYearRange(year)
 }
 
 function pinError(pin: string) {
@@ -64,7 +65,6 @@ export default function Settings() {
   const [userName, setUserName] = useState('')
   const [userRole, setUserRole] = useState<UserRole>('STAFF')
   const [userPin, setUserPin] = useState('')
-  const [userActive, setUserActive] = useState(true)
 
   const yearsQ = useQuery<FinancialYear[], Error>({
     queryKey: ['settings-financial-years'],
@@ -160,7 +160,6 @@ export default function Settings() {
     setUserName('')
     setUserRole('STAFF')
     setUserPin('')
-    setUserActive(true)
     setUserDialogOpen(true)
   }
 
@@ -169,7 +168,6 @@ export default function Settings() {
     setUserName(user.name)
     setUserRole(user.role)
     setUserPin('')
-    setUserActive(Boolean(user.is_active))
     setUserDialogOpen(true)
   }
 
@@ -179,7 +177,6 @@ export default function Settings() {
     setUserName('')
     setUserRole('STAFF')
     setUserPin('')
-    setUserActive(true)
   }
 
   function submitFinancialYear() {
@@ -227,7 +224,6 @@ export default function Settings() {
     const payload: Partial<{ name: string; role: UserRole; pin: string; is_active: boolean }> = {
       name: cleanName,
       role: userRole,
-      is_active: userActive,
     }
     if (userPin.trim()) payload.pin = userPin.trim()
     updateUserM.mutate({ userId: editingUser.id, payload })
@@ -237,7 +233,7 @@ export default function Settings() {
     if (!editingUser) return
     updateUserM.mutate({
       userId: editingUser.id,
-      payload: { name: userName.trim() || editingUser.name, role: userRole, is_active: userActive, pin: '' },
+      payload: { name: userName.trim() || editingUser.name, role: userRole, pin: '' },
     })
   }
 
@@ -283,7 +279,7 @@ export default function Settings() {
             </Typography>
             <Stack direction="row" gap={0.75} flexWrap="wrap">
               {currentUser ? <Chip label={`${currentUser.name} • ${currentUser.role}`} color="primary" /> : null}
-              {activeYear ? <Chip label={`Active FY ${activeYear.label}`} variant="outlined" /> : null}
+              {activeYear ? <Chip label={`Active ${financialYearDisplayName(activeYear)}`} variant="outlined" /> : null}
               <Chip label={`Shortcuts ${shortcutCount}/8`} variant="outlined" />
             </Stack>
           </Stack>
@@ -316,7 +312,7 @@ export default function Settings() {
           <table className="table">
             <thead>
               <tr>
-                <th>Label</th>
+                <th>Financial Year</th>
                 <th>Range</th>
                 <th>Status</th>
                 <th>Rules</th>
@@ -326,7 +322,16 @@ export default function Settings() {
             <tbody>
               {(yearsQ.data || []).map((year) => (
                 <tr key={year.id}>
-                  <td style={{ fontWeight: 700 }}>{year.label}</td>
+                  <td>
+                    <Typography variant="body2" sx={{ fontWeight: 800 }}>
+                      {financialYearDisplayName(year)}
+                    </Typography>
+                    {year.label && year.label !== financialYearDisplayName(year) ? (
+                      <Typography variant="caption" color="text.secondary">
+                        Stored label: {year.label}
+                      </Typography>
+                    ) : null}
+                  </td>
                   <td>{prettyRange(year)}</td>
                   <td>
                     <Stack direction="row" gap={0.75} flexWrap="wrap">
@@ -362,7 +367,7 @@ export default function Settings() {
               ))}
               {(yearsQ.data || []).length === 0 ? (
                 <tr>
-                  <td colSpan={5}>
+                  <td colSpan={4}>
                     <Box p={2} color="text.secondary">
                       No financial years configured yet.
                     </Box>
@@ -508,7 +513,6 @@ export default function Settings() {
                 <th>Name</th>
                 <th>Role</th>
                 <th>PIN</th>
-                <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -518,22 +522,10 @@ export default function Settings() {
                   <td style={{ fontWeight: 700 }}>{user.name}</td>
                   <td>{user.role}</td>
                   <td>{user.has_pin ? 'Configured' : 'Not set'}</td>
-                  <td>{user.is_active ? 'Active' : 'Inactive'}</td>
                   <td>
                     <Stack direction={{ xs: 'column', md: 'row' }} gap={0.75}>
                       <Button variant="outlined" onClick={() => openEditUser(user)} disabled={!canManageUsers}>
                         Edit
-                      </Button>
-                      <Button
-                        onClick={() =>
-                          updateUserM.mutate({
-                            userId: user.id,
-                            payload: { name: user.name, role: user.role, is_active: !user.is_active },
-                          })
-                        }
-                        disabled={!canManageUsers || updateUserM.isPending}
-                      >
-                        {user.is_active ? 'Deactivate' : 'Activate'}
                       </Button>
                     </Stack>
                   </td>
@@ -609,17 +601,6 @@ export default function Settings() {
               type="password"
               fullWidth
             />
-            {editingUser ? (
-              <TextField
-                select
-                label="Status"
-                value={userActive ? 'active' : 'inactive'}
-                onChange={(e) => setUserActive(e.target.value === 'active')}
-              >
-                <MenuItem value="active">Active</MenuItem>
-                <MenuItem value="inactive">Inactive</MenuItem>
-              </TextField>
-            ) : null}
           </Stack>
         </DialogContent>
         <DialogActions>

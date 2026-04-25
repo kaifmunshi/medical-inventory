@@ -52,8 +52,7 @@ function formatDateTime(value?: string | null) {
   }
 }
 
-function statusChip(status: string, isDeleted: boolean) {
-  if (isDeleted) return <Chip size="small" label="Deleted" color="default" variant="outlined" />
+function statusChip(status: string) {
   const key = String(status || '').toUpperCase()
   if (key === 'PAID') return <Chip size="small" label="Paid" color="success" />
   if (key === 'PARTIAL') return <Chip size="small" label="Partial" color="warning" />
@@ -65,7 +64,7 @@ export default function CustomerSummaryPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const numericCustomerId = Number(customerId || 0)
-  const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'DELETED' | 'OPEN' | 'PAID'>('ALL')
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'OPEN' | 'PAID'>('ALL')
   const [moveOpen, setMoveOpen] = useState(false)
   const [moveTarget, setMoveTarget] = useState<Customer | null>(null)
   const [moveSearch, setMoveSearch] = useState('')
@@ -103,11 +102,10 @@ export default function CustomerSummaryPage() {
   const totals = summaryQ.data?.totals
 
   const filteredBills = useMemo(() => {
-    if (statusFilter === 'ALL') return bills
-    if (statusFilter === 'ACTIVE') return bills.filter((bill: any) => !bill.is_deleted)
-    if (statusFilter === 'DELETED') return bills.filter((bill: any) => bill.is_deleted)
-    if (statusFilter === 'PAID') return bills.filter((bill: any) => String(bill.payment_status || '').toUpperCase() === 'PAID')
-    return bills.filter((bill: any) => ['UNPAID', 'PARTIAL'].includes(String(bill.payment_status || '').toUpperCase()))
+    const visibleBills = bills.filter((bill: any) => !bill.is_deleted)
+    if (statusFilter === 'ALL') return visibleBills
+    if (statusFilter === 'PAID') return visibleBills.filter((bill: any) => String(bill.payment_status || '').toUpperCase() === 'PAID')
+    return visibleBills.filter((bill: any) => ['UNPAID', 'PARTIAL'].includes(String(bill.payment_status || '').toUpperCase()))
   }, [bills, statusFilter])
 
   async function openBillDetail(billId: number) {
@@ -157,7 +155,6 @@ export default function CustomerSummaryPage() {
                       q: customer.phone || customer.name,
                       from: '2000-01-01',
                       to: '2099-12-31',
-                      deletedFilter: 'all',
                     })
                   )
                 }
@@ -188,7 +185,7 @@ export default function CustomerSummaryPage() {
               Move Bills To Another Customer
             </Button>
             <Typography variant="body2" color="text.secondary">
-              All bills are shown here, including deleted and partially paid ones.
+              Active bills are shown here, including paid and pending bills.
             </Typography>
           </Stack>
         </Stack>
@@ -197,8 +194,6 @@ export default function CustomerSummaryPage() {
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} gap={1} flexWrap="wrap">
           <Chip label={`Bills: ${totals.total_bills}`} />
-          <Chip label={`Active: ${totals.active_bills}`} color="success" variant="outlined" />
-          <Chip label={`Deleted: ${totals.deleted_bills}`} variant="outlined" />
           <Chip label={`Sales: Rs ${money(totals.total_sales)}`} color="primary" />
           <Chip label={`Collected: Rs ${money(totals.total_paid)}`} color="success" variant="outlined" />
           <Chip label={`Pending: Rs ${money(totals.total_pending)}`} color="warning" variant="outlined" />
@@ -221,8 +216,6 @@ export default function CustomerSummaryPage() {
             sx={{ minWidth: 180, ml: { md: 'auto' } }}
           >
             <MenuItem value="ALL">All Bills</MenuItem>
-            <MenuItem value="ACTIVE">Active Bills</MenuItem>
-            <MenuItem value="DELETED">Deleted Bills</MenuItem>
             <MenuItem value="OPEN">Open / Pending</MenuItem>
             <MenuItem value="PAID">Paid Bills</MenuItem>
           </TextField>
@@ -255,7 +248,7 @@ export default function CustomerSummaryPage() {
                     </td>
                     <td>{formatDateTime(bill.date_time)}</td>
                     <td>{bill.payment_mode || '-'}</td>
-                    <td>{statusChip(String(bill.payment_status || ''), Boolean(bill.is_deleted))}</td>
+                    <td>{statusChip(String(bill.payment_status || ''))}</td>
                     <td>Rs {money(bill.total_amount)}</td>
                     <td>Rs {money(bill.paid_amount)}</td>
                     <td>Rs {money(pending)}</td>
@@ -287,7 +280,7 @@ export default function CustomerSummaryPage() {
         <DialogContent dividers>
           <Stack gap={2} sx={{ mt: 1 }}>
             <Alert severity="info">
-              This will move every bill currently tagged to {customer.name} to the selected customer, including deleted bills.
+              This will move every active bill currently tagged to {customer.name} to the selected customer.
             </Alert>
             <Autocomplete
               options={(customersQ.data || []).filter((row) => Number(row.id) !== Number(customer.id))}

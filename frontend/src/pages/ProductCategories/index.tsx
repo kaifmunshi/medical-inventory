@@ -2,22 +2,16 @@ import { useMemo, useState } from 'react'
 import {
   Box,
   Button,
-  Chip,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  FormControlLabel,
-  IconButton,
   Paper,
   Stack,
-  Switch,
   TextField,
   Typography,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
-import ArchiveIcon from '@mui/icons-material/Archive'
-import UnarchiveIcon from '@mui/icons-material/Unarchive'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createCategory, fetchCategories, updateCategory } from '../../services/products'
 import type { Category } from '../../lib/types'
@@ -43,14 +37,13 @@ export default function ProductCategoriesPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const [q, setQ] = useState('')
-  const [showInactive, setShowInactive] = useState(false)
   const [open, setOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<Category | null>(null)
   const [name, setName] = useState('')
 
   const categoriesQ = useQuery<Category[], Error>({
-    queryKey: ['product-categories-master', showInactive],
-    queryFn: () => fetchCategories({ active_only: !showInactive }),
+    queryKey: ['product-categories-master'],
+    queryFn: () => fetchCategories({ active_only: true }),
   })
 
   const createM = useMutation({
@@ -96,7 +89,6 @@ export default function ProductCategoriesPage() {
 
   function resetFilters() {
     setQ('')
-    setShowInactive(false)
   }
 
   function saveCreate() {
@@ -118,10 +110,6 @@ export default function ProductCategoriesPage() {
     updateM.mutate({ id: Number(editTarget.id), payload: { name: clean } })
   }
 
-  function toggleActive(row: Category) {
-    updateM.mutate({ id: Number(row.id), payload: { is_active: !row.is_active } })
-  }
-
   return (
     <Stack gap={2}>
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
@@ -137,11 +125,6 @@ export default function ProductCategoriesPage() {
           <Button variant="outlined" onClick={resetFilters} sx={{ minWidth: 120 }}>
             Reset Filters
           </Button>
-          <FormControlLabel
-            control={<Switch checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />}
-            label="Show inactive"
-            sx={{ minWidth: 160 }}
-          />
         </Stack>
       </Paper>
 
@@ -151,38 +134,21 @@ export default function ProductCategoriesPage() {
             <thead>
               <tr>
                 <th>Name</th>
-                <th>Status</th>
                 <th>Created</th>
                 <th>Updated</th>
-                <th></th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={row.id} onDoubleClick={() => openEdit(row)} style={{ cursor: 'pointer' }}>
                   <td>{row.name}</td>
-                  <td>
-                    <Chip
-                      size="small"
-                      label={row.is_active ? 'Active' : 'Inactive'}
-                      color={row.is_active ? 'success' : 'default'}
-                      variant={row.is_active ? 'filled' : 'outlined'}
-                    />
-                  </td>
                   <td>{formatDate(row.created_at)}</td>
                   <td>{formatDate(row.updated_at)}</td>
-                  <td>
-                    <Stack direction="row" gap={1}>
-                      <IconButton size="small" color={row.is_active ? 'warning' : 'success'} onClick={() => toggleActive(row)}>
-                        {row.is_active ? <ArchiveIcon fontSize="small" /> : <UnarchiveIcon fontSize="small" />}
-                      </IconButton>
-                    </Stack>
-                  </td>
                 </tr>
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={5}>
+                  <td colSpan={3}>
                     <Box p={2} color="text.secondary">No categories found.</Box>
                   </td>
                 </tr>

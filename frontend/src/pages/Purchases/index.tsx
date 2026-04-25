@@ -24,7 +24,7 @@ import PaymentsIcon from '@mui/icons-material/Payments'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { createParty, fetchParties } from '../../services/parties'
-import { createCategory, fetchCategories, fetchProducts } from '../../services/products'
+import { createBrand, createCategory, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
 import {
   addPurchasePayment,
   cancelPurchase,
@@ -141,6 +141,9 @@ export default function PurchasesPage() {
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false)
   const [categoryTargetKey, setCategoryTargetKey] = useState<string | null>(null)
   const [newCategoryName, setNewCategoryName] = useState('')
+  const [brandDialogOpen, setBrandDialogOpen] = useState(false)
+  const [brandTargetKey, setBrandTargetKey] = useState<string | null>(null)
+  const [newBrandName, setNewBrandName] = useState('')
 
   const suppliersQ = useQuery<Party[], Error>({
     queryKey: ['suppliers-select'],
@@ -150,6 +153,10 @@ export default function PurchasesPage() {
   const categoriesQ = useQuery<Category[], Error>({
     queryKey: ['purchase-categories'],
     queryFn: () => fetchCategories(),
+  })
+  const brandsQ = useQuery({
+    queryKey: ['purchase-brands'],
+    queryFn: () => fetchBrands({ active_only: true }),
   })
 
   const productsQ = useQuery<Product[], Error>({
@@ -291,6 +298,23 @@ export default function PurchasesPage() {
     onError: (err: any) => toast.push(String(err?.message || 'Failed to add category'), 'error'),
   })
 
+  const createBrandM = useMutation({
+    mutationFn: createBrand,
+    onSuccess: (brand) => {
+      toast.push('Brand added', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchase-brands'] })
+      queryClient.invalidateQueries({ queryKey: ['brand-master'] })
+      if (brandTargetKey) {
+        updateItem(brandTargetKey, { brand: brand.name, product_id: undefined })
+        updateEditItem(brandTargetKey, { brand: brand.name, product_id: undefined })
+      }
+      setBrandDialogOpen(false)
+      setBrandTargetKey(null)
+      setNewBrandName('')
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to add brand'), 'error'),
+  })
+
   const subtotal = useMemo(
     () => items.reduce((sum, item) => sum + lineBaseTotal(item), 0),
     [items],
@@ -303,6 +327,7 @@ export default function PurchasesPage() {
 
   const suppliers = suppliersQ.data || []
   const categories = categoriesQ.data || []
+  const brandNames = (brandsQ.data || []).map((brand) => brand.name)
   const products = productsQ.data || []
   const purchases = purchasesQ.data || []
   const selectedPurchase = selectedPurchaseQ.data || null
@@ -513,10 +538,25 @@ export default function PurchasesPage() {
     createCategoryM.mutate(cleanName)
   }
 
+  function saveQuickBrand() {
+    const cleanName = newBrandName.trim()
+    if (!cleanName) {
+      toast.push('Brand name is required', 'error')
+      return
+    }
+    createBrandM.mutate(cleanName)
+  }
+
   function openCategoryDialog(itemKey: string) {
     setCategoryTargetKey(itemKey)
     setNewCategoryName('')
     setCategoryDialogOpen(true)
+  }
+
+  function openBrandDialog(itemKey: string) {
+    setBrandTargetKey(itemKey)
+    setNewBrandName('')
+    setBrandDialogOpen(true)
   }
 
   function itemEditor(
@@ -584,7 +624,21 @@ export default function PurchasesPage() {
                     <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchItem(item.key, { product_name: e.target.value, product_id: undefined })} fullWidth />
                   </Grid>
                   <Grid item xs={12} md={2}>
-                    <TextField size="small" label="Brand" value={item.brand || ''} onChange={(e) => patchItem(item.key, { brand: e.target.value, product_id: undefined })} fullWidth />
+                    <Stack direction="row" gap={1}>
+                      <Autocomplete
+                        freeSolo
+                        size="small"
+                        options={brandNames}
+                        value={item.brand || ''}
+                        onChange={(_, value) => patchItem(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined })}
+                        onInputChange={(_, value) => patchItem(item.key, { brand: value, product_id: undefined })}
+                        renderInput={(params) => <TextField {...params} label="Brand" fullWidth />}
+                        sx={{ flex: 1 }}
+                      />
+                      <Button size="small" variant="outlined" onClick={() => openBrandDialog(item.key)} sx={{ minWidth: 0, px: 1 }}>
+                        New
+                      </Button>
+                    </Stack>
                   </Grid>
                   <Grid item xs={12} md={1.5}>
                     <TextField size="small" label="Alias" value={item.alias || ''} onChange={(e) => patchItem(item.key, { alias: e.target.value })} fullWidth />
@@ -638,7 +692,7 @@ export default function PurchasesPage() {
                           onClick={() => openCategoryDialog(item.key)}
                           sx={{ minWidth: 0, px: 1, whiteSpace: 'nowrap' }}
                         >
-                          + NEW
+                          New
                         </Button>
                         <Typography variant="subtitle2" sx={{ minWidth: 80, textAlign: 'right' }}>
                           {money(lineBaseTotal(item))}
@@ -685,9 +739,9 @@ export default function PurchasesPage() {
     <Stack gap={2}>
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
         <Box>
-          <Typography variant="h5">Purchase Order Desk</Typography>
+          <Typography variant="h5">Purchase Desk</Typography>
           <Typography variant="body2" color="text.secondary">
-            Supplier orders, inward stock, free-item cost averaging, and settlement in one place.
+            Supplier purchases, inward stock, free-item cost averaging, and settlement in one place.
           </Typography>
         </Box>
         <Button variant="contained" onClick={openAddPurchase}>Add Purchase</Button>
@@ -775,7 +829,7 @@ export default function PurchasesPage() {
         <DialogTitle>
           <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
             <Box>
-              <Typography variant="h6">Add Purchase Order</Typography>
+              <Typography variant="h6">Add Purchase</Typography>
               <Typography variant="body2" color="text.secondary">
                 {partyId ? supplierNameFor(partyId) : 'Select supplier'} | {invoiceDate || 'No date'}
               </Typography>
@@ -907,6 +961,17 @@ export default function PurchasesPage() {
         </DialogActions>
       </Dialog>
 
+      <Dialog open={brandDialogOpen} onClose={() => setBrandDialogOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Add Product Brand</DialogTitle>
+        <DialogContent dividers>
+          <TextField label="Brand Name" value={newBrandName} onChange={(e) => setNewBrandName(e.target.value)} required autoFocus fullWidth sx={{ mt: 1 }} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBrandDialogOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={saveQuickBrand} disabled={createBrandM.isPending}>Save Brand</Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={Boolean(selectedPurchaseId)} onClose={() => setSelectedPurchaseId(null)} fullWidth maxWidth="lg">
         <DialogTitle>Purchase Detail</DialogTitle>
         <DialogContent dividers>
@@ -1016,7 +1081,7 @@ export default function PurchasesPage() {
       <Dialog open={editHeaderOpen} onClose={() => setEditHeaderOpen(false)} fullWidth maxWidth="md">
         <DialogTitle>
           <Box>
-            <Typography variant="h6">Edit Purchase Order</Typography>
+            <Typography variant="h6">Edit Purchase</Typography>
             <Typography variant="body2" color="text.secondary">
               {editPartyId ? supplierNameFor(editPartyId) : 'Select supplier'} | {editInvoiceDate || 'No date'}
             </Typography>

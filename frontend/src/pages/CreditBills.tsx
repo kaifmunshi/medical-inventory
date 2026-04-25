@@ -18,7 +18,6 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
@@ -27,12 +26,9 @@ import {
   listAllBills,
   receivePayment,
   listBillPayments,
-  recoverBillPayment,
-  undoBillPayment,
 } from '../services/billing'
 import { getExchangeByReturn, listExchangeRecords } from '../services/returns'
 import { todayRange } from '../lib/date'
-import ConfirmDialog from '../components/ui/ConfirmDialog'
 import { fetchFinancialYears } from '../services/settings'
 import type { FinancialYear } from '../lib/types'
 
@@ -123,19 +119,6 @@ function extractCustomerMeta(notes: any) {
   }
 }
 
-function billHasUndoableCreditComponent(bill: any, payments: any[]) {
-  if (String(bill?.payment_mode || '').toLowerCase() === 'credit') return true
-  if (Boolean(bill?.is_credit)) return true
-
-  const total = Number(bill?.total_amount || 0)
-  return (payments || []).some((p: any) => {
-    const isOpeningPayment = String(p?.note || '') === 'auto: payment at bill creation'
-    if (!isOpeningPayment) return false
-    const openingPaid = Number(p?.cash_amount || 0) + Number(p?.online_amount || 0)
-    return openingPaid + 0.0001 < total
-  })
-}
-
 function previousFinancialYear(years: FinancialYear[], activeYear: FinancialYear | null) {
   if (!activeYear) return null
   return (
@@ -150,7 +133,9 @@ function StatusChip({ status }: { status: any }) {
   const s = String(status || '').toUpperCase()
 
   const sx =
-    s === 'PAID'
+    s === 'WRITTEN OFF'
+      ? { bgcolor: 'warning.dark', color: '#fff' }
+      : s === 'PAID'
       ? { bgcolor: 'success.main', color: '#fff' }
       : s === 'PARTIAL'
         ? { bgcolor: 'warning.main', color: '#fff' }
@@ -181,8 +166,6 @@ export default function CreditBills() {
   const [detailLoadingPayments, setDetailLoadingPayments] = useState(false)
   const [openExchangeDlg, setOpenExchangeDlg] = useState(false)
   const [exchangeDetail, setExchangeDetail] = useState<any | null>(null)
-  const [undoPaymentRow, setUndoPaymentRow] = useState<any | null>(null)
-  const [recoverPaymentRow, setRecoverPaymentRow] = useState<any | null>(null)
   const [editPaymentRow, setEditPaymentRow] = useState<any | null>(null)
 
   // Receive payment dialog
@@ -282,7 +265,7 @@ export default function CreditBills() {
       const paid = Number(b.paid_amount || 0)
       const writeoff = Number(b.writeoff_amount || 0)
       const pendingNum = Math.max(0, total - paid - writeoff)
-      const status = (b.payment_status || (pendingNum > 0 ? 'UNPAID' : 'PAID')) as string
+      const status = pendingNum <= 0.0001 && writeoff > 0 ? 'WRITTEN OFF' : ((b.payment_status || (pendingNum > 0 ? 'UNPAID' : 'PAID')) as string)
       const customerMeta = extractCustomerMeta(b.notes)
 
       return {
@@ -531,34 +514,6 @@ export default function CreditBills() {
     },
   })
 
-  const mUndoPay = useMutation({
-    mutationFn: async (payment: any) => {
-      if (!detail?.id) throw new Error('Bill missing')
-      if (!payment?.id) throw new Error('Payment missing')
-      return undoBillPayment(Number(detail.id), Number(payment.id))
-    },
-    onSuccess: async () => {
-      const billId = Number(detail?.id || 0)
-      setUndoPaymentRow(null)
-      await qBills.refetch()
-      if (billId) await refreshDetailIfOpen(billId)
-    },
-  })
-
-  const mRecoverPay = useMutation({
-    mutationFn: async (payment: any) => {
-      if (!detail?.id) throw new Error('Bill missing')
-      if (!payment?.id) throw new Error('Payment missing')
-      return recoverBillPayment(Number(detail.id), Number(payment.id))
-    },
-    onSuccess: async () => {
-      const billId = Number(detail?.id || 0)
-      setRecoverPaymentRow(null)
-      await qBills.refetch()
-      if (billId) await refreshDetailIfOpen(billId)
-    },
-  })
-
   const mEditPay = useMutation({
     mutationFn: async () => {
       if (!detail?.id) throw new Error('Bill missing')
@@ -602,18 +557,8 @@ export default function CreditBills() {
     return pays[0]
   }, [detailPayments])
 
-  const canUndoDetailPayments = useMemo(
-    () => billHasUndoableCreditComponent(detail, detailPayments),
-    [detail, detailPayments]
-  )
-
   const activeDetailPayments = useMemo(
     () => (detailPayments || []).filter((p: any) => !p?.is_deleted),
-    [detailPayments]
-  )
-
-  const deletedDetailPayments = useMemo(
-    () => (detailPayments || []).filter((p: any) => p?.is_deleted),
     [detailPayments]
   )
 
@@ -965,7 +910,14 @@ export default function CreditBills() {
 
                 <Stack direction="row" alignItems="center" gap={1}>
                   <Typography>Status:</Typography>
-                  <StatusChip status={detail.payment_status || '-'} />
+                  <StatusChip
+                    status={
+                      Number(detail.total_amount || 0) - Number(detail.paid_amount || 0) - Number(detail.writeoff_amount || 0) <= 0.0001 &&
+                      Number(detail.writeoff_amount || 0) > 0
+                        ? 'WRITTEN OFF'
+                        : detail.payment_status || '-'
+                    }
+                  />
                 </Stack>
 
                 <Typography>
@@ -1043,21 +995,6 @@ export default function CreditBills() {
                               >
                                 <EditOutlinedIcon fontSize="small" />
                               </IconButton>
-                              {canUndoDetailPayments ? (
-                                <IconButton
-                                  size="small"
-                                  color="error"
-                                  onClick={() => setUndoPaymentRow(p)}
-                                  disabled={mUndoPay.isPending}
-                                  sx={{ p: 0.25 }}
-                                >
-                                  <DeleteOutlineIcon fontSize="small" />
-                                </IconButton>
-                              ) : (
-                                <Typography variant="body2" color="text.secondary">
-                                  -
-                                </Typography>
-                              )}
                             </Box>
                           </td>
                         </tr>
@@ -1076,100 +1013,10 @@ export default function CreditBills() {
                 </Box>
               )}
 
-              <Divider />
-
-              <Typography variant="subtitle1">Deleted Payment History</Typography>
-              <Box sx={{ overflowX: 'auto' }}>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th style={{ width: 120 }}>Date</th>
-                      <th>Type</th>
-                      <th>Mode</th>
-                      <th>Cash</th>
-                      <th>Online</th>
-                      <th>Write-off</th>
-                      <th style={{ minWidth: 220 }}>Note</th>
-                      <th style={{ width: 120 }}>Deleted</th>
-                      <th style={{ width: 64 }}></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {deletedDetailPayments.map((p: any) => (
-                      <tr key={`deleted-${p.id}`}>
-                        <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {p.received_at ? String(p.received_at).slice(0, 10) : '-'}
-                        </td>
-                        <td>{p.is_writeoff ? 'Write-off' : 'Receipt'}</td>
-                        <td>{p.mode || '-'}</td>
-                        <td>{money(p.cash_amount)}</td>
-                        <td>{money(p.online_amount)}</td>
-                        <td>{money(p.writeoff_amount)}</td>
-                        <td style={{ minWidth: 220 }}>{p.note || ''}</td>
-                        <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {p.deleted_at ? String(p.deleted_at).slice(0, 10) : '-'}
-                        </td>
-                        <td align="right">
-                          {canUndoDetailPayments ? (
-                            <Button
-                              size="small"
-                              variant="outlined"
-                              onClick={() => setRecoverPaymentRow(p)}
-                              disabled={mRecoverPay.isPending}
-                              sx={{ minWidth: 0, px: 1 }}
-                            >
-                              Recover
-                            </Button>
-                          ) : (
-                            <Typography variant="body2" color="text.secondary">
-                              -
-                            </Typography>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                    {deletedDetailPayments.length === 0 && (
-                      <tr>
-                          <td colSpan={9}>
-                          <Box p={2} color="text.secondary">
-                            No deleted payments.
-                          </Box>
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </Box>
             </Stack>
           )}
         </DialogContent>
       </Dialog>
-
-      <ConfirmDialog
-        open={Boolean(undoPaymentRow)}
-        title="Undo Payment"
-        onClose={() => {
-          if (!mUndoPay.isPending) setUndoPaymentRow(null)
-        }}
-        onConfirm={() => {
-          if (undoPaymentRow) mUndoPay.mutate(undoPaymentRow)
-        }}
-      >
-        <Typography sx={{ mt: 1 }}>
-          Undo {undoPaymentRow?.is_writeoff ? 'write-off' : 'payment'} of ₹
-          {money(
-            Number(undoPaymentRow?.cash_amount || 0) +
-            Number(undoPaymentRow?.online_amount || 0) +
-            Number(undoPaymentRow?.writeoff_amount || 0),
-          )}
-          {undoPaymentRow?.received_at ? ` received at ${undoPaymentRow.received_at}` : ''}?
-        </Typography>
-        {mUndoPay.isError ? (
-          <Typography color="error" sx={{ mt: 1 }}>
-            {(mUndoPay.error as any)?.message || 'Undo failed'}
-          </Typography>
-        ) : null}
-      </ConfirmDialog>
 
       <Dialog open={Boolean(editPaymentRow)} onClose={() => !mEditPay.isPending && setEditPaymentRow(null)} fullWidth maxWidth="sm">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1258,32 +1105,6 @@ export default function CreditBills() {
           </Stack>
         </DialogContent>
       </Dialog>
-
-      <ConfirmDialog
-        open={Boolean(recoverPaymentRow)}
-        title="Recover Payment"
-        onClose={() => {
-          if (!mRecoverPay.isPending) setRecoverPaymentRow(null)
-        }}
-        onConfirm={() => {
-          if (recoverPaymentRow) mRecoverPay.mutate(recoverPaymentRow)
-        }}
-      >
-        <Typography sx={{ mt: 1 }}>
-          Recover {recoverPaymentRow?.is_writeoff ? 'write-off' : 'payment'} of ₹
-          {money(
-            Number(recoverPaymentRow?.cash_amount || 0) +
-            Number(recoverPaymentRow?.online_amount || 0) +
-            Number(recoverPaymentRow?.writeoff_amount || 0),
-          )}
-          {recoverPaymentRow?.received_at ? ` received at ${recoverPaymentRow.received_at}` : ''}?
-        </Typography>
-        {mRecoverPay.isError ? (
-          <Typography color="error" sx={{ mt: 1 }}>
-            {(mRecoverPay.error as any)?.message || 'Recover failed'}
-          </Typography>
-        ) : null}
-      </ConfirmDialog>
 
       {/* ---------------- Receive Payment Dialog ---------------- */}
       <Dialog open={openPayDlg} onClose={() => setOpenPayDlg(false)} fullWidth maxWidth="sm">

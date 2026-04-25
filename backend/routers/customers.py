@@ -254,6 +254,7 @@ def get_customer_summary(customer_id: int) -> CustomerSummaryOut:
         bills = session.exec(
             select(Bill)
             .where(_customer_note_conditions(customer.name))
+            .where(Bill.is_deleted == False)  # noqa: E712
             .order_by(Bill.id.desc())
         ).all()
 
@@ -309,7 +310,11 @@ def move_customer_bills(payload: MoveCustomerBillsIn):
         if not destination:
             raise HTTPException(status_code=404, detail="Destination customer not found")
 
-        bills = session.exec(select(Bill).where(_customer_note_conditions(source.name))).all()
+        bills = session.exec(
+            select(Bill)
+            .where(_customer_note_conditions(source.name))
+            .where(Bill.is_deleted == False)  # noqa: E712
+        ).all()
         if not bills:
             return {
                 "moved_count": 0,

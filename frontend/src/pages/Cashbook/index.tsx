@@ -5,6 +5,7 @@ import {
   Button,
   Chip,
   Dialog,
+  DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
@@ -24,14 +25,13 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import EditIcon from '@mui/icons-material/Edit'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createCashbookEntry,
-  deleteCashbookEntry,
   getCashbookDay,
   listCashbookEntries,
+  updateCashbookEntry,
   type CashbookType,
 } from '../../services/cashbook'
 import { listBankbookEntries } from '../../services/bankbook'
@@ -40,9 +40,14 @@ import { listExchangeRecords, listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
+import { useToast } from '../../components/ui/Toaster'
 
 function money(n: number | string | null | undefined) {
   return Number(n || 0).toFixed(2)
+}
+
+function errorMessage(err: any, fallback: string) {
+  return String(err?.response?.data?.detail || err?.message || fallback)
 }
 
 function isoDate(s: string | null | undefined) {
@@ -106,6 +111,9 @@ function typeChipProps(type: string) {
   if (t === 'WITHDRAWAL') {
     return { label: 'Withdrawal', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
   }
+  if (t === 'CONTRA') {
+    return { label: 'Contra', sx: { ...baseSx, bgcolor: 'secondary.light', color: 'secondary.dark' } }
+  }
   return { label: 'Expense', sx: { ...baseSx, bgcolor: 'error.light', color: 'error.dark' } }
 }
 
@@ -140,6 +148,7 @@ function chargedLine(bill: any, mrp: number, qty: number) {
 
 export default function CashbookPage() {
   const qc = useQueryClient()
+  const toast = useToast()
   const today = useMemo(() => toYMD(new Date()), [])
   const [selectedDate, setSelectedDate] = useState(today)
   const [recordsFilter, setRecordsFilter] = useState<'DAY' | 'ALL'>('DAY')
@@ -155,6 +164,11 @@ export default function CashbookPage() {
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<any | null>(null)
   const [billEditOpen, setBillEditOpen] = useState(false)
+  const [editRow, setEditRow] = useState<any | null>(null)
+  const [editType, setEditType] = useState<CashbookType>('RECEIPT')
+  const [editDate, setEditDate] = useState(today)
+  const [editAmount, setEditAmount] = useState('')
+  const [editNote, setEditNote] = useState('')
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedAllAnchorDate(allAnchorDate), 250)
@@ -303,17 +317,34 @@ export default function CashbookPage() {
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
     },
   })
 
-  const mDelete = useMutation({
-    mutationFn: (id: number) => deleteCashbookEntry(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['cashbook-day', selectedDate] })
+  const mUpdate = useMutation({
+    mutationFn: () =>
+      updateCashbookEntry(Number(editRow?.id), {
+        entry_type: editType,
+        amount: Number(editAmount),
+        note: editNote.trim() || undefined,
+        entry_date: editDate,
+      }),
+    onSuccess: (updated: any) => {
+      setEditRow(null)
+      if (updated?.created_at) setSelectedDate(isoDate(updated.created_at))
+      qc.invalidateQueries({ queryKey: ['cashbook-day'] })
       qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
+    },
+    onError: (err: any) => {
+      toast.push(errorMessage(err, 'Failed to update entry'), 'error')
     },
   })
 
@@ -335,6 +366,14 @@ export default function CashbookPage() {
     } finally {
       setBillLoading(false)
     }
+  }
+
+  function openEdit(row: any) {
+    setEditRow(row)
+    setEditType(String(row.entry_type || 'RECEIPT').toUpperCase() as CashbookType)
+    setEditDate(isoDate(row.created_at) === '-' ? today : isoDate(row.created_at))
+    setEditAmount(String(Number(row.amount || 0)))
+    setEditNote(String(row.note || ''))
   }
 
   const billCashRowsDay = useMemo(() => {
@@ -448,7 +487,7 @@ export default function CashbookPage() {
         const cashType =
           bankType === 'RECEIPT'
             ? 'WITHDRAWAL'
-            : bankType === 'WITHDRAWAL'
+            : bankType === 'WITHDRAWAL' || bankType === 'CONTRA'
               ? 'RECEIPT'
               : 'EXPENSE'
         return {
@@ -471,7 +510,7 @@ export default function CashbookPage() {
         const cashType =
           bankType === 'RECEIPT'
             ? 'WITHDRAWAL'
-            : bankType === 'WITHDRAWAL'
+            : bankType === 'WITHDRAWAL' || bankType === 'CONTRA'
               ? 'RECEIPT'
               : 'EXPENSE'
         return {
@@ -537,7 +576,7 @@ export default function CashbookPage() {
       const amt = Number(r.amount || 0)
       if (t === 'OPENING') continue
       if (t === 'RECEIPT') receipts += amt
-      else if (t === 'WITHDRAWAL') withdrawals += amt
+      else if (t === 'WITHDRAWAL' || t === 'CONTRA') withdrawals += amt
       else expenses += amt
     }
     const cashOut = withdrawals + expenses
@@ -687,6 +726,7 @@ export default function CashbookPage() {
             <MenuItem value="RECEIPT">Receipt (Cash In)</MenuItem>
             <MenuItem value="EXPENSE">Expense (Cash Out)</MenuItem>
             <MenuItem value="WITHDRAWAL">Withdrawal (Cash Out)</MenuItem>
+            <MenuItem value="CONTRA">Contra (Cash to Bank)</MenuItem>
           </TextField>
           <TextField
             label="Entry Date"
@@ -800,13 +840,8 @@ export default function CashbookPage() {
                       <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
                       <TableCell align="right">
                         {row.source === 'CASHBOOK' ? (
-                          <IconButton
-                            size="small"
-                            onClick={() => mDelete.mutate(row.id)}
-                            disabled={mDelete.isPending}
-                            color="error"
-                          >
-                            <DeleteOutlineIcon fontSize="small" />
+                          <IconButton size="small" onClick={() => openEdit(row)} disabled={mUpdate.isPending}>
+                            <EditIcon fontSize="small" />
                           </IconButton>
                         ) : (
                           '-'
@@ -916,14 +951,6 @@ export default function CashbookPage() {
                   Payment Mode: <b>{billDetail.payment_mode || '-'}</b>
                 </Typography>
                 <Typography>
-                  Deleted: <b>{billDetail.is_deleted ? 'Yes' : 'No'}</b>
-                </Typography>
-                {billDetail.is_deleted ? (
-                  <Typography>
-                    Deleted At: <b>{billDetail.deleted_at || '-'}</b>
-                  </Typography>
-                ) : null}
-                <Typography>
                   Payment Status: <b>{billDetail.payment_status || (billDetail.is_credit ? 'UNPAID' : 'PAID')}</b>
                 </Typography>
                 <Typography>
@@ -938,18 +965,16 @@ export default function CashbookPage() {
                     Notes: <i>{billDetail.notes}</i>
                   </Typography>
                 ) : null}
-                {!billDetail.is_deleted ? (
-                  <Box sx={{ pt: 1 }}>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={<EditIcon />}
-                      onClick={() => setBillEditOpen(true)}
-                    >
-                      Edit Bill
-                    </Button>
-                  </Box>
-                ) : null}
+                <Box sx={{ pt: 1 }}>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<EditIcon />}
+                    onClick={() => setBillEditOpen(true)}
+                  >
+                    Edit Bill
+                  </Button>
+                </Box>
               </Stack>
 
               <Divider />
@@ -979,6 +1004,62 @@ export default function CashbookPage() {
           qc.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
         }}
       />
+      <Dialog open={!!editRow} onClose={() => setEditRow(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Edit Cashbook Entry</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <TextField
+              select
+              label="Entry Type"
+              value={editType}
+              onChange={(e) => setEditType(e.target.value as CashbookType)}
+              fullWidth
+            >
+              <MenuItem value="RECEIPT">Receipt (Cash In)</MenuItem>
+              <MenuItem value="EXPENSE">Expense (Cash Out)</MenuItem>
+              <MenuItem value="WITHDRAWAL">Withdrawal (Cash Out)</MenuItem>
+              <MenuItem value="CONTRA">Contra (Cash to Bank)</MenuItem>
+            </TextField>
+            <TextField
+              label="Entry Date"
+              type="date"
+              value={editDate}
+              onChange={(e) => setEditDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              label="Amount"
+              type="number"
+              value={editAmount}
+              onChange={(e) => setEditAmount(e.target.value)}
+              inputProps={{ min: 0, step: '0.01' }}
+              fullWidth
+            />
+            <TextField
+              label="Note"
+              value={editNote}
+              onChange={(e) => setEditNote(e.target.value)}
+              multiline
+              minRows={2}
+              fullWidth
+            />
+            {mUpdate.isError ? (
+              <Alert severity="error">{errorMessage(mUpdate.error, 'Failed to update entry.')}</Alert>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditRow(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => mUpdate.mutate()}
+            disabled={!editRow || Number(editAmount) <= 0 || !editDate || mUpdate.isPending}
+          >
+            {mUpdate.isPending ? 'Saving...' : 'Save Changes'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   )
 }

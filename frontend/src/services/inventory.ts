@@ -167,12 +167,15 @@ export async function listItemsPage(
   q: string = '',
   limit: number = 50,
   offset: number = 0,
-  rackNumber?: number
+  rackNumber?: number,
+  filters?: { brand?: string; category_id?: number }
 ): Promise<ItemsPage> {
   const params: Record<string, string | number> = { q, limit, offset }
   if (typeof rackNumber === 'number' && Number.isFinite(rackNumber)) {
     params.rack_number = rackNumber
   }
+  if (filters?.brand) params.brand = filters.brand
+  if (typeof filters?.category_id === 'number') params.category_id = filters.category_id
   const { data } = await api.get('/inventory', { params })
   return data as ItemsPage
 }

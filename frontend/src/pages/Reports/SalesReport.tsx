@@ -14,11 +14,11 @@ import {
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import EditIcon from '@mui/icons-material/Edit'
-import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useToast } from '../../components/ui/Toaster'
 import type { Customer } from '../../lib/types'
 
-import { listBillsPaged, getBill, getSalesAggregate, softDeleteBill, recoverBill } from '../../services/billing'
+import { listBillsPaged, getBill, getSalesAggregate } from '../../services/billing'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 
@@ -174,43 +174,6 @@ export default function SalesReport(props: {
       }),
   })
 
-  const mSoftDelete = useMutation({
-    mutationFn: softDeleteBill,
-    onSuccess: async (_data, billId) => {
-      toast.push(`Bill #${billId} deleted`, 'warning')
-      await qSales.refetch()
-      if (detail?.id === billId) {
-        try {
-          const b = await getBill(billId)
-          setDetail(b)
-        } catch {}
-      }
-    },
-    onError: (err: any) => {
-      const msg = err?.response?.data?.detail || err?.message || 'Failed to delete bill'
-      toast.push(String(msg), 'error')
-    },
-  })
-
-  const mRecover = useMutation({
-    mutationFn: recoverBill,
-    onSuccess: async (_data, billId) => {
-      toast.push(`Bill #${billId} recovered`, 'success')
-      await qSales.refetch()
-      if (detail?.id === billId) {
-        try {
-          const b = await getBill(billId)
-          setDetail(b)
-        } catch {}
-      }
-    },
-    onError: (err: any) => {
-      const msg = err?.response?.data?.detail || err?.message || 'Failed to recover bill'
-      toast.push(String(msg), 'error')
-    },
-  })
-
-
   const salesRaw = useMemo(() => {
     const pages: any[] = ((qSales.data as any)?.pages ?? []) as any[]
     return pages.flatMap((p) => (Array.isArray(p?.items) ? p.items : []))
@@ -255,8 +218,6 @@ export default function SalesReport(props: {
         pending: money(pendingAmount),
         status,
         mode: b.payment_mode || '',
-        isDeleted: Boolean(b.is_deleted),
-        deletedAt: b.deleted_at || '',
       }
     })
   }, [salesRaw])
@@ -272,25 +233,7 @@ export default function SalesReport(props: {
     setOpen(true)
   }
 
-  function handleDelete(row: any) {
-    if (!row?.id || row?.isDeleted) return
-    const ok = window.confirm(`Delete bill #${row.id}? This is a soft delete and can be recovered.`)
-    if (!ok) return
-    mSoftDelete.mutate(Number(row.id))
-  }
-
-  function handleRecover(row: any) {
-    if (!row?.id || !row?.isDeleted) return
-    const ok = window.confirm(`Recover bill #${row.id}?`)
-    if (!ok) return
-    mRecover.mutate(Number(row.id))
-  }
-
   function openEdit(row: any) {
-    if (row?.isDeleted) {
-      toast.push('Deleted bill cannot be edited', 'warning')
-      return
-    }
     const b = row?.raw || detail
     if (!b?.id) return
     setEditBill(b)
@@ -378,7 +321,6 @@ export default function SalesReport(props: {
         'Pending',
         'Status',
         'Payment Mode',
-        'Deleted',
       ]
 
       const body = detailRows.map((r: any) => [
@@ -393,7 +335,6 @@ export default function SalesReport(props: {
         r.pending,
         r.status,
         r.mode,
-        r.isDeleted ? 'YES' : 'NO',
       ])
 
       const csv = toCSV([header, ...body])
@@ -487,7 +428,6 @@ export default function SalesReport(props: {
                   <th>Pending</th>
                   <th>Status</th>
                   <th>Mode</th>
-                  <th>Deleted</th>
                   <th></th>
                 </tr>
               </thead>
@@ -496,7 +436,6 @@ export default function SalesReport(props: {
                   <tr
                     key={`b-${r.id}`}
                     onDoubleClick={() => openEdit(r)}
-                    style={r.isDeleted ? { backgroundColor: '#ffe9e9' } : undefined}
                   >
                     <td>
                       <Tooltip title={r.itemsPreview} arrow placement="top">
@@ -515,7 +454,6 @@ export default function SalesReport(props: {
                     <td>{r.pending}</td>
                     <td>{r.status}</td>
                     <td>{r.mode}</td>
-                    <td>{r.isDeleted ? 'Yes' : 'No'}</td>
                     <td>
                       <Stack direction="row" gap={1}>
                         <Tooltip title="Edit bill" arrow>
@@ -523,32 +461,11 @@ export default function SalesReport(props: {
                             <IconButton
                               size="small"
                               onClick={() => openEdit(r)}
-                              disabled={r.isDeleted}
                             >
                               <EditIcon fontSize="small" />
                             </IconButton>
                           </span>
                         </Tooltip>
-                        {r.isDeleted ? (
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            onClick={() => handleRecover(r)}
-                            disabled={mRecover.isPending}
-                          >
-                            Recover
-                          </Button>
-                        ) : (
-                          <Button
-                            size="small"
-                            color="error"
-                            variant="outlined"
-                            onClick={() => handleDelete(r)}
-                            disabled={mSoftDelete.isPending}
-                          >
-                            Delete
-                          </Button>
-                        )}
                       </Stack>
                     </td>
                   </tr>
@@ -556,7 +473,7 @@ export default function SalesReport(props: {
 
                 {detailRows.length === 0 && !isLoading && (
                   <tr>
-                    <td colSpan={13}>
+                    <td colSpan={12}>
                       <Box p={2} color="text.secondary">
                         No data.
                       </Box>
@@ -672,14 +589,6 @@ export default function SalesReport(props: {
                   Payment Mode: <b>{detail.payment_mode || '-'}</b>
                 </Typography>
                 <Typography>
-                  Deleted: <b>{detail.is_deleted ? 'Yes' : 'No'}</b>
-                </Typography>
-                {detail.is_deleted ? (
-                  <Typography>
-                    Deleted At: <b>{detail.deleted_at || '-'}</b>
-                  </Typography>
-                ) : null}
-                <Typography>
                   Payment Status: <b>{detail.payment_status || (detail.is_credit ? 'UNPAID' : 'PAID')}</b>
                 </Typography>
                 <Typography>
@@ -699,13 +608,11 @@ export default function SalesReport(props: {
                     Customer: <b>{[detailCustomer.name, detailCustomer.phone, detailCustomer.address_line].filter(Boolean).join(' | ')}</b>
                   </Typography>
                 ) : null}
-                {!detail.is_deleted ? (
-                  <Box sx={{ pt: 1 }}>
-                    <Button size="small" variant="outlined" startIcon={<EditIcon />} onClick={() => openEdit({ raw: detail })}>
-                      Edit Bill
-                    </Button>
-                  </Box>
-                ) : null}
+                <Box sx={{ pt: 1 }}>
+                  <Button size="small" variant="outlined" startIcon={<EditIcon />} onClick={() => openEdit({ raw: detail })}>
+                    Edit Bill
+                  </Button>
+                </Box>
               </Stack>
 
               <Divider />

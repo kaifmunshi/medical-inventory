@@ -7,20 +7,21 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  IconButton,
+  FormControlLabel,
   MenuItem,
   Paper,
   Stack,
+  Switch,
   TextField,
   Typography,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
-import ArchiveIcon from '@mui/icons-material/Archive'
-import UnarchiveIcon from '@mui/icons-material/Unarchive'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
   createProduct,
+  createBrand,
+  createCategory,
   fetchBrands,
   fetchCategories,
   fetchProducts,
@@ -41,6 +42,10 @@ const emptyForm: ProductForm = {
   category_id: undefined,
   default_rack_number: 0,
   printed_price: 0,
+  loose_sale_enabled: false,
+  parent_unit_name: '',
+  child_unit_name: '',
+  default_conversion_qty: undefined,
 }
 
 export default function ProductsPage() {
@@ -50,15 +55,24 @@ export default function ProductsPage() {
   const [q, setQ] = useState(searchParams.get('q') || '')
   const [brandFilter, setBrandFilter] = useState(searchParams.get('brand') || '')
   const [categoryFilter, setCategoryFilter] = useState<number | null>(null)
-  const [showInactive, setShowInactive] = useState(false)
+  const [page, setPage] = useState(0)
+  const [rowsPerPage, setRowsPerPage] = useState(25)
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<Product | null>(null)
   const [form, setForm] = useState<ProductForm>(emptyForm)
+  const [brandDialogOpen, setBrandDialogOpen] = useState(false)
+  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false)
+  const [newBrandName, setNewBrandName] = useState('')
+  const [newCategoryName, setNewCategoryName] = useState('')
 
   useEffect(() => {
     setQ(searchParams.get('q') || '')
     setBrandFilter(searchParams.get('brand') || '')
   }, [searchParams])
+
+  useEffect(() => {
+    setPage(0)
+  }, [q, brandFilter, categoryFilter, rowsPerPage])
 
   const categoriesQ = useQuery<Category[], Error>({
     queryKey: ['product-categories-master', { active_only: false }],
@@ -71,12 +85,15 @@ export default function ProductsPage() {
   })
 
   const productsQ = useQuery<Product[], Error>({
-    queryKey: ['products-master', q, categoryFilter, showInactive],
+    queryKey: ['products-master', q, brandFilter, categoryFilter, page, rowsPerPage],
     queryFn: () =>
       fetchProducts({
         q: q.trim() || undefined,
+        brand: brandFilter.trim() || undefined,
         category_id: categoryFilter || undefined,
-        active_only: !showInactive,
+        active_only: true,
+        limit: rowsPerPage + 1,
+        offset: page * rowsPerPage,
       }),
   })
 
@@ -85,6 +102,7 @@ export default function ProductsPage() {
     onSuccess: () => {
       toast.push('Product saved', 'success')
       queryClient.invalidateQueries({ queryKey: ['products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['brand-master'] })
       closeForm()
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to save product'), 'error'),
@@ -95,21 +113,44 @@ export default function ProductsPage() {
     onSuccess: () => {
       toast.push('Product updated', 'success')
       queryClient.invalidateQueries({ queryKey: ['products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['brand-master'] })
       closeForm()
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to update product'), 'error'),
   })
 
   const categories = categoriesQ.data || []
+  const createBrandM = useMutation({
+    mutationFn: createBrand,
+    onSuccess: (brand) => {
+      toast.push('Brand added', 'success')
+      queryClient.invalidateQueries({ queryKey: ['brand-master'] })
+      patchForm({ brand: brand.name })
+      setNewBrandName('')
+      setBrandDialogOpen(false)
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to add brand'), 'error'),
+  })
+
+  const createCategoryM = useMutation({
+    mutationFn: createCategory,
+    onSuccess: (category) => {
+      toast.push('Category added', 'success')
+      queryClient.invalidateQueries({ queryKey: ['product-categories-master'] })
+      patchForm({ category_id: Number(category.id) })
+      setNewCategoryName('')
+      setCategoryDialogOpen(false)
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to add category'), 'error'),
+  })
+
   const brandNames = (brandsQ.data || []).map((brand) => brand.name)
   const categoryName = (id?: number | null) => categories.find((category) => Number(category.id) === Number(id))?.name || '-'
 
   const rows = useMemo(() => {
-    const products = productsQ.data || []
-    const activeRows = showInactive ? products : products.filter((product) => product.is_active)
-    if (!brandFilter.trim()) return activeRows
-    return activeRows.filter((product) => String(product.brand || '').toLowerCase() === brandFilter.trim().toLowerCase())
-  }, [productsQ.data, showInactive, brandFilter])
+    return (productsQ.data || []).slice(0, rowsPerPage)
+  }, [productsQ.data, rowsPerPage])
+  const hasNextPage = (productsQ.data || []).length > rowsPerPage
 
   function openAdd() {
     setEditing(null)
@@ -126,7 +167,10 @@ export default function ProductsPage() {
       category_id: row.category_id || undefined,
       default_rack_number: row.default_rack_number || 0,
       printed_price: row.printed_price || 0,
-      is_active: row.is_active,
+      loose_sale_enabled: Boolean(row.loose_sale_enabled),
+      parent_unit_name: row.parent_unit_name || '',
+      child_unit_name: row.child_unit_name || '',
+      default_conversion_qty: row.default_conversion_qty || undefined,
     })
     setOpen(true)
   }
@@ -150,6 +194,10 @@ export default function ProductsPage() {
       category_id: form.category_id || undefined,
       default_rack_number: Number(form.default_rack_number || 0),
       printed_price: Number(form.printed_price || 0),
+      loose_sale_enabled: Boolean(form.loose_sale_enabled),
+      parent_unit_name: form.loose_sale_enabled ? form.parent_unit_name?.trim() || undefined : undefined,
+      child_unit_name: form.loose_sale_enabled ? form.child_unit_name?.trim() || undefined : undefined,
+      default_conversion_qty: form.loose_sale_enabled ? Number(form.default_conversion_qty || 1) : undefined,
     }
     if (!payload.name) {
       toast.push('Product name is required', 'error')
@@ -167,15 +215,29 @@ export default function ProductsPage() {
     else createM.mutate(payload)
   }
 
-  function toggleActive(row: Product) {
-    updateM.mutate({ id: Number(row.id), payload: { name: row.name, is_active: !row.is_active } as ProductForm })
-  }
-
   function resetFilters() {
     setQ('')
     setBrandFilter('')
     setCategoryFilter(null)
-    setShowInactive(false)
+    setPage(0)
+  }
+
+  function saveQuickBrand() {
+    const name = newBrandName.trim()
+    if (!name) {
+      toast.push('Brand name is required', 'error')
+      return
+    }
+    createBrandM.mutate(name)
+  }
+
+  function saveQuickCategory() {
+    const name = newCategoryName.trim()
+    if (!name) {
+      toast.push('Category name is required', 'error')
+      return
+    }
+    createCategoryM.mutate(name)
   }
 
   return (
@@ -190,7 +252,18 @@ export default function ProductsPage() {
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} gap={2} alignItems={{ md: 'center' }}>
           <TextField label="Search" value={q} onChange={(e) => setQ(e.target.value)} fullWidth />
-          <TextField label="Brand" value={brandFilter} onChange={(e) => setBrandFilter(e.target.value)} sx={{ minWidth: 180 }} />
+          <TextField
+            select
+            label="Brand"
+            value={brandFilter}
+            onChange={(e) => setBrandFilter(e.target.value)}
+            sx={{ minWidth: 180 }}
+          >
+            <MenuItem value="">All</MenuItem>
+            {brandNames.map((brand) => (
+              <MenuItem key={brand} value={brand}>{brand}</MenuItem>
+            ))}
+          </TextField>
           <TextField
             select
             label="Category"
@@ -203,16 +276,6 @@ export default function ProductsPage() {
               <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
             ))}
           </TextField>
-          <TextField
-            select
-            label="Status"
-            value={showInactive ? 'all' : 'active'}
-            onChange={(e) => setShowInactive(e.target.value === 'all')}
-            sx={{ minWidth: 160 }}
-          >
-            <MenuItem value="active">Active only</MenuItem>
-            <MenuItem value="all">All products</MenuItem>
-          </TextField>
           <Button variant="outlined" onClick={resetFilters}>
             Reset
           </Button>
@@ -222,7 +285,9 @@ export default function ProductsPage() {
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}>
           <Typography variant="subtitle1" fontWeight={700}>Product List</Typography>
-          <Typography variant="body2" color="text.secondary">{rows.length} products</Typography>
+          <Typography variant="body2" color="text.secondary">
+            Page {page + 1} • {rows.length} products
+          </Typography>
         </Stack>
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
@@ -234,33 +299,28 @@ export default function ProductsPage() {
                 <th>Category</th>
                 <th>Default Rack</th>
                 <th>Printed Price</th>
-                <th>Status</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.id} onDoubleClick={() => openEdit(row)} style={{ cursor: 'pointer', opacity: row.is_active ? 1 : 0.65 }}>
+                <tr key={row.id} onDoubleClick={() => openEdit(row)} style={{ cursor: 'pointer' }}>
                   <td>{row.name}</td>
                   <td>{row.brand || '-'}</td>
                   <td>{row.alias || '-'}</td>
                   <td>{categoryName(row.category_id)}</td>
                   <td>{row.default_rack_number || 0}</td>
                   <td>{Number(row.printed_price || 0).toFixed(2)}</td>
-                  <td>{row.is_active ? 'Active' : 'Inactive'}</td>
                   <td>
                     <Stack direction="row" gap={1}>
                       <Button size="small" onClick={() => openEdit(row)}>Edit</Button>
-                      <IconButton size="small" onClick={() => toggleActive(row)}>
-                        {row.is_active ? <ArchiveIcon fontSize="small" /> : <UnarchiveIcon fontSize="small" />}
-                      </IconButton>
                     </Stack>
                   </td>
                 </tr>
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={7}>
                     <Box p={2} color="text.secondary">No products found.</Box>
                   </td>
                 </tr>
@@ -268,6 +328,29 @@ export default function ProductsPage() {
             </tbody>
           </table>
         </Box>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} justifyContent="flex-end" alignItems={{ sm: 'center' }} sx={{ mt: 1.5 }}>
+          <TextField
+            select
+            size="small"
+            label="Rows"
+            value={rowsPerPage}
+            onChange={(e) => {
+              setRowsPerPage(Number(e.target.value))
+              setPage(0)
+            }}
+            sx={{ width: 110 }}
+          >
+            <MenuItem value={10}>10</MenuItem>
+            <MenuItem value={25}>25</MenuItem>
+            <MenuItem value={50}>50</MenuItem>
+          </TextField>
+          <Button size="small" variant="outlined" disabled={page === 0 || productsQ.isFetching} onClick={() => setPage((prev) => Math.max(0, prev - 1))}>
+            Previous
+          </Button>
+          <Button size="small" variant="outlined" disabled={!hasNextPage || productsQ.isFetching} onClick={() => setPage((prev) => prev + 1)}>
+            Next
+          </Button>
+        </Stack>
       </Paper>
 
       <Dialog open={open} onClose={closeForm} fullWidth maxWidth="md">
@@ -290,27 +373,33 @@ export default function ProductsPage() {
               />
             </Stack>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
-              <Autocomplete
-                freeSolo
-                options={brandNames}
-                value={form.brand || ''}
-                onChange={(_, value) => patchForm({ brand: typeof value === 'string' ? value : value || '' })}
-                onInputChange={(_, value) => patchForm({ brand: value })}
-                renderInput={(params) => <TextField {...params} label="Brand" fullWidth helperText="Choose from Brand Master or type a new one" />}
-                sx={{ flex: 1 }}
-              />
-              <TextField
-                select
-                label="Category"
-                value={form.category_id ?? ''}
-                onChange={(e) => patchForm({ category_id: e.target.value ? Number(e.target.value) : undefined })}
-                sx={{ minWidth: 220 }}
-              >
-                <MenuItem value="">No category</MenuItem>
-                {categories.map((category) => (
-                  <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
-                ))}
-              </TextField>
+              <Stack direction="row" gap={1} sx={{ flex: 1 }}>
+                <Autocomplete
+                  freeSolo
+                  options={brandNames}
+                  value={form.brand || ''}
+                  onChange={(_, value) => patchForm({ brand: typeof value === 'string' ? value : value || '' })}
+                  onInputChange={(_, value) => patchForm({ brand: value })}
+                  renderInput={(params) => <TextField {...params} label="Brand" fullWidth helperText="Choose or add a brand" />}
+                  sx={{ flex: 1 }}
+                />
+                <Button variant="outlined" onClick={() => setBrandDialogOpen(true)} sx={{ height: 56, whiteSpace: 'nowrap' }}>New</Button>
+              </Stack>
+              <Stack direction="row" gap={1} sx={{ flex: 1 }}>
+                <TextField
+                  select
+                  label="Category"
+                  value={form.category_id ?? ''}
+                  onChange={(e) => patchForm({ category_id: e.target.value ? Number(e.target.value) : undefined })}
+                  fullWidth
+                >
+                  <MenuItem value="">No category</MenuItem>
+                  {categories.map((category) => (
+                    <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
+                  ))}
+                </TextField>
+                <Button variant="outlined" onClick={() => setCategoryDialogOpen(true)} sx={{ height: 56, whiteSpace: 'nowrap' }}>New</Button>
+              </Stack>
             </Stack>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
               <TextField
@@ -329,17 +418,42 @@ export default function ProductsPage() {
                 inputProps={{ min: 0, step: '0.01' }}
                 sx={{ minWidth: 220 }}
               />
-              {editing ? (
-                <TextField
-                  select
-                  label="Status"
-                  value={form.is_active === false ? 'inactive' : 'active'}
-                  onChange={(e) => patchForm({ is_active: e.target.value === 'active' })}
-                  sx={{ minWidth: 180 }}
-                >
-                  <MenuItem value="active">Active</MenuItem>
-                  <MenuItem value="inactive">Inactive</MenuItem>
-                </TextField>
+            </Stack>
+            <Stack spacing={1}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={Boolean(form.loose_sale_enabled)}
+                    onChange={(e) => patchForm({ loose_sale_enabled: e.target.checked })}
+                  />
+                }
+                label="Enable loose stock"
+              />
+              {form.loose_sale_enabled ? (
+                <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+                  <TextField
+                    label="Parent Unit"
+                    value={form.parent_unit_name || ''}
+                    onChange={(e) => patchForm({ parent_unit_name: e.target.value })}
+                    placeholder="Strip"
+                    fullWidth
+                  />
+                  <TextField
+                    label="Loose Unit"
+                    value={form.child_unit_name || ''}
+                    onChange={(e) => patchForm({ child_unit_name: e.target.value })}
+                    placeholder="Tablet"
+                    fullWidth
+                  />
+                  <TextField
+                    label="Units per Parent"
+                    type="number"
+                    value={form.default_conversion_qty ?? ''}
+                    onChange={(e) => patchForm({ default_conversion_qty: e.target.value ? Number(e.target.value) : undefined })}
+                    inputProps={{ min: 1, step: 1 }}
+                    fullWidth
+                  />
+                </Stack>
               ) : null}
             </Stack>
           </Stack>
@@ -349,6 +463,28 @@ export default function ProductsPage() {
           <Button variant="contained" onClick={save} disabled={createM.isPending || updateM.isPending}>
             {editing ? 'Update' : 'Save'}
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={brandDialogOpen} onClose={() => setBrandDialogOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Add Brand</DialogTitle>
+        <DialogContent dividers>
+          <TextField label="Brand Name" value={newBrandName} onChange={(e) => setNewBrandName(e.target.value)} autoFocus fullWidth sx={{ mt: 1 }} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBrandDialogOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={saveQuickBrand} disabled={createBrandM.isPending}>Save Brand</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={categoryDialogOpen} onClose={() => setCategoryDialogOpen(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Add Category</DialogTitle>
+        <DialogContent dividers>
+          <TextField label="Category Name" value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} autoFocus fullWidth sx={{ mt: 1 }} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCategoryDialogOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={saveQuickCategory} disabled={createCategoryM.isPending}>Save Category</Button>
         </DialogActions>
       </Dialog>
     </Stack>

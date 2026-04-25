@@ -23,6 +23,7 @@ import { useQuery } from '@tanstack/react-query'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { allMenuItems, appMenuGroups, quickShortcutItems } from './menuConfig'
 import { fetchFinancialYears } from '../../services/settings'
+import { financialYearDisplayName, financialYearRange } from '../../lib/financialYear'
 import { useUserSession } from '../session/UserSessionProvider'
 
 type TopMenuBarProps = {
@@ -181,7 +182,7 @@ export default function TopMenuBar({
             </Typography>
             <Typography variant="caption" sx={{ color: 'text.secondary' }} noWrap>
               {activeGroup?.label || 'Workspace'}
-              {activeYear ? ` • ${activeYear.label}` : ''}
+              {activeYear ? ` • ${financialYearDisplayName(activeYear)}` : ''}
             </Typography>
           </Stack>
         </Stack>
@@ -189,7 +190,7 @@ export default function TopMenuBar({
         <Stack direction="row" gap={0.6} alignItems="center" sx={{ flexShrink: 0 }}>
           {activeYear ? (
             <Chip
-              label={`${activeYear.start_date} to ${activeYear.end_date}`}
+              label={`${financialYearDisplayName(activeYear)} • ${financialYearRange(activeYear)}`}
               variant="outlined"
               sx={{ display: { xs: 'none', lg: 'inline-flex' }, bgcolor: 'rgba(255,255,255,0.55)' }}
             />

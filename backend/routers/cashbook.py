@@ -8,7 +8,7 @@ from sqlalchemy import text  # ✅ use sqlalchemy.text (NOT sqlmodel.text)
 
 from backend.controls import assert_financial_year_unlocked
 from backend.db import get_session
-from backend.models import CashbookEntry, CashbookCreate, CashbookOut, Bill, BillPayment, Return, ExchangeRecord
+from backend.models import BankbookEntry, CashbookEntry, CashbookCreate, CashbookOut, Bill, BillPayment, Return, ExchangeRecord
 from backend.security import require_min_role
 
 router = APIRouter()
@@ -116,6 +116,26 @@ def _sum_exchange_cash_in(session, *, start_iso: Optional[str] = None, end_iso: 
     return round(total, 2)
 
 
+def _sum_bankbook_contra(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None):
+    stmt = select(BankbookEntry).where(BankbookEntry.mode == "BANK_DEPOSIT")
+    if start_iso:
+        stmt = stmt.where(BankbookEntry.created_at >= start_iso)
+    if end_iso:
+        stmt = stmt.where(BankbookEntry.created_at <= end_iso)
+    rows = session.exec(stmt).all()
+    out = {"receipts": 0.0, "withdrawals": 0.0, "expenses": 0.0}
+    for row in rows:
+        entry_type = str(getattr(row, "entry_type", "") or "").upper()
+        amount = float(getattr(row, "amount", 0) or 0)
+        if entry_type == "RECEIPT":
+            out["withdrawals"] += amount
+        elif entry_type in ("WITHDRAWAL", "CONTRA"):
+            out["receipts"] += amount
+        else:
+            out["expenses"] += amount
+    return {key: round(value, 2) for key, value in out.items()}
+
+
 def _opening_anchor(session, *, day_end: str):
     return session.exec(
         select(CashbookEntry)
@@ -123,6 +143,83 @@ def _opening_anchor(session, *, day_end: str):
         .where(CashbookEntry.created_at <= day_end)
         .order_by(CashbookEntry.created_at.desc(), CashbookEntry.id.desc())
     ).first()
+
+
+def _day_snapshot(session, date: str, *, include_entries: bool = False):
+    day_dt = _parse_ymd(date)
+    prev_date = (day_dt - timedelta(days=1)).date().isoformat()
+
+    day_start = f"{date}T00:00:00"
+    day_end = f"{date}T23:59:59.999999"
+    prev_end = f"{prev_date}T23:59:59.999999"
+
+    anchor = _opening_anchor(session, day_end=day_end)
+    anchor_amount = float(getattr(anchor, "amount", 0) or 0) if anchor else 0.0
+    anchor_ts = str(getattr(anchor, "created_at", "") or "") if anchor else None
+    anchor_effective_start = f"{anchor_ts[:10]}T00:00:00" if anchor_ts and len(anchor_ts) >= 10 else None
+
+    opening_stmt = select(CashbookEntry).where(CashbookEntry.created_at <= prev_end)
+    if anchor_effective_start:
+        opening_stmt = opening_stmt.where(CashbookEntry.created_at >= anchor_effective_start)
+    opening_rows = session.exec(opening_stmt).all()
+    opening_balance = (
+        anchor_amount
+        + _sum_rows(opening_rows)["net_change"]
+        + _sum_bill_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
+        + _sum_exchange_cash_in(session, start_iso=anchor_effective_start, end_iso=prev_end)
+        - _sum_return_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
+    )
+    bankbook_contra_opening = _sum_bankbook_contra(session, start_iso=anchor_effective_start, end_iso=prev_end)
+    opening_balance += (
+        float(bankbook_contra_opening["receipts"])
+        - float(bankbook_contra_opening["withdrawals"])
+        - float(bankbook_contra_opening["expenses"])
+    )
+
+    day_rows = session.exec(
+        select(CashbookEntry)
+        .where(CashbookEntry.created_at >= day_start)
+        .where(CashbookEntry.created_at <= day_end)
+        .order_by(CashbookEntry.id.desc())
+    ).all()
+    day_summary = _sum_rows(day_rows)
+    bill_cash_today = _sum_bill_cash(session, start_iso=day_start, end_iso=day_end)
+    exchange_cash_in_today = _sum_exchange_cash_in(session, start_iso=day_start, end_iso=day_end)
+    return_cash_today = _sum_return_cash(session, start_iso=day_start, end_iso=day_end)
+    bankbook_contra_today = _sum_bankbook_contra(session, start_iso=day_start, end_iso=day_end)
+    day_summary["receipts"] = round(
+        float(day_summary["receipts"]) + bill_cash_today + exchange_cash_in_today + float(bankbook_contra_today["receipts"]),
+        2,
+    )
+    day_summary["withdrawals"] = round(
+        float(day_summary["withdrawals"]) + return_cash_today + float(bankbook_contra_today["withdrawals"]),
+        2,
+    )
+    day_summary["expenses"] = round(float(day_summary["expenses"]) + float(bankbook_contra_today["expenses"]), 2)
+    day_summary["cash_out"] = round(float(day_summary["withdrawals"]) + float(day_summary["expenses"]), 2)
+    day_summary["net_change"] = round(float(day_summary["receipts"]) - float(day_summary["cash_out"]), 2)
+
+    closing_balance = round(opening_balance + day_summary["net_change"], 2)
+    out = {
+        "date": date,
+        "opening_balance": round(opening_balance, 2),
+        "closing_balance": closing_balance,
+        "summary": day_summary,
+    }
+    if include_entries:
+        out["entries"] = day_rows
+    return out
+
+
+def _iter_dates(from_date: str, to_date: str):
+    start = _parse_ymd(from_date)
+    end = _parse_ymd(to_date)
+    if start > end:
+        raise HTTPException(status_code=400, detail="from_date must be before or equal to to_date")
+    day = start
+    while day <= end:
+        yield day.date().isoformat()
+        day += timedelta(days=1)
 
 
 @router.post("/", response_model=CashbookOut)
@@ -231,65 +328,40 @@ def summary(
         bill_cash = _sum_bill_cash(session, start_iso=start_iso, end_iso=end_iso)
         exchange_cash_in = _sum_exchange_cash_in(session, start_iso=start_iso, end_iso=end_iso)
         return_cash = _sum_return_cash(session, start_iso=start_iso, end_iso=end_iso)
-        out["receipts"] = round(float(out["receipts"]) + bill_cash + exchange_cash_in, 2)
-        out["withdrawals"] = round(float(out["withdrawals"]) + return_cash, 2)
+        bankbook_contra = _sum_bankbook_contra(session, start_iso=start_iso, end_iso=end_iso)
+        out["receipts"] = round(float(out["receipts"]) + bill_cash + exchange_cash_in + float(bankbook_contra["receipts"]), 2)
+        out["withdrawals"] = round(float(out["withdrawals"]) + return_cash + float(bankbook_contra["withdrawals"]), 2)
+        out["expenses"] = round(float(out["expenses"]) + float(bankbook_contra["expenses"]), 2)
         out["cash_out"] = round(float(out["withdrawals"]) + float(out["expenses"]), 2)
         out["net_change"] = round(float(out["receipts"]) - float(out["cash_out"]), 2)
 
         return out
 
 
-@router.get("/day")
-def day_cashbook(date: str = Query(..., description="YYYY-MM-DD")):
-    day_dt = _parse_ymd(date)
-    prev_date = (day_dt - timedelta(days=1)).date().isoformat()
+@router.get("/daily-summary")
+def daily_summary(
+    from_date: Optional[str] = Query(default=None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(default=None, description="YYYY-MM-DD"),
+    dates: Optional[str] = Query(default=None, description="Comma-separated YYYY-MM-DD values"),
+):
+    if dates:
+        requested_dates = sorted({d.strip() for d in dates.split(",") if d.strip()})
+    elif from_date and to_date:
+        requested_dates = list(_iter_dates(from_date, to_date))
+    else:
+        raise HTTPException(status_code=400, detail="provide dates or from_date/to_date")
 
-    day_start = f"{date}T00:00:00"
-    day_end = f"{date}T23:59:59.999999"
-    prev_end = f"{prev_date}T23:59:59.999999"
+    for date in requested_dates:
+        _parse_ymd(date)
 
     with get_session() as session:
-        anchor = _opening_anchor(session, day_end=day_end)
-        anchor_amount = float(getattr(anchor, "amount", 0) or 0) if anchor else 0.0
-        anchor_ts = str(getattr(anchor, "created_at", "") or "") if anchor else None
-        anchor_effective_start = f"{anchor_ts[:10]}T00:00:00" if anchor_ts and len(anchor_ts) >= 10 else None
+        return [_day_snapshot(session, date, include_entries=False) for date in requested_dates]
 
-        opening_stmt = select(CashbookEntry).where(CashbookEntry.created_at <= prev_end)
-        if anchor_effective_start:
-            opening_stmt = opening_stmt.where(CashbookEntry.created_at >= anchor_effective_start)
-        opening_rows = session.exec(opening_stmt).all()
-        opening_balance = (
-            anchor_amount
-            + _sum_rows(opening_rows)["net_change"]
-            + _sum_bill_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
-            + _sum_exchange_cash_in(session, start_iso=anchor_effective_start, end_iso=prev_end)
-            - _sum_return_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
-        )
 
-        day_rows = session.exec(
-            select(CashbookEntry)
-            .where(CashbookEntry.created_at >= day_start)
-            .where(CashbookEntry.created_at <= day_end)
-            .order_by(CashbookEntry.id.desc())
-        ).all()
-        day_summary = _sum_rows(day_rows)
-        bill_cash_today = _sum_bill_cash(session, start_iso=day_start, end_iso=day_end)
-        exchange_cash_in_today = _sum_exchange_cash_in(session, start_iso=day_start, end_iso=day_end)
-        return_cash_today = _sum_return_cash(session, start_iso=day_start, end_iso=day_end)
-        day_summary["receipts"] = round(float(day_summary["receipts"]) + bill_cash_today + exchange_cash_in_today, 2)
-        day_summary["withdrawals"] = round(float(day_summary["withdrawals"]) + return_cash_today, 2)
-        day_summary["cash_out"] = round(float(day_summary["withdrawals"]) + float(day_summary["expenses"]), 2)
-        day_summary["net_change"] = round(float(day_summary["receipts"]) - float(day_summary["cash_out"]), 2)
-
-        closing_balance = round(opening_balance + day_summary["net_change"], 2)
-
-        return {
-            "date": date,
-            "opening_balance": round(opening_balance, 2),
-            "closing_balance": closing_balance,
-            "summary": day_summary,
-            "entries": day_rows,
-        }
+@router.get("/day")
+def day_cashbook(date: str = Query(..., description="YYYY-MM-DD")):
+    with get_session() as session:
+        return _day_snapshot(session, date, include_entries=True)
 
 
 @router.delete("/entry/{entry_id}")

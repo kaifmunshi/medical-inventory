@@ -40,6 +40,8 @@ export type BankbookDay = {
   entries: BankbookEntry[]
 }
 
+export type BankbookDailySummary = Omit<BankbookDay, 'entries'>
+
 export async function createBankbookEntry(payload: BankbookCreate) {
   const { data } = await api.post('/bankbook/', payload)
   return data
@@ -57,6 +59,17 @@ export async function getBankbookSummary(params: { from_date?: string; to_date?:
 
 export async function getBankbookDay(params: { date: string }) {
   const { data } = await api.get<BankbookDay>('/bankbook/day', { params })
+  return data
+}
+
+export async function getBankbookDailySummary(params: { from_date?: string; to_date?: string; dates?: string[] }) {
+  const { data } = await api.get<BankbookDailySummary[]>('/bankbook/daily-summary', {
+    params: {
+      from_date: params.from_date,
+      to_date: params.to_date,
+      dates: params.dates?.join(','),
+    },
+  })
   return data
 }
 

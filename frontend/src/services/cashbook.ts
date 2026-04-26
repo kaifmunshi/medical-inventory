@@ -50,8 +50,21 @@ export type CashbookDay = {
   entries: CashbookEntry[]
 }
 
+export type CashbookDailySummary = Omit<CashbookDay, 'entries'>
+
 export async function getCashbookDay(params: { date: string }) {
   const { data } = await api.get<CashbookDay>('/cashbook/day', { params })
+  return data
+}
+
+export async function getCashbookDailySummary(params: { from_date?: string; to_date?: string; dates?: string[] }) {
+  const { data } = await api.get<CashbookDailySummary[]>('/cashbook/daily-summary', {
+    params: {
+      from_date: params.from_date,
+      to_date: params.to_date,
+      dates: params.dates?.join(','),
+    },
+  })
   return data
 }
 

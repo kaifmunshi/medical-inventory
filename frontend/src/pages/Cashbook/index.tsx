@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Box,
@@ -35,6 +35,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createCashbookEntry,
   deleteCashbookEntry,
+  getCashbookDailySummary,
   getCashbookDay,
   listCashbookEntries,
   updateCashbookEntry,
@@ -380,10 +381,12 @@ export default function CashbookPage() {
       setSelectedDate(entryDate)
       qc.invalidateQueries({ queryKey: ['cashbook-day'] })
       qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+      qc.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
       qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
       qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
       qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
     },
@@ -402,10 +405,12 @@ export default function CashbookPage() {
       if (updated?.created_at) setSelectedDate(isoDate(updated.created_at))
       qc.invalidateQueries({ queryKey: ['cashbook-day'] })
       qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+      qc.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
       qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
       qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
       qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
     },
@@ -422,10 +427,12 @@ export default function CashbookPage() {
       if (deletedDate !== '-') setSelectedDate(deletedDate)
       qc.invalidateQueries({ queryKey: ['cashbook-day'] })
       qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+      qc.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
       qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
       qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
       qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
     },
@@ -643,6 +650,23 @@ export default function CashbookPage() {
         : [...manualRowsAll, ...billCashRowsAll, ...exchangeCashInRowsAll, ...contraRowsAll, ...returnCashRowsAll]
     return rows.sort((a: any, b: any) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
   }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, exchangeCashInRowsDay, contraRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, exchangeCashInRowsAll, contraRowsAll, returnCashRowsAll])
+
+  const allLedgerDates = useMemo(() => {
+    if (recordsFilter !== 'ALL') return []
+    return Array.from(new Set((ledgerRows || []).map((row: any) => isoDate(row.created_at)).filter((date) => date !== '-'))).sort()
+  }, [ledgerRows, recordsFilter])
+
+  const qDailySummary = useQuery({
+    queryKey: ['cashbook-daily-summary', allLedgerDates.join(',')],
+    queryFn: () => getCashbookDailySummary({ dates: allLedgerDates }),
+    enabled: recordsFilter === 'ALL' && allLedgerDates.length > 0,
+  })
+
+  const dailySummaryByDate = useMemo(() => {
+    const out: Record<string, any> = {}
+    for (const row of qDailySummary.data || []) out[String(row.date)] = row
+    return out
+  }, [qDailySummary.data])
 
   const visibleRows = useMemo(
     () => ledgerRows.filter((row: any) => matchesFilters(row, typeFilter, noteFilter)),
@@ -988,7 +1012,12 @@ export default function CashbookPage() {
             <TableBody>
               {(recordsFilter === 'DAY'
                 ? qDay.isLoading || qDayPayments.isLoading || qDayReturns.isLoading || qDayExchanges.isLoading || qDayBankbookContra.isLoading
-                : qAllCashbook.isLoading || qAllPayments.isLoading || qAllReturns.isLoading || qAllExchanges.isLoading || qAllBankbookContra.isLoading) ? (
+                : qAllCashbook.isLoading ||
+                  qAllPayments.isLoading ||
+                  qAllReturns.isLoading ||
+                  qAllExchanges.isLoading ||
+                  qAllBankbookContra.isLoading ||
+                  qDailySummary.isLoading) ? (
                 <TableRow>
                   <TableCell colSpan={6}>Loading...</TableCell>
                 </TableRow>
@@ -1011,77 +1040,106 @@ export default function CashbookPage() {
                   const date = isoDate(row.created_at)
                   const prevDate = idx > 0 ? isoDate((visibleRows as any[])[idx - 1]?.created_at) : date
                   const isNewDay = recordsFilter === 'ALL' && idx > 0 && date !== prevDate
+                  const showDayHeader = recordsFilter === 'ALL' && (idx === 0 || isNewDay)
+                  const daySummary = dailySummaryByDate[date]
                   return (
-                    <TableRow
-                      key={row.id}
-                      hover
-                      sx={
-                        recordsFilter === 'ALL'
-                          ? {
-                              bgcolor: dayColorMap[date],
-                              ...(isNewDay ? { '& td': { borderTop: '2px solid rgba(0,0,0,0.65)' } } : {}),
-                            }
-                          : undefined
-                      }
-                    >
-                      <TableCell>{isoDate(row.created_at)}</TableCell>
-                      <TableCell>{isoTime(row.created_at)}</TableCell>
-                      <TableCell>
-                        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                          <Chip size="small" label={chip.label} sx={{ borderRadius: 999, ...chip.sx }} />
-                          {row.source === 'BILL' && Number(row.bill_id || 0) > 0 ? (
-                            <Typography variant="body2">
-                              Cash payment for{' '}
-                              <Link component="button" onClick={() => openBillDetail(Number(row.bill_id))} underline="hover">
-                                Bill #{row.bill_id}
-                              </Link>
-                            </Typography>
-                          ) : (
-                            <Typography variant="body2">{row.note || '-'}</Typography>
-                          )}
-                        </Stack>
-                      </TableCell>
-                      <TableCell
-                        align="right"
-                        sx={{
-                          color: t === 'OPENING' ? 'text.primary' : isIn ? 'success.main' : 'error.main',
-                          fontWeight: 700,
-                        }}
+                    <Fragment key={row.id}>
+                      {showDayHeader ? (
+                        <TableRow>
+                          <TableCell colSpan={6} sx={{ bgcolor: '#edf4f1', borderTop: idx > 0 ? '2px solid rgba(0,0,0,0.65)' : undefined }}>
+                            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} alignItems={{ md: 'center' }}>
+                              <Typography variant="body2" sx={{ fontWeight: 800, minWidth: 120 }}>
+                                {date}
+                              </Typography>
+                              {daySummary ? (
+                                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} flexWrap="wrap">
+                                  <Chip size="small" label={`Opening: Rs ${money(daySummary.opening_balance)}`} />
+                                  <Chip
+                                    size="small"
+                                    color={Number(daySummary.summary?.net_change || 0) >= 0 ? 'success' : 'error'}
+                                    variant="outlined"
+                                    label={`Net: Rs ${money(daySummary.summary?.net_change)}`}
+                                  />
+                                  <Chip size="small" color="primary" label={`Closing: Rs ${money(daySummary.closing_balance)}`} />
+                                </Stack>
+                              ) : (
+                                <Typography variant="body2" color="text.secondary">
+                                  Loading day totals...
+                                </Typography>
+                              )}
+                            </Stack>
+                          </TableCell>
+                        </TableRow>
+                      ) : null}
+                      <TableRow
+                        hover
+                        sx={
+                          recordsFilter === 'ALL'
+                            ? {
+                                bgcolor: dayColorMap[date],
+                              }
+                            : undefined
+                        }
                       >
-                        {t === 'OPENING' ? '' : isIn ? '+' : '-'}Rs {money(row.amount)}
-                      </TableCell>
-                      <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
-                      <TableCell align="right">
-                        {row.source === 'CASHBOOK' ? (
-                          <Stack direction="row" spacing={0.5} justifyContent="flex-end">
-                            <Tooltip title="Edit entry">
-                              <span>
-                                <IconButton size="small" onClick={() => openEdit(row)} disabled={mUpdate.isPending || mDelete.isPending}>
-                                  <EditIcon fontSize="small" />
-                                </IconButton>
-                              </span>
-                            </Tooltip>
-                            <Tooltip title="Delete entry">
-                              <span>
-                                <IconButton
-                                  size="small"
-                                  color="error"
-                                  onClick={() => {
-                                    mDelete.reset()
-                                    setDeleteRow(row)
-                                  }}
-                                  disabled={mUpdate.isPending || mDelete.isPending}
-                                >
-                                  <DeleteIcon fontSize="small" />
-                                </IconButton>
-                              </span>
-                            </Tooltip>
+                        <TableCell>{isoDate(row.created_at)}</TableCell>
+                        <TableCell>{isoTime(row.created_at)}</TableCell>
+                        <TableCell>
+                          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                            <Chip size="small" label={chip.label} sx={{ borderRadius: 999, ...chip.sx }} />
+                            {row.source === 'BILL' && Number(row.bill_id || 0) > 0 ? (
+                              <Typography variant="body2">
+                                Cash payment for{' '}
+                                <Link component="button" onClick={() => openBillDetail(Number(row.bill_id))} underline="hover">
+                                  Bill #{row.bill_id}
+                                </Link>
+                              </Typography>
+                            ) : (
+                              <Typography variant="body2">{row.note || '-'}</Typography>
+                            )}
                           </Stack>
-                        ) : (
-                          '-'
-                        )}
-                      </TableCell>
-                    </TableRow>
+                        </TableCell>
+                        <TableCell
+                          align="right"
+                          sx={{
+                            color: t === 'OPENING' ? 'text.primary' : isIn ? 'success.main' : 'error.main',
+                            fontWeight: 700,
+                          }}
+                        >
+                          {t === 'OPENING' ? '' : isIn ? '+' : '-'}Rs {money(row.amount)}
+                        </TableCell>
+                        <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
+                        <TableCell align="right">
+                          {row.source === 'CASHBOOK' ? (
+                            <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                              <Tooltip title="Edit entry">
+                                <span>
+                                  <IconButton size="small" onClick={() => openEdit(row)} disabled={mUpdate.isPending || mDelete.isPending}>
+                                    <EditIcon fontSize="small" />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                              <Tooltip title="Delete entry">
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    color="error"
+                                    onClick={() => {
+                                      mDelete.reset()
+                                      setDeleteRow(row)
+                                    }}
+                                    disabled={mUpdate.isPending || mDelete.isPending}
+                                  >
+                                    <DeleteIcon fontSize="small" />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                            </Stack>
+                          ) : (
+                            '-'
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    </Fragment>
                   )
                 })
               )}
@@ -1218,6 +1276,7 @@ export default function CashbookPage() {
                   setBillDetail(updatedBill)
                   qc.invalidateQueries({ queryKey: ['cashbook-day', selectedDate] })
                   qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+                  qc.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
                   qc.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
                   qc.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
                 }}
@@ -1234,6 +1293,7 @@ export default function CashbookPage() {
           setBillDetail(updated)
           qc.invalidateQueries({ queryKey: ['cashbook-day', selectedDate] })
           qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+          qc.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
           qc.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
           qc.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
         }}

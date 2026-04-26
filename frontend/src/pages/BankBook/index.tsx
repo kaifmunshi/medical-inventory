@@ -4,6 +4,7 @@ import {
   Box,
   Button,
   Chip,
+  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
@@ -22,13 +23,18 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material'
+import AddIcon from '@mui/icons-material/Add'
 import CloseIcon from '@mui/icons-material/Close'
+import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
+import ExpandLessIcon from '@mui/icons-material/ExpandLess'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createBankbookEntry,
+  deleteBankbookEntry,
   getBankbookDay,
   listBankbookEntries,
   updateBankbookEntry,
@@ -107,6 +113,32 @@ function typeChipProps(type: string) {
   return { label: 'Expense', sx: { ...baseSx, bgcolor: 'error.light', color: 'error.dark' } }
 }
 
+const typeFilterOptions = [
+  { value: 'ALL', label: 'All Types' },
+  { value: 'RECEIPT', label: 'Receipt' },
+  { value: 'OPENING', label: 'Opening' },
+  { value: 'EXPENSE', label: 'Expense' },
+  { value: 'WITHDRAWAL', label: 'Withdrawal' },
+  { value: 'CONTRA', label: 'Contra' },
+  { value: 'RETURN', label: 'Refund' },
+  { value: 'SPLIT', label: 'Split' },
+]
+
+function rowTypeForFilter(row: any) {
+  if (row?.source === 'RETURN') return 'RETURN'
+  if (row?.source === 'CONTRA' || row?.source === 'CASHBOOK_CONTRA') return 'CONTRA'
+  return String(row?.pill_type || row?.entry_type || '').toUpperCase()
+}
+
+function matchesFilters(row: any, typeFilter: string, noteFilter: string) {
+  const type = rowTypeForFilter(row)
+  const entryType = String(row?.entry_type || '').toUpperCase()
+  const typeOk = typeFilter === 'ALL' || type === typeFilter || entryType === typeFilter
+  const needle = noteFilter.trim().toLowerCase()
+  const noteOk = !needle || String(row?.note || '').toLowerCase().includes(needle)
+  return typeOk && noteOk
+}
+
 function round2(n: number) {
   return Math.round(n * 100) / 100
 }
@@ -175,6 +207,9 @@ export default function BankBookPage() {
   const [debouncedAllAnchorDate, setDebouncedAllAnchorDate] = useState(today)
   const [rangeFrom, setRangeFrom] = useState(today)
   const [rangeTo, setRangeTo] = useState(today)
+  const [typeFilter, setTypeFilter] = useState('ALL')
+  const [noteFilter, setNoteFilter] = useState('')
+  const [addOpen, setAddOpen] = useState(false)
 
   const [entryType, setEntryType] = useState<BankbookType>('RECEIPT')
   const [entryMode, setEntryMode] = useState<BankbookMode>('UPI')
@@ -193,6 +228,7 @@ export default function BankBookPage() {
   const [editAmount, setEditAmount] = useState('')
   const [editTxnCharges, setEditTxnCharges] = useState('')
   const [editNote, setEditNote] = useState('')
+  const [deleteRow, setDeleteRow] = useState<any | null>(null)
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedAllAnchorDate(allAnchorDate), 250)
@@ -373,6 +409,7 @@ export default function BankBookPage() {
       setAmount('')
       setTxnCharges('')
       setNote('')
+      setAddOpen(false)
       setEntryMode('UPI')
       setSelectedDate(entryDate)
       qc.invalidateQueries({ queryKey: ['bankbook-day'] })
@@ -399,6 +436,23 @@ export default function BankBookPage() {
     onSuccess: (updated: any) => {
       setEditRow(null)
       if (updated?.created_at) setSelectedDate(isoDate(updated.created_at))
+      qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
+      qc.invalidateQueries({ queryKey: ['cashbook-day'] })
+      qc.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+      qc.invalidateQueries({ queryKey: ['cashbook-bankbook-contra-day'] })
+      qc.invalidateQueries({ queryKey: ['cashbook-bankbook-contra-all'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
+      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
+    },
+  })
+
+  const mDelete = useMutation({
+    mutationFn: (row: any) => deleteBankbookEntry(Number(row?.id)),
+    onSuccess: (_deleted: any, row: any) => {
+      const deletedDate = isoDate(row?.created_at)
+      setDeleteRow(null)
+      if (deletedDate !== '-') setSelectedDate(deletedDate)
       qc.invalidateQueries({ queryKey: ['bankbook-day'] })
       qc.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
       qc.invalidateQueries({ queryKey: ['cashbook-day'] })
@@ -665,7 +719,7 @@ export default function BankBookPage() {
       }))
   }, [manualRowsAll])
 
-  const visibleRows = useMemo(() => {
+  const ledgerRows = useMemo(() => {
     const rows =
       recordsFilter === 'DAY'
         ? [
@@ -723,6 +777,13 @@ export default function BankBookPage() {
     exchangeOnlineOutRowsAll,
     returnOnlineRowsAll,
   ])
+
+  const visibleRows = useMemo(
+    () => ledgerRows.filter((row: any) => matchesFilters(row, typeFilter, noteFilter)),
+    [ledgerRows, noteFilter, typeFilter],
+  )
+
+  const hasActiveFilters = typeFilter !== 'ALL' || noteFilter.trim().length > 0
 
   const dayColorMap = useMemo(() => {
     if (recordsFilter !== 'ALL') return {} as Record<string, string>
@@ -930,102 +991,176 @@ export default function BankBookPage() {
       </Paper>
 
       <Paper sx={{ p: 2 }}>
-        <Stack spacing={1.5}>
-          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1.5} flexWrap="wrap">
-            <TextField
-              select
-              label="Entry Type"
-              value={entryType}
-              onChange={(e) => setEntryType(e.target.value as BankbookType)}
-              sx={{ minWidth: 180 }}
-            >
-              <MenuItem value="OPENING">Opening Balance (1 Apr)</MenuItem>
-              <MenuItem value="CONTRA">Contra (Bank to Cash)</MenuItem>
-              <MenuItem value="RECEIPT">Receipt (Bank In)</MenuItem>
-              <MenuItem value="EXPENSE">Expense (Bank Out)</MenuItem>
-              <MenuItem value="WITHDRAWAL">Withdrawal (Bank Out)</MenuItem>
-            </TextField>
-            {entryType !== 'OPENING' && entryType !== 'CONTRA' ? (
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            Add Bank Record
+          </Typography>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={addOpen ? <ExpandLessIcon /> : <AddIcon />}
+            onClick={() => setAddOpen((open) => !open)}
+            sx={{ ml: { sm: 'auto' }, alignSelf: { xs: 'flex-start', sm: 'center' } }}
+          >
+            {addOpen ? 'Collapse' : 'Add New Entry'}
+          </Button>
+        </Stack>
+        <Collapse in={addOpen} timeout="auto" unmountOnExit>
+          <Stack spacing={1.5} sx={{ mt: 1.5 }}>
+            <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1.5} flexWrap="wrap">
               <TextField
                 select
-                label="Mode"
-                value={entryMode}
-                onChange={(e) => setEntryMode(e.target.value as BankbookMode)}
-                sx={{ minWidth: 220 }}
+                label="Entry Type"
+                value={entryType}
+                onChange={(e) => setEntryType(e.target.value as BankbookType)}
+                sx={{ minWidth: 180 }}
               >
-                {manualModes.map((mode) => (
-                  <MenuItem key={mode.value} value={mode.value}>
-                    {mode.label}
-                  </MenuItem>
-                ))}
+                <MenuItem value="OPENING">Opening Balance (1 Apr)</MenuItem>
+                <MenuItem value="CONTRA">Contra (Bank to Cash)</MenuItem>
+                <MenuItem value="RECEIPT">Receipt (Bank In)</MenuItem>
+                <MenuItem value="EXPENSE">Expense (Bank Out)</MenuItem>
+                <MenuItem value="WITHDRAWAL">Withdrawal (Bank Out)</MenuItem>
               </TextField>
-            ) : null}
-            <TextField
-              label="Entry Date"
-              type="date"
-              value={entryDate}
-              onChange={(e) => setEntryDate(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              sx={{ minWidth: 170 }}
-            />
-            <TextField
-              label="Amount"
-              type="number"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              inputProps={{ min: 0, step: '0.01' }}
-              sx={{ minWidth: 140 }}
-            />
-            <TextField
-              label="Txn Charges"
-              type="number"
-              value={txnCharges}
-              onChange={(e) => setTxnCharges(e.target.value)}
-              inputProps={{ min: 0, step: '0.01' }}
-              sx={{ minWidth: 150 }}
-              disabled={entryType === 'CONTRA'}
-              helperText="Adds a separate linked charges entry"
-            />
+              {entryType !== 'OPENING' && entryType !== 'CONTRA' ? (
+                <TextField
+                  select
+                  label="Mode"
+                  value={entryMode}
+                  onChange={(e) => setEntryMode(e.target.value as BankbookMode)}
+                  sx={{ minWidth: 220 }}
+                >
+                  {manualModes.map((mode) => (
+                    <MenuItem key={mode.value} value={mode.value}>
+                      {mode.label}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              ) : null}
+              <TextField
+                label="Entry Date"
+                type="date"
+                value={entryDate}
+                onChange={(e) => setEntryDate(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 170 }}
+              />
+              <TextField
+                label="Amount"
+                type="number"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                inputProps={{ min: 0, step: '0.01' }}
+                sx={{ minWidth: 140 }}
+              />
+              <TextField
+                label="Txn Charges"
+                type="number"
+                value={txnCharges}
+                onChange={(e) => setTxnCharges(e.target.value)}
+                inputProps={{ min: 0, step: '0.01' }}
+                sx={{ minWidth: 150 }}
+                disabled={entryType === 'CONTRA'}
+                helperText="Adds a separate linked charges entry"
+              />
+            </Stack>
+            <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'flex-start' }}>
+              <TextField
+                label="Note"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder={entryMode === 'BANK_DEPOSIT' ? bankDepositDefaultNote(entryType) : 'Optional details'}
+                helperText={
+                  entryMode === 'BANK_DEPOSIT'
+                    ? 'Prefilled contra note. You can edit it before saving.'
+                    : 'Optional details for the bank entry.'
+                }
+                multiline
+                minRows={2}
+                fullWidth
+              />
+              <Button
+                variant="contained"
+                onClick={() => mCreate.mutate()}
+                disabled={!canSave}
+                sx={{ minWidth: 140, mt: { md: 0.5 } }}
+              >
+                {mCreate.isPending ? 'Saving...' : 'Save Record'}
+              </Button>
+            </Stack>
           </Stack>
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'flex-start' }}>
-            <TextField
-              label="Note"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder={entryMode === 'BANK_DEPOSIT' ? bankDepositDefaultNote(entryType) : 'Optional details'}
-              helperText={
-                entryMode === 'BANK_DEPOSIT'
-                  ? 'Prefilled contra note. You can edit it before saving.'
-                  : 'Optional details for the bank entry.'
-              }
-              multiline
-              minRows={2}
-              fullWidth
-            />
-            <Button variant="contained" onClick={() => mCreate.mutate()} disabled={!canSave} sx={{ minWidth: 140, mt: { md: 0.5 } }}>
-              {mCreate.isPending ? 'Saving...' : 'Add Record'}
-            </Button>
-          </Stack>
-        </Stack>
-        {mCreate.isError ? (
-          <Alert severity="error" sx={{ mt: 1.5 }}>
-            Failed to save bank record. Please try again.
-          </Alert>
-        ) : null}
+          {mCreate.isError ? (
+            <Alert severity="error" sx={{ mt: 1.5 }}>
+              Failed to save bank record. Please try again.
+            </Alert>
+          ) : null}
+        </Collapse>
       </Paper>
 
       <Paper sx={{ p: 2 }}>
-        <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
-          {recordsFilter === 'DAY' ? 'Day Entries' : 'All Records'}
-        </Typography>
-        <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
-          <Button size="small" variant={sortDir === 'asc' ? 'contained' : 'outlined'} onClick={() => setSortDir('asc')}>
-            Date Asc
-          </Button>
-          <Button size="small" variant={sortDir === 'desc' ? 'contained' : 'outlined'} onClick={() => setSortDir('desc')}>
-            Date Desc
-          </Button>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} sx={{ mb: 1.5 }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            {recordsFilter === 'DAY' ? 'Day Entries' : 'All Records'}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ ml: { sm: 'auto' } }}>
+            {visibleRows.length} of {ledgerRows.length}
+          </Typography>
         </Stack>
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: {
+              xs: '1fr',
+              sm: '180px minmax(0, 1fr)',
+              md: '180px minmax(260px, 1fr) auto auto',
+            },
+            gap: 1,
+            alignItems: 'stretch',
+            mb: 1.5,
+          }}
+        >
+          <TextField
+            select
+            size="small"
+            label="Type"
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value)}
+            fullWidth
+          >
+            {typeFilterOptions.map((option) => (
+              <MenuItem key={option.value} value={option.value}>
+                {option.label}
+              </MenuItem>
+            ))}
+          </TextField>
+          <TextField
+            size="small"
+            label="Note filter"
+            value={noteFilter}
+            onChange={(e) => setNoteFilter(e.target.value)}
+            placeholder="Search notes"
+            fullWidth
+          />
+          {hasActiveFilters ? (
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => {
+                setTypeFilter('ALL')
+                setNoteFilter('')
+              }}
+            >
+              Clear Filters
+            </Button>
+          ) : null}
+          <Stack direction="row" spacing={1}>
+            <Button size="small" variant={sortDir === 'asc' ? 'contained' : 'outlined'} onClick={() => setSortDir('asc')}>
+              Date Asc
+            </Button>
+            <Button size="small" variant={sortDir === 'desc' ? 'contained' : 'outlined'} onClick={() => setSortDir('desc')}>
+              Date Desc
+            </Button>
+          </Stack>
+        </Box>
         <TableContainer>
           <Table size="small">
             <TableHead>
@@ -1058,7 +1193,11 @@ export default function BankBookPage() {
               ) : visibleRows.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={8}>
-                    {recordsFilter === 'DAY' ? 'No entries for this day.' : 'No records found.'}
+                    {hasActiveFilters
+                      ? 'No entries match the filters.'
+                      : recordsFilter === 'DAY'
+                        ? 'No entries for this day.'
+                        : 'No records found.'}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -1136,9 +1275,30 @@ export default function BankBookPage() {
                       </TableCell>
                       <TableCell align="right">
                         {row.source === 'BANKBOOK' ? (
-                          <IconButton size="small" onClick={() => openEdit(row)} disabled={mUpdate.isPending}>
-                            <EditIcon fontSize="small" />
-                          </IconButton>
+                          <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                            <Tooltip title="Edit entry">
+                              <span>
+                                <IconButton size="small" onClick={() => openEdit(row)} disabled={mUpdate.isPending || mDelete.isPending}>
+                                  <EditIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                            <Tooltip title="Delete entry">
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  color="error"
+                                  onClick={() => {
+                                    mDelete.reset()
+                                    setDeleteRow(row)
+                                  }}
+                                  disabled={mUpdate.isPending || mDelete.isPending}
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                          </Stack>
                         ) : (
                           '-'
                         )}
@@ -1387,6 +1547,47 @@ export default function BankBookPage() {
             disabled={!editRow || Number(editAmount) <= 0 || !editDate || mUpdate.isPending}
           >
             {mUpdate.isPending ? 'Saving...' : 'Save Changes'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={!!deleteRow}
+        onClose={() => {
+          if (!mDelete.isPending) setDeleteRow(null)
+        }}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>Delete Bank Book Entry</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1}>
+            <Typography>Delete this bank book entry?</Typography>
+            <Typography variant="body2" color="text.secondary">
+              {deleteRow ? `${isoDate(deleteRow.created_at)} - ${rowTypeForFilter(deleteRow)} - Rs ${money(deleteRow.amount)}` : ''}
+            </Typography>
+            {deleteRow?.note ? (
+              <Typography variant="body2" color="text.secondary">
+                {deleteRow.note}
+              </Typography>
+            ) : null}
+            {mDelete.isError ? (
+              <Alert severity="error">{errorMessage(mDelete.error, 'Failed to delete bank record.')}</Alert>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteRow(null)} disabled={mDelete.isPending}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={() => {
+              if (deleteRow) mDelete.mutate(deleteRow)
+            }}
+            disabled={!deleteRow || mDelete.isPending}
+          >
+            {mDelete.isPending ? 'Deleting...' : 'Delete'}
           </Button>
         </DialogActions>
       </Dialog>

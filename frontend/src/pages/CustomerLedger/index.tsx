@@ -6,13 +6,18 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Divider,
+  IconButton,
+  Link,
   MenuItem,
   Paper,
   Stack,
   TextField,
   Typography,
 } from '@mui/material'
-import { Link, useSearchParams } from 'react-router-dom'
+import CloseIcon from '@mui/icons-material/Close'
+import EditIcon from '@mui/icons-material/Edit'
+import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchCustomers } from '../../services/customers'
 import {
@@ -23,10 +28,11 @@ import {
   fetchPartyReceipts,
   fetchReceiptAdjustments,
 } from '../../services/parties'
-import { listPayments, type BillPaymentRow } from '../../services/billing'
+import { getBill, listPayments, type BillPaymentRow } from '../../services/billing'
 import type { Customer, DebtorLedgerRow, OpenBill, Party, PartyReceipt, ReceiptBillAdjustment } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
-import { buildSalesReportLink } from '../../lib/reportLinks'
+import BillEditDialog from '../../components/billing/BillEditDialog'
+import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 
 function money(n: number) {
   return Number(n || 0).toFixed(2)
@@ -46,6 +52,10 @@ export default function CustomerLedgerPage() {
   const [paymentDate, setPaymentDate] = useState(today)
   const [note, setNote] = useState('')
   const [adjustmentDrafts, setAdjustmentDrafts] = useState<Record<number, string>>({})
+  const [billOpen, setBillOpen] = useState(false)
+  const [billLoading, setBillLoading] = useState(false)
+  const [billDetail, setBillDetail] = useState<any | null>(null)
+  const [billEditOpen, setBillEditOpen] = useState(false)
 
   const customersQ = useQuery<Customer[], Error>({
     queryKey: ['customer-ledger-customers'],
@@ -251,6 +261,30 @@ export default function CustomerLedgerPage() {
     setAdjustmentDrafts((prev) => ({ ...prev, [billId]: value }))
   }
 
+  async function openBillDetail(billId: number) {
+    if (!Number.isFinite(billId) || billId <= 0) return
+    setBillOpen(true)
+    setBillLoading(true)
+    setBillDetail(null)
+    try {
+      const data = await getBill(billId)
+      setBillDetail(data)
+    } catch {
+      setBillDetail(null)
+    } finally {
+      setBillLoading(false)
+    }
+  }
+
+  function refreshLedgerQueries() {
+    queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
+  }
+
   function saveReceipt() {
     if (!selectedParty?.id) return
     receiptM.mutate({
@@ -340,12 +374,10 @@ export default function CustomerLedgerPage() {
                 <tr key={row.bill_id}>
                   <td>
                     <Link
-                      to={buildSalesReportLink({
-                        billId: row.bill_id,
-                        from: '2000-01-01',
-                        to: '2099-12-31',
-                      })}
-                      style={{ color: '#1976d2', fontWeight: 600, textDecoration: 'none' }}
+                      component="button"
+                      underline="hover"
+                      onClick={() => openBillDetail(Number(row.bill_id))}
+                      sx={{ fontWeight: 600 }}
                     >
                       {row.bill_id}
                     </Link>
@@ -393,12 +425,10 @@ export default function CustomerLedgerPage() {
                 <tr key={row.bill_id}>
                   <td>
                     <Link
-                      to={buildSalesReportLink({
-                        billId: row.bill_id,
-                        from: '2000-01-01',
-                        to: '2099-12-31',
-                      })}
-                      style={{ color: '#1976d2', fontWeight: 600, textDecoration: 'none' }}
+                      component="button"
+                      underline="hover"
+                      onClick={() => openBillDetail(Number(row.bill_id))}
+                      sx={{ fontWeight: 600 }}
                     >
                       {row.bill_id}
                     </Link>
@@ -545,6 +575,117 @@ export default function CustomerLedgerPage() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Bill Details {billDetail?.id ? `#${billDetail.id}` : ''}
+          <IconButton onClick={() => setBillOpen(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          {billLoading ? (
+            <Typography color="text.secondary">Loading…</Typography>
+          ) : !billDetail ? (
+            <Typography color="error">Failed to load bill details.</Typography>
+          ) : (
+            <Stack gap={2}>
+              <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
+                <Typography variant="subtitle1">
+                  ID: <b>{billDetail.id}</b>
+                </Typography>
+                <Typography variant="subtitle1">
+                  Date/Time: <b>{billDetail.date_time || billDetail.created_at || '-'}</b>
+                </Typography>
+              </Stack>
+
+              <Divider />
+
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 220 }}>Item</th>
+                      <th>Qty</th>
+                      <th>MRP</th>
+                      <th>Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(billDetail.items || []).map((it: any, idx: number) => (
+                      <tr key={idx}>
+                        <td>{it.item_name || it.name || it.item?.name || `#${it.item_id}`}</td>
+                        <td>{Number(it.quantity || 0)}</td>
+                        <td>{money(it.mrp)}</td>
+                        <td>{money(it.line_total)}</td>
+                      </tr>
+                    ))}
+                    {(billDetail.items || []).length === 0 ? (
+                      <tr>
+                        <td colSpan={4}>
+                          <Box p={2} color="text.secondary">
+                            No items.
+                          </Box>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </Box>
+
+              <Stack gap={0.5} sx={{ ml: 'auto', maxWidth: 420 }}>
+                <Typography>
+                  Total: <b>{money(billDetail.total_amount || 0)}</b>
+                </Typography>
+                <Typography>
+                  Payment Mode: <b>{billDetail.payment_mode || '-'}</b>
+                </Typography>
+                <Typography>
+                  Payment Status: <b>{billDetail.payment_status || '-'}</b>
+                </Typography>
+                <Typography>
+                  Paid Amount: <b>{money(billDetail.paid_amount || 0)}</b>
+                </Typography>
+                <Typography>
+                  Pending Amount:{' '}
+                  <b>{money(Math.max(0, Number(billDetail.total_amount || 0) - Number(billDetail.paid_amount || 0) - Number(billDetail.writeoff_amount || 0)))}</b>
+                </Typography>
+                {billDetail.notes ? (
+                  <Typography sx={{ mt: 1 }}>
+                    Notes: <i>{billDetail.notes}</i>
+                  </Typography>
+                ) : null}
+                {!billDetail.is_deleted ? (
+                  <Box sx={{ pt: 1 }}>
+                    <Button size="small" variant="outlined" startIcon={<EditIcon />} onClick={() => setBillEditOpen(true)}>
+                      Edit Bill
+                    </Button>
+                  </Box>
+                ) : null}
+              </Stack>
+
+              <Divider />
+              <BillPaymentsPanel
+                bill={billDetail}
+                onBillUpdated={async (updatedBill) => {
+                  setBillDetail(updatedBill)
+                  refreshLedgerQueries()
+                }}
+              />
+            </Stack>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <BillEditDialog
+        open={billEditOpen}
+        bill={billDetail}
+        onClose={() => setBillEditOpen(false)}
+        onSaved={(updated) => {
+          setBillDetail(updated)
+          refreshLedgerQueries()
+        }}
+      />
     </Stack>
   )
 }

@@ -11,6 +11,7 @@ export interface Item {
   cost_price?: number
   stock: number
   rack_number: number
+  is_archived?: boolean
   created_at?: string
   updated_at?: string
 }
@@ -143,6 +144,7 @@ export interface StockAuditItem {
 }
 
 export interface PurchaseItemPayload {
+  existing_inventory_item_id?: ID
   product_id?: ID
   product_name: string
   alias?: string
@@ -174,6 +176,7 @@ export interface PurchaseItem {
   product_id: ID
   inventory_item_id?: ID | null
   lot_id?: ID | null
+  stock_source?: 'CREATED' | 'ATTACHED'
   product_name: string
   brand?: string | null
   expiry_date?: string | null

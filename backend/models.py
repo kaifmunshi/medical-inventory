@@ -719,6 +719,7 @@ class PurchaseItem(SQLModel, table=True):
     product_id: int = Field(index=True)
     inventory_item_id: Optional[int] = Field(default=None, index=True)
     lot_id: Optional[int] = Field(default=None, index=True)
+    stock_source: str = Field(default="CREATED", index=True)
     product_name: str
     brand: Optional[str] = None
     expiry_date: Optional[str] = Field(default=None, sa_column=Column(String(10)))
@@ -930,6 +931,7 @@ class StockAuditItemOut(SQLModel):
 
 
 class PurchaseItemIn(SQLModel):
+    existing_inventory_item_id: Optional[int] = None
     product_id: Optional[int] = None
     product_name: str
     alias: Optional[str] = None
@@ -990,6 +992,7 @@ class PurchaseItemOut(SQLModel):
     product_id: int
     inventory_item_id: Optional[int] = None
     lot_id: Optional[int] = None
+    stock_source: str = "CREATED"
     product_name: str
     brand: Optional[str] = None
     expiry_date: Optional[str] = None

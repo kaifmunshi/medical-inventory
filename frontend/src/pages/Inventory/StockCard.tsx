@@ -84,6 +84,9 @@ function reasonLabel(reason: string) {
   const labels: Record<string, string> = {
     OPENING: 'Opening',
     PURCHASE: 'Purchase In',
+    PURCHASE_LINK: 'Purchase Link',
+    PURCHASE_LINK_REMOVED: 'Purchase Link Removed',
+    PURCHASE_LINK_CANCEL: 'Purchase Link Cancel',
     PURCHASE_CANCEL: 'Purchase Cancel',
     SALE: 'Sale Out',
     BILL_DELETE: 'Sale Cancel',

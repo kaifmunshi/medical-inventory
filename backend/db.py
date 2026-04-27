@@ -545,6 +545,8 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchaseitem ADD COLUMN lot_id INTEGER"))
         if "effective_cost_price" not in purchase_item_col_names:
             session.exec(text("ALTER TABLE purchaseitem ADD COLUMN effective_cost_price REAL NOT NULL DEFAULT 0"))
+        if "stock_source" not in purchase_item_col_names:
+            session.exec(text("ALTER TABLE purchaseitem ADD COLUMN stock_source TEXT NOT NULL DEFAULT 'CREATED'"))
 
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchasepayment (
@@ -566,6 +568,7 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchaseitem_product_id ON purchaseitem (product_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchaseitem_inventory_item_id ON purchaseitem (inventory_item_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchaseitem_lot_id ON purchaseitem (lot_id)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchaseitem_stock_source ON purchaseitem (stock_source)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_purchase_id ON purchasepayment (purchase_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_paid_at ON purchasepayment (paid_at)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_is_writeoff ON purchasepayment (is_writeoff)"))

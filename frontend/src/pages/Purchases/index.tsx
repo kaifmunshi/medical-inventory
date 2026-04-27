@@ -20,10 +20,12 @@ import {
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import DeleteIcon from '@mui/icons-material/Delete'
+import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
 import PaymentsIcon from '@mui/icons-material/Payments'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { createParty, fetchParties } from '../../services/parties'
+import { listItems } from '../../services/inventory'
 import { createBrand, createCategory, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
 import {
   addPurchasePayment,
@@ -35,7 +37,7 @@ import {
   fetchSupplierLedgerSummary,
   updatePurchase,
 } from '../../services/purchases'
-import type { Category, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
+import type { Category, Item, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 
 type DraftItem = PurchaseItemPayload & { key: string }
@@ -74,6 +76,18 @@ function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'co
   const totalQty = Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
   if (totalQty <= 0) return 0
   return lineBaseTotal(item) / totalQty
+}
+
+function inventoryBatchLabel(item: Item) {
+  const parts = [
+    `#${item.id}`,
+    item.name,
+    item.brand || '',
+    item.expiry_date ? `Exp ${item.expiry_date}` : '',
+    `MRP ${money(item.mrp)}`,
+    `Stock ${Number(item.stock || 0)}`,
+  ].filter(Boolean)
+  return parts.join(' | ')
 }
 
 function fmtDateTime(v?: string | null) {
@@ -115,6 +129,7 @@ export default function PurchasesPage() {
   const [items, setItems] = useState<DraftItem[]>([makeEmptyItem()])
 
   const [productSearch, setProductSearch] = useState('')
+  const [inventorySearch, setInventorySearch] = useState('')
   const [selectedPurchaseId, setSelectedPurchaseId] = useState<number | null>(null)
   const [editHeaderOpen, setEditHeaderOpen] = useState(false)
   const [editItemsOpen, setEditItemsOpen] = useState(false)
@@ -164,6 +179,11 @@ export default function PurchasesPage() {
     queryFn: () => fetchProducts({ q: productSearch.trim() || undefined }),
   })
 
+  const inventoryBatchesQ = useQuery<Item[], Error>({
+    queryKey: ['purchase-existing-inventory', inventorySearch],
+    queryFn: () => listItems(inventorySearch.trim(), { include_archived: true }),
+  })
+
   const purchasesQ = useQuery<Purchase[], Error>({
     queryKey: ['purchases-list', filterPartyId, filterFromDate, filterToDate],
     queryFn: () => fetchPurchases({
@@ -202,6 +222,7 @@ export default function PurchasesPage() {
       toast.push('Purchase saved', 'success')
       queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
       if (partyId) queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary', partyId] })
       resetForm()
       setAddOpen(false)
@@ -305,8 +326,8 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['purchase-brands'] })
       queryClient.invalidateQueries({ queryKey: ['brand-master'] })
       if (brandTargetKey) {
-        updateItem(brandTargetKey, { brand: brand.name, product_id: undefined })
-        updateEditItem(brandTargetKey, { brand: brand.name, product_id: undefined })
+        updateItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined })
+        updateEditItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined })
       }
       setBrandDialogOpen(false)
       setBrandTargetKey(null)
@@ -329,6 +350,7 @@ export default function PurchasesPage() {
   const categories = categoriesQ.data || []
   const brandNames = (brandsQ.data || []).map((brand) => brand.name)
   const products = productsQ.data || []
+  const inventoryBatches = inventoryBatchesQ.data || []
   const purchases = purchasesQ.data || []
   const selectedPurchase = selectedPurchaseQ.data || null
   const selectedSupplierName = selectedPurchase
@@ -371,6 +393,7 @@ export default function PurchasesPage() {
   function applyProduct(itemKey: string, product: Product | null, editMode = false) {
     if (!product) return
     const patch = {
+      existing_inventory_item_id: undefined,
       product_id: product.id,
       product_name: product.name,
       alias: product.alias || '',
@@ -381,6 +404,24 @@ export default function PurchasesPage() {
       parent_unit_name: product.parent_unit_name || '',
       child_unit_name: product.child_unit_name || '',
       conversion_qty: product.default_conversion_qty ?? undefined,
+    }
+    if (editMode) updateEditItem(itemKey, patch)
+    else updateItem(itemKey, patch)
+  }
+
+  function applyExistingInventory(itemKey: string, inventoryItem: Item | null, editMode = false) {
+    if (!inventoryItem) return
+    const patch = {
+      existing_inventory_item_id: inventoryItem.id,
+      product_id: inventoryItem.product_id ?? undefined,
+      product_name: inventoryItem.name,
+      brand: inventoryItem.brand || '',
+      category_id: inventoryItem.category_id ?? undefined,
+      expiry_date: inventoryItem.expiry_date || '',
+      rack_number: inventoryItem.rack_number || 0,
+      sealed_qty: Number(inventoryItem.stock || 0) > 0 ? Number(inventoryItem.stock || 0) : 1,
+      cost_price: Number(inventoryItem.cost_price || 0),
+      mrp: Number(inventoryItem.mrp || 0),
     }
     if (editMode) updateEditItem(itemKey, patch)
     else updateItem(itemKey, patch)
@@ -408,6 +449,7 @@ export default function PurchasesPage() {
     if (!purchase) return
     setEditItems(purchase.items.map((item) => ({
       key: Math.random().toString(36).slice(2),
+      existing_inventory_item_id: item.stock_source === 'ATTACHED' && item.inventory_item_id ? item.inventory_item_id : undefined,
       product_id: item.product_id,
       product_name: item.product_name,
       alias: '',
@@ -596,6 +638,15 @@ export default function PurchasesPage() {
                 <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
                   <Stack direction="row" gap={1} alignItems="center">
                     <Chip size="small" label={`Line ${index + 1}`} />
+                    {item.existing_inventory_item_id ? (
+                      <Chip
+                        size="small"
+                        color="info"
+                        icon={<Inventory2OutlinedIcon />}
+                        label={`Existing #${item.existing_inventory_item_id}`}
+                        variant="outlined"
+                      />
+                    ) : null}
                     <Typography variant="caption" color="text.secondary">
                       {item.product_name || 'New product line'}
                     </Typography>
@@ -610,6 +661,20 @@ export default function PurchasesPage() {
                   </Button>
                 </Stack>
                 <Grid container spacing={1.25} alignItems="center">
+                  <Grid item xs={12} md={4}>
+                    <Autocomplete
+                      size="small"
+                      options={inventoryBatches}
+                      value={inventoryBatches.find((batch) => Number(batch.id) === Number(item.existing_inventory_item_id)) || null}
+                      getOptionLabel={inventoryBatchLabel}
+                      onInputChange={(_, value) => setInventorySearch(value)}
+                      onChange={(_, value) => {
+                        if (value) applyExistingInventory(item.key, value, editMode)
+                        else patchItem(item.key, { existing_inventory_item_id: undefined })
+                      }}
+                      renderInput={(params) => <TextField {...params} label="Attach Existing Batch" fullWidth />}
+                    />
+                  </Grid>
                   <Grid item xs={12} md={3.5}>
                     <Autocomplete
                       size="small"
@@ -621,7 +686,7 @@ export default function PurchasesPage() {
                     />
                   </Grid>
                   <Grid item xs={12} md={3.5}>
-                    <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchItem(item.key, { product_name: e.target.value, product_id: undefined })} fullWidth />
+                    <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchItem(item.key, { product_name: e.target.value, product_id: undefined, existing_inventory_item_id: undefined })} fullWidth />
                   </Grid>
                   <Grid item xs={12} md={2}>
                     <Stack direction="row" gap={1}>
@@ -630,8 +695,8 @@ export default function PurchasesPage() {
                         size="small"
                         options={brandNames}
                         value={item.brand || ''}
-                        onChange={(_, value) => patchItem(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined })}
-                        onInputChange={(_, value) => patchItem(item.key, { brand: value, product_id: undefined })}
+                        onChange={(_, value) => patchItem(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined, existing_inventory_item_id: undefined })}
+                        onInputChange={(_, value) => patchItem(item.key, { brand: value, product_id: undefined, existing_inventory_item_id: undefined })}
                         renderInput={(params) => <TextField {...params} label="Brand" fullWidth />}
                         sx={{ flex: 1 }}
                       />
@@ -1008,6 +1073,7 @@ export default function PurchasesPage() {
                   <thead>
                     <tr>
                       <th>Product</th>
+                      <th>Source</th>
                       <th>Brand</th>
                       <th>Expiry</th>
                       <th>Rack</th>
@@ -1024,6 +1090,11 @@ export default function PurchasesPage() {
                     {selectedPurchase.items.map((item) => (
                       <tr key={item.id}>
                         <td>{item.product_name}</td>
+                        <td>
+                          {item.stock_source === 'ATTACHED'
+                            ? <Chip size="small" label={`Existing #${item.inventory_item_id || '-'}`} variant="outlined" color="info" />
+                            : <Chip size="small" label="New" variant="outlined" />}
+                        </td>
                         <td>{item.brand || '-'}</td>
                         <td>{item.expiry_date || '-'}</td>
                         <td>{item.rack_number}</td>

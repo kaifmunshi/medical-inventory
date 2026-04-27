@@ -154,8 +154,10 @@ export type StockReconciliationApplyResult = {
   total_delta_applied: number
 }
 
-export async function listItems(q: string = ''): Promise<Item[]> {
-  const params = q ? { q } : undefined
+export async function listItems(q: string = '', options?: { include_archived?: boolean }): Promise<Item[]> {
+  const params: Record<string, string | boolean> = {}
+  if (q) params.q = q
+  if (typeof options?.include_archived === 'boolean') params.include_archived = options.include_archived
   const { data } = await api.get('/inventory', { params })
 
   if (Array.isArray(data)) return data

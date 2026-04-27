@@ -505,6 +505,7 @@ def _build_stock_reconciliation(
         .join(Purchase, Purchase.id == PurchaseItem.purchase_id)
         .where(PurchaseItem.inventory_item_id.is_not(None))
         .where(PurchaseItem.inventory_item_id.in_(target_item_ids))
+        .where(func.coalesce(PurchaseItem.stock_source, "CREATED") != "ATTACHED")
         .group_by(PurchaseItem.inventory_item_id, PurchaseItem.purchase_id, Purchase.is_deleted)
     ).all()
     for row in purchase_rows:

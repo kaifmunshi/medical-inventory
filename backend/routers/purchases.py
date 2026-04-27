@@ -38,6 +38,10 @@ class PurchaseItemsReplace(SQLModel):
     items: List[PurchaseItemIn]
 
 
+STOCK_SOURCE_CREATED = "CREATED"
+STOCK_SOURCE_ATTACHED = "ATTACHED"
+
+
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -151,6 +155,120 @@ def ensure_product(
     session.add(row)
     session.flush()
     return row
+
+
+def purchase_item_stock_source(item: PurchaseItem) -> str:
+    return str(getattr(item, "stock_source", STOCK_SOURCE_CREATED) or STOCK_SOURCE_CREATED).upper()
+
+
+def ensure_inventory_batch_not_already_purchased(
+    session,
+    inventory_item_id: int,
+    *,
+    ignore_purchase_id: Optional[int] = None,
+) -> None:
+    stmt = (
+        select(PurchaseItem, Purchase)
+        .join(Purchase, Purchase.id == PurchaseItem.purchase_id)
+        .where(
+            PurchaseItem.inventory_item_id == int(inventory_item_id),
+            Purchase.is_deleted == False,  # noqa: E712
+        )
+    )
+    if ignore_purchase_id is not None:
+        stmt = stmt.where(PurchaseItem.purchase_id != int(ignore_purchase_id))
+    existing = session.exec(stmt).first()
+    if existing:
+        _purchase_item, purchase = existing
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Inventory batch #{inventory_item_id} is already linked to "
+                f"purchase {purchase.invoice_number or purchase.id}"
+            ),
+        )
+
+
+def ensure_product_for_existing_inventory(
+    session,
+    *,
+    inventory_item: Item,
+    raw: PurchaseItemIn,
+) -> Product:
+    product_id = raw.product_id or inventory_item.product_id
+    if product_id is not None:
+        product = session.get(Product, product_id)
+        if not product:
+            raise HTTPException(status_code=400, detail=f"Product #{product_id} not found")
+    else:
+        product = ensure_product(
+            session,
+            product_id=None,
+            product_name=clean_text(raw.product_name) or inventory_item.name,
+            alias=raw.alias,
+            brand=clean_text(raw.brand) if raw.brand is not None else inventory_item.brand,
+            category_id=raw.category_id if raw.category_id is not None else inventory_item.category_id,
+            rack_number=raw.rack_number if raw.rack_number is not None else inventory_item.rack_number,
+            loose_sale_enabled=raw.loose_sale_enabled,
+            parent_unit_name=raw.parent_unit_name,
+            child_unit_name=raw.child_unit_name,
+            conversion_qty=raw.conversion_qty,
+            printed_price=raw.mrp if raw.mrp is not None else inventory_item.mrp,
+        )
+
+    changed = False
+    if inventory_item.product_id != product.id:
+        inventory_item.product_id = product.id
+        changed = True
+    if inventory_item.category_id is None and product.category_id is not None:
+        inventory_item.category_id = product.category_id
+        changed = True
+    if changed:
+        inventory_item.updated_at = now_ts()
+        session.add(inventory_item)
+    return product
+
+
+def get_or_create_lot_for_inventory_item(
+    session,
+    *,
+    inventory_item: Item,
+    product: Product,
+    effective_cost_price: float,
+    conversion_qty: Optional[int],
+    ts: str,
+) -> InventoryLot:
+    lot = session.exec(
+        select(InventoryLot)
+        .where(InventoryLot.legacy_item_id == inventory_item.id)
+        .order_by(InventoryLot.id.asc())
+    ).first()
+    if lot:
+        lot.product_id = product.id
+        lot.cost_price = effective_cost_price
+        lot.updated_at = ts
+        session.add(lot)
+        session.flush()
+        return lot
+
+    lot = InventoryLot(
+        product_id=product.id,
+        expiry_date=inventory_item.expiry_date,
+        mrp=float(inventory_item.mrp or 0),
+        cost_price=effective_cost_price,
+        rack_number=int(inventory_item.rack_number or 0),
+        sealed_qty=max(0, int(inventory_item.stock or 0)),
+        loose_qty=0,
+        conversion_qty=conversion_qty if conversion_qty and conversion_qty > 0 else product.default_conversion_qty,
+        opened_from_lot_id=None,
+        legacy_item_id=inventory_item.id,
+        is_active=not bool(getattr(inventory_item, "is_archived", False)),
+        created_at=ts,
+        updated_at=ts,
+    )
+    session.add(lot)
+    session.flush()
+    return lot
 
 
 def add_stock_movement(
@@ -326,20 +444,34 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             if round2(raw.mrp) < 0:
                 raise HTTPException(status_code=400, detail="mrp cannot be negative")
 
-            product = ensure_product(
-                session,
-                product_id=raw.product_id,
-                product_name=raw.product_name,
-                alias=raw.alias,
-                brand=raw.brand,
-                category_id=raw.category_id,
-                rack_number=raw.rack_number,
-                loose_sale_enabled=raw.loose_sale_enabled,
-                parent_unit_name=raw.parent_unit_name,
-                child_unit_name=raw.child_unit_name,
-                conversion_qty=raw.conversion_qty,
-                printed_price=raw.mrp,
-            )
+            existing_inventory_item = None
+            stock_source = STOCK_SOURCE_CREATED
+            if raw.existing_inventory_item_id is not None:
+                existing_inventory_item = session.get(Item, int(raw.existing_inventory_item_id))
+                if not existing_inventory_item:
+                    raise HTTPException(status_code=400, detail=f"Inventory batch #{raw.existing_inventory_item_id} not found")
+                ensure_inventory_batch_not_already_purchased(session, int(existing_inventory_item.id))
+                product = ensure_product_for_existing_inventory(
+                    session,
+                    inventory_item=existing_inventory_item,
+                    raw=raw,
+                )
+                stock_source = STOCK_SOURCE_ATTACHED
+            else:
+                product = ensure_product(
+                    session,
+                    product_id=raw.product_id,
+                    product_name=raw.product_name,
+                    alias=raw.alias,
+                    brand=raw.brand,
+                    category_id=raw.category_id,
+                    rack_number=raw.rack_number,
+                    loose_sale_enabled=raw.loose_sale_enabled,
+                    parent_unit_name=raw.parent_unit_name,
+                    child_unit_name=raw.child_unit_name,
+                    conversion_qty=raw.conversion_qty,
+                    printed_price=raw.mrp,
+                )
 
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
             line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0))
@@ -349,6 +481,8 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             prepared_items.append(
                 {
                     "product": product,
+                    "existing_inventory_item": existing_inventory_item,
+                    "stock_source": stock_source,
                     "expiry_date": clean_date(raw.expiry_date),
                     "rack_number": rack_number,
                     "sealed_qty": qty,
@@ -415,49 +549,75 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
         for entry in prepared_items:
             product: Product = entry["product"]
             total_qty = int(entry["sealed_qty"]) + int(entry["free_qty"])
-            inventory_item = Item(
-                name=product.name,
-                brand=product.brand,
-                product_id=product.id,
-                category_id=product.category_id,
-                expiry_date=entry["expiry_date"],
-                mrp=entry["mrp"],
-                cost_price=entry["effective_cost_price"],
-                stock=total_qty,
-                rack_number=entry["rack_number"],
-                is_archived=False,
-                created_at=ts,
-                updated_at=ts,
-            )
-            session.add(inventory_item)
-            session.flush()
-            add_stock_movement(
-                session,
-                item_id=int(inventory_item.id),
-                delta=total_qty,
-                reason="PURCHASE",
-                ref_type="PURCHASE",
-                ref_id=int(purchase.id),
-                note=f"Purchase {invoice_number}",
-            )
-            inventory_lot = create_inventory_lot(
-                session,
-                product=product,
-                inventory_item=inventory_item,
-                expiry_date=entry["expiry_date"],
-                rack_number=entry["rack_number"],
-                total_qty=total_qty,
-                effective_cost_price=entry["effective_cost_price"],
-                mrp=entry["mrp"],
-                conversion_qty=product.default_conversion_qty,
-                ts=ts,
-            )
+            stock_source = str(entry["stock_source"])
+            if stock_source == STOCK_SOURCE_ATTACHED:
+                inventory_item = entry["existing_inventory_item"]
+                inventory_item.cost_price = entry["effective_cost_price"]
+                inventory_item.updated_at = ts
+                session.add(inventory_item)
+                session.flush()
+                inventory_lot = get_or_create_lot_for_inventory_item(
+                    session,
+                    inventory_item=inventory_item,
+                    product=product,
+                    effective_cost_price=entry["effective_cost_price"],
+                    conversion_qty=product.default_conversion_qty,
+                    ts=ts,
+                )
+                add_stock_movement(
+                    session,
+                    item_id=int(inventory_item.id),
+                    delta=0,
+                    reason="PURCHASE_LINK",
+                    ref_type="PURCHASE",
+                    ref_id=int(purchase.id),
+                    note=f"Linked existing inventory to purchase {invoice_number}",
+                )
+            else:
+                inventory_item = Item(
+                    name=product.name,
+                    brand=product.brand,
+                    product_id=product.id,
+                    category_id=product.category_id,
+                    expiry_date=entry["expiry_date"],
+                    mrp=entry["mrp"],
+                    cost_price=entry["effective_cost_price"],
+                    stock=total_qty,
+                    rack_number=entry["rack_number"],
+                    is_archived=False,
+                    created_at=ts,
+                    updated_at=ts,
+                )
+                session.add(inventory_item)
+                session.flush()
+                add_stock_movement(
+                    session,
+                    item_id=int(inventory_item.id),
+                    delta=total_qty,
+                    reason="PURCHASE",
+                    ref_type="PURCHASE",
+                    ref_id=int(purchase.id),
+                    note=f"Purchase {invoice_number}",
+                )
+                inventory_lot = create_inventory_lot(
+                    session,
+                    product=product,
+                    inventory_item=inventory_item,
+                    expiry_date=entry["expiry_date"],
+                    rack_number=entry["rack_number"],
+                    total_qty=total_qty,
+                    effective_cost_price=entry["effective_cost_price"],
+                    mrp=entry["mrp"],
+                    conversion_qty=product.default_conversion_qty,
+                    ts=ts,
+                )
 
             purchase_item = PurchaseItem(
                 purchase_id=purchase.id,
                 product_id=product.id,
                 inventory_item_id=inventory_item.id,
                 lot_id=inventory_lot.id,
+                stock_source=stock_source,
                 product_name=product.name,
                 brand=product.brand,
                 expiry_date=entry["expiry_date"],
@@ -721,7 +881,14 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
         existing_items = get_purchase_items(session, purchase_id)
         touched: List[tuple[PurchaseItem, Item]] = []
         for item in existing_items:
-            inventory_item = assert_purchase_item_untouched(session, item)
+            if purchase_item_stock_source(item) == STOCK_SOURCE_ATTACHED:
+                if not item.inventory_item_id:
+                    raise HTTPException(status_code=400, detail=f"Purchase item #{item.id} is missing stock linkage")
+                inventory_item = session.get(Item, item.inventory_item_id)
+                if not inventory_item:
+                    raise HTTPException(status_code=400, detail=f"Inventory item #{item.inventory_item_id} not found")
+            else:
+                inventory_item = assert_purchase_item_untouched(session, item)
             touched.append((item, inventory_item))
 
         subtotal_amount = 0.0
@@ -734,20 +901,38 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             if free_qty < 0:
                 raise HTTPException(status_code=400, detail="free_qty cannot be negative")
 
-            product = ensure_product(
-                session,
-                product_id=raw.product_id,
-                product_name=raw.product_name,
-                alias=raw.alias,
-                brand=raw.brand,
-                category_id=raw.category_id,
-                rack_number=raw.rack_number,
-                loose_sale_enabled=raw.loose_sale_enabled,
-                parent_unit_name=raw.parent_unit_name,
-                child_unit_name=raw.child_unit_name,
-                conversion_qty=raw.conversion_qty,
-                printed_price=raw.mrp,
-            )
+            existing_inventory_item = None
+            stock_source = STOCK_SOURCE_CREATED
+            if raw.existing_inventory_item_id is not None:
+                existing_inventory_item = session.get(Item, int(raw.existing_inventory_item_id))
+                if not existing_inventory_item:
+                    raise HTTPException(status_code=400, detail=f"Inventory batch #{raw.existing_inventory_item_id} not found")
+                ensure_inventory_batch_not_already_purchased(
+                    session,
+                    int(existing_inventory_item.id),
+                    ignore_purchase_id=purchase_id,
+                )
+                product = ensure_product_for_existing_inventory(
+                    session,
+                    inventory_item=existing_inventory_item,
+                    raw=raw,
+                )
+                stock_source = STOCK_SOURCE_ATTACHED
+            else:
+                product = ensure_product(
+                    session,
+                    product_id=raw.product_id,
+                    product_name=raw.product_name,
+                    alias=raw.alias,
+                    brand=raw.brand,
+                    category_id=raw.category_id,
+                    rack_number=raw.rack_number,
+                    loose_sale_enabled=raw.loose_sale_enabled,
+                    parent_unit_name=raw.parent_unit_name,
+                    child_unit_name=raw.child_unit_name,
+                    conversion_qty=raw.conversion_qty,
+                    printed_price=raw.mrp,
+                )
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
             line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0))
             total_qty = qty + free_qty
@@ -756,6 +941,8 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             prepared_items.append(
                 {
                     "product": product,
+                    "existing_inventory_item": existing_inventory_item,
+                    "stock_source": stock_source,
                     "expiry_date": clean_date(raw.expiry_date),
                     "rack_number": rack_number,
                     "sealed_qty": qty,
@@ -771,27 +958,38 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
 
         for purchase_item, inventory_item in touched:
             purchase_item_qty = purchase_item_total_qty(purchase_item)
-            inventory_item.stock = 0
-            inventory_item.is_archived = True
-            inventory_item.updated_at = now_ts()
-            session.add(inventory_item)
-            if purchase_item.lot_id:
-                lot = session.get(InventoryLot, purchase_item.lot_id)
-                if lot:
-                    lot.sealed_qty = 0
-                    lot.loose_qty = 0
-                    lot.is_active = False
-                    lot.updated_at = inventory_item.updated_at
-                    session.add(lot)
-            add_stock_movement(
-                session,
-                item_id=int(inventory_item.id),
-                delta=-purchase_item_qty,
-                reason="PURCHASE_EDIT",
-                ref_type="PURCHASE",
-                ref_id=int(purchase.id),
-                note=f"Replaced items on purchase {purchase.invoice_number}",
-            )
+            if purchase_item_stock_source(purchase_item) == STOCK_SOURCE_ATTACHED:
+                add_stock_movement(
+                    session,
+                    item_id=int(inventory_item.id),
+                    delta=0,
+                    reason="PURCHASE_LINK_REMOVED",
+                    ref_type="PURCHASE",
+                    ref_id=int(purchase.id),
+                    note=f"Removed existing inventory link from purchase {purchase.invoice_number}",
+                )
+            else:
+                inventory_item.stock = 0
+                inventory_item.is_archived = True
+                inventory_item.updated_at = now_ts()
+                session.add(inventory_item)
+                if purchase_item.lot_id:
+                    lot = session.get(InventoryLot, purchase_item.lot_id)
+                    if lot:
+                        lot.sealed_qty = 0
+                        lot.loose_qty = 0
+                        lot.is_active = False
+                        lot.updated_at = inventory_item.updated_at
+                        session.add(lot)
+                add_stock_movement(
+                    session,
+                    item_id=int(inventory_item.id),
+                    delta=-purchase_item_qty,
+                    reason="PURCHASE_EDIT",
+                    ref_type="PURCHASE",
+                    ref_id=int(purchase.id),
+                    note=f"Replaced items on purchase {purchase.invoice_number}",
+                )
             session.delete(purchase_item)
 
         session.flush()
@@ -799,43 +997,68 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
         for entry in prepared_items:
             product: Product = entry["product"]
             total_qty = int(entry["sealed_qty"]) + int(entry["free_qty"])
-            inventory_item = Item(
-                name=product.name,
-                brand=product.brand,
-                product_id=product.id,
-                category_id=product.category_id,
-                expiry_date=entry["expiry_date"],
-                mrp=entry["mrp"],
-                cost_price=entry["effective_cost_price"],
-                stock=total_qty,
-                rack_number=entry["rack_number"],
-                is_archived=False,
-                created_at=ts,
-                updated_at=ts,
-            )
-            session.add(inventory_item)
-            session.flush()
-            add_stock_movement(
-                session,
-                item_id=int(inventory_item.id),
-                delta=total_qty,
-                reason="PURCHASE",
-                ref_type="PURCHASE",
-                ref_id=int(purchase.id),
-                note=f"Purchase {purchase.invoice_number}",
-            )
-            inventory_lot = create_inventory_lot(
-                session,
-                product=product,
-                inventory_item=inventory_item,
-                expiry_date=entry["expiry_date"],
-                rack_number=entry["rack_number"],
-                total_qty=total_qty,
-                effective_cost_price=entry["effective_cost_price"],
-                mrp=entry["mrp"],
-                conversion_qty=product.default_conversion_qty,
-                ts=ts,
-            )
+            stock_source = str(entry["stock_source"])
+            if stock_source == STOCK_SOURCE_ATTACHED:
+                inventory_item = entry["existing_inventory_item"]
+                inventory_item.cost_price = entry["effective_cost_price"]
+                inventory_item.updated_at = ts
+                session.add(inventory_item)
+                session.flush()
+                inventory_lot = get_or_create_lot_for_inventory_item(
+                    session,
+                    inventory_item=inventory_item,
+                    product=product,
+                    effective_cost_price=entry["effective_cost_price"],
+                    conversion_qty=product.default_conversion_qty,
+                    ts=ts,
+                )
+                add_stock_movement(
+                    session,
+                    item_id=int(inventory_item.id),
+                    delta=0,
+                    reason="PURCHASE_LINK",
+                    ref_type="PURCHASE",
+                    ref_id=int(purchase.id),
+                    note=f"Linked existing inventory to purchase {purchase.invoice_number}",
+                )
+            else:
+                inventory_item = Item(
+                    name=product.name,
+                    brand=product.brand,
+                    product_id=product.id,
+                    category_id=product.category_id,
+                    expiry_date=entry["expiry_date"],
+                    mrp=entry["mrp"],
+                    cost_price=entry["effective_cost_price"],
+                    stock=total_qty,
+                    rack_number=entry["rack_number"],
+                    is_archived=False,
+                    created_at=ts,
+                    updated_at=ts,
+                )
+                session.add(inventory_item)
+                session.flush()
+                add_stock_movement(
+                    session,
+                    item_id=int(inventory_item.id),
+                    delta=total_qty,
+                    reason="PURCHASE",
+                    ref_type="PURCHASE",
+                    ref_id=int(purchase.id),
+                    note=f"Purchase {purchase.invoice_number}",
+                )
+                inventory_lot = create_inventory_lot(
+                    session,
+                    product=product,
+                    inventory_item=inventory_item,
+                    expiry_date=entry["expiry_date"],
+                    rack_number=entry["rack_number"],
+                    total_qty=total_qty,
+                    effective_cost_price=entry["effective_cost_price"],
+                    mrp=entry["mrp"],
+                    conversion_qty=product.default_conversion_qty,
+                    ts=ts,
+                )
 
             session.add(
                 PurchaseItem(
@@ -843,6 +1066,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     product_id=product.id,
                     inventory_item_id=inventory_item.id,
                     lot_id=inventory_lot.id,
+                    stock_source=stock_source,
                     product_name=product.name,
                     brand=product.brand,
                     expiry_date=entry["expiry_date"],
@@ -897,29 +1121,45 @@ def cancel_purchase(purchase_id: int) -> PurchaseOut:
 
         items = get_purchase_items(session, purchase_id)
         for item in items:
-            inventory_item = assert_purchase_item_untouched(session, item)
             qty = purchase_item_total_qty(item)
-            inventory_item.stock = 0
-            inventory_item.is_archived = True
-            inventory_item.updated_at = now_ts()
-            session.add(inventory_item)
-            if item.lot_id:
-                lot = session.get(InventoryLot, item.lot_id)
-                if lot:
-                    lot.sealed_qty = 0
-                    lot.loose_qty = 0
-                    lot.is_active = False
-                    lot.updated_at = inventory_item.updated_at
-                    session.add(lot)
-            add_stock_movement(
-                session,
-                item_id=int(inventory_item.id),
-                delta=-qty,
-                reason="PURCHASE_CANCEL",
-                ref_type="PURCHASE",
-                ref_id=int(purchase.id),
-                note=f"Cancelled purchase {purchase.invoice_number}",
-            )
+            if purchase_item_stock_source(item) == STOCK_SOURCE_ATTACHED:
+                if not item.inventory_item_id:
+                    raise HTTPException(status_code=400, detail=f"Purchase item #{item.id} is missing stock linkage")
+                inventory_item = session.get(Item, item.inventory_item_id)
+                if not inventory_item:
+                    raise HTTPException(status_code=400, detail=f"Inventory item #{item.inventory_item_id} not found")
+                add_stock_movement(
+                    session,
+                    item_id=int(inventory_item.id),
+                    delta=0,
+                    reason="PURCHASE_LINK_CANCEL",
+                    ref_type="PURCHASE",
+                    ref_id=int(purchase.id),
+                    note=f"Cancelled existing inventory link for purchase {purchase.invoice_number}",
+                )
+            else:
+                inventory_item = assert_purchase_item_untouched(session, item)
+                inventory_item.stock = 0
+                inventory_item.is_archived = True
+                inventory_item.updated_at = now_ts()
+                session.add(inventory_item)
+                if item.lot_id:
+                    lot = session.get(InventoryLot, item.lot_id)
+                    if lot:
+                        lot.sealed_qty = 0
+                        lot.loose_qty = 0
+                        lot.is_active = False
+                        lot.updated_at = inventory_item.updated_at
+                        session.add(lot)
+                add_stock_movement(
+                    session,
+                    item_id=int(inventory_item.id),
+                    delta=-qty,
+                    reason="PURCHASE_CANCEL",
+                    ref_type="PURCHASE",
+                    ref_id=int(purchase.id),
+                    note=f"Cancelled purchase {purchase.invoice_number}",
+                )
 
         purchase.is_deleted = True
         purchase.deleted_at = now_ts()

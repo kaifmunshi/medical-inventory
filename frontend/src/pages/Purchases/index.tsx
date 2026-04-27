@@ -33,6 +33,7 @@ import {
   createPurchase,
   fetchPurchase,
   fetchPurchases,
+  fetchSupplierLedger,
   replacePurchaseItems,
   fetchSupplierLedgerSummary,
   updatePurchase,
@@ -57,6 +58,7 @@ function makeEmptyItem(): DraftItem {
     mrp: 0,
     gst_percent: 0,
     discount_amount: 0,
+    rounding_adjustment: 0,
     loose_sale_enabled: false,
     parent_unit_name: '',
     child_unit_name: '',
@@ -68,19 +70,44 @@ function money(n: number) {
   return Number(n || 0).toFixed(2)
 }
 
-function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount'>) {
-  return Number(item.sealed_qty || 0) * Number(item.cost_price || 0) - Number(item.discount_amount || 0)
+function lineGrossTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price'>) {
+  return Number(item.sealed_qty || 0) * Number(item.cost_price || 0)
 }
 
-function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'cost_price' | 'discount_amount'>) {
+function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
+  return lineGrossTotal(item) - Number(item.discount_amount || 0) + Number(item.rounding_adjustment || 0)
+}
+
+function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
   const totalQty = Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
   if (totalQty <= 0) return 0
   return lineBaseTotal(item) / totalQty
 }
 
+function currentFinancialYearStart() {
+  const now = new Date()
+  const year = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1
+  return `${year}-04-01`
+}
+
+function fmtDate(value?: string | null) {
+  const raw = String(value || '')
+  if (!raw) return '-'
+  try {
+    return new Date(raw).toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+    })
+  } catch {
+    return raw.slice(0, 10)
+  }
+}
+
 function inventoryBatchLabel(item: Item) {
   const parts = [
     `#${item.id}`,
+    `Added ${fmtDate(item.created_at)}`,
     item.name,
     item.brand || '',
     item.expiry_date ? `Exp ${item.expiry_date}` : '',
@@ -111,6 +138,7 @@ export default function PurchasesPage() {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const today = new Date().toISOString().slice(0, 10)
+  const existingInventoryFromDate = currentFinancialYearStart()
 
   const [filterPartyId, setFilterPartyId] = useState<number | null>(null)
   const [filterFromDate, setFilterFromDate] = useState('')
@@ -122,7 +150,6 @@ export default function PurchasesPage() {
   const [invoiceDate, setInvoiceDate] = useState(today)
   const [notes, setNotes] = useState('')
   const [discountAmount, setDiscountAmount] = useState('0')
-  const [gstAmount, setGstAmount] = useState('0')
   const [roundingAdjustment, setRoundingAdjustment] = useState('0')
   const [paidAmount, setPaidAmount] = useState('0')
   const [writeoffAmount, setWriteoffAmount] = useState('0')
@@ -146,7 +173,6 @@ export default function PurchasesPage() {
   const [editInvoiceDate, setEditInvoiceDate] = useState(today)
   const [editNotes, setEditNotes] = useState('')
   const [editDiscountAmount, setEditDiscountAmount] = useState('0')
-  const [editGstAmount, setEditGstAmount] = useState('0')
   const [editRoundingAdjustment, setEditRoundingAdjustment] = useState('0')
 
   const [supplierDialogOpen, setSupplierDialogOpen] = useState(false)
@@ -180,8 +206,8 @@ export default function PurchasesPage() {
   })
 
   const inventoryBatchesQ = useQuery<Item[], Error>({
-    queryKey: ['purchase-existing-inventory', inventorySearch],
-    queryFn: () => listItems(inventorySearch.trim(), { include_archived: true }),
+    queryKey: ['purchase-existing-inventory', inventorySearch, existingInventoryFromDate],
+    queryFn: () => listItems(inventorySearch.trim(), { include_archived: true, created_from: existingInventoryFromDate }),
   })
 
   const purchasesQ = useQuery<Purchase[], Error>({
@@ -202,6 +228,12 @@ export default function PurchasesPage() {
   const ledgerQ = useQuery({
     queryKey: ['supplier-ledger-summary', partyId],
     queryFn: () => fetchSupplierLedgerSummary(Number(partyId)),
+    enabled: Boolean(partyId),
+  })
+
+  const supplierLedgerQ = useQuery({
+    queryKey: ['supplier-ledger-quick', partyId],
+    queryFn: () => fetchSupplierLedger(Number(partyId)),
     enabled: Boolean(partyId),
   })
 
@@ -342,8 +374,8 @@ export default function PurchasesPage() {
   )
 
   const total = useMemo(
-    () => subtotal - Number(discountAmount || 0) + Number(gstAmount || 0) + Number(roundingAdjustment || 0),
-    [subtotal, discountAmount, gstAmount, roundingAdjustment],
+    () => subtotal - Number(discountAmount || 0) + Number(roundingAdjustment || 0),
+    [subtotal, discountAmount, roundingAdjustment],
   )
 
   const suppliers = suppliersQ.data || []
@@ -364,7 +396,6 @@ export default function PurchasesPage() {
     setInvoiceDate(today)
     setNotes('')
     setDiscountAmount('0')
-    setGstAmount('0')
     setRoundingAdjustment('0')
     setPaidAmount('0')
     setWriteoffAmount('0')
@@ -422,6 +453,7 @@ export default function PurchasesPage() {
       sealed_qty: Number(inventoryItem.stock || 0) > 0 ? Number(inventoryItem.stock || 0) : 1,
       cost_price: Number(inventoryItem.cost_price || 0),
       mrp: Number(inventoryItem.mrp || 0),
+      rounding_adjustment: 0,
     }
     if (editMode) updateEditItem(itemKey, patch)
     else updateItem(itemKey, patch)
@@ -439,7 +471,6 @@ export default function PurchasesPage() {
     setEditInvoiceDate(purchase.invoice_date)
     setEditNotes(purchase.notes || '')
     setEditDiscountAmount(String(purchase.discount_amount || 0))
-    setEditGstAmount(String(purchase.gst_amount || 0))
     setEditRoundingAdjustment(String(purchase.rounding_adjustment || 0))
     setEditHeaderOpen(true)
   }
@@ -463,6 +494,7 @@ export default function PurchasesPage() {
       mrp: item.mrp,
       gst_percent: item.gst_percent,
       discount_amount: item.discount_amount,
+      rounding_adjustment: item.rounding_adjustment || 0,
       loose_sale_enabled: false,
       parent_unit_name: '',
       child_unit_name: '',
@@ -478,6 +510,8 @@ export default function PurchasesPage() {
       alias: item.alias?.trim() || undefined,
       brand: item.brand?.trim() || undefined,
       expiry_date: item.expiry_date?.trim() || undefined,
+      gst_percent: 0,
+      rounding_adjustment: Number(item.rounding_adjustment || 0),
       parent_unit_name: item.parent_unit_name?.trim() || undefined,
       child_unit_name: item.child_unit_name?.trim() || undefined,
     }))
@@ -503,7 +537,7 @@ export default function PurchasesPage() {
       invoice_date: invoiceDate,
       notes: notes.trim() || undefined,
       discount_amount: Number(discountAmount || 0),
-      gst_amount: Number(gstAmount || 0),
+      gst_amount: 0,
       rounding_adjustment: Number(roundingAdjustment || 0),
       items: cleanedItems.map(({ key, ...rest }) => rest),
       payments: [
@@ -523,7 +557,7 @@ export default function PurchasesPage() {
         invoice_date: editInvoiceDate,
         notes: editNotes.trim() || undefined,
         discount_amount: Number(editDiscountAmount || 0),
-        gst_amount: Number(editGstAmount || 0),
+        gst_amount: 0,
         rounding_adjustment: Number(editRoundingAdjustment || 0),
       },
     })
@@ -623,7 +657,7 @@ export default function PurchasesPage() {
           <Box>
             <Typography variant="subtitle1" fontWeight={700}>Product Lines</Typography>
             <Typography variant="caption" color="text.secondary">
-              {draftItems.length} line{draftItems.length === 1 ? '' : 's'} · Subtotal {money(draftSubtotal)} · Free qty automatically reduces landed cost
+              {draftItems.length} line{draftItems.length === 1 ? '' : 's'} · Lines net {money(draftSubtotal)} · Free qty reduces average rate
             </Typography>
           </Box>
           <Stack direction="row" gap={1}>
@@ -708,7 +742,7 @@ export default function PurchasesPage() {
                   <Grid item xs={12} md={1.5}>
                     <TextField size="small" label="Alias" value={item.alias || ''} onChange={(e) => patchItem(item.key, { alias: e.target.value })} fullWidth />
                   </Grid>
-                  <Grid item xs={12} md={1.5}>
+                  <Grid item xs={12} md={2}>
                     <Stack direction="row" gap={1}>
                       <TextField size="small" select label="Category" value={item.category_id ?? ''} onChange={(e) => patchItem(item.key, { category_id: e.target.value ? Number(e.target.value) : undefined })} fullWidth>
                         <MenuItem value="">None</MenuItem>
@@ -716,9 +750,22 @@ export default function PurchasesPage() {
                           <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
                         ))}
                       </TextField>
+                      <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() => openCategoryDialog(item.key)}
+                          sx={{ minWidth: 0, px: 1 }}
+                        >
+                          New
+                        </Button> 
                     </Stack>
                   </Grid>
 
+                  <Grid item xs={12}>
+                    <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                      Batch, quantity, and invoice math
+                    </Typography>
+                  </Grid>
                   <Grid item xs={6} md={1.6}>
                     <TextField size="small" label="Expiry" type="date" value={item.expiry_date || ''} onChange={(e) => patchItem(item.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} fullWidth />
                   </Grid>
@@ -732,16 +779,16 @@ export default function PurchasesPage() {
                     <TextField size="small" label="Free" type="number" value={item.free_qty || 0} onChange={(e) => patchItem(item.key, { free_qty: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
-                    <TextField size="small" label="Cost" type="number" value={item.cost_price} onChange={(e) => patchItem(item.key, { cost_price: Number(e.target.value) })} fullWidth />
+                    <TextField size="small" label="Rate" type="number" value={item.cost_price} onChange={(e) => patchItem(item.key, { cost_price: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
                     <TextField size="small" label="MRP" type="number" value={item.mrp} onChange={(e) => patchItem(item.key, { mrp: Number(e.target.value) })} fullWidth />
                   </Grid>
-                  <Grid item xs={6} md={1}>
-                    <TextField size="small" label="GST %" type="number" value={item.gst_percent || 0} onChange={(e) => patchItem(item.key, { gst_percent: Number(e.target.value) })} fullWidth />
-                  </Grid>
                   <Grid item xs={6} md={1.2}>
                     <TextField size="small" label="Discount" type="number" value={item.discount_amount || 0} onChange={(e) => patchItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1.2}>
+                    <TextField size="small" label="Round Off" type="number" value={item.rounding_adjustment || 0} onChange={(e) => patchItem(item.key, { rounding_adjustment: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={12} md={2.8}>
                     <Stack gap={0.75}>
@@ -751,19 +798,16 @@ export default function PurchasesPage() {
                           label="Loose"
                           sx={{ m: 0 }}
                         />
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          onClick={() => openCategoryDialog(item.key)}
-                          sx={{ minWidth: 0, px: 1, whiteSpace: 'nowrap' }}
-                        >
-                          New
-                        </Button>
                         <Typography variant="subtitle2" sx={{ minWidth: 80, textAlign: 'right' }}>
                           {money(lineBaseTotal(item))}
                         </Typography>
                       </Stack>
                       <Stack direction="row" gap={0.75} flexWrap="wrap">
+                        <Chip
+                          size="small"
+                          label={`Gross ${money(lineGrossTotal(item))}`}
+                          variant="outlined"
+                        />
                         <Chip
                           size="small"
                           label={`Total Inward ${Number(item.sealed_qty || 0) + Number(item.free_qty || 0)}`}
@@ -772,7 +816,7 @@ export default function PurchasesPage() {
                         <Chip
                           size="small"
                           color={Number(item.free_qty || 0) > 0 ? 'success' : 'default'}
-                          label={`Avg Cost ${money(lineEffectiveCost(item))}`}
+                          label={`Avg Rate ${money(lineEffectiveCost(item))}`}
                           variant={Number(item.free_qty || 0) > 0 ? 'filled' : 'outlined'}
                         />
                       </Stack>
@@ -904,6 +948,62 @@ export default function PurchasesPage() {
         </DialogTitle>
         <DialogContent dividers>
           <Stack gap={2}>
+            {partyId && (
+              <Paper variant="outlined" sx={{ p: 2, bgcolor: 'rgba(31,107,74,0.04)' }}>
+                <Stack gap={1.5}>
+                  <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
+                    <Box>
+                      <Typography variant="subtitle1" fontWeight={800}>{supplierNameFor(partyId)}</Typography>
+                      <Typography variant="caption" color="text.secondary">Supplier snapshot before saving this purchase</Typography>
+                    </Box>
+                    {ledgerQ.data ? (
+                      <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
+                        <Chip label={`Purchases ${money(ledgerQ.data.total_purchases)}`} />
+                        <Chip label={`Paid ${money(ledgerQ.data.total_paid)}`} color="success" variant="outlined" />
+                        <Chip label={`Write-off ${money(ledgerQ.data.total_writeoff)}`} variant="outlined" />
+                        <Chip label={`Outstanding ${money(ledgerQ.data.outstanding_amount)}`} color="warning" />
+                      </Stack>
+                    ) : (
+                      <Typography variant="body2" color="text.secondary">Loading supplier summary...</Typography>
+                    )}
+                  </Stack>
+
+                  {(supplierLedgerQ.data || []).length > 0 ? (
+                    <Box sx={{ overflowX: 'auto' }}>
+                      <table className="table">
+                        <thead>
+                          <tr>
+                            <th>Recent Invoice</th>
+                            <th>Date</th>
+                            <th>Total</th>
+                            <th>Paid</th>
+                            <th>Outstanding</th>
+                            <th>Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(supplierLedgerQ.data || []).slice(0, 4).map((row) => (
+                            <tr key={row.purchase_id}>
+                              <td>{row.invoice_number}</td>
+                              <td>{row.invoice_date}</td>
+                              <td>{money(row.total_amount)}</td>
+                              <td>{money(row.paid_amount + row.writeoff_amount)}</td>
+                              <td>{money(row.outstanding_amount)}</td>
+                              <td>{row.payment_status}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </Box>
+                  ) : (
+                    <Typography variant="body2" color="text.secondary">
+                      {supplierLedgerQ.isLoading ? 'Loading recent ledger...' : 'No previous purchases for this supplier.'}
+                    </Typography>
+                  )}
+                </Stack>
+              </Paper>
+            )}
+
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Supplier & Invoice</Typography>
               <Grid container spacing={2}>
@@ -929,48 +1029,22 @@ export default function PurchasesPage() {
               </Grid>
             </Paper>
 
-            {partyId && ledgerQ.data && (
-              <Paper variant="outlined" sx={{ p: 2 }}>
-                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
-                  <Box>
-                    <Typography variant="caption" color="text.secondary">Total Purchases</Typography>
-                    <Typography fontWeight={700}>{money(ledgerQ.data.total_purchases)}</Typography>
-                  </Box>
-                  <Box>
-                    <Typography variant="caption" color="text.secondary">Total Paid</Typography>
-                    <Typography fontWeight={700}>{money(ledgerQ.data.total_paid)}</Typography>
-                  </Box>
-                  <Box>
-                    <Typography variant="caption" color="text.secondary">Total Write-off</Typography>
-                    <Typography fontWeight={700}>{money(ledgerQ.data.total_writeoff)}</Typography>
-                  </Box>
-                  <Box>
-                    <Typography variant="caption" color="text.secondary">Outstanding</Typography>
-                    <Typography fontWeight={800}>{money(ledgerQ.data.outstanding_amount)}</Typography>
-                  </Box>
-                </Stack>
-              </Paper>
-            )}
-
             {itemEditor(items, setItems)}
 
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Totals & Settlement</Typography>
               <Grid container spacing={2} alignItems="center">
-                <Grid item xs={12} md={2.4}>
-                  <Typography variant="caption" color="text.secondary">Subtotal</Typography>
+                <Grid item xs={12} md={3}>
+                  <Typography variant="caption" color="text.secondary">Lines Net Total</Typography>
                   <Typography variant="h6">{money(subtotal)}</Typography>
                 </Grid>
-                <Grid item xs={12} md={2.4}>
-                  <TextField label="Bill Discount" type="number" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} fullWidth />
+                <Grid item xs={12} md={3}>
+                  <TextField label="Invoice Discount" type="number" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} fullWidth />
                 </Grid>
-                <Grid item xs={12} md={2.4}>
-                  <TextField label="GST Amount" type="number" value={gstAmount} onChange={(e) => setGstAmount(e.target.value)} fullWidth />
+                <Grid item xs={12} md={3}>
+                  <TextField label="Final Round Off" type="number" value={roundingAdjustment} onChange={(e) => setRoundingAdjustment(e.target.value)} fullWidth />
                 </Grid>
-                <Grid item xs={12} md={2.4}>
-                  <TextField label="Rounding Adj." type="number" value={roundingAdjustment} onChange={(e) => setRoundingAdjustment(e.target.value)} fullWidth />
-                </Grid>
-                <Grid item xs={12} md={2.4}>
+                <Grid item xs={12} md={3}>
                   <Typography variant="caption" color="text.secondary">Total</Typography>
                   <Typography variant="h5" fontWeight={800}>{money(total)}</Typography>
                 </Grid>
@@ -980,7 +1054,7 @@ export default function PurchasesPage() {
                       Free product impact
                     </Typography>
                     <Typography variant="body2" fontWeight={700}>
-                      Average landed cost is recalculated line-wise as billed amount divided by total inward quantity including free units.
+                      Average rate is recalculated line-wise as net line amount divided by total inward quantity including free units.
                     </Typography>
                   </Paper>
                 </Grid>
@@ -1079,10 +1153,11 @@ export default function PurchasesPage() {
                       <th>Rack</th>
                       <th>Qty</th>
                       <th>Free</th>
-                      <th>Cost</th>
-                      <th>Avg Cost</th>
+                      <th>Rate</th>
+                      <th>Avg Rate</th>
                       <th>MRP</th>
                       <th>Discount</th>
+                      <th>Round Off</th>
                       <th>Line Total</th>
                     </tr>
                   </thead>
@@ -1104,6 +1179,7 @@ export default function PurchasesPage() {
                         <td>{money(item.effective_cost_price)}</td>
                         <td>{money(item.mrp)}</td>
                         <td>{money(item.discount_amount)}</td>
+                        <td>{money(item.rounding_adjustment || 0)}</td>
                         <td>{money(item.line_total)}</td>
                       </tr>
                     ))}
@@ -1185,14 +1261,11 @@ export default function PurchasesPage() {
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Bill Adjustments</Typography>
               <Grid container spacing={2}>
-                <Grid item xs={12} md={4}>
-                  <TextField label="Bill Discount" type="number" value={editDiscountAmount} onChange={(e) => setEditDiscountAmount(e.target.value)} fullWidth />
+                <Grid item xs={12} md={6}>
+                  <TextField label="Invoice Discount" type="number" value={editDiscountAmount} onChange={(e) => setEditDiscountAmount(e.target.value)} fullWidth />
                 </Grid>
-                <Grid item xs={12} md={4}>
-                  <TextField label="GST Amount" type="number" value={editGstAmount} onChange={(e) => setEditGstAmount(e.target.value)} fullWidth />
-                </Grid>
-                <Grid item xs={12} md={4}>
-                  <TextField label="Rounding Adjustment" type="number" value={editRoundingAdjustment} onChange={(e) => setEditRoundingAdjustment(e.target.value)} fullWidth />
+                <Grid item xs={12} md={6}>
+                  <TextField label="Final Round Off" type="number" value={editRoundingAdjustment} onChange={(e) => setEditRoundingAdjustment(e.target.value)} fullWidth />
                 </Grid>
               </Grid>
             </Paper>

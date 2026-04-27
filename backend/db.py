@@ -534,6 +534,7 @@ def migrate_db():
                 mrp REAL NOT NULL DEFAULT 0,
                 gst_percent REAL NOT NULL DEFAULT 0,
                 discount_amount REAL NOT NULL DEFAULT 0,
+                rounding_adjustment REAL NOT NULL DEFAULT 0,
                 line_total REAL NOT NULL DEFAULT 0
             )
         """))
@@ -547,6 +548,8 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchaseitem ADD COLUMN effective_cost_price REAL NOT NULL DEFAULT 0"))
         if "stock_source" not in purchase_item_col_names:
             session.exec(text("ALTER TABLE purchaseitem ADD COLUMN stock_source TEXT NOT NULL DEFAULT 'CREATED'"))
+        if "rounding_adjustment" not in purchase_item_col_names:
+            session.exec(text("ALTER TABLE purchaseitem ADD COLUMN rounding_adjustment REAL NOT NULL DEFAULT 0"))
 
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchasepayment (

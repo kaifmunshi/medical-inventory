@@ -731,6 +731,7 @@ class PurchaseItem(SQLModel, table=True):
     mrp: float = 0.0
     gst_percent: float = 0.0
     discount_amount: float = 0.0
+    rounding_adjustment: float = 0.0
     line_total: float = 0.0
 
 
@@ -945,6 +946,7 @@ class PurchaseItemIn(SQLModel):
     mrp: float
     gst_percent: float = 0.0
     discount_amount: float = 0.0
+    rounding_adjustment: float = 0.0
     loose_sale_enabled: bool = False
     parent_unit_name: Optional[str] = None
     child_unit_name: Optional[str] = None
@@ -1004,6 +1006,7 @@ class PurchaseItemOut(SQLModel):
     mrp: float
     gst_percent: float
     discount_amount: float
+    rounding_adjustment: float = 0.0
     line_total: float
 
 

@@ -850,6 +850,7 @@ def list_items(
     rack_number: Optional[int] = Query(None, ge=0, description="Filter by exact rack number"),
     brand: Optional[str] = Query(None, description="Filter by exact brand"),
     category_id: Optional[int] = Query(None, ge=0, description="Filter by product category"),
+    created_from: Optional[str] = Query(None, description="YYYY-MM-DD; include inventory rows created on/after this date"),
     limit: Optional[int] = Query(None, ge=1, le=500),
     offset: Optional[int] = Query(None, ge=0),
 
@@ -889,6 +890,11 @@ def list_items(
             base_stmt = base_stmt.where(func.lower(func.coalesce(Item.brand, "")) == brand.strip().lower())
         if category_id is not None:
             base_stmt = base_stmt.where(Item.category_id == category_id)
+        if created_from:
+            start_date = str(created_from).strip()[:10]
+            if len(start_date) != 10:
+                raise HTTPException(status_code=400, detail="created_from must be YYYY-MM-DD")
+            base_stmt = base_stmt.where(Item.created_at >= f"{start_date}T00:00:00")
 
         ...
 

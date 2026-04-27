@@ -158,6 +158,7 @@ export interface PurchaseItemPayload {
   mrp: number
   gst_percent?: number
   discount_amount?: number
+  rounding_adjustment?: number
   loose_sale_enabled?: boolean
   parent_unit_name?: string
   child_unit_name?: string
@@ -188,6 +189,7 @@ export interface PurchaseItem {
   mrp: number
   gst_percent: number
   discount_amount: number
+  rounding_adjustment: number
   line_total: number
 }
 

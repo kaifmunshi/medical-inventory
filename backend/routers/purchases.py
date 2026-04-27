@@ -440,7 +440,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             if free_qty < 0:
                 raise HTTPException(status_code=400, detail="free_qty cannot be negative")
             if round2(raw.cost_price) < 0:
-                raise HTTPException(status_code=400, detail="cost_price cannot be negative")
+                raise HTTPException(status_code=400, detail="rate cannot be negative")
             if round2(raw.mrp) < 0:
                 raise HTTPException(status_code=400, detail="mrp cannot be negative")
 
@@ -474,7 +474,8 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 )
 
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
-            line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0))
+            line_rounding = round2(raw.rounding_adjustment)
+            line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
             total_qty = qty + free_qty
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
             subtotal_amount = round2(subtotal_amount + line_total)
@@ -490,14 +491,15 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     "cost_price": round2(raw.cost_price),
                     "effective_cost_price": effective_cost,
                     "mrp": round2(raw.mrp),
-                    "gst_percent": round2(raw.gst_percent),
+                    "gst_percent": 0.0,
                     "discount_amount": round2(raw.discount_amount),
+                    "rounding_adjustment": line_rounding,
                     "line_total": line_total,
                 }
             )
 
         discount_amount = round2(payload.discount_amount)
-        gst_amount = round2(payload.gst_amount)
+        gst_amount = 0.0
         rounding_adjustment = round2(payload.rounding_adjustment)
         total_amount = round2(subtotal_amount - discount_amount + gst_amount + rounding_adjustment)
         if total_amount < 0:
@@ -629,6 +631,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 mrp=entry["mrp"],
                 gst_percent=entry["gst_percent"],
                 discount_amount=entry["discount_amount"],
+                rounding_adjustment=entry["rounding_adjustment"],
                 line_total=entry["line_total"],
             )
             session.add(purchase_item)
@@ -767,8 +770,7 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
             row.notes = clean_text(data["notes"])
         if "discount_amount" in data:
             row.discount_amount = round2(data["discount_amount"])
-        if "gst_amount" in data:
-            row.gst_amount = round2(data["gst_amount"])
+        row.gst_amount = 0.0
         if "rounding_adjustment" in data:
             row.rounding_adjustment = round2(data["rounding_adjustment"])
 
@@ -900,6 +902,8 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             free_qty = int(raw.free_qty or 0)
             if free_qty < 0:
                 raise HTTPException(status_code=400, detail="free_qty cannot be negative")
+            if round2(raw.cost_price) < 0:
+                raise HTTPException(status_code=400, detail="rate cannot be negative")
 
             existing_inventory_item = None
             stock_source = STOCK_SOURCE_CREATED
@@ -934,7 +938,8 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     printed_price=raw.mrp,
                 )
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
-            line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0))
+            line_rounding = round2(raw.rounding_adjustment)
+            line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
             total_qty = qty + free_qty
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
             subtotal_amount = round2(subtotal_amount + line_total)
@@ -950,8 +955,9 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     "cost_price": round2(raw.cost_price),
                     "effective_cost_price": effective_cost,
                     "mrp": round2(raw.mrp),
-                    "gst_percent": round2(raw.gst_percent),
+                    "gst_percent": 0.0,
                     "discount_amount": round2(raw.discount_amount),
+                    "rounding_adjustment": line_rounding,
                     "line_total": line_total,
                 }
             )
@@ -1078,11 +1084,13 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     mrp=entry["mrp"],
                     gst_percent=entry["gst_percent"],
                     discount_amount=entry["discount_amount"],
+                    rounding_adjustment=entry["rounding_adjustment"],
                     line_total=entry["line_total"],
                 )
             )
 
         purchase.subtotal_amount = subtotal_amount
+        purchase.gst_amount = 0.0
         purchase.total_amount = round2(
             float(subtotal_amount or 0)
             - float(purchase.discount_amount or 0)

@@ -143,10 +143,13 @@ export default function Dashboard() {
  const qInv = useQuery({
   queryKey: ['dash-inventory'],
   queryFn: () => fetchAllInventoryRows(),
+  placeholderData: (previousData) => previousData,
   staleTime: 0,                 // ✅ always treat as stale
   refetchOnMount: 'always',     // ✅ when you go to dashboard, always refresh
   refetchOnWindowFocus: true,   // ✅ if you tab back, refresh
 })
+
+  const inventoryLoaded = Array.isArray(qInv.data)
   // ✅ Inventory totals (Total Qty + Total Types) + ✅ Zero stock types list
   const {
     inventoryTotalQty,
@@ -601,14 +604,14 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
             <Paper
               sx={{
                 ...cardBase,
-                cursor: zeroStockTypesCount > 0 ? 'pointer' : 'default',
+                cursor: inventoryLoaded && zeroStockTypesCount > 0 ? 'pointer' : 'default',
                 '&:hover':
-                  zeroStockTypesCount > 0
+                  inventoryLoaded && zeroStockTypesCount > 0
                     ? { bgcolor: 'rgba(255,255,255,1)', boxShadow: '0 20px 45px rgba(0,0,0,0.06)' }
                     : undefined,
               }}
               onClick={() => {
-                if (zeroStockTypesCount > 0) setOpenZeroStock(true)
+                if (inventoryLoaded && zeroStockTypesCount > 0) setOpenZeroStock(true)
               }}
             >
               <Typography variant="subtitle2" color="text.secondary">
@@ -616,15 +619,17 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
               </Typography>
 
               <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {inventoryTotalQty} qty
+                {inventoryLoaded ? `${inventoryTotalQty} qty` : 'Loading...'}
               </Typography>
 
               <Typography variant="caption" color="text.secondary" fontSize={15}>
-                Total {inventoryTotalTypesAll} • Types available {inventoryAvailableTypes}
+                {inventoryLoaded
+                  ? `Total ${inventoryTotalTypesAll} • Types available ${inventoryAvailableTypes}`
+                  : 'Fetching inventory count'}
               </Typography>
 
               <Typography variant="caption" color="text.secondary" fontSize={12.5}>
-                Zero stock items: {zeroStockTypesCount}
+                {inventoryLoaded ? `Zero stock items: ${zeroStockTypesCount}` : ' '}
               </Typography>
             </Paper>
           </Tooltip>
@@ -644,7 +649,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
                 Low Stock
               </Typography>
               <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {lowStockCount} items
+                {inventoryLoaded ? `${lowStockCount} items` : 'Loading...'}
               </Typography>
             </Paper>
           </Tooltip>
@@ -664,7 +669,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
                 Expiring Soon
               </Typography>
               <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {expiringSoonCount} items
+                {inventoryLoaded ? `${expiringSoonCount} items` : 'Loading...'}
               </Typography>
             </Paper>
           </Tooltip>
@@ -685,7 +690,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
                 Expired Items
               </Typography>
               <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {expiredCount} items
+                {inventoryLoaded ? `${expiredCount} items` : 'Loading...'}
               </Typography>
             </Paper>
           </Tooltip>

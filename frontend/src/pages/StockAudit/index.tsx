@@ -88,6 +88,8 @@ function AuditDetail({ id, onBack }: { id: number; onBack: () => void }) {
       qc.invalidateQueries({ queryKey: ['audit-items', id] })
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['inventory-stats'] })
+      qc.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
+      qc.invalidateQueries({ queryKey: ['dash-inventory'] })
       toast.push('Audit finalized and ledger updated!', 'success')
     },
     onError: (err: any) => {

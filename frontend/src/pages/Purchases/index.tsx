@@ -25,7 +25,7 @@ import PaymentsIcon from '@mui/icons-material/Payments'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { createParty, fetchParties } from '../../services/parties'
-import { listItems } from '../../services/inventory'
+import { listAllItems } from '../../services/inventory'
 import { createBrand, createCategory, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
 import {
   addPurchasePayment,
@@ -207,7 +207,10 @@ export default function PurchasesPage() {
 
   const inventoryBatchesQ = useQuery<Item[], Error>({
     queryKey: ['purchase-existing-inventory', inventorySearch, existingInventoryFromDate],
-    queryFn: () => listItems(inventorySearch.trim(), { include_archived: true, created_from: existingInventoryFromDate }),
+    queryFn: () => listAllItems(inventorySearch.trim(), {
+      include_archived: true,
+      created_from: existingInventoryFromDate,
+    }),
   })
 
   const purchasesQ = useQuery<Purchase[], Error>({
@@ -255,6 +258,8 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory'] })
       if (partyId) queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary', partyId] })
       resetForm()
       setAddOpen(false)
@@ -299,6 +304,8 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory'] })
       setCancelConfirmOpen(false)
       setSelectedPurchaseId(null)
     },
@@ -314,6 +321,8 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory'] })
       setEditItemsOpen(false)
     },
     onError: (err: any) => toast.push(String(err?.message || 'Failed to replace purchase items'), 'error'),

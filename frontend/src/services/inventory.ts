@@ -7,6 +7,16 @@ export type ItemsPage = {
   next_offset: number | null
 }
 
+export type InventoryDashboardStats = {
+  inventory_total_qty: number
+  inventory_total_types_all: number
+  inventory_available_types: number
+  zero_stock_types_count: number
+  low_stock_count: number
+  expiring_soon_count: number
+  expired_count: number
+}
+
 export type StockMovementRow = {
   id: number
   ts: string
@@ -171,16 +181,41 @@ export async function listItemsPage(
   limit: number = 50,
   offset: number = 0,
   rackNumber?: number,
-  filters?: { brand?: string; category_id?: number }
+  filters?: { brand?: string; category_id?: number; include_archived?: boolean; created_from?: string }
 ): Promise<ItemsPage> {
-  const params: Record<string, string | number> = { q, limit, offset }
+  const params: Record<string, string | number | boolean> = { q, limit, offset }
   if (typeof rackNumber === 'number' && Number.isFinite(rackNumber)) {
     params.rack_number = rackNumber
   }
   if (filters?.brand) params.brand = filters.brand
   if (typeof filters?.category_id === 'number') params.category_id = filters.category_id
+  if (typeof filters?.include_archived === 'boolean') params.include_archived = filters.include_archived
+  if (filters?.created_from) params.created_from = filters.created_from
   const { data } = await api.get('/inventory', { params })
   return data as ItemsPage
+}
+
+export async function listAllItems(q: string = '', options?: { include_archived?: boolean; created_from?: string }): Promise<Item[]> {
+  const limit = 500
+  let offset = 0
+  const rows: Item[] = []
+
+  while (true) {
+    const page = await listItemsPage(q, limit, offset, undefined, {
+      include_archived: options?.include_archived,
+      created_from: options?.created_from,
+    })
+    rows.push(...(page.items || []))
+    if (page.next_offset == null) break
+    offset = page.next_offset
+  }
+
+  return rows
+}
+
+export async function getInventoryDashboardStats(): Promise<InventoryDashboardStats> {
+  const { data } = await api.get('/inventory/dashboard-stats')
+  return data as InventoryDashboardStats
 }
 
 export async function getItem(id: number): Promise<Item> {

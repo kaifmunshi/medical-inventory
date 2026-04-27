@@ -4,7 +4,7 @@ from collections import defaultdict
 import logging
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from sqlmodel import select
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel
 from backend.utils.archive_rules import apply_archive_rules
@@ -77,6 +77,16 @@ class ItemPageOut(BaseModel):
     items: List[ItemOut]
     total: int
     next_offset: Optional[int] = None
+
+
+class InventoryDashboardStatsOut(BaseModel):
+    inventory_total_qty: int
+    inventory_total_types_all: int
+    inventory_available_types: int
+    zero_stock_types_count: int
+    low_stock_count: int
+    expiring_soon_count: int
+    expired_count: int
 
 
 # ---------- Ledger Response Models ----------
@@ -292,6 +302,21 @@ def _same_group_stmt(name: Optional[str], brand: Optional[str]):
 
 def _group_key(name: Optional[str], brand: Optional[str]) -> str:
     return f"{(_norm_str(name) or '').lower()}__{(_norm_str(brand) or '').lower()}"
+
+
+def _apply_default_visibility(stmt):
+    peer = aliased(Item)
+    visible_row = or_(Item.is_archived == False, Item.is_archived.is_(None))  # noqa: E712
+    same_group_visible_exists = exists(
+        select(peer.id).where(
+            func.lower(func.trim(func.coalesce(peer.name, "")))
+            == func.lower(func.trim(func.coalesce(Item.name, ""))),
+            func.lower(func.trim(func.coalesce(peer.brand, "")))
+            == func.lower(func.trim(func.coalesce(Item.brand, ""))),
+            or_(peer.is_archived == False, peer.is_archived.is_(None)),  # noqa: E712
+        )
+    )
+    return stmt.where(or_(visible_row, ~same_group_visible_exists))
 
 
 def _load_group_batches(session, *, name: Optional[str], brand: Optional[str]) -> Tuple[str, Optional[str], List[Item]]:
@@ -843,6 +868,69 @@ def _build_group_summary(
 
 
 # ---------- Endpoints ----------
+@router.get("/dashboard-stats", response_model=InventoryDashboardStatsOut)
+def dashboard_stats(
+    low_stock_threshold: int = Query(2, ge=0),
+    expiry_window_days: int = Query(60, ge=0),
+) -> InventoryDashboardStatsOut:
+    with get_session() as session:
+        rows = session.exec(_apply_default_visibility(select(Item))).all()
+
+        groups: Dict[str, Dict[str, Any]] = {}
+        total_qty = 0
+        today = date.today()
+        expiring_soon_count = 0
+        expired_count = 0
+
+        for item in rows:
+            name = str(getattr(item, "name", "") or "").strip()
+            brand = str(getattr(item, "brand", "") or "").strip()
+            if not name:
+                continue
+
+            stock = int(getattr(item, "stock", 0) or 0)
+            total_qty += stock
+            key = f"{name.lower()}|{brand.lower()}"
+            if key not in groups:
+                groups[key] = {"stock": 0}
+            groups[key]["stock"] = int(groups[key]["stock"] or 0) + stock
+
+            expiry_raw = str(getattr(item, "expiry_date", "") or "").strip()[:10]
+            if expiry_raw:
+                try:
+                    expiry = date.fromisoformat(expiry_raw)
+                except ValueError:
+                    expiry = None
+                if expiry:
+                    days_left = (expiry - today).days
+                    if days_left < 0:
+                        expired_count += 1
+                    elif days_left <= expiry_window_days:
+                        expiring_soon_count += 1
+
+        zero_stock_types = 0
+        available_types = 0
+        low_stock_count = 0
+        for group in groups.values():
+            stock = int(group["stock"] or 0)
+            if stock > 0:
+                available_types += 1
+            else:
+                zero_stock_types += 1
+            if stock <= low_stock_threshold:
+                low_stock_count += 1
+
+        return InventoryDashboardStatsOut(
+            inventory_total_qty=total_qty,
+            inventory_total_types_all=len(groups),
+            inventory_available_types=available_types,
+            zero_stock_types_count=zero_stock_types,
+            low_stock_count=low_stock_count,
+            expiring_soon_count=expiring_soon_count,
+            expired_count=expired_count,
+        )
+
+
 @router.get("/", response_model=ItemPageOut)
 def list_items(
     request: Request,
@@ -850,6 +938,10 @@ def list_items(
     rack_number: Optional[int] = Query(None, ge=0, description="Filter by exact rack number"),
     brand: Optional[str] = Query(None, description="Filter by exact brand"),
     category_id: Optional[int] = Query(None, ge=0, description="Filter by product category"),
+    created_from: Optional[str] = Query(
+        None,
+        description="Filter to batches created from this date or with positive stock movement from this date",
+    ),
     limit: Optional[int] = Query(None, ge=1, le=500),
     offset: Optional[int] = Query(None, ge=0),
 
@@ -862,18 +954,7 @@ def list_items(
         # ✅ hide archived by default, but keep at least one row visible per (name+brand) group.
         # This prevents fully sold-out groups from disappearing when every batch became archived.
         if not include_archived:
-            peer = aliased(Item)
-            visible_row = or_(Item.is_archived == False, Item.is_archived.is_(None))
-            same_group_visible_exists = exists(
-                select(peer.id).where(
-                    func.lower(func.trim(func.coalesce(peer.name, "")))
-                    == func.lower(func.trim(func.coalesce(Item.name, ""))),
-                    func.lower(func.trim(func.coalesce(peer.brand, "")))
-                    == func.lower(func.trim(func.coalesce(Item.brand, ""))),
-                    or_(peer.is_archived == False, peer.is_archived.is_(None)),
-                )
-            )
-            base_stmt = base_stmt.where(or_(visible_row, ~same_group_visible_exists))
+            base_stmt = _apply_default_visibility(base_stmt)
 
         if q:
             like = f"%{q.strip()}%"
@@ -889,6 +970,26 @@ def list_items(
             base_stmt = base_stmt.where(func.lower(func.coalesce(Item.brand, "")) == brand.strip().lower())
         if category_id is not None:
             base_stmt = base_stmt.where(Item.category_id == category_id)
+        if created_from:
+            from_date = created_from.strip()[:10]
+            try:
+                date.fromisoformat(from_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="created_from must be YYYY-MM-DD")
+
+            positive_stock_exists = exists(
+                select(StockMovement.id).where(
+                    StockMovement.item_id == Item.id,
+                    StockMovement.delta > 0,
+                    StockMovement.ts >= from_date,
+                )
+            )
+            base_stmt = base_stmt.where(
+                or_(
+                    Item.created_at >= from_date,
+                    positive_stock_exists,
+                )
+            )
         
 
         ...
@@ -981,8 +1082,6 @@ def get_item_group_summary(
             to_date=to_date,
         )
 
-
-# ✅✅ IMPORTANT: THIS MUST BE BEFORE /{item_id}
 @router.get("/ledger/group", response_model=StockLedgerGroupPageOut)
 def group_ledger(
     name: str = Query(..., description="Item name (exact match, case-insensitive)"),

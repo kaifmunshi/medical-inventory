@@ -71,6 +71,7 @@ export default function LooseStockPage() {
       queryClient.invalidateQueries({ queryKey: ['pack-open-events'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
       queryClient.invalidateQueries({ queryKey: ['dash-inventory'] })
       setSelectedLot(null)
       setPacksToOpen('1')

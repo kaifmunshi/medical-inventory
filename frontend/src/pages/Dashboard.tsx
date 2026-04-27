@@ -24,7 +24,7 @@ import {
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { listBills, listAllBills, getPaymentsSummary } from '../services/billing'
 import { listReturns } from '../services/returns'
-import { listItemsPage } from '../services/inventory'
+import { getInventoryDashboardStats, listItemsPage } from '../services/inventory'
 import { todayRange } from '../lib/date'
 import {
   createCashbookEntry,
@@ -139,6 +139,15 @@ export default function Dashboard() {
     queryFn: () => listReturns({ from_date: from, to_date: to, limit: 500 }),
   })
 
+  const qInventoryStats = useQuery({
+    queryKey: ['dash-inventory-stats'],
+    queryFn: () => getInventoryDashboardStats(),
+    placeholderData: (previousData) => previousData,
+    staleTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+  })
+
   // Inventory for low-stock + expiry
  const qInv = useQuery({
   queryKey: ['dash-inventory'],
@@ -149,7 +158,6 @@ export default function Dashboard() {
   refetchOnWindowFocus: true,   // ✅ if you tab back, refresh
 })
 
-  const inventoryLoaded = Array.isArray(qInv.data)
   // ✅ Inventory totals (Total Qty + Total Types) + ✅ Zero stock types list
   const {
     inventoryTotalQty,
@@ -417,6 +425,14 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
     return { expiredItems: expired, expiredCount: expired.length }
   }, [qInv.data])
 
+  const displayInventoryTotalQty = qInventoryStats.data?.inventory_total_qty ?? inventoryTotalQty
+  const displayInventoryTotalTypesAll = qInventoryStats.data?.inventory_total_types_all ?? inventoryTotalTypesAll
+  const displayInventoryAvailableTypes = qInventoryStats.data?.inventory_available_types ?? inventoryAvailableTypes
+  const displayZeroStockTypesCount = qInventoryStats.data?.zero_stock_types_count ?? zeroStockTypesCount
+  const displayLowStockCount = qInventoryStats.data?.low_stock_count ?? lowStockCount
+  const displayExpiringSoonCount = qInventoryStats.data?.expiring_soon_count ?? expiringSoonCount
+  const displayExpiredCount = qInventoryStats.data?.expired_count ?? expiredCount
+
   const cardBase = {
     p: 2.5,
     borderRadius: 3,
@@ -604,14 +620,14 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
             <Paper
               sx={{
                 ...cardBase,
-                cursor: inventoryLoaded && zeroStockTypesCount > 0 ? 'pointer' : 'default',
+                cursor: displayZeroStockTypesCount > 0 ? 'pointer' : 'default',
                 '&:hover':
-                  inventoryLoaded && zeroStockTypesCount > 0
+                  displayZeroStockTypesCount > 0
                     ? { bgcolor: 'rgba(255,255,255,1)', boxShadow: '0 20px 45px rgba(0,0,0,0.06)' }
                     : undefined,
               }}
               onClick={() => {
-                if (inventoryLoaded && zeroStockTypesCount > 0) setOpenZeroStock(true)
+                if (displayZeroStockTypesCount > 0) setOpenZeroStock(true)
               }}
             >
               <Typography variant="subtitle2" color="text.secondary">
@@ -619,17 +635,15 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
               </Typography>
 
               <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {inventoryLoaded ? `${inventoryTotalQty} qty` : 'Loading...'}
+                {`${displayInventoryTotalQty} qty`}
               </Typography>
 
               <Typography variant="caption" color="text.secondary" fontSize={15}>
-                {inventoryLoaded
-                  ? `Total ${inventoryTotalTypesAll} • Types available ${inventoryAvailableTypes}`
-                  : 'Fetching inventory count'}
+                Total {displayInventoryTotalTypesAll} • Types available {displayInventoryAvailableTypes}
               </Typography>
 
               <Typography variant="caption" color="text.secondary" fontSize={12.5}>
-                {inventoryLoaded ? `Zero stock items: ${zeroStockTypesCount}` : ' '}
+                Zero stock items: {displayZeroStockTypesCount}
               </Typography>
             </Paper>
           </Tooltip>
@@ -649,7 +663,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
                 Low Stock
               </Typography>
               <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {inventoryLoaded ? `${lowStockCount} items` : 'Loading...'}
+                {displayLowStockCount} items
               </Typography>
             </Paper>
           </Tooltip>
@@ -669,7 +683,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
                 Expiring Soon
               </Typography>
               <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {inventoryLoaded ? `${expiringSoonCount} items` : 'Loading...'}
+                {displayExpiringSoonCount} items
               </Typography>
             </Paper>
           </Tooltip>
@@ -690,7 +704,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
                 Expired Items
               </Typography>
               <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {inventoryLoaded ? `${expiredCount} items` : 'Loading...'}
+                {displayExpiredCount} items
               </Typography>
             </Paper>
           </Tooltip>
@@ -701,7 +715,11 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       <Dialog open={openZeroStock} onClose={() => setOpenZeroStock(false)} fullWidth maxWidth="sm">
         <DialogTitle>Zero Stock Items</DialogTitle>
         <DialogContent>
-          {zeroStockTypesList.length === 0 ? (
+          {!Array.isArray(qInv.data) ? (
+            <Typography color="text.secondary" p={1}>
+              Fetching zero stock list...
+            </Typography>
+          ) : zeroStockTypesList.length === 0 ? (
             <Typography color="text.secondary" p={1}>
               No zero stock items.
             </Typography>
@@ -749,7 +767,10 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
           <Stack direction="row" justifyContent="flex-end" gap={1} p={1}>
   <Button
     variant="outlined"
-    onClick={() => qc.invalidateQueries({ queryKey: ['dash-inventory'] })}
+    onClick={() => {
+      qc.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
+      qc.invalidateQueries({ queryKey: ['dash-inventory'] })
+    }}
   >
     Refresh
   </Button>

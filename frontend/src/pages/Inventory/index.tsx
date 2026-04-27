@@ -273,6 +273,7 @@ export default function Inventory() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
+      qc.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
       qc.invalidateQueries({ queryKey: ['dash-inventory'] })
       toast.push('Saved', 'success')
     },
@@ -290,6 +291,7 @@ export default function Inventory() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
+      qc.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
       qc.invalidateQueries({ queryKey: ['dash-inventory'] })
       toast.push('Item updated', 'success')
     },
@@ -304,6 +306,7 @@ export default function Inventory() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
+      qc.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
       qc.invalidateQueries({ queryKey: ['dash-inventory'] })
       toast.push('Stock adjusted', 'success')
     },

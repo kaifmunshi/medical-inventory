@@ -68,6 +68,7 @@ class ItemOut(BaseModel):
     rack_number: int
     created_at: str
     updated_at: str
+    last_incoming_at: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -317,6 +318,22 @@ def _apply_default_visibility(stmt):
         )
     )
     return stmt.where(or_(visible_row, ~same_group_visible_exists))
+
+
+def _attach_last_incoming(session, items: List[Item]) -> None:
+    item_ids = [int(item.id) for item in items if getattr(item, "id", None) is not None]
+    if not item_ids:
+        return
+
+    rows = session.exec(
+        select(StockMovement.item_id, func.max(StockMovement.ts))
+        .where(StockMovement.item_id.in_(item_ids))
+        .where(StockMovement.delta > 0)
+        .group_by(StockMovement.item_id)
+    ).all()
+    latest_by_item = {int(row[0]): row[1] for row in rows}
+    for item in items:
+        object.__setattr__(item, "last_incoming_at", latest_by_item.get(int(item.id)))
 
 
 def _load_group_batches(session, *, name: Optional[str], brand: Optional[str]) -> Tuple[str, Optional[str], List[Item]]:
@@ -942,6 +959,10 @@ def list_items(
         None,
         description="Filter to batches created from this date or with positive stock movement from this date",
     ),
+    incoming_from: Optional[str] = Query(
+        None,
+        description="Filter to batches with positive incoming stock from this date",
+    ),
     limit: Optional[int] = Query(None, ge=1, le=500),
     offset: Optional[int] = Query(None, ge=0),
 
@@ -958,10 +979,21 @@ def list_items(
 
         if q:
             like = f"%{q.strip()}%"
+            matching_movement_exists = exists(
+                select(StockMovement.id).where(
+                    StockMovement.item_id == Item.id,
+                    or_(
+                        StockMovement.reason.ilike(like),
+                        func.coalesce(StockMovement.ref_type, "").ilike(like),
+                        func.coalesce(StockMovement.note, "").ilike(like),
+                    ),
+                )
+            )
             base_stmt = base_stmt.where(
                 or_(
                     Item.name.ilike(like),
                     Item.brand.ilike(like),
+                    matching_movement_exists,
                 )
             )
         if rack_number is not None:
@@ -970,23 +1002,42 @@ def list_items(
             base_stmt = base_stmt.where(func.lower(func.coalesce(Item.brand, "")) == brand.strip().lower())
         if category_id is not None:
             base_stmt = base_stmt.where(Item.category_id == category_id)
-        if created_from:
+        if incoming_from:
+            from_date = incoming_from.strip()[:10]
+            try:
+                date.fromisoformat(from_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="incoming_from must be YYYY-MM-DD")
+
+            from_ts = f"{from_date}T00:00:00"
+            incoming_stock_exists = exists(
+                select(StockMovement.id).where(
+                    StockMovement.item_id == Item.id,
+                    StockMovement.delta > 0,
+                    StockMovement.ts >= from_ts,
+                )
+            )
+            legacy_created_stock = (Item.stock > 0) & (Item.created_at >= from_date)
+            base_stmt = base_stmt.where(or_(incoming_stock_exists, legacy_created_stock))
+        elif created_from:
             from_date = created_from.strip()[:10]
             try:
                 date.fromisoformat(from_date)
             except ValueError:
                 raise HTTPException(status_code=400, detail="created_from must be YYYY-MM-DD")
 
+            from_ts = f"{from_date}T00:00:00"
             positive_stock_exists = exists(
                 select(StockMovement.id).where(
                     StockMovement.item_id == Item.id,
                     StockMovement.delta > 0,
-                    StockMovement.ts >= from_date,
+                    StockMovement.ts >= from_ts,
                 )
             )
             base_stmt = base_stmt.where(
                 or_(
                     Item.created_at >= from_date,
+                    Item.updated_at >= from_date,
                     positive_stock_exists,
                 )
             )
@@ -998,6 +1049,7 @@ def list_items(
         if q and limit is None and offset is None:
             stmt = base_stmt.order_by(Item.name, Item.id)
             items = session.exec(stmt).all()
+            _attach_last_incoming(session, items)
             total = len(items)
             return {"items": items, "total": total, "next_offset": None}
 
@@ -1012,6 +1064,7 @@ def list_items(
             base_stmt.order_by(Item.name, Item.id).limit(page_limit).offset(page_offset)
         )
         items = session.exec(page_stmt).all()
+        _attach_last_incoming(session, items)
 
         next_offset = (
             (page_offset + page_limit)

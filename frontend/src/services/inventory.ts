@@ -164,11 +164,15 @@ export type StockReconciliationApplyResult = {
   total_delta_applied: number
 }
 
-export async function listItems(q: string = '', options?: { include_archived?: boolean; created_from?: string }): Promise<Item[]> {
+export async function listItems(
+  q: string = '',
+  options?: { include_archived?: boolean; created_from?: string; incoming_from?: string },
+): Promise<Item[]> {
   const params: Record<string, string | boolean> = {}
   if (q) params.q = q
   if (typeof options?.include_archived === 'boolean') params.include_archived = options.include_archived
   if (options?.created_from) params.created_from = options.created_from
+  if (options?.incoming_from) params.incoming_from = options.incoming_from
   const { data } = await api.get('/inventory', { params })
 
   if (Array.isArray(data)) return data
@@ -181,7 +185,7 @@ export async function listItemsPage(
   limit: number = 50,
   offset: number = 0,
   rackNumber?: number,
-  filters?: { brand?: string; category_id?: number; include_archived?: boolean; created_from?: string }
+  filters?: { brand?: string; category_id?: number; include_archived?: boolean; created_from?: string; incoming_from?: string }
 ): Promise<ItemsPage> {
   const params: Record<string, string | number | boolean> = { q, limit, offset }
   if (typeof rackNumber === 'number' && Number.isFinite(rackNumber)) {
@@ -191,11 +195,15 @@ export async function listItemsPage(
   if (typeof filters?.category_id === 'number') params.category_id = filters.category_id
   if (typeof filters?.include_archived === 'boolean') params.include_archived = filters.include_archived
   if (filters?.created_from) params.created_from = filters.created_from
+  if (filters?.incoming_from) params.incoming_from = filters.incoming_from
   const { data } = await api.get('/inventory', { params })
   return data as ItemsPage
 }
 
-export async function listAllItems(q: string = '', options?: { include_archived?: boolean; created_from?: string }): Promise<Item[]> {
+export async function listAllItems(
+  q: string = '',
+  options?: { include_archived?: boolean; created_from?: string; incoming_from?: string },
+): Promise<Item[]> {
   const limit = 500
   let offset = 0
   const rows: Item[] = []
@@ -204,6 +212,7 @@ export async function listAllItems(q: string = '', options?: { include_archived?
     const page = await listItemsPage(q, limit, offset, undefined, {
       include_archived: options?.include_archived,
       created_from: options?.created_from,
+      incoming_from: options?.incoming_from,
     })
     rows.push(...(page.items || []))
     if (page.next_offset == null) break

@@ -14,6 +14,7 @@ export interface Item {
   is_archived?: boolean
   created_at?: string
   updated_at?: string
+  last_incoming_at?: string | null
 }
 
 export interface RequestedItem {

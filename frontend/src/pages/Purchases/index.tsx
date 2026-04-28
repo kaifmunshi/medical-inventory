@@ -27,6 +27,7 @@ import { useSearchParams } from 'react-router-dom'
 import { createParty, fetchParties } from '../../services/parties'
 import { listAllItems } from '../../services/inventory'
 import { createBrand, createCategory, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
+import { fetchFinancialYears } from '../../services/settings'
 import {
   addPurchasePayment,
   cancelPurchase,
@@ -38,7 +39,7 @@ import {
   fetchSupplierLedgerSummary,
   updatePurchase,
 } from '../../services/purchases'
-import type { Category, Item, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
+import type { Category, FinancialYear, Item, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 
 type DraftItem = PurchaseItemPayload & { key: string }
@@ -105,9 +106,10 @@ function fmtDate(value?: string | null) {
 }
 
 function inventoryBatchLabel(item: Item) {
+  const incomingDate = item.last_incoming_at || item.created_at
   const parts = [
     `#${item.id}`,
-    `Added ${fmtDate(item.created_at)}`,
+    item.last_incoming_at ? `Incoming ${fmtDate(incomingDate)}` : `Added ${fmtDate(incomingDate)}`,
     item.name,
     item.brand || '',
     item.expiry_date ? `Exp ${item.expiry_date}` : '',
@@ -138,7 +140,6 @@ export default function PurchasesPage() {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const today = new Date().toISOString().slice(0, 10)
-  const existingInventoryFromDate = currentFinancialYearStart()
 
   const [filterPartyId, setFilterPartyId] = useState<number | null>(null)
   const [filterFromDate, setFilterFromDate] = useState('')
@@ -186,6 +187,16 @@ export default function PurchasesPage() {
   const [brandTargetKey, setBrandTargetKey] = useState<string | null>(null)
   const [newBrandName, setNewBrandName] = useState('')
 
+  const financialYearsQ = useQuery<FinancialYear[], Error>({
+    queryKey: ['settings-financial-years'],
+    queryFn: fetchFinancialYears,
+  })
+  const activeFinancialYear = useMemo(
+    () => (financialYearsQ.data || []).find((year) => year.is_active) || null,
+    [financialYearsQ.data],
+  )
+  const existingInventoryFromDate = activeFinancialYear?.start_date || currentFinancialYearStart()
+
   const suppliersQ = useQuery<Party[], Error>({
     queryKey: ['suppliers-select'],
     queryFn: () => fetchParties({ party_group: 'SUNDRY_CREDITOR', is_active: true }),
@@ -209,7 +220,7 @@ export default function PurchasesPage() {
     queryKey: ['purchase-existing-inventory', inventorySearch, existingInventoryFromDate],
     queryFn: () => listAllItems(inventorySearch.trim(), {
       include_archived: true,
-      created_from: existingInventoryFromDate,
+      incoming_from: existingInventoryFromDate,
     }),
   })
 
@@ -708,6 +719,7 @@ export default function PurchasesPage() {
                     <Autocomplete
                       size="small"
                       options={inventoryBatches}
+                      filterOptions={(options) => options}
                       value={inventoryBatches.find((batch) => Number(batch.id) === Number(item.existing_inventory_item_id)) || null}
                       getOptionLabel={inventoryBatchLabel}
                       onInputChange={(_, value) => setInventorySearch(value)}

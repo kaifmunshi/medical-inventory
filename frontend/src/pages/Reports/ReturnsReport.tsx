@@ -30,9 +30,7 @@ function toCSV(rows: string[][]) {
 }
 
 function itemsPreview(items: any[], max = 6) {
-  const names = (items || []).map(
-    (it: any) => it.item_name || it.name || it.item?.name || `#${it.item_id}`
-  )
+  const names = (items || []).map((it: any) => itemDisplayName(it))
   if (names.length <= max) return names.join(', ') || '—'
   const head = names.slice(0, max).join(', ')
   return `${head} +${names.length - max} more`
@@ -41,6 +39,23 @@ function itemsPreview(items: any[], max = 6) {
 function money(n: number | string | undefined | null) {
   const v = Number(n || 0)
   return v.toFixed(2)
+}
+
+function itemKindLabel(it: any) {
+  return it?.is_loose_stock ? 'Loose' : 'Pack'
+}
+
+function itemUnitLabel(it: any) {
+  return String(
+    it?.stock_unit_label ||
+    (it?.is_loose_stock ? it?.child_unit_name : it?.parent_unit_name) ||
+    (it?.is_loose_stock ? 'Unit' : 'Pack')
+  )
+}
+
+function itemDisplayName(it: any) {
+  const name = it.item_name || it.name || it.item?.name || `#${it.item_id}`
+  return `${name} - ${itemKindLabel(it)}`
 }
 
 export default function ReturnsReport(props: {
@@ -243,8 +258,15 @@ export default function ReturnsReport(props: {
                   <tbody>
                     {(detail.return?.items || []).map((it: any, idx: number) => (
                       <tr key={`ret-${idx}`}>
-                        <td>{it.item_name || `#${it.item_id}`}</td>
-                        <td>{Number(it.quantity || 0)}</td>
+                        <td>
+                          <Stack gap={0.25}>
+                            <Typography variant="body2">{it.item_name || `#${it.item_id}`}</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {itemKindLabel(it)} | {itemUnitLabel(it)}
+                            </Typography>
+                          </Stack>
+                        </td>
+                        <td>{Number(it.quantity || 0)} {itemUnitLabel(it)}</td>
                         <td>{money(it.mrp)}</td>
                         <td>{money(it.line_total ?? Number(it.quantity || 0) * Number(it.mrp || 0))}</td>
                       </tr>
@@ -267,8 +289,15 @@ export default function ReturnsReport(props: {
                   <tbody>
                     {(detail.bill?.items || []).map((it: any, idx: number) => (
                       <tr key={`bill-${idx}`}>
-                        <td>{it.item_name || `#${it.item_id}`}</td>
-                        <td>{Number(it.quantity || 0)}</td>
+                        <td>
+                          <Stack gap={0.25}>
+                            <Typography variant="body2">{it.item_name || `#${it.item_id}`}</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {itemKindLabel(it)} | {itemUnitLabel(it)}
+                            </Typography>
+                          </Stack>
+                        </td>
+                        <td>{Number(it.quantity || 0)} {itemUnitLabel(it)}</td>
                         <td>{money(it.mrp)}</td>
                         <td>{money(it.line_total ?? Number(it.quantity || 0) * Number(it.mrp || 0))}</td>
                       </tr>
@@ -307,8 +336,15 @@ export default function ReturnsReport(props: {
                       const mrp = Number(it.mrp)
                       return (
                         <tr key={idx}>
-                          <td>{name}</td>
-                          <td>{qty}</td>
+                          <td>
+                            <Stack gap={0.25}>
+                              <Typography variant="body2">{name}</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {itemKindLabel(it)} | {itemUnitLabel(it)}
+                              </Typography>
+                            </Stack>
+                          </td>
+                          <td>{qty} {itemUnitLabel(it)}</td>
                           <td>{money(mrp)}</td>
                           <td>{money(qty * mrp)}</td>
                         </tr>

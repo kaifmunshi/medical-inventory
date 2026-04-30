@@ -5,15 +5,18 @@ import {
   Button,
   Chip,
   Dialog,
+  DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
+  FormControlLabel,
   IconButton,
   Link,
   MenuItem,
   Paper,
   Skeleton,
   Stack,
+  Switch,
   Tab,
   Tabs,
   TextField,
@@ -28,7 +31,7 @@ import EditIcon from '@mui/icons-material/Edit'
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
 import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
-import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
@@ -39,8 +42,19 @@ import {
   getItemGroup,
   getStockLedgerReconciliation,
 } from '../../services/inventory'
+import {
+  createBrand,
+  createCategory,
+  createProduct,
+  fetchBrands,
+  fetchCategories,
+  fetchProducts,
+  updateProduct,
+  type ProductPayload,
+} from '../../services/products'
 import { buildStockReportLink } from '../../lib/reportLinks'
 import { formatLedgerNote } from '../../lib/stockLedger'
+import { useToast } from '../../components/ui/Toaster'
 
 type StockCardTab = 'ledger' | 'batches'
 type LedgerScope = 'product' | 'batch'
@@ -115,6 +129,7 @@ function reasonLabel(reason: string) {
   const key = String(reason || '').toUpperCase()
   const labels: Record<string, string> = {
     OPENING: 'Opening',
+    INVENTORY_ADD: 'Inventory Add',
     PURCHASE: 'Purchase In',
     PURCHASE_LINK: 'Purchase Link',
     PURCHASE_LINK_REMOVED: 'Purchase Link Removed',
@@ -180,16 +195,19 @@ function daysUntilExpiry(expiry?: string | null) {
   return Math.round((exp.getTime() - today.getTime()) / (24 * 60 * 60 * 1000))
 }
 
-function buildProductSearch(name: string, brand?: string | null) {
-  const params = new URLSearchParams()
-  params.set('q', name)
-  if (brand) params.set('brand', brand)
-  return `/products?${params.toString()}`
+function findExactProduct(products: any[], name?: string, brand?: string) {
+  const nameKey = String(name || '').trim().toLowerCase()
+  const brandKey = String(brand || '').trim().toLowerCase()
+  return products.find((product) => (
+    String(product?.name || '').trim().toLowerCase() === nameKey
+    && String(product?.brand || '').trim().toLowerCase() === brandKey
+  )) || null
 }
 
 export default function StockCardPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const toast = useToast()
   const [searchParams] = useSearchParams()
   const name = (searchParams.get('name') || '').trim()
   const brand = (searchParams.get('brand') || '').trim()
@@ -211,6 +229,23 @@ export default function StockCardPage() {
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<Bill | null>(null)
   const [billEditOpen, setBillEditOpen] = useState(false)
+  const [productOpen, setProductOpen] = useState(false)
+  const [productId, setProductId] = useState<number | null>(null)
+  const [productBrandOpen, setProductBrandOpen] = useState(false)
+  const [productCategoryOpen, setProductCategoryOpen] = useState(false)
+  const [productBrandName, setProductBrandName] = useState('')
+  const [productCategoryName, setProductCategoryName] = useState('')
+  const [productForm, setProductForm] = useState<ProductPayload>({
+    name: '',
+    brand: '',
+    category_id: undefined,
+    default_rack_number: 0,
+    printed_price: 0,
+    loose_sale_enabled: false,
+    parent_unit_name: '',
+    child_unit_name: '',
+    default_conversion_qty: undefined,
+  })
 
   const groupQ = useQuery({
     queryKey: ['inventory-group', name, brand],
@@ -219,6 +254,21 @@ export default function StockCardPage() {
   })
 
   const batches = groupQ.data?.batches || []
+  const brandsQ = useQuery({ queryKey: ['stock-card-brands'], queryFn: () => fetchBrands({ active_only: true }) })
+  const categoriesQ = useQuery({ queryKey: ['stock-card-categories'], queryFn: () => fetchCategories({ active_only: true }) })
+  const productsQ = useQuery({
+    queryKey: ['stock-card-products', name],
+    queryFn: () => fetchProducts({ q: name, active_only: true, limit: 2000 }),
+    enabled: !!name,
+  })
+  const productMatch = useMemo(() => {
+    const nameKey = name.trim().toLowerCase()
+    const brandKey = brand.trim().toLowerCase()
+    return (productsQ.data || []).find((product) => (
+      String(product.name || '').trim().toLowerCase() === nameKey
+      && String(product.brand || '').trim().toLowerCase() === brandKey
+    )) || null
+  }, [brand, name, productsQ.data])
   const currentBatch = useMemo(() => {
     if (!batches.length) return null
     const byParam = selectedBatchId ? batches.find((batch) => Number(batch.id) === Number(selectedBatchId)) : null
@@ -355,8 +405,118 @@ export default function StockCardPage() {
     openLedger: true,
   })
 
-  function openProductMaster() {
-    navigate(buildProductSearch(name, brand || undefined))
+  const mSaveProduct = useMutation({
+    mutationFn: async () => {
+      const payload: ProductPayload = {
+        ...productForm,
+        name: productForm.name.trim(),
+        brand: productForm.brand?.trim() || undefined,
+        category_id: productForm.category_id || undefined,
+        default_rack_number: Number(productForm.default_rack_number || 0),
+        printed_price: Number(productForm.printed_price || 0),
+        parent_unit_name: productForm.loose_sale_enabled ? productForm.parent_unit_name?.trim() || 'Pack' : undefined,
+        child_unit_name: productForm.loose_sale_enabled ? productForm.child_unit_name?.trim() || 'Unit' : undefined,
+        default_conversion_qty: productForm.loose_sale_enabled ? Number(productForm.default_conversion_qty || 1) : undefined,
+      }
+      let targetId = productId
+      if (!targetId) {
+        const knownMatch = findExactProduct(productsQ.data || [], payload.name, payload.brand)
+        const freshMatch = knownMatch || findExactProduct(
+          await fetchProducts({ q: payload.name, active_only: false, limit: 1000 }),
+          payload.name,
+          payload.brand,
+        )
+        targetId = freshMatch?.id ? Number(freshMatch.id) : null
+      }
+      return targetId ? updateProduct(targetId, payload) : createProduct(payload)
+    },
+    onSuccess: (savedProduct) => {
+      setProductId(Number(savedProduct.id))
+      setProductForm({
+        name: savedProduct.name,
+        brand: savedProduct.brand || '',
+        category_id: savedProduct.category_id || undefined,
+        default_rack_number: savedProduct.default_rack_number ?? 0,
+        printed_price: savedProduct.printed_price ?? 0,
+        loose_sale_enabled: Boolean(savedProduct.loose_sale_enabled),
+        parent_unit_name: savedProduct.parent_unit_name || '',
+        child_unit_name: savedProduct.child_unit_name || '',
+        default_conversion_qty: savedProduct.default_conversion_qty || undefined,
+      })
+      setProductOpen(false)
+      queryClient.invalidateQueries({ queryKey: ['stock-card-products'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-group'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      toast.push('Product master saved', 'success')
+    },
+    onError: (err: any) => {
+      toast.push(String(err?.message || 'Product save failed'), 'error')
+    },
+  })
+
+  const mCreateProductBrand = useMutation({
+    mutationFn: createBrand,
+    onSuccess: (brandRow) => {
+      setProductForm((prev) => ({ ...prev, brand: brandRow.name }))
+      setProductBrandName('')
+      setProductBrandOpen(false)
+      queryClient.invalidateQueries({ queryKey: ['stock-card-brands'] })
+      queryClient.invalidateQueries({ queryKey: ['brand-master'] })
+      toast.push('Brand added', 'success')
+    },
+    onError: (err: any) => {
+      toast.push(String(err?.message || 'Failed to add brand'), 'error')
+    },
+  })
+
+  const mCreateProductCategory = useMutation({
+    mutationFn: createCategory,
+    onSuccess: (category) => {
+      setProductForm((prev) => ({ ...prev, category_id: Number(category.id) }))
+      setProductCategoryName('')
+      setProductCategoryOpen(false)
+      queryClient.invalidateQueries({ queryKey: ['stock-card-categories'] })
+      queryClient.invalidateQueries({ queryKey: ['product-categories-master'] })
+      toast.push('Category added', 'success')
+    },
+    onError: (err: any) => {
+      toast.push(String(err?.message || 'Failed to add category'), 'error')
+    },
+  })
+
+  function setProductLooseSaleEnabled(next: boolean) {
+    if (!next && productForm.loose_sale_enabled) {
+      const ok = window.confirm(
+        'Disable loose stock for this product? New parent units cannot be opened after this, but existing loose stock, bills, returns, and ledgers will remain usable.'
+      )
+      if (!ok) return
+    }
+    setProductForm((prev) => ({ ...prev, loose_sale_enabled: next }))
+  }
+
+  async function openProductMaster() {
+    const batch = currentBatch || batches[0]
+    let product = null
+    try {
+      product = findExactProduct(await fetchProducts({ q: name, active_only: false, limit: 1000 }), name, brand)
+    } catch {
+      product = productMatch
+    }
+    setProductId(product?.id ? Number(product.id) : null)
+    setProductForm({
+      name,
+      brand,
+      category_id: product?.category_id || undefined,
+      default_rack_number: product?.default_rack_number ?? Number(batch?.rack_number || 0),
+      printed_price: product?.printed_price ?? Number(batch?.mrp || 0),
+      loose_sale_enabled: Boolean(product?.loose_sale_enabled),
+      parent_unit_name: product?.parent_unit_name || '',
+      child_unit_name: product?.child_unit_name || '',
+      default_conversion_qty: product?.default_conversion_qty || undefined,
+    })
+    setProductOpen(true)
   }
 
   async function openBillDetail(billId: number) {
@@ -629,7 +789,7 @@ export default function StockCardPage() {
                 Inventory
               </Button>
               <Button size="small" startIcon={<Inventory2OutlinedIcon />} variant="outlined" onClick={openProductMaster}>
-                Product
+                Edit Product
               </Button>
               <Button size="small" startIcon={<OpenInNewIcon />} variant="outlined" onClick={() => navigate(stockReportLink)}>
                 Stock Report
@@ -693,6 +853,7 @@ export default function StockCardPage() {
               sx={{ minWidth: 180 }}
             >
               <MenuItem value="">All</MenuItem>
+              <MenuItem value="INVENTORY_ADD">Inventory Add</MenuItem>
               <MenuItem value="OPENING">Opening</MenuItem>
               <MenuItem value="PURCHASE">Purchase</MenuItem>
               <MenuItem value="PURCHASE_CANCEL">Purchase Cancel</MenuItem>
@@ -868,7 +1029,7 @@ export default function StockCardPage() {
                             Batch Ledger
                           </Button>
                           <Button size="small" onClick={openProductMaster}>
-                            Product
+                            Edit Product
                           </Button>
                         </Stack>
                       </td>
@@ -881,6 +1042,175 @@ export default function StockCardPage() {
         </Paper>
       ) : null}
     </Stack>
+
+    <Dialog open={productOpen} onClose={() => setProductOpen(false)} fullWidth maxWidth="sm">
+      <DialogTitle>{productId ? 'Edit Product' : 'Add Product Master'}</DialogTitle>
+      <DialogContent dividers>
+        <Stack gap={2} sx={{ pt: 1 }}>
+          <TextField
+            label="Product Name"
+            value={productForm.name}
+            onChange={(e) => setProductForm((prev) => ({ ...prev, name: e.target.value }))}
+            fullWidth
+          />
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+            <TextField
+              select
+              label="Brand"
+              value={productForm.brand || ''}
+              onChange={(e) => setProductForm((prev) => ({ ...prev, brand: e.target.value }))}
+              fullWidth
+            >
+              <MenuItem value="">No Brand</MenuItem>
+              {(brandsQ.data || []).map((brandRow) => (
+                <MenuItem key={brandRow.id} value={brandRow.name}>
+                  {brandRow.name}
+                </MenuItem>
+              ))}
+            </TextField>
+            <Button variant="outlined" onClick={() => setProductBrandOpen(true)} sx={{ whiteSpace: 'nowrap', height: 40 }}>
+              New Brand
+            </Button>
+          </Stack>
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+            <TextField
+              select
+              label="Category"
+              value={productForm.category_id ? String(productForm.category_id) : ''}
+              onChange={(e) => setProductForm((prev) => ({ ...prev, category_id: e.target.value ? Number(e.target.value) : undefined }))}
+              fullWidth
+            >
+              <MenuItem value="">No Category</MenuItem>
+              {(categoriesQ.data || []).map((category) => (
+                <MenuItem key={category.id} value={String(category.id)}>
+                  {category.name}
+                </MenuItem>
+              ))}
+            </TextField>
+            <Button variant="outlined" onClick={() => setProductCategoryOpen(true)} sx={{ whiteSpace: 'nowrap', height: 40 }}>
+              New Category
+            </Button>
+          </Stack>
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+            <TextField
+              label="Default Rack"
+              type="number"
+              value={productForm.default_rack_number ?? 0}
+              onChange={(e) => setProductForm((prev) => ({ ...prev, default_rack_number: Number(e.target.value || 0) }))}
+              fullWidth
+            />
+            <TextField
+              label="Printed Price"
+              type="number"
+              value={productForm.printed_price ?? 0}
+              onChange={(e) => setProductForm((prev) => ({ ...prev, printed_price: Number(e.target.value || 0) }))}
+              fullWidth
+            />
+          </Stack>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={Boolean(productForm.loose_sale_enabled)}
+                onChange={(e) => setProductLooseSaleEnabled(e.target.checked)}
+              />
+            }
+            label="Enable loose stock"
+          />
+          {productForm.loose_sale_enabled ? (
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+              <TextField
+                label="Parent Unit"
+                value={productForm.parent_unit_name || ''}
+                onChange={(e) => setProductForm((prev) => ({ ...prev, parent_unit_name: e.target.value }))}
+                placeholder="Strip"
+                fullWidth
+              />
+              <TextField
+                label="Loose Unit"
+                value={productForm.child_unit_name || ''}
+                onChange={(e) => setProductForm((prev) => ({ ...prev, child_unit_name: e.target.value }))}
+                placeholder="Tablet"
+                fullWidth
+              />
+              <TextField
+                label="Units per Parent"
+                type="number"
+                value={productForm.default_conversion_qty ?? ''}
+                onChange={(e) => setProductForm((prev) => ({ ...prev, default_conversion_qty: e.target.value ? Number(e.target.value) : undefined }))}
+                inputProps={{ min: 1, step: 1 }}
+                fullWidth
+              />
+            </Stack>
+          ) : null}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setProductOpen(false)}>Cancel</Button>
+        <Button
+          variant="contained"
+          onClick={() => mSaveProduct.mutate()}
+          disabled={!productForm.name.trim() || mSaveProduct.isPending}
+        >
+          {mSaveProduct.isPending ? 'Saving...' : 'Save Product'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+
+    <Dialog open={productBrandOpen} onClose={() => setProductBrandOpen(false)} fullWidth maxWidth="xs">
+      <DialogTitle>Add Brand</DialogTitle>
+      <DialogContent dividers>
+        <TextField
+          label="Brand Name"
+          value={productBrandName}
+          onChange={(e) => setProductBrandName(e.target.value)}
+          autoFocus
+          fullWidth
+          sx={{ mt: 1 }}
+        />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setProductBrandOpen(false)}>Cancel</Button>
+        <Button
+          variant="contained"
+          onClick={() => {
+            const nextName = productBrandName.trim()
+            if (!nextName) return toast.push('Brand name is required', 'error')
+            mCreateProductBrand.mutate(nextName)
+          }}
+          disabled={mCreateProductBrand.isPending}
+        >
+          Save Brand
+        </Button>
+      </DialogActions>
+    </Dialog>
+
+    <Dialog open={productCategoryOpen} onClose={() => setProductCategoryOpen(false)} fullWidth maxWidth="xs">
+      <DialogTitle>Add Category</DialogTitle>
+      <DialogContent dividers>
+        <TextField
+          label="Category Name"
+          value={productCategoryName}
+          onChange={(e) => setProductCategoryName(e.target.value)}
+          autoFocus
+          fullWidth
+          sx={{ mt: 1 }}
+        />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setProductCategoryOpen(false)}>Cancel</Button>
+        <Button
+          variant="contained"
+          onClick={() => {
+            const nextName = productCategoryName.trim()
+            if (!nextName) return toast.push('Category name is required', 'error')
+            mCreateProductCategory.mutate(nextName)
+          }}
+          disabled={mCreateProductCategory.isPending}
+        >
+          Save Category
+        </Button>
+      </DialogActions>
+    </Dialog>
 
     <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

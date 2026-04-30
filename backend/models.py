@@ -275,6 +275,14 @@ class BillItemOut(SQLModel):
     mrp: float
     quantity: int
     line_total: float
+    inventory_lot_id: Optional[int] = None
+    opened_from_lot_id: Optional[int] = None
+    is_loose_stock: bool = False
+    stock_unit_label: Optional[str] = None
+    parent_unit_name: Optional[str] = None
+    child_unit_name: Optional[str] = None
+    conversion_qty: Optional[int] = None
+    loose_sale_enabled: bool = False
 
 
 class BillOut(SQLModel):
@@ -320,6 +328,14 @@ class ReturnItemOut(SQLModel):
     mrp: float
     quantity: int
     line_total: float
+    inventory_lot_id: Optional[int] = None
+    opened_from_lot_id: Optional[int] = None
+    is_loose_stock: bool = False
+    stock_unit_label: Optional[str] = None
+    parent_unit_name: Optional[str] = None
+    child_unit_name: Optional[str] = None
+    conversion_qty: Optional[int] = None
+    loose_sale_enabled: bool = False
 
 
 class ReturnOut(SQLModel):
@@ -1136,7 +1152,8 @@ class ReceiptBillAdjustmentOut(SQLModel):
 
 
 class LotOpenCreate(SQLModel):
-    lot_id: int
+    lot_id: Optional[int] = None
+    item_id: Optional[int] = None
     packs_opened: int
     note: Optional[str] = None
 

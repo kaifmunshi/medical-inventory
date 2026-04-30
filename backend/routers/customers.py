@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from backend.db import get_session
+from backend.inventory_lot_sync import item_stock_meta
 from backend.models import Bill, BillItem, BillItemOut, BillOut, Customer, CustomerCreate, CustomerUpdate, CustomerOut
 
 router = APIRouter()
@@ -88,6 +89,7 @@ def _to_bill_out(session, bill: Bill) -> BillOut:
                 mrp=item.mrp,
                 quantity=item.quantity,
                 line_total=item.line_total,
+                **item_stock_meta(session, int(item.item_id or 0)),
             )
             for item in items
         ],

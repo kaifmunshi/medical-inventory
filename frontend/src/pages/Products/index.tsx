@@ -185,6 +185,16 @@ export default function ProductsPage() {
     setForm((prev) => ({ ...prev, ...patch }))
   }
 
+  function setLooseSaleEnabled(next: boolean) {
+    if (!next && form.loose_sale_enabled) {
+      const ok = window.confirm(
+        'Disable loose stock for this product? New parent units cannot be opened after this, but existing loose stock, bills, returns, and ledgers will remain usable.'
+      )
+      if (!ok) return
+    }
+    patchForm({ loose_sale_enabled: next })
+  }
+
   function save() {
     const payload: ProductForm = {
       ...form,
@@ -383,7 +393,7 @@ export default function ProductsPage() {
                   renderInput={(params) => <TextField {...params} label="Brand" fullWidth helperText="Choose or add a brand" />}
                   sx={{ flex: 1 }}
                 />
-                <Button variant="outlined" onClick={() => setBrandDialogOpen(true)} sx={{ height: 56, whiteSpace: 'nowrap' }}>New</Button>
+                <Button variant="outlined" onClick={() => setBrandDialogOpen(true)} sx={{ height: 40, whiteSpace: 'nowrap' }}>New</Button>
               </Stack>
               <Stack direction="row" gap={1} sx={{ flex: 1 }}>
                 <TextField
@@ -398,7 +408,7 @@ export default function ProductsPage() {
                     <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
                   ))}
                 </TextField>
-                <Button variant="outlined" onClick={() => setCategoryDialogOpen(true)} sx={{ height: 56, whiteSpace: 'nowrap' }}>New</Button>
+                <Button variant="outlined" onClick={() => setCategoryDialogOpen(true)} sx={{ height: 40, whiteSpace: 'nowrap' }}>New</Button>
               </Stack>
             </Stack>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
@@ -424,7 +434,7 @@ export default function ProductsPage() {
                 control={
                   <Switch
                     checked={Boolean(form.loose_sale_enabled)}
-                    onChange={(e) => patchForm({ loose_sale_enabled: e.target.checked })}
+                    onChange={(e) => setLooseSaleEnabled(e.target.checked)}
                   />
                 }
                 label="Enable loose stock"

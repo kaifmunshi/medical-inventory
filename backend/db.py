@@ -980,6 +980,111 @@ def migrate_db():
             )
             session.commit()
 
+        # ---------- repeat-safe upkeep for lot links / loose rates ----------
+        # Runs on normal app startup. No separate client-side script is required.
+        ts_lot_upkeep = _now_ts()
+        session.exec(
+            text("""
+                INSERT INTO inventorylot (
+                    product_id, expiry_date, mrp, cost_price, rack_number,
+                    sealed_qty, loose_qty, conversion_qty, opened_from_lot_id,
+                    legacy_item_id, is_active, created_at, updated_at
+                )
+                SELECT
+                    i.product_id,
+                    i.expiry_date,
+                    COALESCE(i.mrp, 0),
+                    COALESCE(i.cost_price, 0),
+                    COALESCE(i.rack_number, 0),
+                    MAX(0, COALESCE(i.stock, 0)),
+                    0,
+                    p.default_conversion_qty,
+                    NULL,
+                    i.id,
+                    CASE WHEN COALESCE(i.is_archived, 0) = 1 THEN 0 ELSE 1 END,
+                    :ts,
+                    :ts
+                FROM item i
+                JOIN product p ON p.id = i.product_id
+                WHERE i.product_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM inventorylot l WHERE l.legacy_item_id = i.id
+                  )
+            """).bindparams(ts=ts_lot_upkeep),
+        )
+        session.exec(
+            text("""
+                UPDATE inventorylot
+                SET sealed_qty = COALESCE((SELECT MAX(0, COALESCE(i.stock, 0)) FROM item i WHERE i.id = inventorylot.legacy_item_id), sealed_qty),
+                    updated_at = :ts
+                WHERE opened_from_lot_id IS NULL
+                  AND legacy_item_id IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM item i WHERE i.id = inventorylot.legacy_item_id)
+            """).bindparams(ts=ts_lot_upkeep),
+        )
+        session.exec(
+            text("""
+                UPDATE inventorylot
+                SET loose_qty = COALESCE((SELECT MAX(0, COALESCE(i.stock, 0)) FROM item i WHERE i.id = inventorylot.legacy_item_id), loose_qty),
+                    updated_at = :ts
+                WHERE opened_from_lot_id IS NOT NULL
+                  AND legacy_item_id IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM item i WHERE i.id = inventorylot.legacy_item_id)
+            """).bindparams(ts=ts_lot_upkeep),
+        )
+        session.exec(
+            text("""
+                UPDATE item
+                SET is_archived = 0,
+                    archived_at = NULL,
+                    updated_at = :ts
+                WHERE COALESCE(stock, 0) > 0
+                  AND COALESCE(is_archived, 0) = 1
+            """).bindparams(ts=ts_lot_upkeep),
+        )
+        session.exec(
+            text("""
+                UPDATE inventorylot
+                SET mrp = ROUND((
+                        SELECT COALESCE(src.mrp, 0) / COALESCE(NULLIF(inventorylot.conversion_qty, 0), NULLIF(src.conversion_qty, 0), NULLIF(p.default_conversion_qty, 0))
+                        FROM inventorylot src
+                        JOIN product p ON p.id = inventorylot.product_id
+                        WHERE src.id = inventorylot.opened_from_lot_id
+                    ), 2),
+                    cost_price = ROUND((
+                        SELECT COALESCE(src.cost_price, 0) / COALESCE(NULLIF(inventorylot.conversion_qty, 0), NULLIF(src.conversion_qty, 0), NULLIF(p.default_conversion_qty, 0))
+                        FROM inventorylot src
+                        JOIN product p ON p.id = inventorylot.product_id
+                        WHERE src.id = inventorylot.opened_from_lot_id
+                    ), 2),
+                    updated_at = :ts
+                WHERE opened_from_lot_id IS NOT NULL
+                  AND COALESCE(NULLIF(conversion_qty, 0), (
+                        SELECT NULLIF(src.conversion_qty, 0)
+                        FROM inventorylot src
+                        WHERE src.id = inventorylot.opened_from_lot_id
+                    ), (
+                        SELECT NULLIF(p.default_conversion_qty, 0)
+                        FROM product p
+                        WHERE p.id = inventorylot.product_id
+                    )) IS NOT NULL
+            """).bindparams(ts=ts_lot_upkeep),
+        )
+        session.exec(
+            text("""
+                UPDATE item
+                SET mrp = COALESCE((SELECT l.mrp FROM inventorylot l WHERE l.legacy_item_id = item.id AND l.opened_from_lot_id IS NOT NULL LIMIT 1), mrp),
+                    cost_price = COALESCE((SELECT l.cost_price FROM inventorylot l WHERE l.legacy_item_id = item.id AND l.opened_from_lot_id IS NOT NULL LIMIT 1), cost_price),
+                    updated_at = :ts
+                WHERE EXISTS (
+                    SELECT 1 FROM inventorylot l
+                    WHERE l.legacy_item_id = item.id
+                      AND l.opened_from_lot_id IS NOT NULL
+                )
+            """).bindparams(ts=ts_lot_upkeep),
+        )
+        session.commit()
+
         # ---------- one-time backfill: deleted bill stock + ledger ----------
         backfill_key = "backfill_deleted_bill_stock_ledger_v2"
         already_done = session.exec(
@@ -1127,6 +1232,8 @@ def migrate_db():
             )
             session.commit()
 
+# Register SQLModel table metadata even when backend.db is imported outside main.py.
+from backend import models as _models  # noqa: F401,E402
 
 SQLModel.metadata.create_all(engine)
 migrate_db()

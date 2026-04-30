@@ -50,6 +50,14 @@ export interface BillItem {
   mrp: number
   quantity: number
   line_total: number
+  inventory_lot_id?: number | null
+  opened_from_lot_id?: number | null
+  is_loose_stock?: boolean
+  stock_unit_label?: string | null
+  parent_unit_name?: string | null
+  child_unit_name?: string | null
+  conversion_qty?: number | null
+  loose_sale_enabled?: boolean
 }
 
 export interface Bill {
@@ -241,6 +249,8 @@ export type ItemSalesRow = {
   item_id: number
   item_name: string
   brand?: string | null
+  is_loose_stock?: boolean
+  stock_unit_label?: string | null
   qty_sold: number
   gross_sales: number
   last_sold_at?: string | null

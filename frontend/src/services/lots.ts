@@ -16,7 +16,7 @@ export async function fetchPackOpenEvents(params?: { lot_id?: number }): Promise
   return res.data
 }
 
-export async function openPack(payload: { lot_id: number; packs_opened: number; note?: string }): Promise<PackOpenEvent> {
+export async function openPack(payload: { lot_id?: number; item_id?: number; packs_opened: number; note?: string }): Promise<PackOpenEvent> {
   const res = await api.post<PackOpenEvent>('/lots/open-pack', payload)
   return res.data
 }

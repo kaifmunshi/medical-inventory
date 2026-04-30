@@ -8,13 +8,21 @@ export interface Item {
   category_id?: ID | null
   expiry_date?: string | null
   mrp: number
-  cost_price?: number
+  cost_price?: number | null
   stock: number
   rack_number: number
   is_archived?: boolean
   created_at?: string
   updated_at?: string
   last_incoming_at?: string | null
+  inventory_lot_id?: ID | null
+  opened_from_lot_id?: ID | null
+  is_loose_stock?: boolean
+  stock_unit_label?: string | null
+  parent_unit_name?: string | null
+  child_unit_name?: string | null
+  conversion_qty?: number | null
+  loose_sale_enabled?: boolean
 }
 
 export interface RequestedItem {

@@ -7,6 +7,10 @@ export const itemSchema = z.object({
   expiry_date: z.string().optional().nullable(),
   mrp: z.coerce.number().nonnegative(),
   stock: z.coerce.number().int().nonnegative(),
+  cost_price: z.coerce.number().nonnegative().optional().nullable(),
+  product_id: z.coerce.number().int().positive().optional().nullable(),
+  category_id: z.coerce.number().int().positive().optional().nullable(),
+  source_item_id: z.coerce.number().int().positive().optional().nullable(),
 
   // ✅ NEW: numeric only, integer, >= 0, default 0
   rack_number: z.coerce.number().int().nonnegative().default(0),

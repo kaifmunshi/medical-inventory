@@ -74,6 +74,15 @@ function buildGroupKey(it: any) {
   return `${name}__${brand}`
 }
 
+function findExactProduct(products: any[], name?: string, brand?: string) {
+  const nameKey = String(name || '').trim().toLowerCase()
+  const brandKey = String(brand || '').trim().toLowerCase()
+  return products.find((product) => (
+    String(product?.name || '').trim().toLowerCase() === nameKey
+    && String(product?.brand || '').trim().toLowerCase() === brandKey
+  )) || null
+}
+
 export default function Inventory() {
   const toast = useToast()
   const navigate = useNavigate()
@@ -317,7 +326,7 @@ export default function Inventory() {
   })
 
   const mSaveProduct = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const payload: ProductPayload = {
         ...productForm,
         name: productForm.name.trim(),
@@ -329,12 +338,35 @@ export default function Inventory() {
         child_unit_name: productForm.loose_sale_enabled ? productForm.child_unit_name?.trim() || 'Unit' : undefined,
         default_conversion_qty: productForm.loose_sale_enabled ? Number(productForm.default_conversion_qty || 1) : undefined,
       }
-      return productId ? updateProduct(productId, payload) : createProduct(payload)
+      let targetId = productId
+      if (!targetId) {
+        const knownMatch = findExactProduct(productsQ.data || [], payload.name, payload.brand)
+        const freshMatch = knownMatch || findExactProduct(
+          await fetchProducts({ q: payload.name, active_only: false, limit: 1000 }),
+          payload.name,
+          payload.brand,
+        )
+        targetId = freshMatch?.id ? Number(freshMatch.id) : null
+      }
+      return targetId ? updateProduct(targetId, payload) : createProduct(payload)
     },
-    onSuccess: () => {
+    onSuccess: (savedProduct) => {
+      setProductId(Number(savedProduct.id))
+      setProductForm({
+        name: savedProduct.name,
+        brand: savedProduct.brand || '',
+        category_id: savedProduct.category_id || undefined,
+        default_rack_number: savedProduct.default_rack_number ?? 0,
+        printed_price: savedProduct.printed_price ?? 0,
+        loose_sale_enabled: Boolean(savedProduct.loose_sale_enabled),
+        parent_unit_name: savedProduct.parent_unit_name || '',
+        child_unit_name: savedProduct.child_unit_name || '',
+        default_conversion_qty: savedProduct.default_conversion_qty || undefined,
+      })
       setProductOpen(false)
       qc.invalidateQueries({ queryKey: ['inventory-products-master'] })
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
+      qc.invalidateQueries({ queryKey: ['lots'] })
       toast.push('Product master saved', 'success')
     },
     onError: (err: any) => {
@@ -375,6 +407,16 @@ export default function Inventory() {
     },
   })
 
+  function setProductLooseSaleEnabled(next: boolean) {
+    if (!next && productForm.loose_sale_enabled) {
+      const ok = window.confirm(
+        'Disable loose stock for this product? New parent units cannot be opened after this, but existing loose stock, bills, returns, and ledgers will remain usable.'
+      )
+      if (!ok) return
+    }
+    setProductForm((prev) => ({ ...prev, loose_sale_enabled: next }))
+  }
+
   function handleAdd() {
     setEditing(null)
     setOpenForm(true)
@@ -388,13 +430,15 @@ export default function Inventory() {
     setAdjustName(row.name)
   }
 
-  function openRelatedProduct(group: any) {
+  async function openRelatedProduct(group: any) {
     const name = String(group?.name || '')
     const brand = String(group?.brand || '')
-    const product = (productsQ.data || []).find((p) => {
-      return String(p.name || '').trim().toLowerCase() === name.trim().toLowerCase()
-        && String(p.brand || '').trim().toLowerCase() === brand.trim().toLowerCase()
-    })
+    let product = null
+    try {
+      product = findExactProduct(await fetchProducts({ q: name, active_only: false, limit: 1000 }), name, brand)
+    } catch {
+      product = findExactProduct(productsQ.data || [], name, brand)
+    }
     setProductId(product?.id ? Number(product.id) : null)
     setProductForm({
       name,
@@ -545,7 +589,7 @@ export default function Inventory() {
           sx={{ mt: 1.25 }}
         >
           <Typography variant="caption" color="text.secondary">
-            Inventory is grouped by item (name + brand). Open Stock Card for a clean product ledger, batch ledger, and batch snapshot.
+            Inventory is grouped by item (name + brand). Separate entries stay as batch rows; Stock Card shows every movement.
           </Typography>
           {hasFilters && (
             <Button
@@ -658,6 +702,15 @@ export default function Inventory() {
                               <Chip
                                 size="small"
                                 label="Out of stock"
+                                variant="outlined"
+                                sx={{ fontWeight: 800, borderRadius: 999 }}
+                              />
+                            )}
+
+                            {Number(g.totalBatchCount || 0) > 1 && (
+                              <Chip
+                                size="small"
+                                label={`${g.totalBatchCount} separate entries`}
                                 variant="outlined"
                                 sx={{ fontWeight: 800, borderRadius: 999 }}
                               />
@@ -841,7 +894,7 @@ export default function Inventory() {
                   </MenuItem>
                 ))}
               </TextField>
-              <Button variant="outlined" onClick={() => setProductBrandOpen(true)} sx={{ whiteSpace: 'nowrap' }}>
+              <Button variant="outlined" onClick={() => setProductBrandOpen(true)} sx={{ whiteSpace: 'nowrap', height: 40 }}>
                 New Brand
               </Button>
             </Stack>
@@ -860,7 +913,7 @@ export default function Inventory() {
                   </MenuItem>
                 ))}
               </TextField>
-              <Button variant="outlined" onClick={() => setProductCategoryOpen(true)} sx={{ whiteSpace: 'nowrap' }}>
+              <Button variant="outlined" onClick={() => setProductCategoryOpen(true)} sx={{ whiteSpace: 'nowrap', height: 40 }}>
                 New Category
               </Button>
             </Stack>
@@ -884,7 +937,7 @@ export default function Inventory() {
               control={
                 <Switch
                   checked={Boolean(productForm.loose_sale_enabled)}
-                  onChange={(e) => setProductForm((prev) => ({ ...prev, loose_sale_enabled: e.target.checked }))}
+                  onChange={(e) => setProductLooseSaleEnabled(e.target.checked)}
                 />
               }
               label="Enable loose stock"

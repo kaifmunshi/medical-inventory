@@ -16,6 +16,7 @@ from backend.models import (
     BillCreate, BillOut, BillItemOut,
     StockMovement,  # ✅ NEW
 )
+from backend.inventory_lot_sync import item_stock_kind, item_stock_meta, sync_lot_quantity_for_item
 from backend.security import require_min_role
 
 router = APIRouter()
@@ -175,6 +176,17 @@ def add_movement(
     )
 
 
+def bill_item_to_out(session, row: BillItem) -> BillItemOut:
+    return BillItemOut(
+        item_id=row.item_id,
+        item_name=row.item_name,
+        mrp=row.mrp,
+        quantity=row.quantity,
+        line_total=row.line_total,
+        **item_stock_meta(session, int(row.item_id or 0)),
+    )
+
+
 # -------------------- Response Models --------------------
 
 class BillPageOut(BaseModel):
@@ -188,6 +200,8 @@ class ItemSalesRowOut(BaseModel):
     item_id: int
     item_name: str
     brand: Optional[str] = None
+    is_loose_stock: bool = False
+    stock_unit_label: Optional[str] = None
     qty_sold: int
     gross_sales: float
     last_sold_at: Optional[str] = None
@@ -250,13 +264,7 @@ def list_bills(
                 is_deleted=b.is_deleted,
                 deleted_at=b.deleted_at,
 
-                items=[BillItemOut(
-                    item_id=i.item_id,
-                    item_name=i.item_name,
-                    mrp=i.mrp,
-                    quantity=i.quantity,
-                    line_total=i.line_total
-                ) for i in items]
+                items=[bill_item_to_out(session, i) for i in items]
             ))
         return out
 
@@ -338,13 +346,7 @@ def list_bills_paged(
                 is_deleted=b.is_deleted,
                 deleted_at=b.deleted_at,
 
-                items=[BillItemOut(
-                    item_id=i.item_id,
-                    item_name=i.item_name,
-                    mrp=i.mrp,
-                    quantity=i.quantity,
-                    line_total=i.line_total
-                ) for i in items]
+                items=[bill_item_to_out(session, i) for i in items]
             ))
 
         next_offset = (offset + limit) if has_more else None
@@ -430,11 +432,14 @@ def report_item_sales(
 
             out: List[ItemSalesRowOut] = []
             for r in rows:
+                meta = item_stock_meta(session, int(r.item_id or 0))
                 out.append(
                     ItemSalesRowOut(
                         item_id=int(r.item_id or 0),
                         item_name=str(r.item_name or ""),
                         brand=(str(r.brand) if r.brand else None),
+                        is_loose_stock=bool(meta.get("is_loose_stock")),
+                        stock_unit_label=meta.get("stock_unit_label"),
                         qty_sold=int(r.qty_sold or 0),
                         gross_sales=round2(as_f(r.gross_sales)),
                         last_sold_at=r.last_sold_at,
@@ -517,13 +522,7 @@ def get_bill(bill_id: int):
             is_deleted=b.is_deleted,
             deleted_at=b.deleted_at,
 
-            items=[BillItemOut(
-                item_id=i.item_id,
-                item_name=i.item_name,
-                mrp=i.mrp,
-                quantity=i.quantity,
-                line_total=i.line_total
-            ) for i in items]
+            items=[bill_item_to_out(session, i) for i in items]
         )
 
 
@@ -653,6 +652,7 @@ def create_bill(payload: BillCreate):
                 session.add(itm)
                 # ✅ archive sold-out duplicate batches
                 apply_archive_rules(session, itm)
+                sync_lot_quantity_for_item(session, itm, ts=bill_ts)
                 bi = BillItem(
                     bill_id=b.id,
                     item_id=itm.id,
@@ -720,13 +720,7 @@ def create_bill(payload: BillCreate):
             is_deleted=b.is_deleted,
             deleted_at=b.deleted_at,
 
-            items=[BillItemOut(
-                item_id=i.item_id,
-                item_name=i.item_name,
-                mrp=i.mrp,
-                quantity=i.quantity,
-                line_total=i.line_total
-            ) for i in items]
+            items=[bill_item_to_out(session, i) for i in items]
         )
 
 
@@ -782,8 +776,16 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         def _norm_txt(v: Any) -> str:
             return str(v or "").strip().lower()
 
-        def _group_key(name: Any, brand: Any) -> str:
-            return f"{_norm_txt(name)}__{_norm_txt(brand)}"
+        stock_kind_cache: Dict[int, str] = {}
+
+        def _stock_kind(it: Item) -> str:
+            iid = as_i(getattr(it, "id", 0))
+            if iid not in stock_kind_cache:
+                stock_kind_cache[iid] = item_stock_kind(session, it)
+            return stock_kind_cache[iid]
+
+        def _group_key(name: Any, brand: Any, kind: str) -> str:
+            return f"{_norm_txt(name)}__{_norm_txt(brand)}__{kind}"
 
         def _expiry_sort_key(it: Item):
             raw = str(getattr(it, "expiry_date", "") or "").strip()
@@ -809,7 +811,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             seed = db_items.get(as_i(line.item_id))
             if not seed:
                 raise HTTPException(status_code=404, detail=f"Item {line.item_id} not found")
-            gk = _group_key(seed.name, getattr(seed, "brand", None))
+            gk = _group_key(seed.name, getattr(seed, "brand", None), _stock_kind(seed))
             requested_qty_by_group[gk] = requested_qty_by_group.get(gk, 0) + qty
             seed_item_by_group[gk] = seed
             custom_price = as_f(getattr(line, "custom_unit_price", None))
@@ -832,7 +834,8 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                     func.lower(func.coalesce(Item.brand, "")) == func.lower(group_brand),
                 )
             ).all()
-            candidates = sorted(candidates, key=_expiry_sort_key)
+            seed_kind = _stock_kind(seed)
+            candidates = sorted([it for it in candidates if _stock_kind(it) == seed_kind], key=_expiry_sort_key)
 
             remaining = as_i(requested_qty)
             total_available = 0
@@ -971,6 +974,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                 itm.stock = as_i(itm.stock) + stock_delta
                 session.add(itm)
                 apply_archive_rules(session, itm)
+                sync_lot_quantity_for_item(session, itm, ts=now_iso)
 
                 add_movement(
                     session,
@@ -1058,13 +1062,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             paid_at=b.paid_at,
             is_deleted=b.is_deleted,
             deleted_at=b.deleted_at,
-            items=[BillItemOut(
-                item_id=i.item_id,
-                item_name=i.item_name,
-                mrp=i.mrp,
-                quantity=i.quantity,
-                line_total=i.line_total,
-            ) for i in items]
+            items=[bill_item_to_out(session, i) for i in items]
         )
 
 
@@ -1096,6 +1094,7 @@ def soft_delete_bill(bill_id: int):
             itm.stock = as_i(itm.stock) + as_i(qty)
             session.add(itm)
             apply_archive_rules(session, itm)
+            sync_lot_quantity_for_item(session, itm)
             add_movement(
                 session,
                 item_id=itm.id,
@@ -1156,6 +1155,7 @@ def recover_bill(bill_id: int):
             itm.stock = as_i(itm.stock) - as_i(qty)
             session.add(itm)
             apply_archive_rules(session, itm)
+            sync_lot_quantity_for_item(session, itm)
             add_movement(
                 session,
                 item_id=itm.id,

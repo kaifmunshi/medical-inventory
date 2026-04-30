@@ -237,6 +237,20 @@ export default function ItemForm({
 
   const pickedStock = Number(pickedExisting?.stock ?? 0)
 
+  const submitForm = handleSubmit((values) => {
+    if (!isEditMode && pickedExisting?.id) {
+      onSubmit({
+        ...values,
+        source_item_id: Number(pickedExisting.id),
+        product_id: pickedExisting.product_id ?? undefined,
+        category_id: pickedExisting.category_id ?? undefined,
+        cost_price: Number(pickedExisting.cost_price ?? 0),
+      })
+      return
+    }
+    onSubmit(values)
+  })
+
   const noSpinnerSx = {
     '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': {
       WebkitAppearance: 'none',
@@ -254,7 +268,7 @@ export default function ItemForm({
       onClose={onClose}
       PaperProps={{ sx: { width: { xs: '100%', sm: 420 } } }}
     >
-      <form onSubmit={handleSubmit(onSubmit)}>
+      <form onSubmit={submitForm}>
         <Stack gap={2} p={3}>
           <Typography variant="h6">
             {isEditMode ? 'Edit Item' : 'Add Item'}
@@ -404,7 +418,7 @@ export default function ItemForm({
                   </Typography>
 
                   <Typography variant="caption" color="text.secondary">
-                    Selected batch only prefills details. Saving will create a separate inventory batch row.
+                    Selected batch only prefills details. Saving will create a separate inventory entry and ledger movement.
                   </Typography>
 
                   {pickedStock <= 0 && (
@@ -495,7 +509,7 @@ export default function ItemForm({
               (isEditMode
                 ? 'Stock edits are locked here. Use Adjust Stock or transaction flows.'
                 : pickedExisting
-                  ? 'Opening stock for separate NEW batch'
+                  ? 'Incoming stock for a separate new entry'
                   : '')
             }
           />

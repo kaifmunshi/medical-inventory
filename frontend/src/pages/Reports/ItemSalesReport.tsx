@@ -38,6 +38,14 @@ function cleanText(v: any) {
   return cleaned
 }
 
+function itemKindLabel(r: any) {
+  return r?.is_loose_stock ? 'Loose' : 'Pack'
+}
+
+function itemUnitLabel(r: any) {
+  return String(r?.stock_unit_label || (r?.is_loose_stock ? 'Unit' : 'Pack'))
+}
+
 export default function ItemSalesReport(props: {
   from: string
   to: string
@@ -76,10 +84,12 @@ export default function ItemSalesReport(props: {
     props.setExportDisabled(rows.length === 0)
 
     props.setExportFn(() => () => {
-      const header = ['Item ID', 'Item Name', 'Brand', 'Qty Sold', 'Gross Sales', 'Last Sold At']
+      const header = ['Item ID', 'Item Name', 'Stock Type', 'Unit', 'Brand', 'Qty Sold', 'Gross Sales', 'Last Sold At']
       const body = rows.map((r) => [
         String(r.item_id ?? ''),
         cleanText(r.item_name ?? ''),
+        itemKindLabel(r),
+        itemUnitLabel(r),
         cleanText(r.brand ?? ''),
         String(r.qty_sold ?? 0),
         String(r.gross_sales ?? 0),
@@ -115,6 +125,7 @@ export default function ItemSalesReport(props: {
             <tr>
               <th style={{ width: 90 }}>ID</th>
               <th>Item</th>
+              <th style={{ width: 130 }}>Type</th>
               <th style={{ width: 180 }}>Brand</th>
               <th style={{ width: 120 }}>Qty Sold</th>
               <th style={{ width: 140 }}>Gross</th>
@@ -125,7 +136,7 @@ export default function ItemSalesReport(props: {
           <tbody>
             {qItems.isLoading && (
               <tr>
-                <td colSpan={6}>
+                <td colSpan={7}>
                   <Box p={2} color="text.secondary">
                     Loading…
                   </Box>
@@ -135,7 +146,7 @@ export default function ItemSalesReport(props: {
 
             {!qItems.isLoading && rows.length === 0 && (
               <tr>
-                <td colSpan={6}>
+                <td colSpan={7}>
                   <Box p={2} color="text.secondary">
                     No sales found for this date range.
                   </Box>
@@ -149,8 +160,9 @@ export default function ItemSalesReport(props: {
                 <tr key={`${r.item_id}-${idx}`}>
                   <td>{r.item_id}</td>
                   <td style={{ fontWeight: 700 }}>{cleanText(r.item_name)}</td>
+                  <td>{itemKindLabel(r)} | {itemUnitLabel(r)}</td>
                   <td>{brand ? brand : '—'}</td>
-                  <td style={{ fontWeight: 800 }}>{r.qty_sold}</td>
+                  <td style={{ fontWeight: 800 }}>{r.qty_sold} {itemUnitLabel(r)}</td>
                   <td>{Number(r.gross_sales || 0).toFixed(2)}</td>
                   <td>{r.last_sold_at || '—'}</td>
                 </tr>

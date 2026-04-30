@@ -20,6 +20,7 @@ import { useToast } from '../ui/Toaster'
 import { listItems } from '../../services/inventory'
 import { createCustomer, fetchCustomers } from '../../services/customers'
 import { updateBill } from '../../services/billing'
+import { openPack } from '../../services/lots'
 import type { Customer } from '../../lib/types'
 
 type EditMode = 'cash' | 'online' | 'split' | 'credit'
@@ -32,6 +33,14 @@ type EditLine = {
   custom_unit_price: number
   item_discount_percent: number
   stock?: number
+  inventory_lot_id?: number | null
+  opened_from_lot_id?: number | null
+  is_loose_stock?: boolean
+  stock_unit_label?: string | null
+  parent_unit_name?: string | null
+  child_unit_name?: string | null
+  conversion_qty?: number | null
+  loose_sale_enabled?: boolean
   existed_in_bill?: boolean
 }
 
@@ -53,6 +62,47 @@ function toIsoDateOnly(exp?: string | null) {
   if (!exp) return ''
   const s = String(exp)
   return s.length > 10 ? s.slice(0, 10) : s
+}
+
+function itemKindLabel(it: any) {
+  return it?.is_loose_stock ? 'Loose' : 'Pack'
+}
+
+function itemUnitLabel(it: any) {
+  return String(
+    it?.stock_unit_label ||
+    (it?.is_loose_stock ? it?.child_unit_name : it?.parent_unit_name) ||
+    (it?.is_loose_stock ? 'Unit' : 'Pack')
+  )
+}
+
+function itemStockText(it: any) {
+  return `${Number(it?.stock || 0)} ${itemUnitLabel(it)}`
+}
+
+function canOpenForLoose(it: any) {
+  return Boolean(
+    it &&
+    !it.is_loose_stock &&
+    it.loose_sale_enabled &&
+    (it.inventory_lot_id || it.id) &&
+    Number(it.stock || 0) > 0
+  )
+}
+
+function findOpenedLooseItem(rows: any[], parent: any, looseItemId?: number | null) {
+  if (looseItemId) {
+    const byId = rows.find((row) => Number(row?.id) === Number(looseItemId))
+    if (byId) return byId
+  }
+  const nameKey = String(parent?.name || '').trim().toLowerCase()
+  const brandKey = String(parent?.brand || '').trim().toLowerCase()
+  return rows.find((row) => (
+    Boolean(row?.is_loose_stock) &&
+    Number(row?.stock || 0) > 0 &&
+    String(row?.name || '').trim().toLowerCase() === nameKey &&
+    String(row?.brand || '').trim().toLowerCase() === brandKey
+  )) || null
 }
 
 function nowLocalDateInput() {
@@ -245,6 +295,8 @@ export default function BillEditDialog({
   const [editNewCustomerName, setEditNewCustomerName] = useState('')
   const [editNewCustomerPhone, setEditNewCustomerPhone] = useState('')
   const [editNewCustomerAddress, setEditNewCustomerAddress] = useState('')
+  const [editOpenLooseDraft, setEditOpenLooseDraft] = useState<any | null>(null)
+  const [editOpenLooseQty, setEditOpenLooseQty] = useState('1')
 
   useEffect(() => {
     if (!open || !bill?.id) return
@@ -261,6 +313,14 @@ export default function BillEditDialog({
         quantity: qty,
         custom_unit_price: custom,
         item_discount_percent: Number(Math.min(100, Math.max(0, pct)).toFixed(2)),
+        inventory_lot_id: it.inventory_lot_id ?? null,
+        opened_from_lot_id: it.opened_from_lot_id ?? null,
+        is_loose_stock: Boolean(it.is_loose_stock),
+        stock_unit_label: it.stock_unit_label ?? null,
+        parent_unit_name: it.parent_unit_name ?? null,
+        child_unit_name: it.child_unit_name ?? null,
+        conversion_qty: it.conversion_qty ?? null,
+        loose_sale_enabled: Boolean(it.loose_sale_enabled),
         existed_in_bill: true,
       }
     })
@@ -290,6 +350,8 @@ export default function BillEditDialog({
     setEditPriceDraftByRow({})
     setEditDiscountDraftByRow({})
     setEditSuggestionPage(0)
+    setEditOpenLooseDraft(null)
+    setEditOpenLooseQty('1')
   }, [open, bill])
 
   const qEditItems = useQuery({
@@ -354,6 +416,59 @@ export default function BillEditDialog({
     },
   })
 
+  const mEditOpenParentPacks = useMutation({
+    mutationFn: async ({ item, packs }: { item: any; packs: number }) => {
+      if (!item?.inventory_lot_id && !item?.id) throw new Error('Parent item link is missing')
+      const event = await openPack({
+        lot_id: item.inventory_lot_id ? Number(item.inventory_lot_id) : undefined,
+        item_id: item.inventory_lot_id ? undefined : Number(item.id),
+        packs_opened: packs,
+        note: 'Opened from bill edit for loose sale',
+      })
+      const freshRows = await listItems(String(item.name || ''))
+      return {
+        packs,
+        loose: findOpenedLooseItem(freshRows as any[], item, event.loose_item_id),
+      }
+    },
+    onSuccess: ({ loose, packs }) => {
+      queryClient.invalidateQueries({ queryKey: ['edit-bill-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-grid-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['pack-open-events'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
+      setEditOpenLooseDraft(null)
+      setEditOpenLooseQty('1')
+      if (loose) {
+        addItemToEdit(loose)
+        toast.push(`Opened ${packs} parent unit(s) and added loose stock.`, 'success')
+      } else {
+        toast.push(`Opened ${packs} parent unit(s). Search again and select the loose row.`, 'success')
+      }
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Could not open parent unit'
+      toast.push(String(msg), 'error')
+    },
+  })
+
+  function submitEditOpenLooseDraft() {
+    if (!editOpenLooseDraft) return
+    const packs = Math.floor(Number(editOpenLooseQty || 0))
+    const stock = Number(editOpenLooseDraft.stock || 0)
+    if (!Number.isFinite(packs) || packs <= 0) {
+      toast.push('Enter a valid parent unit count', 'warning')
+      return
+    }
+    if (packs > stock) {
+      toast.push(`Only ${stock} ${itemUnitLabel(editOpenLooseDraft)} available to open.`, 'warning')
+      return
+    }
+    mEditOpenParentPacks.mutate({ item: editOpenLooseDraft, packs })
+  }
+
   const EDIT_SUGGESTIONS_PAGE_SIZE = 8
   const editSuggestionItems = useMemo(() => {
     const out = [...(((qEditItems.data as any[]) || []) as any[])]
@@ -385,14 +500,28 @@ export default function BillEditDialog({
   useEffect(() => {
     if (!open) return
     if (!editSuggestionItems.length) return
-    const brandByItemId = new Map<number, string | null>()
+    const metaByItemId = new Map<number, any>()
     for (const it of editSuggestionItems) {
-      brandByItemId.set(Number(it.id), it.brand ?? null)
+      metaByItemId.set(Number(it.id), it)
     }
     setEditItems((prev) =>
-      prev.map((row) =>
-        String(row.brand || '').trim() ? row : { ...row, brand: brandByItemId.get(Number(row.item_id)) ?? null }
-      )
+      prev.map((row) => {
+        const meta = metaByItemId.get(Number(row.item_id))
+        if (!meta) return row
+        return {
+          ...row,
+          brand: String(row.brand || '').trim() ? row.brand : meta.brand ?? null,
+          stock: meta.stock ?? row.stock,
+          inventory_lot_id: meta.inventory_lot_id ?? row.inventory_lot_id ?? null,
+          opened_from_lot_id: meta.opened_from_lot_id ?? row.opened_from_lot_id ?? null,
+          is_loose_stock: Boolean(meta.is_loose_stock),
+          stock_unit_label: meta.stock_unit_label ?? row.stock_unit_label ?? null,
+          parent_unit_name: meta.parent_unit_name ?? row.parent_unit_name ?? null,
+          child_unit_name: meta.child_unit_name ?? row.child_unit_name ?? null,
+          conversion_qty: meta.conversion_qty ?? row.conversion_qty ?? null,
+          loose_sale_enabled: Boolean(meta.loose_sale_enabled),
+        }
+      })
     )
   }, [open, editSuggestionItems])
 
@@ -416,6 +545,14 @@ export default function BillEditDialog({
           custom_unit_price: Number(it.mrp || 0),
           item_discount_percent: 0,
           stock: Number(it.stock || 0),
+          inventory_lot_id: it.inventory_lot_id ?? null,
+          opened_from_lot_id: it.opened_from_lot_id ?? null,
+          is_loose_stock: Boolean(it.is_loose_stock),
+          stock_unit_label: it.stock_unit_label ?? null,
+          parent_unit_name: it.parent_unit_name ?? null,
+          child_unit_name: it.child_unit_name ?? null,
+          conversion_qty: it.conversion_qty ?? null,
+          loose_sale_enabled: Boolean(it.loose_sale_enabled),
           existed_in_bill: false,
         },
       ]
@@ -794,15 +931,34 @@ export default function BillEditDialog({
                     }}
                   >
                     <Box sx={{ flex: 1, pr: 2 }}>
-                      <Typography variant="body1" fontWeight={500} sx={{ mb: 0.25 }}>{it.name}</Typography>
+                      <Typography variant="body1" fontWeight={500} sx={{ mb: 0.25 }}>
+                        {it.name} - {itemKindLabel(it)}
+                      </Typography>
                       <Stack direction="row" gap={1.5} flexWrap="wrap" alignItems="center">
+                        <Typography variant="caption" color="text.secondary">ID: <b>#{it.id}</b></Typography>
                         <Typography variant="caption" color="text.secondary">Brand: <b>{it.brand || '-'}</b></Typography>
-                        <Typography variant="caption" color="text.secondary">Stock: <b>{Number(it.stock || 0)}</b></Typography>
+                        <Typography variant="caption" color="text.secondary">Stock: <b>{itemStockText(it)}</b></Typography>
                         <Typography variant="caption" color="text.secondary">MRP: <b>₹{money(it.mrp)}</b></Typography>
                         <Typography variant="caption" color="text.secondary">Exp: <b>{formatExpiry(it.expiry_date)}</b></Typography>
                       </Stack>
                     </Box>
-                    <Button size="small" variant="contained" color="primary" disableElevation onClick={() => addItemToEdit(it)} disabled={Number(it.stock || 0) <= 0} sx={{ minWidth: 80 }}>Add</Button>
+                    <Stack direction="row" gap={1} sx={{ flexShrink: 0 }}>
+                      {canOpenForLoose(it) ? (
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() => {
+                            setEditOpenLooseDraft(it)
+                            setEditOpenLooseQty('1')
+                          }}
+                          disabled={mEditOpenParentPacks.isPending}
+                          sx={{ whiteSpace: 'nowrap' }}
+                        >
+                          {mEditOpenParentPacks.isPending ? 'Opening...' : `Open ${itemUnitLabel(it)}`}
+                        </Button>
+                      ) : null}
+                      <Button size="small" variant="contained" color="primary" disableElevation onClick={() => addItemToEdit(it)} disabled={Number(it.stock || 0) <= 0 || mEditOpenParentPacks.isPending} sx={{ minWidth: 80 }}>Add</Button>
+                    </Stack>
                   </Stack>
                 ))}
                 {editSuggestionItems.length === 0 ? <Box p={2}><Typography variant="body2" color="text.secondary" textAlign="center">No items found.</Typography></Box> : null}
@@ -838,7 +994,9 @@ export default function BillEditDialog({
                         <td>
                           <Stack gap={0.25}>
                             <Typography variant="body2">{it.item_name}</Typography>
-                            {String(it.brand || '').trim() ? <Typography variant="caption" color="text.secondary">{it.brand}</Typography> : null}
+                            <Typography variant="caption" color="text.secondary">
+                              {[String(it.brand || '').trim(), `${itemKindLabel(it)}${it.stock !== undefined ? ` stock: ${itemStockText(it)}` : ''}`].filter(Boolean).join(' | ')}
+                            </Typography>
                           </Stack>
                         </td>
                         <td>{money(it.mrp)}</td>
@@ -990,6 +1148,34 @@ export default function BillEditDialog({
         <DialogActions>
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="contained" onClick={() => mEdit.mutate()} disabled={mEdit.isPending || !editPaymentsOk || !editNotesOkForCredit}>Save</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(editOpenLooseDraft)} onClose={() => setEditOpenLooseDraft(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Open {editOpenLooseDraft ? itemUnitLabel(editOpenLooseDraft) : 'Parent Unit'}</DialogTitle>
+        <DialogContent>
+          <Box sx={{ pt: 1 }}>
+            <TextField
+              autoFocus
+              fullWidth
+              label={`How many ${editOpenLooseDraft ? itemUnitLabel(editOpenLooseDraft) : 'parent units'}?`}
+              type="number"
+              value={editOpenLooseQty}
+              onChange={(e) => setEditOpenLooseQty(e.target.value)}
+              inputProps={{ min: 1, max: Number(editOpenLooseDraft?.stock || 0), step: 1 }}
+              helperText={
+                editOpenLooseDraft
+                  ? `Available ${itemUnitLabel(editOpenLooseDraft)}: ${Number(editOpenLooseDraft.stock || 0)}`
+                  : ''
+              }
+            />
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditOpenLooseDraft(null)}>Cancel</Button>
+          <Button variant="contained" onClick={submitEditOpenLooseDraft} disabled={mEditOpenParentPacks.isPending}>
+            {mEditOpenParentPacks.isPending ? 'Opening...' : 'Open'}
+          </Button>
         </DialogActions>
       </Dialog>
 

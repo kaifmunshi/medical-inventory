@@ -15,6 +15,7 @@ from backend.models import (
     ExchangeRecord,
     StockMovement,
 )
+from backend.inventory_lot_sync import item_stock_meta, sync_lot_quantity_for_item
 
 router = APIRouter()
 
@@ -61,6 +62,17 @@ def add_movement(
             ref_id=int(ref_id),
             note=note,
         )
+    )
+
+
+def return_item_to_out(session, row: ReturnItem) -> ReturnItemOut:
+    return ReturnItemOut(
+        item_id=row.item_id,
+        item_name=row.item_name,
+        mrp=row.mrp,
+        quantity=row.quantity,
+        line_total=row.line_total,
+        **item_stock_meta(session, int(row.item_id or 0)),
     )
 
 
@@ -137,16 +149,7 @@ def list_returns(
                     refund_online=r.refund_online,
                     notes=r.notes,
                     rounding_adjustment=getattr(r, "rounding_adjustment", 0.0),
-                    items=[
-                        ReturnItemOut(
-                            item_id=i.item_id,
-                            item_name=i.item_name,
-                            mrp=i.mrp,
-                            quantity=i.quantity,
-                            line_total=i.line_total,
-                        )
-                        for i in items
-                    ],
+                    items=[return_item_to_out(session, i) for i in items],
                 )
             )
         return out
@@ -183,6 +186,7 @@ def bill_return_summary(bill_id: int):
                 "sold": s,
                 "already_returned": a,
                 "remaining": remaining,
+                **item_stock_meta(session, int(bi.item_id or 0)),
             })
         return out
 
@@ -236,16 +240,7 @@ def get_return(return_id: int):
             refund_online=r.refund_online,
             notes=r.notes,
             rounding_adjustment=getattr(r, "rounding_adjustment", 0.0),
-            items=[
-                ReturnItemOut(
-                    item_id=i.item_id,
-                    item_name=i.item_name,
-                    mrp=i.mrp,
-                    quantity=i.quantity,
-                    line_total=i.line_total,
-                )
-                for i in items
-            ],
+            items=[return_item_to_out(session, i) for i in items],
         )
 
 
@@ -292,6 +287,7 @@ def get_exchange_by_return(return_id: int):
                         "mrp": i.mrp,
                         "quantity": i.quantity,
                         "line_total": i.line_total,
+                        **item_stock_meta(session, int(i.item_id or 0)),
                     }
                     for i in ret_items
                 ],
@@ -312,6 +308,7 @@ def get_exchange_by_return(return_id: int):
                         "mrp": i.mrp,
                         "quantity": i.quantity,
                         "line_total": i.line_total,
+                        **item_stock_meta(session, int(i.item_id or 0)),
                     }
                     for i in bill_items
                 ],
@@ -472,6 +469,7 @@ def create_return(payload: ReturnCreate):
                 session.add(itm)
                 # ✅ unarchive if stock came back
                 apply_archive_rules(session, itm)
+                sync_lot_quantity_for_item(session, itm)
                 # Ledger: RETURN (stock IN)
                 add_movement(
                     session,
@@ -540,16 +538,7 @@ def create_return(payload: ReturnCreate):
             refund_online=r.refund_online,
             notes=r.notes,
             rounding_adjustment=getattr(r, "rounding_adjustment", 0.0),
-            items=[
-                ReturnItemOut(
-                    item_id=i.item_id,
-                    item_name=i.item_name,
-                    mrp=i.mrp,
-                    quantity=i.quantity,
-                    line_total=i.line_total,
-                )
-                for i in items
-            ],
+            items=[return_item_to_out(session, i) for i in items],
         )
 
 
@@ -762,6 +751,7 @@ def create_exchange(payload: ExchangeCreate):
         for itm, qty in ret_items_map.values():
             itm.stock += qty
             session.add(itm)
+            sync_lot_quantity_for_item(session, itm)
 
             add_movement(
                 session,
@@ -831,6 +821,7 @@ def create_exchange(payload: ExchangeCreate):
                 raise HTTPException(status_code=400, detail=f"Insufficient stock during exchange for {itm.name}")
             itm.stock -= qty
             session.add(itm)
+            sync_lot_quantity_for_item(session, itm)
 
             add_movement(
                 session,
@@ -888,7 +879,8 @@ def create_exchange(payload: ExchangeCreate):
                         "item_name": i.item_name,
                         "mrp": i.mrp,
                         "quantity": i.quantity,
-                        "line_total": i.line_total
+                        "line_total": i.line_total,
+                        **item_stock_meta(session, int(i.item_id or 0)),
                     } for i in ret_items
                 ],
             ),
@@ -909,6 +901,7 @@ def create_exchange(payload: ExchangeCreate):
                         "mrp": i.mrp,
                         "quantity": i.quantity,
                         "line_total": i.line_total,
+                        **item_stock_meta(session, int(i.item_id or 0)),
                     }
                     for i in bill_items
                 ],

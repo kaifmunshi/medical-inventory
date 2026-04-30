@@ -16,13 +16,19 @@ from backend.models import (
     Product,
     StockMovement,
 )
+from backend.inventory_lot_sync import ensure_lot_for_inventory_item
 from backend.security import get_request_actor_name
+from backend.utils.archive_rules import apply_archive_rules
 
 router = APIRouter()
 
 
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def round2(value: float) -> float:
+    return float(f"{float(value or 0):.2f}")
 
 
 def clean_text(v: Optional[str]) -> Optional[str]:
@@ -57,7 +63,10 @@ def add_movement(
     )
 
 
-def lot_to_out(lot: InventoryLot, product: Product) -> InventoryLotBrowseOut:
+def lot_to_out(lot: InventoryLot, product: Product, item: Optional[Item] = None) -> InventoryLotBrowseOut:
+    linked_stock = int(item.stock or 0) if item else None
+    sealed_qty = linked_stock if linked_stock is not None and lot.opened_from_lot_id is None else int(lot.sealed_qty or 0)
+    loose_qty = linked_stock if linked_stock is not None and lot.opened_from_lot_id is not None else int(lot.loose_qty or 0)
     return InventoryLotBrowseOut(
         id=lot.id,
         product_id=lot.product_id,
@@ -69,9 +78,9 @@ def lot_to_out(lot: InventoryLot, product: Product) -> InventoryLotBrowseOut:
         mrp=float(lot.mrp or 0),
         cost_price=lot.cost_price,
         rack_number=int(lot.rack_number or 0),
-        sealed_qty=int(lot.sealed_qty or 0),
-        loose_qty=int(lot.loose_qty or 0),
-        conversion_qty=lot.conversion_qty,
+        sealed_qty=sealed_qty,
+        loose_qty=loose_qty,
+        conversion_qty=lot.conversion_qty or product.default_conversion_qty,
         loose_sale_enabled=bool(product.loose_sale_enabled),
         parent_unit_name=product.parent_unit_name,
         child_unit_name=product.child_unit_name,
@@ -94,8 +103,9 @@ def list_lots(
 ) -> List[InventoryLotBrowseOut]:
     with get_session() as session:
         stmt = (
-            select(InventoryLot, Product)
+            select(InventoryLot, Product, Item)
             .join(Product, Product.id == InventoryLot.product_id)
+            .outerjoin(Item, Item.id == InventoryLot.legacy_item_id)
             .where(InventoryLot.is_active == True, Product.is_active == True)  # noqa: E712
         )
 
@@ -109,7 +119,7 @@ def list_lots(
             stmt = stmt.where(
                 Product.loose_sale_enabled == True,  # noqa: E712
                 InventoryLot.opened_from_lot_id.is_(None),
-                InventoryLot.sealed_qty > 0,
+                Item.stock > 0,
             )
 
         qq = clean_text(q)
@@ -131,7 +141,7 @@ def list_lots(
         ).offset(offset).limit(limit)
 
         rows = session.exec(stmt).all()
-        return [lot_to_out(lot, product) for lot, product in rows]
+        return [lot_to_out(lot, product, item) for lot, product, item in rows]
 
 
 @router.get("/open-events", response_model=List[PackOpenEventOut])
@@ -158,7 +168,24 @@ def open_pack(payload: LotOpenCreate) -> PackOpenEventOut:
         raise HTTPException(status_code=400, detail="packs_opened must be greater than 0")
 
     with get_session() as session:
-        source_lot = session.get(InventoryLot, payload.lot_id)
+        source_lot = session.get(InventoryLot, payload.lot_id) if payload.lot_id else None
+        if not source_lot and payload.item_id:
+            source_item_for_lot = session.get(Item, payload.item_id)
+            if not source_item_for_lot:
+                raise HTTPException(status_code=404, detail="Item not found")
+            if not source_item_for_lot.product_id:
+                raise HTTPException(status_code=400, detail="Item is not linked to a product")
+            source_product_for_lot = session.get(Product, source_item_for_lot.product_id)
+            if not source_product_for_lot:
+                raise HTTPException(status_code=400, detail="Product not found")
+            source_lot = ensure_lot_for_inventory_item(
+                session,
+                inventory_item=source_item_for_lot,
+                product=source_product_for_lot,
+                conversion_qty=source_product_for_lot.default_conversion_qty,
+                ts=now_ts(),
+            )
+            session.commit()
         if not source_lot or not source_lot.is_active:
             raise HTTPException(status_code=404, detail="Lot not found")
         if source_lot.opened_from_lot_id is not None:
@@ -174,14 +201,15 @@ def open_pack(payload: LotOpenCreate) -> PackOpenEventOut:
         if conversion_qty <= 0:
             raise HTTPException(status_code=400, detail="Conversion quantity is missing for this lot")
 
-        if int(source_lot.sealed_qty or 0) < packs_opened:
-            raise HTTPException(status_code=400, detail="Not enough sealed stock to open")
-
         source_item = session.get(Item, source_lot.legacy_item_id) if source_lot.legacy_item_id else None
         if not source_item:
             raise HTTPException(status_code=400, detail="Legacy item link is missing for this lot")
+        if int(source_item.stock or 0) < packs_opened:
+            raise HTTPException(status_code=400, detail="Not enough sealed stock to open")
 
         loose_units_created = packs_opened * conversion_qty
+        loose_mrp = round2(float(source_lot.mrp or 0) / conversion_qty)
+        loose_cost_price = round2(float(source_lot.cost_price or 0) / conversion_qty) if source_lot.cost_price is not None else None
         ts = now_ts()
 
         loose_lot = session.exec(
@@ -192,13 +220,18 @@ def open_pack(payload: LotOpenCreate) -> PackOpenEventOut:
         ).first()
 
         if loose_lot:
-            loose_lot.loose_qty = int(loose_lot.loose_qty or 0) + loose_units_created
             loose_lot.updated_at = ts
             loose_item = session.get(Item, loose_lot.legacy_item_id) if loose_lot.legacy_item_id else None
             if not loose_item:
                 raise HTTPException(status_code=400, detail="Loose stock legacy item is missing")
             loose_item.stock = int(loose_item.stock or 0) + loose_units_created
+            loose_item.mrp = loose_mrp
+            loose_item.cost_price = float(loose_cost_price or 0)
             loose_item.updated_at = ts
+            apply_archive_rules(session, loose_item)
+            loose_lot.loose_qty = max(0, int(loose_item.stock or 0))
+            loose_lot.mrp = loose_mrp
+            loose_lot.cost_price = loose_cost_price
         else:
             loose_item = Item(
                 name=product.name,
@@ -206,8 +239,8 @@ def open_pack(payload: LotOpenCreate) -> PackOpenEventOut:
                 product_id=product.id,
                 category_id=product.category_id,
                 expiry_date=source_lot.expiry_date,
-                mrp=float(source_lot.mrp or 0),
-                cost_price=float(source_lot.cost_price or 0),
+                mrp=loose_mrp,
+                cost_price=float(loose_cost_price or 0),
                 stock=loose_units_created,
                 rack_number=int(source_lot.rack_number or 0),
                 is_archived=False,
@@ -221,8 +254,8 @@ def open_pack(payload: LotOpenCreate) -> PackOpenEventOut:
             loose_lot = InventoryLot(
                 product_id=product.id,
                 expiry_date=source_lot.expiry_date,
-                mrp=float(source_lot.mrp or 0),
-                cost_price=source_lot.cost_price,
+                mrp=loose_mrp,
+                cost_price=loose_cost_price,
                 rack_number=int(source_lot.rack_number or 0),
                 sealed_qty=0,
                 loose_qty=loose_units_created,
@@ -235,10 +268,11 @@ def open_pack(payload: LotOpenCreate) -> PackOpenEventOut:
             )
             session.add(loose_lot)
 
-        source_lot.sealed_qty = int(source_lot.sealed_qty or 0) - packs_opened
-        source_lot.updated_at = ts
         source_item.stock = int(source_item.stock or 0) - packs_opened
         source_item.updated_at = ts
+        apply_archive_rules(session, source_item)
+        source_lot.sealed_qty = max(0, int(source_item.stock or 0))
+        source_lot.updated_at = ts
 
         note = clean_text(payload.note)
         session.add(source_lot)

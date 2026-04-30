@@ -66,6 +66,27 @@ function formatSigned(value: number) {
   return `${value > 0 ? '+' : ''}${value}`
 }
 
+function reasonLabel(reason: string) {
+  const key = String(reason || '').toUpperCase()
+  const labels: Record<string, string> = {
+    INVENTORY_ADD: 'Inventory Add',
+    OPENING: 'Opening',
+    PURCHASE: 'Purchase',
+    PURCHASE_CANCEL: 'Purchase Cancel',
+    SALE: 'Sale',
+    BILL_DELETE: 'Sale Cancel',
+    BILL_RECOVER: 'Sale Restore',
+    RETURN: 'Return',
+    EXCHANGE_IN: 'Exchange Return',
+    EXCHANGE_OUT: 'Exchange Sale',
+    ADJUST: 'Stock Adjust',
+    PACK_OPEN_IN: 'Pack Open In',
+    PACK_OPEN_OUT: 'Pack Open Out',
+    RECON_ADJUST: 'Recon Adjust',
+  }
+  return labels[key] || key || '-'
+}
+
 function groupKey(it: any) {
   const name = String(it?.name ?? '').trim().toLowerCase()
   const brand = String(it?.brand ?? '').trim().toLowerCase()
@@ -370,6 +391,7 @@ export default function StockLedgerReport(props: {
           <MenuItem value="">All</MenuItem>
 
           {/* ✅ include these two so user can filter properly */}
+          <MenuItem value="INVENTORY_ADD">Inventory Add</MenuItem>
           <MenuItem value="PURCHASE">PURCHASE</MenuItem>
           <MenuItem value="PURCHASE_CANCEL">PURCHASE_CANCEL</MenuItem>
           <MenuItem value="SALE">SALE</MenuItem>
@@ -516,8 +538,7 @@ export default function StockLedgerReport(props: {
   }
 
   function displayReason(r: any) {
-    // Show exact backend reason to avoid hiding real ledger events.
-    return r?.reason || ''
+    return reasonLabel(r?.reason || '')
   }
 
   function openLedgerForGroup(g: GroupRow) {

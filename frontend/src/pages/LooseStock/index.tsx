@@ -37,6 +37,14 @@ function formatDate(dt?: string) {
   }
 }
 
+function parentUnit(lot?: InventoryLotBrowse | null) {
+  return lot?.parent_unit_name || 'Pack'
+}
+
+function childUnit(lot?: InventoryLotBrowse | null) {
+  return lot?.child_unit_name || 'Unit'
+}
+
 export default function LooseStockPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -66,7 +74,7 @@ export default function LooseStockPage() {
   const openM = useMutation({
     mutationFn: openPack,
     onSuccess: () => {
-      toast.push('Pack opened and loose stock created', 'success')
+      toast.push('Parent unit opened and loose stock created', 'success')
       queryClient.invalidateQueries({ queryKey: ['lots'] })
       queryClient.invalidateQueries({ queryKey: ['pack-open-events'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
@@ -85,16 +93,20 @@ export default function LooseStockPage() {
 
   const selectedPreview = useMemo(() => {
     if (!selectedLot) return null
-    const packs = Number(packsToOpen || 0)
+    const packs = Math.floor(Number(packsToOpen || 0))
     const conversion = Number(selectedLot.conversion_qty || 0)
     return packs > 0 && conversion > 0 ? packs * conversion : 0
   }, [selectedLot, packsToOpen])
 
   function submitOpen() {
     if (!selectedLot) return
-    const packs = Number(packsToOpen || 0)
+    const packs = Math.floor(Number(packsToOpen || 0))
     if (!Number.isFinite(packs) || packs <= 0) {
-      toast.push('Enter a valid pack count', 'error')
+      toast.push(`Enter a valid ${parentUnit(selectedLot)} count`, 'error')
+      return
+    }
+    if (packs > Number(selectedLot.sealed_qty || 0)) {
+      toast.push(`Only ${selectedLot.sealed_qty} ${parentUnit(selectedLot)} available to open.`, 'error')
       return
     }
     openM.mutate({
@@ -148,7 +160,7 @@ export default function LooseStockPage() {
                 <th>MRP</th>
                 <th>Sealed</th>
                 <th>Loose</th>
-                <th>Units / Pack</th>
+                <th>Units / Parent</th>
                 <th>Units</th>
                 <th></th>
               </tr>
@@ -174,7 +186,7 @@ export default function LooseStockPage() {
                   <td>
                     {lot.loose_sale_enabled && !lot.opened_from_lot_id && lot.sealed_qty > 0 ? (
                       <Button variant="contained" size="small" onClick={() => setSelectedLot(lot)}>
-                        Open Pack
+                        Open {parentUnit(lot)}
                       </Button>
                     ) : (
                       '-'
@@ -232,7 +244,7 @@ export default function LooseStockPage() {
       </Paper>
 
       <Dialog open={Boolean(selectedLot)} onClose={() => setSelectedLot(null)} fullWidth maxWidth="sm">
-        <DialogTitle>Open Pack</DialogTitle>
+        <DialogTitle>Open {parentUnit(selectedLot)}</DialogTitle>
         <DialogContent dividers>
           {selectedLot && (
             <Stack gap={2} mt={1}>
@@ -240,17 +252,18 @@ export default function LooseStockPage() {
                 {selectedLot.product_name}{selectedLot.brand ? ` | ${selectedLot.brand}` : ''}
               </Typography>
               <Typography color="text.secondary">
-                Available sealed stock: {selectedLot.sealed_qty} {selectedLot.parent_unit_name || 'packs'}
+                Available sealed stock: {selectedLot.sealed_qty} {parentUnit(selectedLot)}
               </Typography>
               <Typography color="text.secondary">
-                Conversion: 1 {selectedLot.parent_unit_name || 'pack'} = {selectedLot.conversion_qty || 0} {selectedLot.child_unit_name || 'loose units'}
+                Conversion: 1 {parentUnit(selectedLot)} = {selectedLot.conversion_qty || 0} {childUnit(selectedLot)}
               </Typography>
               <TextField
-                label="How many packs to open?"
+                label={`How many ${parentUnit(selectedLot)} to open?`}
                 type="number"
                 value={packsToOpen}
                 onChange={(e) => setPacksToOpen(e.target.value)}
                 fullWidth
+                inputProps={{ min: 1, max: Number(selectedLot.sealed_qty || 0), step: 1 }}
               />
               <TextField
                 label="Note"
@@ -261,7 +274,7 @@ export default function LooseStockPage() {
                 minRows={2}
               />
               <Typography>
-                Loose stock to create: <strong>{selectedPreview || 0}</strong> {selectedLot.child_unit_name || 'units'}
+                Loose stock to create: <strong>{selectedPreview || 0}</strong> {childUnit(selectedLot)}
               </Typography>
             </Stack>
           )}

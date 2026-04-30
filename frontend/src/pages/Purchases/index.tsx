@@ -100,6 +100,20 @@ function fmtDate(value?: string | null) {
   }
 }
 
+function movementReasonLabel(reason?: string | null) {
+  const key = String(reason || '').toUpperCase()
+  const labels: Record<string, string> = {
+    INVENTORY_ADD: 'Inventory Add',
+    OPENING: 'Opening',
+    PURCHASE: 'Purchase',
+    ADJUST: 'Stock Adjust',
+    RETURN: 'Return',
+    EXCHANGE_IN: 'Exchange Return',
+    PACK_OPEN_IN: 'Pack Open In',
+  }
+  return labels[key] || key || '-'
+}
+
 function incomingEntryLabel(entry: IncomingStockEntry) {
   const parts = [
     `#${entry.item_id}`,
@@ -110,7 +124,7 @@ function incomingEntryLabel(entry: IncomingStockEntry) {
     entry.expiry_date ? `Exp ${entry.expiry_date}` : '',
     `MRP ${money(entry.mrp)}`,
     `Current ${Number(entry.stock || 0)}`,
-    entry.reason || '',
+    movementReasonLabel(entry.reason),
   ].filter(Boolean)
   return parts.join(' | ')
 }
@@ -853,7 +867,7 @@ export default function PurchasesPage() {
                               <Typography variant="body2">{option.name}{option.brand ? ` | ${option.brand}` : ''}</Typography>
                             </Stack>
                             <Typography variant="caption" color="text.secondary">
-                              Incoming {fmtDate(option.incoming_at)} | Exp {option.expiry_date || '-'} | MRP {money(option.mrp)} | Current {Number(option.stock || 0)} | {option.reason}
+                              Incoming {fmtDate(option.incoming_at)} | Exp {option.expiry_date || '-'} | MRP {money(option.mrp)} | Current {Number(option.stock || 0)} | {movementReasonLabel(option.reason)}
                             </Typography>
                           </Stack>
                         </li>

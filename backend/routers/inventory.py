@@ -16,8 +16,10 @@ from backend.models import (
     Bill,
     BillItem,
     ExchangeRecord,
+    InventoryLot,
     Item,
     PackOpenEvent,
+    Product,
     Purchase,
     PurchaseItem,
     Return,
@@ -26,6 +28,7 @@ from backend.models import (
     StockAuditItem,
     StockMovement,
 )
+from backend.inventory_lot_sync import ensure_lot_for_inventory_item, sync_lot_quantity_for_item
 
 logger = logging.getLogger("api.items")
 router = APIRouter()
@@ -35,10 +38,14 @@ router = APIRouter()
 class ItemIn(BaseModel):
     name: str
     brand: Optional[str] = None
+    product_id: Optional[int] = None
+    category_id: Optional[int] = None
     expiry_date: Optional[str] = None  # "YYYY-MM-DD"
     mrp: float
+    cost_price: float = 0.0
     stock: int
     rack_number: int = 0
+    source_item_id: Optional[int] = None
 
     class Config:
         extra = "ignore"
@@ -64,11 +71,21 @@ class ItemOut(BaseModel):
     category_id: Optional[int] = None
     expiry_date: Optional[str] = None
     mrp: float
+    cost_price: float = 0.0
     stock: int
     rack_number: int
+    is_archived: bool = False
     created_at: str
     updated_at: str
     last_incoming_at: Optional[str] = None
+    inventory_lot_id: Optional[int] = None
+    opened_from_lot_id: Optional[int] = None
+    is_loose_stock: bool = False
+    stock_unit_label: Optional[str] = None
+    parent_unit_name: Optional[str] = None
+    child_unit_name: Optional[str] = None
+    conversion_qty: Optional[int] = None
+    loose_sale_enabled: bool = False
 
     class Config:
         from_attributes = True
@@ -363,6 +380,48 @@ def _attach_last_incoming(session, items: List[Item]) -> None:
     latest_by_item = {int(row[0]): row[1] for row in rows}
     for item in items:
         object.__setattr__(item, "last_incoming_at", latest_by_item.get(int(item.id)))
+
+
+def _attach_lot_metadata(session, items: List[Item]) -> None:
+    item_ids = [int(item.id) for item in items if getattr(item, "id", None) is not None]
+    if not item_ids:
+        return
+    product_ids = [int(item.product_id) for item in items if getattr(item, "product_id", None) is not None]
+
+    rows = session.exec(
+        select(InventoryLot, Product)
+        .join(Product, Product.id == InventoryLot.product_id)
+        .where(InventoryLot.legacy_item_id.in_(item_ids))
+    ).all()
+    lot_by_item = {int(lot.legacy_item_id): (lot, product) for lot, product in rows if lot.legacy_item_id is not None}
+    product_by_id: Dict[int, Product] = {}
+    if product_ids:
+        product_rows = session.exec(select(Product).where(Product.id.in_(product_ids))).all()
+        product_by_id = {int(product.id): product for product in product_rows if product.id is not None}
+
+    for item in items:
+        pair = lot_by_item.get(int(item.id))
+        if not pair:
+            product = product_by_id.get(int(item.product_id)) if getattr(item, "product_id", None) is not None else None
+            is_loose_enabled = bool(product.loose_sale_enabled) if product else False
+            object.__setattr__(item, "is_loose_stock", False)
+            object.__setattr__(item, "stock_unit_label", (product.parent_unit_name if product else None) or "Pack")
+            object.__setattr__(item, "parent_unit_name", product.parent_unit_name if product else None)
+            object.__setattr__(item, "child_unit_name", product.child_unit_name if product else None)
+            object.__setattr__(item, "conversion_qty", product.default_conversion_qty if product else None)
+            object.__setattr__(item, "loose_sale_enabled", is_loose_enabled)
+            continue
+        lot, product = pair
+        is_loose = lot.opened_from_lot_id is not None
+        unit_label = product.child_unit_name if is_loose else product.parent_unit_name
+        object.__setattr__(item, "inventory_lot_id", lot.id)
+        object.__setattr__(item, "opened_from_lot_id", lot.opened_from_lot_id)
+        object.__setattr__(item, "is_loose_stock", bool(is_loose))
+        object.__setattr__(item, "stock_unit_label", unit_label or ("Unit" if is_loose else "Pack"))
+        object.__setattr__(item, "parent_unit_name", product.parent_unit_name)
+        object.__setattr__(item, "child_unit_name", product.child_unit_name)
+        object.__setattr__(item, "conversion_qty", lot.conversion_qty or product.default_conversion_qty)
+        object.__setattr__(item, "loose_sale_enabled", bool(product.loose_sale_enabled))
 
 
 def _load_group_batches(session, *, name: Optional[str], brand: Optional[str]) -> Tuple[str, Optional[str], List[Item]]:
@@ -1140,6 +1199,7 @@ def list_items(
             stmt = base_stmt.order_by(Item.name, Item.id)
             items = session.exec(stmt).all()
             _attach_last_incoming(session, items)
+            _attach_lot_metadata(session, items)
             total = len(items)
             return {"items": items, "total": total, "next_offset": None}
 
@@ -1155,6 +1215,7 @@ def list_items(
         )
         items = session.exec(page_stmt).all()
         _attach_last_incoming(session, items)
+        _attach_lot_metadata(session, items)
 
         next_offset = (
             (page_offset + page_limit)
@@ -1507,6 +1568,8 @@ def get_item(item_id: int):
         item = session.get(Item, item_id)
         if not item:
             raise HTTPException(status_code=404, detail="Item not found")
+        _attach_last_incoming(session, [item])
+        _attach_lot_metadata(session, [item])
         return item
 
 
@@ -1518,6 +1581,8 @@ def create_item(
 ):
     if payload.mrp <= 0:
         raise HTTPException(status_code=400, detail="MRP must be > 0")
+    if float(payload.cost_price or 0) < 0:
+        raise HTTPException(status_code=400, detail="Cost price cannot be negative")
     if payload.stock is not None and payload.stock < 0:
         raise HTTPException(status_code=400, detail="Stock cannot be negative")
     if payload.rack_number is not None and int(payload.rack_number) < 0:
@@ -1527,17 +1592,44 @@ def create_item(
     brand = _norm_str(payload.brand)
     expiry = _norm_str(payload.expiry_date)
     mrp = float(payload.mrp)
+    cost_price = float(payload.cost_price or 0)
     delta_stock = int(payload.stock or 0)
     rack_no = int(payload.rack_number or 0)
+    product_id = int(payload.product_id) if payload.product_id is not None else None
+    category_id = int(payload.category_id) if payload.category_id is not None else None
+    source_item_id = int(payload.source_item_id) if payload.source_item_id is not None else None
 
     with get_session() as session:
         try:
+            source_item: Optional[Item] = None
+            source_conversion_qty: Optional[int] = None
+            if source_item_id is not None:
+                source_item = session.get(Item, source_item_id)
+                if not source_item:
+                    raise HTTPException(status_code=400, detail=f"Source batch #{source_item_id} not found")
+                if product_id is None:
+                    product_id = getattr(source_item, "product_id", None)
+                if category_id is None:
+                    category_id = getattr(source_item, "category_id", None)
+                if cost_price <= 0:
+                    cost_price = float(getattr(source_item, "cost_price", 0) or 0)
+                source_lot = session.exec(
+                    select(InventoryLot)
+                    .where(InventoryLot.legacy_item_id == source_item_id)
+                    .order_by(InventoryLot.id.asc())
+                ).first()
+                if source_lot:
+                    source_conversion_qty = source_lot.conversion_qty
+
             ts = now_ts()
             item = Item(
                 name=name,
                 brand=brand,
+                product_id=product_id,
+                category_id=category_id,
                 expiry_date=expiry,
                 mrp=mrp,
+                cost_price=cost_price,
                 stock=delta_stock,
                 rack_number=rack_no,
                 created_at=ts,
@@ -1548,22 +1640,39 @@ def create_item(
             session.commit()
             session.refresh(item)
 
+            product = session.get(Product, int(product_id)) if product_id is not None else None
+            ensure_lot_for_inventory_item(
+                session,
+                inventory_item=item,
+                product=product,
+                conversion_qty=source_conversion_qty,
+                ts=ts,
+            )
+            session.commit()
+            session.refresh(item)
+
             if int(item.stock or 0) != 0:
                 try:
                     add_movement(
                         session,
                         item_id=item.id,
                         delta=int(item.stock),
-                        reason="OPENING",
-                        ref_type="ITEM_CREATE",
-                        ref_id=item.id,
-                        note="Initial stock on item creation",
+                        reason="INVENTORY_ADD",
+                        ref_type="ITEM_COPY" if source_item_id is not None else "ITEM_CREATE",
+                        ref_id=source_item_id if source_item_id is not None else item.id,
+                        note=(
+                            f"Separate inventory add copied from batch #{source_item_id}"
+                            if source_item_id is not None
+                            else "Manual inventory add"
+                        ),
                     )
                     session.commit()
                 except Exception as e:
                     session.rollback()
                     logger.exception("Ledger insert failed (ignored). Error: %s", e)
 
+            _attach_last_incoming(session, [item])
+            _attach_lot_metadata(session, [item])
             return item
 
         except HTTPException:
@@ -1618,6 +1727,8 @@ def update_item(item_id: int, payload: ItemUpdateIn):
 
         session.commit()
         session.refresh(item)
+        _attach_last_incoming(session, [item])
+        _attach_lot_metadata(session, [item])
         return item
 
 
@@ -1660,6 +1771,7 @@ def adjust_stock(
             session.add(item)
             # ✅ archive/unarchive logic
             apply_archive_rules(session, item)
+            sync_lot_quantity_for_item(session, item, ts=item.updated_at)
             if int(delta) != 0:
                 add_movement(
                     session,
@@ -1673,6 +1785,8 @@ def adjust_stock(
 
             session.commit()
             session.refresh(item)
+            _attach_last_incoming(session, [item])
+            _attach_lot_metadata(session, [item])
             return item
 
         except HTTPException:

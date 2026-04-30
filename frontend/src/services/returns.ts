@@ -21,10 +21,21 @@ export type ListReturnsParams = {
 }
 
 // Optional typing for a return record (adjust to your API as needed)
+export type ReturnStockMeta = {
+  inventory_lot_id?: number | null
+  opened_from_lot_id?: number | null
+  is_loose_stock?: boolean
+  stock_unit_label?: string | null
+  parent_unit_name?: string | null
+  child_unit_name?: string | null
+  conversion_qty?: number | null
+  loose_sale_enabled?: boolean
+}
+
 export type ReturnRecord = {
   id: number
   source_bill_id: number
-  items: Array<{ item_id: number; quantity: number; mrp?: number; item_name?: string }>
+  items: Array<{ item_id: number; quantity: number; mrp?: number; item_name?: string; line_total?: number } & ReturnStockMeta>
   refund_mode: 'cash' | 'online' | 'credit' | 'split'
   refund_cash: number
   refund_online: number
@@ -45,7 +56,7 @@ export type ReturnSummaryRow = {
   sold: number
   already_returned: number
   remaining: number
-}
+} & ReturnStockMeta
 
 export type ExchangeRecord = {
   id: number

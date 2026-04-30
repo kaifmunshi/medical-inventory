@@ -30,6 +30,7 @@ import { createBill } from '../../services/billing'
 import { createCustomer, fetchCustomers } from '../../services/customers'
 import type { Customer } from '../../lib/types'
 import { listItems } from '../../services/inventory'
+import { openPack } from '../../services/lots'
 import { useToast } from '../../components/ui/Toaster'
 
 interface CartRow {
@@ -42,6 +43,14 @@ interface CartRow {
   stock?: number
   expiry_date?: string | null
   brand?: string | null
+  inventory_lot_id?: number | null
+  opened_from_lot_id?: number | null
+  is_loose_stock?: boolean
+  stock_unit_label?: string | null
+  parent_unit_name?: string | null
+  child_unit_name?: string | null
+  conversion_qty?: number | null
+  loose_sale_enabled?: boolean
 }
 
 function formatExpiry(exp?: string | null) {
@@ -62,7 +71,50 @@ function toIsoDateOnly(exp?: string | null) {
 function buildGroupKey(it: any) {
   const name = String(it?.name ?? '').trim().toLowerCase()
   const brand = String(it?.brand ?? '').trim().toLowerCase()
-  return `${name}__${brand}`
+  const kind = it?.is_loose_stock ? 'loose' : 'pack'
+  if (it?.loose_sale_enabled || it?.is_loose_stock) return `${name}__${brand}__${kind}__${it?.id}`
+  return `${name}__${brand}__${kind}`
+}
+
+function itemKindLabel(it: any) {
+  return it?.is_loose_stock ? 'Loose' : 'Pack'
+}
+
+function itemUnitLabel(it: any) {
+  return String(
+    it?.stock_unit_label ||
+    (it?.is_loose_stock ? it?.child_unit_name : it?.parent_unit_name) ||
+    (it?.is_loose_stock ? 'Unit' : 'Pack')
+  )
+}
+
+function itemStockText(it: any) {
+  return `${Number(it?.stock || 0)} ${itemUnitLabel(it)}`
+}
+
+function canOpenForLoose(it: any) {
+  return Boolean(
+    it &&
+    !it.is_loose_stock &&
+    it.loose_sale_enabled &&
+    (it.inventory_lot_id || it.id) &&
+    Number(it.stock || 0) > 0
+  )
+}
+
+function findOpenedLooseItem(rows: any[], parent: any, looseItemId?: number | null) {
+  if (looseItemId) {
+    const byId = rows.find((row) => Number(row?.id) === Number(looseItemId))
+    if (byId) return byId
+  }
+  const nameKey = String(parent?.name || '').trim().toLowerCase()
+  const brandKey = String(parent?.brand || '').trim().toLowerCase()
+  return rows.find((row) => (
+    Boolean(row?.is_loose_stock) &&
+    Number(row?.stock || 0) > 0 &&
+    String(row?.name || '').trim().toLowerCase() === nameKey &&
+    String(row?.brand || '').trim().toLowerCase() === brandKey
+  )) || null
 }
 
 function nowLocalDateInput() {
@@ -146,6 +198,8 @@ export default function Billing() {
   const [pendingQtyFocusRow, setPendingQtyFocusRow] = useState<number | null>(null)
   const qtyInputRefs = useRef<Record<number, HTMLInputElement | null>>({})
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [openLooseDraft, setOpenLooseDraft] = useState<{ item: any; rowIndex: number } | null>(null)
+  const [openLooseQty, setOpenLooseQty] = useState('1')
 
   const [tax, setTax] = useState(0)
   const [customerQ, setCustomerQ] = useState('')
@@ -243,6 +297,59 @@ export default function Billing() {
       toast.push(String(msg), 'error')
     },
   })
+
+  const mOpenParentPacks = useMutation({
+    mutationFn: async ({ item, rowIndex, packs }: { item: any; rowIndex: number; packs: number }) => {
+      if (!item?.inventory_lot_id && !item?.id) throw new Error('Parent item link is missing')
+      const event = await openPack({
+        lot_id: item.inventory_lot_id ? Number(item.inventory_lot_id) : undefined,
+        item_id: item.inventory_lot_id ? undefined : Number(item.id),
+        packs_opened: packs,
+        note: 'Opened from billing for loose sale',
+      })
+      const freshRows = await listItems(String(item.name || ''))
+      return {
+        rowIndex,
+        packs,
+        loose: findOpenedLooseItem(freshRows as any[], item, event.loose_item_id),
+      }
+    },
+    onSuccess: ({ loose, rowIndex, packs }) => {
+      queryClient.invalidateQueries({ queryKey: ['billing-grid-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['pack-open-events'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
+      setOpenLooseDraft(null)
+      setOpenLooseQty('1')
+      if (loose) {
+        selectItemAtRow(rowIndex, loose)
+        toast.push(`Opened ${packs} parent unit(s) and selected loose stock.`, 'success')
+      } else {
+        toast.push(`Opened ${packs} parent unit(s). Search again and select the loose row.`, 'success')
+      }
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Could not open parent unit'
+      toast.push(String(msg), 'error')
+    },
+  })
+
+  function submitOpenLooseDraft() {
+    if (!openLooseDraft) return
+    const packs = Math.floor(Number(openLooseQty || 0))
+    const stock = Number(openLooseDraft.item?.stock || 0)
+    if (!Number.isFinite(packs) || packs <= 0) {
+      toast.push('Enter a valid parent unit count', 'warning')
+      return
+    }
+    if (packs > stock) {
+      toast.push(`Only ${stock} ${itemUnitLabel(openLooseDraft.item)} available to open.`, 'warning')
+      return
+    }
+    mOpenParentPacks.mutate({ item: openLooseDraft.item, rowIndex: openLooseDraft.rowIndex, packs })
+  }
 
   function handleNewCustomerPhoneChange(raw: string) {
     const digits = raw.replace(/\D/g, '').slice(0, 10)
@@ -651,6 +758,14 @@ export default function Billing() {
                 stock: it.stock,
                 expiry_date: it.expiry_date ?? null,
                 brand: it.brand ?? null,
+                inventory_lot_id: it.inventory_lot_id ?? null,
+                opened_from_lot_id: it.opened_from_lot_id ?? null,
+                is_loose_stock: Boolean(it.is_loose_stock),
+                stock_unit_label: it.stock_unit_label ?? null,
+                parent_unit_name: it.parent_unit_name ?? null,
+                child_unit_name: it.child_unit_name ?? null,
+                conversion_qty: it.conversion_qty ?? null,
+                loose_sale_enabled: Boolean(it.loose_sale_enabled),
               }
             : r
         )
@@ -671,6 +786,14 @@ export default function Billing() {
           stock: it.stock,
           expiry_date: it.expiry_date ?? null,
           brand: it.brand ?? null,
+          inventory_lot_id: it.inventory_lot_id ?? null,
+          opened_from_lot_id: it.opened_from_lot_id ?? null,
+          is_loose_stock: Boolean(it.is_loose_stock),
+          stock_unit_label: it.stock_unit_label ?? null,
+          parent_unit_name: it.parent_unit_name ?? null,
+          child_unit_name: it.child_unit_name ?? null,
+          conversion_qty: it.conversion_qty ?? null,
+          loose_sale_enabled: Boolean(it.loose_sale_enabled),
         },
       ]
       setStockError(prev.length)
@@ -783,6 +906,14 @@ export default function Billing() {
               stock: Number(it.stock ?? 0),
               expiry_date: it.expiry_date ?? null,
               brand: it.brand ?? null,
+              inventory_lot_id: it.inventory_lot_id ?? null,
+              opened_from_lot_id: it.opened_from_lot_id ?? null,
+              is_loose_stock: Boolean(it.is_loose_stock),
+              stock_unit_label: it.stock_unit_label ?? null,
+              parent_unit_name: it.parent_unit_name ?? null,
+              child_unit_name: it.child_unit_name ?? null,
+              conversion_qty: it.conversion_qty ?? null,
+              loose_sale_enabled: Boolean(it.loose_sale_enabled),
             }
           : r
       )
@@ -1045,6 +1176,14 @@ export default function Billing() {
                               mrp: r.mrp,
                               stock: r.stock ?? 0,
                               expiry_date: r.expiry_date ?? null,
+                              inventory_lot_id: r.inventory_lot_id ?? null,
+                              opened_from_lot_id: r.opened_from_lot_id ?? null,
+                              is_loose_stock: Boolean(r.is_loose_stock),
+                              stock_unit_label: r.stock_unit_label ?? null,
+                              parent_unit_name: r.parent_unit_name ?? null,
+                              child_unit_name: r.child_unit_name ?? null,
+                              conversion_qty: r.conversion_qty ?? null,
+                              loose_sale_enabled: Boolean(r.loose_sale_enabled),
                             }
                           : null)
                       }
@@ -1074,15 +1213,42 @@ export default function Billing() {
                               Number(option?.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.12)' : undefined,
                           }}
                         >
-                          <Stack sx={{ py: 0.5, width: '100%' }}>
-                            <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                              {option.name}
-                              {option.brand ? ` (${option.brand})` : ''}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {option.brand ? `${option.brand} | ` : ''}MRP ₹{Number(option.mrp || 0).toFixed(2)} | Stock {Number(option.stock || 0)} | Exp {formatExpiry(option.expiry_date)}
-                            </Typography>
-                          </Stack>
+                          <Box sx={{ py: 0.5, width: '100%', display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                            <Stack sx={{ minWidth: 0, flex: 1 }}>
+                              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                {option.name}
+                                {option.brand ? ` (${option.brand})` : ''}
+                                {` - ${itemKindLabel(option)}`}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                #{option.id} | {option.brand ? `${option.brand} | ` : ''}MRP ₹{Number(option.mrp || 0).toFixed(2)} | Stock {itemStockText(option)} | Exp {formatExpiry(option.expiry_date)}
+                              </Typography>
+                            </Stack>
+                            {canOpenForLoose(option) ? (
+                              <Button
+                                type="button"
+                                size="small"
+                                variant="outlined"
+                                disabled={mOpenParentPacks.isPending}
+                                onPointerDown={(e) => {
+                                  e.stopPropagation()
+                                }}
+                                onMouseDown={(e) => {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                }}
+                                onClick={(e) => {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                  setOpenLooseDraft({ item: option, rowIndex: i })
+                                  setOpenLooseQty('1')
+                                }}
+                                sx={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+                              >
+                                {mOpenParentPacks.isPending ? 'Opening...' : `Open ${itemUnitLabel(option)}`}
+                              </Button>
+                            ) : null}
+                          </Box>
                         </li>
                       )}
                       sx={GRID_INPUT_SX}
@@ -1092,7 +1258,14 @@ export default function Billing() {
                           size="small"
                           placeholder="Search medicine..."
                           sx={GRID_INPUT_SX}
-                          helperText={Number(r.item_id) > 0 && String(r.brand || '').trim() ? `${r.brand}` : ''}
+                          helperText={
+                            Number(r.item_id) > 0
+                              ? [
+                                  String(r.brand || '').trim(),
+                                  `${itemKindLabel(r)} stock: ${itemStockText(r)}`,
+                                ].filter(Boolean).join(' | ')
+                              : ''
+                          }
                           FormHelperTextProps={{
                             sx: {
                               color: 'text.secondary',
@@ -1414,6 +1587,34 @@ export default function Billing() {
       </Paper>
 
       <ItemPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={addRow} />
+
+      <Dialog open={Boolean(openLooseDraft)} onClose={() => setOpenLooseDraft(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Open {openLooseDraft ? itemUnitLabel(openLooseDraft.item) : 'Parent Unit'}</DialogTitle>
+        <DialogContent>
+          <Box sx={{ pt: 1 }}>
+            <TextField
+              autoFocus
+              fullWidth
+              label={`How many ${openLooseDraft ? itemUnitLabel(openLooseDraft.item) : 'parent units'}?`}
+              type="number"
+              value={openLooseQty}
+              onChange={(e) => setOpenLooseQty(e.target.value)}
+              inputProps={{ min: 1, max: Number(openLooseDraft?.item?.stock || 0), step: 1 }}
+              helperText={
+                openLooseDraft
+                  ? `Available ${itemUnitLabel(openLooseDraft.item)}: ${Number(openLooseDraft.item?.stock || 0)}`
+                  : ''
+              }
+            />
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenLooseDraft(null)}>Cancel</Button>
+          <Button variant="contained" onClick={submitOpenLooseDraft} disabled={mOpenParentPacks.isPending}>
+            {mOpenParentPacks.isPending ? 'Opening...' : 'Open'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog open={addCustomerOpen} onClose={() => setAddCustomerOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Add Customer</DialogTitle>

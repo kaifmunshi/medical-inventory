@@ -38,6 +38,21 @@ class PurchaseItemsReplace(SQLModel):
     items: List[PurchaseItemIn]
 
 
+class SupplierPaymentAllocationIn(SQLModel):
+    purchase_id: int
+    amount: float
+
+
+class SupplierPaymentCreate(SQLModel):
+    mode: str = "cash"
+    cash_amount: float = 0.0
+    online_amount: float = 0.0
+    note: Optional[str] = None
+    payment_date: Optional[str] = None
+    is_writeoff: bool = False
+    allocations: List[SupplierPaymentAllocationIn]
+
+
 STOCK_SOURCE_CREATED = "CREATED"
 STOCK_SOURCE_ATTACHED = "ATTACHED"
 
@@ -66,6 +81,41 @@ def clean_date(v: Optional[str]) -> Optional[str]:
 
 def round2(x: Any) -> float:
     return float(f"{float(x or 0):.2f}")
+
+
+def normalize_payment_mode(mode: Optional[str], amount: float, cash_amount: float, online_amount: float, is_writeoff: bool) -> tuple[str, float, float, float]:
+    total = round2(amount)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="amount must be greater than 0")
+
+    if is_writeoff:
+        return "writeoff", total, 0.0, 0.0
+
+    normalized = str(mode or "cash").strip().lower()
+    if normalized not in {"cash", "online", "split"}:
+        raise HTTPException(status_code=400, detail="mode must be cash, online, or split")
+
+    cash = round2(cash_amount)
+    online = round2(online_amount)
+    if cash < 0 or online < 0:
+        raise HTTPException(status_code=400, detail="cash_amount and online_amount cannot be negative")
+
+    if cash <= 0 and online <= 0:
+        if normalized == "online":
+            online = total
+        else:
+            cash = total
+
+    if normalized == "cash" and online != 0:
+        raise HTTPException(status_code=400, detail="online_amount must be 0 for cash mode")
+    if normalized == "online" and cash != 0:
+        raise HTTPException(status_code=400, detail="cash_amount must be 0 for online mode")
+    if normalized == "split" and cash + online <= 0:
+        raise HTTPException(status_code=400, detail="split mode requires cash or online amount")
+    if abs(round2(cash + online) - total) > 0.01:
+        raise HTTPException(status_code=400, detail="cash_amount + online_amount must equal amount")
+
+    return normalized, total, cash, online
 
 
 def ensure_supplier(session, party_id: int) -> Party:
@@ -280,11 +330,12 @@ def add_stock_movement(
     ref_type: Optional[str],
     ref_id: Optional[int],
     note: Optional[str],
+    ts: Optional[str] = None,
 ) -> None:
     session.add(
         StockMovement(
             item_id=int(item_id),
-            ts=now_ts(),
+            ts=ts or now_ts(),
             delta=int(delta),
             reason=str(reason),
             ref_type=ref_type,
@@ -507,11 +558,26 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
 
         paid_amount = 0.0
         writeoff_amount = 0.0
+        prepared_payments = []
         for payment in payload.payments:
-            amount = round2(payment.amount)
-            if amount <= 0:
-                raise HTTPException(status_code=400, detail="Payment amount must be greater than 0")
-            if payment.is_writeoff:
+            mode, amount, cash_amount, online_amount = normalize_payment_mode(
+                payment.mode,
+                payment.amount,
+                payment.cash_amount,
+                payment.online_amount,
+                bool(payment.is_writeoff),
+            )
+            prepared_payments.append(
+                {
+                    "mode": mode,
+                    "amount": amount,
+                    "cash_amount": cash_amount,
+                    "online_amount": online_amount,
+                    "note": clean_text(payment.note),
+                    "is_writeoff": bool(payment.is_writeoff),
+                }
+            )
+            if bool(payment.is_writeoff):
                 writeoff_amount = round2(writeoff_amount + amount)
             else:
                 paid_amount = round2(paid_amount + amount)
@@ -527,6 +593,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             payment_status = "PAID"
 
         ts = now_ts()
+        purchase_stock_ts = f"{invoice_date}T00:00:00"
         purchase = Purchase(
             party_id=supplier.id,
             invoice_number=invoice_number,
@@ -574,6 +641,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     ref_type="PURCHASE",
                     ref_id=int(purchase.id),
                     note=f"Linked existing inventory to purchase {invoice_number}",
+                    ts=purchase_stock_ts,
                 )
             else:
                 inventory_item = Item(
@@ -600,6 +668,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     ref_type="PURCHASE",
                     ref_id=int(purchase.id),
                     note=f"Purchase {invoice_number}",
+                    ts=purchase_stock_ts,
                 )
                 inventory_lot = create_inventory_lot(
                     session,
@@ -637,13 +706,16 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             session.add(purchase_item)
 
         payment_ts = f"{invoice_date}T00:00:00"
-        for payment in payload.payments:
+        for payment in prepared_payments:
             payment_row = PurchasePayment(
                 purchase_id=purchase.id,
                 paid_at=payment_ts,
-                amount=round2(payment.amount),
-                note=clean_text(payment.note),
-                is_writeoff=bool(payment.is_writeoff),
+                mode=payment["mode"],
+                amount=payment["amount"],
+                cash_amount=payment["cash_amount"],
+                online_amount=payment["online_amount"],
+                note=payment["note"],
+                is_writeoff=bool(payment["is_writeoff"]),
                 is_deleted=False,
                 deleted_at=None,
             )
@@ -671,6 +743,8 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 bool(payment.is_writeoff),
                 payment.note,
                 payment.paid_at,
+                float(getattr(payment, "cash_amount", 0) or 0),
+                float(getattr(payment, "online_amount", 0) or 0),
             )
         session.commit()
         return make_purchase_out(session, purchase)
@@ -804,11 +878,140 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
         return make_purchase_out(session, row)
 
 
+@router.post("/supplier-payment/{party_id}", response_model=List[PurchaseOut])
+def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[PurchaseOut]:
+    if not payload.allocations:
+        raise HTTPException(status_code=400, detail="At least one purchase allocation is required")
+
+    allocation_map: Dict[int, float] = {}
+    for allocation in payload.allocations:
+        purchase_id = int(allocation.purchase_id or 0)
+        amount = round2(allocation.amount)
+        if purchase_id <= 0:
+            raise HTTPException(status_code=400, detail="purchase_id is required")
+        if amount <= 0:
+            raise HTTPException(status_code=400, detail="Allocation amounts must be greater than 0")
+        allocation_map[purchase_id] = round2(allocation_map.get(purchase_id, 0.0) + amount)
+
+    allocation_total = round2(sum(allocation_map.values()))
+    mode, total_amount, cash_amount, online_amount = normalize_payment_mode(
+        payload.mode,
+        allocation_total,
+        payload.cash_amount,
+        payload.online_amount,
+        bool(payload.is_writeoff),
+    )
+
+    payment_ts = payload.payment_date
+    if payment_ts:
+        payment_ts = clean_date(payment_ts)
+        payment_ts = f"{payment_ts}T00:00:00"
+    else:
+        payment_ts = now_ts()
+
+    with get_session() as session:
+        supplier = ensure_supplier(session, party_id)
+        assert_financial_year_unlocked(session, payment_ts, context="Supplier payment")
+
+        purchase_ids = list(allocation_map.keys())
+        rows = session.exec(
+            select(Purchase)
+            .where(Purchase.id.in_(purchase_ids))
+            .where(Purchase.is_deleted == False)  # noqa: E712
+        ).all()
+        purchases_by_id = {int(row.id): row for row in rows if row.id is not None}
+
+        missing_ids = [purchase_id for purchase_id in purchase_ids if purchase_id not in purchases_by_id]
+        if missing_ids:
+            raise HTTPException(status_code=404, detail=f"Purchase not found: {missing_ids[0]}")
+
+        for purchase_id, amount in allocation_map.items():
+            row = purchases_by_id[purchase_id]
+            if int(row.party_id) != int(supplier.id):
+                raise HTTPException(status_code=400, detail=f"Purchase {purchase_id} does not belong to this supplier")
+            outstanding = round2(
+                float(row.total_amount or 0)
+                - float(row.paid_amount or 0)
+                - float(row.writeoff_amount or 0)
+            )
+            if amount > outstanding + 0.0001:
+                raise HTTPException(status_code=400, detail=f"Allocation for purchase {purchase_id} exceeds outstanding amount")
+
+        cash_remaining = cash_amount
+        online_remaining = online_amount
+        allocations = list(allocation_map.items())
+        for index, (purchase_id, amount) in enumerate(allocations):
+            row = purchases_by_id[purchase_id]
+            is_last = index == len(allocations) - 1
+            if bool(payload.is_writeoff):
+                cash_share = 0.0
+                online_share = 0.0
+            elif is_last:
+                cash_share = round2(cash_remaining)
+                online_share = round2(online_remaining)
+            else:
+                cash_share = round2((cash_amount / total_amount) * amount) if total_amount > 0 else 0.0
+                cash_share = min(cash_remaining, max(0.0, cash_share))
+                online_share = round2(amount - cash_share)
+                if online_share > online_remaining:
+                    online_share = round2(online_remaining)
+                    cash_share = round2(amount - online_share)
+                cash_share = max(0.0, cash_share)
+                online_share = max(0.0, online_share)
+
+            payment = PurchasePayment(
+                purchase_id=row.id,
+                paid_at=payment_ts,
+                mode=mode,
+                amount=amount,
+                cash_amount=cash_share,
+                online_amount=online_share,
+                note=clean_text(payload.note),
+                is_writeoff=bool(payload.is_writeoff),
+                is_deleted=False,
+                deleted_at=None,
+            )
+            session.add(payment)
+            session.flush()
+
+            recompute_purchase_payment_state(session, row)
+            session.add(row)
+            post_purchase_payment_voucher(
+                session,
+                row,
+                supplier,
+                int(payment.id or 0),
+                float(payment.amount or 0),
+                bool(payment.is_writeoff),
+                payment.note,
+                payment.paid_at,
+                float(payment.cash_amount or 0),
+                float(payment.online_amount or 0),
+            )
+            log_audit(
+                session,
+                entity_type="PURCHASE_PAYMENT",
+                entity_id=int(payment.id),
+                action="CREATE",
+                note=f"Added supplier payment to purchase #{row.id}",
+                details={"purchase_id": row.id, "amount": payment.amount, "mode": payment.mode, "is_writeoff": bool(payment.is_writeoff)},
+            )
+            cash_remaining = round2(cash_remaining - cash_share)
+            online_remaining = round2(online_remaining - online_share)
+
+        session.commit()
+        return [make_purchase_out(session, purchases_by_id[purchase_id]) for purchase_id, _amount in allocations]
+
+
 @router.post("/{purchase_id}/payments", response_model=PurchaseOut)
 def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> PurchaseOut:
-    amount = round2(payload.amount)
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="amount must be greater than 0")
+    mode, amount, cash_amount, online_amount = normalize_payment_mode(
+        payload.mode,
+        payload.amount,
+        payload.cash_amount,
+        payload.online_amount,
+        bool(payload.is_writeoff),
+    )
 
     with get_session() as session:
         row = session.get(Purchase, purchase_id)
@@ -834,7 +1037,10 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
         payment = PurchasePayment(
             purchase_id=row.id,
             paid_at=paid_at,
+            mode=mode,
             amount=amount,
+            cash_amount=cash_amount,
+            online_amount=online_amount,
             note=clean_text(payload.note),
             is_writeoff=bool(payload.is_writeoff),
             is_deleted=False,
@@ -862,6 +1068,8 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
             bool(payment.is_writeoff),
             payment.note,
             payment.paid_at,
+            float(getattr(payment, "cash_amount", 0) or 0),
+            float(getattr(payment, "online_amount", 0) or 0),
         )
         session.commit()
         session.refresh(row)
@@ -962,6 +1170,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                 }
             )
 
+        purchase_stock_ts = f"{purchase.invoice_date}T00:00:00"
         for purchase_item, inventory_item in touched:
             purchase_item_qty = purchase_item_total_qty(purchase_item)
             if purchase_item_stock_source(purchase_item) == STOCK_SOURCE_ATTACHED:
@@ -973,6 +1182,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     ref_type="PURCHASE",
                     ref_id=int(purchase.id),
                     note=f"Removed existing inventory link from purchase {purchase.invoice_number}",
+                    ts=purchase_stock_ts,
                 )
             else:
                 inventory_item.stock = 0
@@ -995,6 +1205,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     ref_type="PURCHASE",
                     ref_id=int(purchase.id),
                     note=f"Replaced items on purchase {purchase.invoice_number}",
+                    ts=purchase_stock_ts,
                 )
             session.delete(purchase_item)
 
@@ -1026,6 +1237,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     ref_type="PURCHASE",
                     ref_id=int(purchase.id),
                     note=f"Linked existing inventory to purchase {purchase.invoice_number}",
+                    ts=purchase_stock_ts,
                 )
             else:
                 inventory_item = Item(
@@ -1052,6 +1264,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     ref_type="PURCHASE",
                     ref_id=int(purchase.id),
                     note=f"Purchase {purchase.invoice_number}",
+                    ts=purchase_stock_ts,
                 )
                 inventory_lot = create_inventory_lot(
                     session,
@@ -1127,6 +1340,7 @@ def cancel_purchase(purchase_id: int) -> PurchaseOut:
             raise HTTPException(status_code=404, detail="Purchase not found")
         assert_financial_year_unlocked(session, purchase.invoice_date, context="Purchase cancel")
 
+        purchase_stock_ts = f"{purchase.invoice_date}T00:00:00"
         items = get_purchase_items(session, purchase_id)
         for item in items:
             qty = purchase_item_total_qty(item)
@@ -1144,6 +1358,7 @@ def cancel_purchase(purchase_id: int) -> PurchaseOut:
                     ref_type="PURCHASE",
                     ref_id=int(purchase.id),
                     note=f"Cancelled existing inventory link for purchase {purchase.invoice_number}",
+                    ts=purchase_stock_ts,
                 )
             else:
                 inventory_item = assert_purchase_item_untouched(session, item)
@@ -1167,6 +1382,7 @@ def cancel_purchase(purchase_id: int) -> PurchaseOut:
                     ref_type="PURCHASE",
                     ref_id=int(purchase.id),
                     note=f"Cancelled purchase {purchase.invoice_number}",
+                    ts=purchase_stock_ts,
                 )
 
         purchase.is_deleted = True

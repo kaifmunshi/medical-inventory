@@ -66,7 +66,6 @@ export default function ItemForm({
     register,
     handleSubmit,
     reset,
-    watch,
     formState: { errors, isSubmitting },
   } = useForm<ItemFormValues>({
     resolver: zodResolver(itemSchema),
@@ -135,24 +134,8 @@ export default function ItemForm({
     })
   }
 
-  // Watch fields to decide behavior
-  const wName = watch('name')
-  const wBrand = watch('brand')
-  const wExpiry = watch('expiry_date')
-  const wMrp = watch('mrp')
-
-  // ✅ Decide if this is "merge into existing" or "new batch"
-  const willMergeIntoPicked = React.useMemo(() => {
-    if (!pickedExisting || isEditMode) return false
-    const sameName = norm(wName) === norm(pickedExisting?.name)
-    const sameBrand = norm(wBrand) === norm(pickedExisting?.brand)
-    const sameExpiry = toIsoDateOnly(wExpiry) === toIsoDateOnly(pickedExisting?.expiry_date)
-    const sameMrp = Number(wMrp) === Number(pickedExisting?.mrp)
-    return sameName && sameBrand && sameExpiry && sameMrp
-  }, [pickedExisting, isEditMode, wName, wBrand, wExpiry, wMrp])
-
-  // ✅ Lock only Name/Brand when batch is picked (so user never has to retype),
-  // but allow changing Expiry/MRP to create a new batch.
+  // ✅ Lock only Name/Brand when batch is picked (so user never has to retype).
+  // Saving still creates a separate batch row.
   const lockNameBrand = Boolean(pickedExisting) && !isEditMode
 
   // -----------------------------
@@ -282,7 +265,7 @@ export default function ItemForm({
             <>
               <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
                 <Typography variant="body2" sx={{ fontWeight: 800 }}>
-                  Find existing batch
+                  Copy existing batch
                 </Typography>
 
                 <FormControlLabel
@@ -417,13 +400,11 @@ export default function ItemForm({
                   }}
                 >
                   <Typography variant="body2" sx={{ fontWeight: 800 }}>
-                    {willMergeIntoPicked ? 'Existing batch selected' : 'New batch (from selected)'}
+                    Template batch selected
                   </Typography>
 
                   <Typography variant="caption" color="text.secondary">
-                    {willMergeIntoPicked
-                      ? 'Saving will add stock to this batch (same name + brand + expiry + MRP).'
-                      : 'You changed expiry/MRP. Saving will create a NEW batch with same name/brand.'}
+                    Selected batch only prefills details. Saving will create a separate inventory batch row.
                   </Typography>
 
                   {pickedStock <= 0 && (
@@ -502,9 +483,7 @@ export default function ItemForm({
           />
 
           <TextField
-            label={
-              pickedExisting && !isEditMode && willMergeIntoPicked ? 'Add Stock (+)' : 'Stock'
-            }
+            label="Stock"
             type="number"
             {...register('stock', { valueAsNumber: true })}
             InputLabelProps={{ shrink: true }}
@@ -516,9 +495,7 @@ export default function ItemForm({
               (isEditMode
                 ? 'Stock edits are locked here. Use Adjust Stock or transaction flows.'
                 : pickedExisting
-                  ? willMergeIntoPicked
-                    ? 'Enter quantity to add into selected batch'
-                    : 'Opening stock for NEW batch'
+                  ? 'Opening stock for separate NEW batch'
                   : '')
             }
           />

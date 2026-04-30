@@ -175,7 +175,9 @@ export default function CustomerLedgerPage() {
   const adjustments = receiptAdjustmentsQ.data || []
   const totalOutstanding = ledgerRows.reduce((sum, row) => sum + Number(row.outstanding_amount || 0), 0)
   const adjustmentTotal = Object.values(adjustmentDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
-  const receiptTotal = Number(cashAmount || 0) + Number(onlineAmount || 0)
+  const receiptCashAmount = mode === 'online' ? 0 : Number(cashAmount || 0)
+  const receiptOnlineAmount = mode === 'cash' ? 0 : Number(onlineAmount || 0)
+  const receiptTotal = receiptCashAmount + receiptOnlineAmount
   const onAccountAmount = Math.max(0, receiptTotal - adjustmentTotal)
 
   const adjustmentMap = useMemo(() => {
@@ -254,6 +256,11 @@ export default function CustomerLedgerPage() {
     setAdjustmentDrafts(
       Object.fromEntries(openBills.map((bill) => [Number(bill.bill_id), '0'])),
     )
+    setMode('cash')
+    setCashAmount('0')
+    setOnlineAmount('0')
+    setPaymentDate(today)
+    setNote('')
     setReceiptOpen(true)
   }
 
@@ -285,14 +292,34 @@ export default function CustomerLedgerPage() {
     queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
   }
 
+  function renderBillRefs(text: string) {
+    const raw = String(text || '-')
+    if (raw === '-') return raw
+    return raw.split(/(Bill #\d+)/g).map((part, index) => {
+      const match = /^Bill #(\d+)$/.exec(part)
+      if (!match) return part
+      return (
+        <Link
+          key={`${part}-${index}`}
+          component="button"
+          underline="hover"
+          onClick={() => openBillDetail(Number(match[1]))}
+          sx={{ fontWeight: 600, verticalAlign: 'baseline' }}
+        >
+          {part}
+        </Link>
+      )
+    })
+  }
+
   function saveReceipt() {
     if (!selectedParty?.id) return
     receiptM.mutate({
       partyId: Number(selectedParty.id),
       payload: {
         mode,
-        cash_amount: Number(cashAmount || 0),
-        online_amount: Number(onlineAmount || 0),
+        cash_amount: receiptCashAmount,
+        online_amount: receiptOnlineAmount,
         payment_date: paymentDate,
         note: note.trim() || undefined,
         adjustments: openBills
@@ -488,7 +515,7 @@ export default function CustomerLedgerPage() {
                     <td>{money(receipt.total)}</td>
                     <td>{money(receipt.adjusted)}</td>
                     <td>{money(receipt.onAccount)}</td>
-                    <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{receipt.allocation}</td>
+	                    <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{renderBillRefs(receipt.allocation)}</td>
                     <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{receipt.note || '-'}</td>
                   </tr>
                 )
@@ -512,13 +539,38 @@ export default function CustomerLedgerPage() {
         <DialogContent dividers>
           <Stack gap={2}>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
-              <TextField select label="Mode" value={mode} onChange={(e) => setMode(e.target.value as 'cash' | 'online' | 'split')} fullWidth>
-                <MenuItem value="cash">Cash</MenuItem>
-                <MenuItem value="online">Online</MenuItem>
-                <MenuItem value="split">Split</MenuItem>
-              </TextField>
-              <TextField label="Cash Amount" type="number" value={cashAmount} onChange={(e) => setCashAmount(e.target.value)} fullWidth />
-              <TextField label="Online Amount" type="number" value={onlineAmount} onChange={(e) => setOnlineAmount(e.target.value)} fullWidth />
+	              <TextField
+	                select
+	                label="Mode"
+	                value={mode}
+	                onChange={(e) => {
+	                  const next = e.target.value as 'cash' | 'online' | 'split'
+	                  setMode(next)
+	                  if (next === 'cash') setOnlineAmount('0')
+	                  if (next === 'online') setCashAmount('0')
+	                }}
+	                fullWidth
+	              >
+	                <MenuItem value="cash">Cash</MenuItem>
+	                <MenuItem value="online">Online</MenuItem>
+	                <MenuItem value="split">Split</MenuItem>
+	              </TextField>
+	              <TextField
+	                label="Cash Amount"
+	                type="number"
+	                value={mode === 'online' ? '0' : cashAmount}
+	                onChange={(e) => setCashAmount(e.target.value)}
+	                disabled={mode === 'online'}
+	                fullWidth
+	              />
+	              <TextField
+	                label="Online Amount"
+	                type="number"
+	                value={mode === 'cash' ? '0' : onlineAmount}
+	                onChange={(e) => setOnlineAmount(e.target.value)}
+	                disabled={mode === 'cash'}
+	                fullWidth
+	              />
               <TextField label="Date" type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
             </Stack>
             <TextField label="Note" value={note} onChange={(e) => setNote(e.target.value)} multiline minRows={2} fullWidth />
@@ -537,7 +589,16 @@ export default function CustomerLedgerPage() {
                 <tbody>
                   {openBills.map((bill) => (
                     <tr key={bill.bill_id}>
-                      <td>{bill.bill_id}</td>
+	                      <td>
+	                        <Link
+	                          component="button"
+	                          underline="hover"
+	                          onClick={() => openBillDetail(Number(bill.bill_id))}
+	                          sx={{ fontWeight: 600 }}
+	                        >
+	                          {bill.bill_id}
+	                        </Link>
+	                      </td>
                       <td>{bill.bill_date}</td>
                       <td>{money(bill.outstanding_amount)}</td>
                       <td>

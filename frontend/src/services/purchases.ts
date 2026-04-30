@@ -25,9 +25,22 @@ export interface PurchaseUpdatePayload {
 
 export interface PurchasePaymentCreatePayload {
   amount: number
+  mode?: 'cash' | 'online' | 'split' | 'writeoff'
+  cash_amount?: number
+  online_amount?: number
   note?: string
   paid_at?: string
   is_writeoff?: boolean
+}
+
+export interface SupplierPaymentCreatePayload {
+  mode: 'cash' | 'online' | 'split'
+  cash_amount?: number
+  online_amount?: number
+  note?: string
+  payment_date?: string
+  is_writeoff?: boolean
+  allocations: Array<{ purchase_id: number; amount: number }>
 }
 
 export async function createPurchase(payload: PurchaseCreatePayload): Promise<Purchase> {
@@ -58,6 +71,11 @@ export async function updatePurchase(id: number, payload: PurchaseUpdatePayload)
 
 export async function addPurchasePayment(id: number, payload: PurchasePaymentCreatePayload): Promise<Purchase> {
   const res = await api.post<Purchase>(`/purchases/${id}/payments`, payload)
+  return res.data
+}
+
+export async function addSupplierPayment(id: number, payload: SupplierPaymentCreatePayload): Promise<Purchase[]> {
+  const res = await api.post<Purchase[]>(`/purchases/supplier-payment/${id}`, payload)
   return res.data
 }
 

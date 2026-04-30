@@ -8,7 +8,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel
 from backend.utils.archive_rules import apply_archive_rules
-from sqlalchemy import case, func, or_, exists
+from sqlalchemy import and_, case, func, literal, or_, exists
 from sqlalchemy.orm import aliased
 
 from backend.db import get_session
@@ -76,6 +76,35 @@ class ItemOut(BaseModel):
 
 class ItemPageOut(BaseModel):
     items: List[ItemOut]
+    total: int
+    next_offset: Optional[int] = None
+
+
+class IncomingStockEntryOut(BaseModel):
+    movement_id: int
+    item_id: int
+    name: str
+    brand: Optional[str] = None
+    product_id: Optional[int] = None
+    category_id: Optional[int] = None
+    expiry_date: Optional[str] = None
+    mrp: float
+    cost_price: float = 0.0
+    stock: int
+    rack_number: int
+    is_archived: bool = False
+    created_at: str
+    updated_at: str
+    incoming_at: str
+    delta: int
+    reason: str
+    ref_type: Optional[str] = None
+    ref_id: Optional[int] = None
+    note: Optional[str] = None
+
+
+class IncomingStockEntryPageOut(BaseModel):
+    items: List[IncomingStockEntryOut]
     total: int
     next_offset: Optional[int] = None
 
@@ -791,6 +820,40 @@ def _build_stock_reconciliation(
     return rows_out
 
 
+def _purchase_stock_movement_join_condition():
+    return and_(
+        func.upper(func.coalesce(StockMovement.ref_type, "")) == "PURCHASE",
+        StockMovement.ref_id == Purchase.id,
+    )
+
+
+def _stock_movement_effective_ts_expr():
+    return case(
+        (
+            and_(
+                func.upper(func.coalesce(StockMovement.ref_type, "")) == "PURCHASE",
+                Purchase.invoice_date.isnot(None),
+            ),
+            Purchase.invoice_date + literal("T00:00:00"),
+        ),
+        else_=StockMovement.ts,
+    )
+
+
+def _future_delta_after_effective_ts(session, item_ids: List[int], to_ts: Optional[str]) -> int:
+    if not to_ts:
+        return 0
+    movement_ts = _stock_movement_effective_ts_expr()
+    stmt = (
+        select(func.coalesce(func.sum(StockMovement.delta), 0))
+        .select_from(StockMovement)
+        .outerjoin(Purchase, _purchase_stock_movement_join_condition())
+        .where(StockMovement.item_id.in_(item_ids))
+        .where(movement_ts > to_ts)
+    )
+    return int(session.exec(stmt).one() or 0)
+
+
 def _build_group_summary(
     session,
     *,
@@ -812,19 +875,25 @@ def _build_group_summary(
     from_ts = f"{from_date}T00:00:00" if from_date else None
     to_ts = f"{to_date}T23:59:59" if to_date else None
 
+    movement_ts = _stock_movement_effective_ts_expr()
+    period_net_expr = StockMovement.delta
+    period_in_expr = case((StockMovement.delta > 0, StockMovement.delta), else_=0)
+    period_out_expr = case((StockMovement.delta < 0, -StockMovement.delta), else_=0)
     period_stmt = (
         select(
-            func.coalesce(func.sum(StockMovement.delta), 0),
-            func.coalesce(func.sum(case((StockMovement.delta > 0, StockMovement.delta), else_=0)), 0),
-            func.coalesce(func.sum(case((StockMovement.delta < 0, -StockMovement.delta), else_=0)), 0),
+            func.coalesce(func.sum(period_net_expr), 0),
+            func.coalesce(func.sum(period_in_expr), 0),
+            func.coalesce(func.sum(period_out_expr), 0),
             func.count(StockMovement.id),
         )
+        .select_from(StockMovement)
+        .outerjoin(Purchase, _purchase_stock_movement_join_condition())
         .where(StockMovement.item_id.in_(item_ids))
     )
     if from_ts:
-        period_stmt = period_stmt.where(StockMovement.ts >= from_ts)
+        period_stmt = period_stmt.where(movement_ts >= from_ts)
     if to_ts:
-        period_stmt = period_stmt.where(StockMovement.ts <= to_ts)
+        period_stmt = period_stmt.where(movement_ts <= to_ts)
     period_row = session.exec(period_stmt).one()
     net_qty = int(period_row[0] or 0)
     inward_qty = int(period_row[1] or 0)
@@ -835,8 +904,10 @@ def _build_group_summary(
     if to_ts:
         future_stmt = (
             select(func.coalesce(func.sum(StockMovement.delta), 0))
+            .select_from(StockMovement)
+            .outerjoin(Purchase, _purchase_stock_movement_join_condition())
             .where(StockMovement.item_id.in_(item_ids))
-            .where(StockMovement.ts > to_ts)
+            .where(movement_ts > to_ts)
         )
         future_delta = int(session.exec(future_stmt).one() or 0)
 
@@ -851,14 +922,19 @@ def _build_group_summary(
 
     def _max_ts_for_reasons(reasons: List[str]) -> Optional[str]:
         stmt = (
-            select(func.max(StockMovement.ts))
+            select(func.max(movement_ts))
+            .select_from(StockMovement)
+            .outerjoin(Purchase, _purchase_stock_movement_join_condition())
             .where(StockMovement.item_id.in_(item_ids))
             .where(func.upper(StockMovement.reason).in_([reason.upper() for reason in reasons]))
         )
         return session.exec(stmt).one()
 
     last_movement_ts = session.exec(
-        select(func.max(StockMovement.ts)).where(StockMovement.item_id.in_(item_ids))
+        select(func.max(movement_ts))
+        .select_from(StockMovement)
+        .outerjoin(Purchase, _purchase_stock_movement_join_condition())
+        .where(StockMovement.item_id.in_(item_ids))
     ).one()
 
     return StockLedgerSummaryOut(
@@ -978,23 +1054,37 @@ def list_items(
             base_stmt = _apply_default_visibility(base_stmt)
 
         if q:
-            like = f"%{q.strip()}%"
+            search_text = q.strip()
+            like = f"%{search_text}%"
+            numeric_search_id = None
+            id_text = search_text[1:] if search_text.startswith("#") else search_text
+            if id_text.isdigit():
+                numeric_search_id = int(id_text)
+
+            movement_search_terms = [
+                StockMovement.reason.ilike(like),
+                func.coalesce(StockMovement.ref_type, "").ilike(like),
+                func.coalesce(StockMovement.note, "").ilike(like),
+            ]
+            if numeric_search_id is not None:
+                movement_search_terms.append(StockMovement.ref_id == numeric_search_id)
+
             matching_movement_exists = exists(
                 select(StockMovement.id).where(
                     StockMovement.item_id == Item.id,
-                    or_(
-                        StockMovement.reason.ilike(like),
-                        func.coalesce(StockMovement.ref_type, "").ilike(like),
-                        func.coalesce(StockMovement.note, "").ilike(like),
-                    ),
+                    or_(*movement_search_terms),
                 )
             )
+            item_search_terms = [
+                Item.name.ilike(like),
+                Item.brand.ilike(like),
+                matching_movement_exists,
+            ]
+            if numeric_search_id is not None:
+                item_search_terms.append(Item.id == numeric_search_id)
+
             base_stmt = base_stmt.where(
-                or_(
-                    Item.name.ilike(like),
-                    Item.brand.ilike(like),
-                    matching_movement_exists,
-                )
+                or_(*item_search_terms)
             )
         if rack_number is not None:
             base_stmt = base_stmt.where(Item.rack_number == rack_number)
@@ -1072,6 +1162,100 @@ def list_items(
             else None
         )
 
+        return {"items": items, "total": total, "next_offset": next_offset}
+
+
+@router.get("/incoming", response_model=IncomingStockEntryPageOut)
+def list_incoming_stock_entries(
+    q: Optional[str] = Query(None, description="Search item/movement text or item/movement id"),
+    incoming_from: Optional[str] = Query(None, description="YYYY-MM-DD; only positive incoming entries from this date"),
+    include_archived: bool = Query(False, description="If true, include archived batches"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    with get_session() as session:
+        movement_ts = _stock_movement_effective_ts_expr()
+        stmt = (
+            select(StockMovement, Item, movement_ts.label("effective_ts"))
+            .join(Item, Item.id == StockMovement.item_id)
+            .outerjoin(Purchase, _purchase_stock_movement_join_condition())
+            .where(StockMovement.delta > 0)
+        )
+
+        if not include_archived:
+            stmt = stmt.where(or_(Item.is_archived == False, Item.is_archived.is_(None)))  # noqa: E712
+
+        if incoming_from:
+            from_date = incoming_from.strip()[:10]
+            try:
+                date.fromisoformat(from_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="incoming_from must be YYYY-MM-DD")
+            stmt = stmt.where(movement_ts >= f"{from_date}T00:00:00")
+
+        if q:
+            search_text = q.strip()
+            like = f"%{search_text}%"
+            numeric_search_id = None
+            id_text = search_text[1:] if search_text.startswith("#") else search_text
+            if id_text.isdigit():
+                numeric_search_id = int(id_text)
+
+            terms = [
+                Item.name.ilike(like),
+                Item.brand.ilike(like),
+                StockMovement.reason.ilike(like),
+                func.coalesce(StockMovement.ref_type, "").ilike(like),
+                func.coalesce(StockMovement.note, "").ilike(like),
+            ]
+            if numeric_search_id is not None:
+                terms.extend([
+                    Item.id == numeric_search_id,
+                    StockMovement.id == numeric_search_id,
+                    StockMovement.ref_id == numeric_search_id,
+                ])
+            stmt = stmt.where(or_(*terms))
+
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total = session.exec(count_stmt).one()
+
+        rows = session.exec(
+            stmt.order_by(movement_ts.desc(), StockMovement.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+
+        items: List[IncomingStockEntryOut] = []
+        for row in rows:
+            movement = row[0]
+            item = row[1]
+            effective_ts = row[2] or movement.ts
+            items.append(
+                IncomingStockEntryOut(
+                    movement_id=int(movement.id or 0),
+                    item_id=int(item.id or 0),
+                    name=item.name,
+                    brand=item.brand,
+                    product_id=getattr(item, "product_id", None),
+                    category_id=getattr(item, "category_id", None),
+                    expiry_date=item.expiry_date,
+                    mrp=float(item.mrp or 0),
+                    cost_price=float(getattr(item, "cost_price", 0) or 0),
+                    stock=int(item.stock or 0),
+                    rack_number=int(item.rack_number or 0),
+                    is_archived=bool(getattr(item, "is_archived", False)),
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                    incoming_at=effective_ts,
+                    delta=int(movement.delta or 0),
+                    reason=movement.reason,
+                    ref_type=getattr(movement, "ref_type", None),
+                    ref_id=getattr(movement, "ref_id", None),
+                    note=getattr(movement, "note", None),
+                )
+            )
+
+        next_offset = (offset + limit) if (offset + limit) < total else None
         return {"items": items, "total": total, "next_offset": next_offset}
 
 
@@ -1160,50 +1344,59 @@ def group_ledger(
         current_stock = sum(int(x.stock or 0) for x in ledger_batches)
         key = _group_key(n, b)
 
-        stmt = select(StockMovement).where(StockMovement.item_id.in_(item_ids))
+        movement_ts = _stock_movement_effective_ts_expr()
+        stmt = (
+            select(StockMovement, movement_ts.label("effective_ts"))
+            .select_from(StockMovement)
+            .outerjoin(Purchase, _purchase_stock_movement_join_condition())
+            .where(StockMovement.item_id.in_(item_ids))
+        )
 
         if from_date:
-            stmt = stmt.where(StockMovement.ts >= f"{from_date}T00:00:00")
+            stmt = stmt.where(movement_ts >= f"{from_date}T00:00:00")
         if to_date:
-            stmt = stmt.where(StockMovement.ts <= f"{to_date}T23:59:59")
+            stmt = stmt.where(movement_ts <= f"{to_date}T23:59:59")
 
         if reason:
             stmt = stmt.where(func.lower(StockMovement.reason) == reason.strip().lower())
 
-        stmt = stmt.order_by(StockMovement.id.desc()).limit(limit + 1).offset(offset)
+        stmt = stmt.order_by(movement_ts.desc(), StockMovement.id.desc()).limit(offset + limit + 1)
         rows = session.exec(stmt).all()
 
-        has_more = len(rows) > limit
-        if has_more:
-            rows = rows[:limit]
+        has_more = len(rows) > offset + limit
+        rows_to_balance = rows[:offset + limit]
 
-        running = int(current_stock)
+        to_ts = f"{to_date}T23:59:59" if to_date else None
+        running = int(current_stock) - _future_delta_after_effective_ts(session, item_ids, to_ts)
         out: List[StockMovementGroupOut] = []
 
-        for m in rows:
+        for index, row in enumerate(rows_to_balance):
+            m = row[0]
+            effective_ts = row[1] or m.ts
             after = running
             before = after - int(m.delta or 0)
 
             it = items_by_id.get(int(m.item_id))
 
-            out.append(
-                StockMovementGroupOut(
-                    id=m.id,
-                    ts=m.ts,
-                    delta=int(m.delta or 0),
-                    reason=m.reason,
-                    ref_type=getattr(m, "ref_type", None),
-                    ref_id=getattr(m, "ref_id", None),
-                    note=getattr(m, "note", None),
-                    actor=getattr(m, "actor", None),
-                    item_id=int(m.item_id),
-                    expiry_date=getattr(it, "expiry_date", None) if it else None,
-                    mrp=float(getattr(it, "mrp", 0) or 0) if it else None,
-                    rack_number=int(getattr(it, "rack_number", 0) or 0) if it else None,
-                    balance_after=after,
-                    balance_before=before,
+            if index >= offset:
+                out.append(
+                    StockMovementGroupOut(
+                        id=m.id,
+                        ts=effective_ts,
+                        delta=int(m.delta or 0),
+                        reason=m.reason,
+                        ref_type=getattr(m, "ref_type", None),
+                        ref_id=getattr(m, "ref_id", None),
+                        note=getattr(m, "note", None),
+                        actor=getattr(m, "actor", None),
+                        item_id=int(m.item_id),
+                        expiry_date=getattr(it, "expiry_date", None) if it else None,
+                        mrp=float(getattr(it, "mrp", 0) or 0) if it else None,
+                        rack_number=int(getattr(it, "rack_number", 0) or 0) if it else None,
+                        balance_after=after,
+                        balance_before=before,
+                    )
                 )
-            )
 
             running = before
 
@@ -1321,7 +1514,7 @@ def get_item(item_id: int):
 def create_item(
     payload: ItemIn,
     response: Response,
-    force_new: bool = Query(False, description="If true, always create a new row (no merge)"),
+    force_new: bool = Query(True, description="Deprecated; inventory adds always create a separate batch"),
 ):
     if payload.mrp <= 0:
         raise HTTPException(status_code=400, detail="MRP must be > 0")
@@ -1339,42 +1532,7 @@ def create_item(
 
     with get_session() as session:
         try:
-            existing = None
-            if not force_new:
-                stmt = select(Item).where(
-                    func.lower(Item.name) == func.lower(name),
-                    func.coalesce(func.lower(Item.brand), "") == func.coalesce(func.lower(brand), ""),
-                    func.coalesce(Item.expiry_date, "") == (expiry or ""),
-                    Item.mrp == mrp,
-                )
-                existing = session.exec(stmt).first()
-
-            if existing:
-                existing.stock = int(existing.stock or 0) + delta_stock
-
-                if rack_no and int(existing.rack_number or 0) == 0:
-                    existing.rack_number = rack_no
-
-                existing.updated_at = now_ts()
-                session.add(existing)
-                apply_archive_rules(session, existing)
-
-                if delta_stock != 0:
-                    add_movement(
-                        session,
-                        item_id=existing.id,
-                        delta=delta_stock,
-                        reason="OPENING",
-                        ref_type="ITEM_MERGE",
-                        ref_id=existing.id,
-                        note="Merged add into existing batch (same name/brand/expiry/MRP)",
-                    )
-
-                session.commit()
-                session.refresh(existing)
-                response.status_code = 200
-                return existing
-
+            ts = now_ts()
             item = Item(
                 name=name,
                 brand=brand,
@@ -1382,8 +1540,8 @@ def create_item(
                 mrp=mrp,
                 stock=delta_stock,
                 rack_number=rack_no,
-                created_at=now_ts(),
-                updated_at=now_ts(),
+                created_at=ts,
+                updated_at=ts,
             )
             session.add(item)
             apply_archive_rules(session, item)
@@ -1538,44 +1696,53 @@ def item_ledger(
         if not item:
             raise HTTPException(status_code=404, detail="Item not found")
 
-        stmt = select(StockMovement).where(StockMovement.item_id == item_id)
+        movement_ts = _stock_movement_effective_ts_expr()
+        stmt = (
+            select(StockMovement, movement_ts.label("effective_ts"))
+            .select_from(StockMovement)
+            .outerjoin(Purchase, _purchase_stock_movement_join_condition())
+            .where(StockMovement.item_id == item_id)
+        )
 
         if from_date:
-            stmt = stmt.where(StockMovement.ts >= f"{from_date}T00:00:00")
+            stmt = stmt.where(movement_ts >= f"{from_date}T00:00:00")
         if to_date:
-            stmt = stmt.where(StockMovement.ts <= f"{to_date}T23:59:59")
+            stmt = stmt.where(movement_ts <= f"{to_date}T23:59:59")
 
         if reason:
             stmt = stmt.where(func.lower(StockMovement.reason) == reason.strip().lower())
 
-        stmt = stmt.order_by(StockMovement.id.desc()).limit(limit + 1).offset(offset)
+        stmt = stmt.order_by(movement_ts.desc(), StockMovement.id.desc()).limit(offset + limit + 1)
         rows = session.exec(stmt).all()
 
-        has_more = len(rows) > limit
-        if has_more:
-            rows = rows[:limit]
+        has_more = len(rows) > offset + limit
+        rows_to_balance = rows[:offset + limit]
 
-        running = int(item.stock or 0)
+        to_ts = f"{to_date}T23:59:59" if to_date else None
+        running = int(item.stock or 0) - _future_delta_after_effective_ts(session, [int(item_id)], to_ts)
         out: List[StockMovementOut] = []
 
-        for m in rows:
+        for index, row in enumerate(rows_to_balance):
+            m = row[0]
+            effective_ts = row[1] or m.ts
             after = running
             before = after - int(m.delta or 0)
 
-            out.append(
-                StockMovementOut(
-                    id=m.id,
-                    ts=m.ts,
-                    delta=int(m.delta or 0),
-                    reason=m.reason,
-                    ref_type=getattr(m, "ref_type", None),
-                    ref_id=getattr(m, "ref_id", None),
-                    note=getattr(m, "note", None),
-                    actor=getattr(m, "actor", None),
-                    balance_after=after,
-                    balance_before=before,
+            if index >= offset:
+                out.append(
+                    StockMovementOut(
+                        id=m.id,
+                        ts=effective_ts,
+                        delta=int(m.delta or 0),
+                        reason=m.reason,
+                        ref_type=getattr(m, "ref_type", None),
+                        ref_id=getattr(m, "ref_id", None),
+                        note=getattr(m, "note", None),
+                        actor=getattr(m, "actor", None),
+                        balance_after=after,
+                        balance_before=before,
+                    )
                 )
-            )
 
             running = before
 

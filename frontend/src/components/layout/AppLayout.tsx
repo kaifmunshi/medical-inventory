@@ -27,7 +27,7 @@ export default function AppLayout() {
   }, [desktopSidebarCollapsed])
 
   return (
-    <Box sx={{ display: 'flex', minHeight: '100vh', alignItems: 'stretch', bgcolor: 'background.default' }}>
+    <Box sx={{ display: 'flex', width: '100%', minWidth: 0, minHeight: '100vh', alignItems: 'stretch', bgcolor: 'background.default' }}>
       <Sidebar
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
@@ -38,7 +38,9 @@ export default function AppLayout() {
         sx={{
           flex: 1,
           width: '100%',
+          maxWidth: '100%',
           minWidth: 0,
+          overflowX: 'hidden',
           px: { xs: 1, sm: 1.25, lg: 1.5 },
           py: { xs: 0.875, sm: 1.25 },
         }}

@@ -15,6 +15,8 @@ from backend.models import (
     BillPayment,
     CashbookEntry,
     ExchangeRecord,
+    Purchase,
+    PurchasePayment,
     Return,
 )
 from backend.security import require_min_role
@@ -97,6 +99,25 @@ def _sum_bill_online(session, *, start_iso: Optional[str] = None, end_iso: Optio
     total = 0.0
     for p in rows:
         total += float(getattr(p, "online_amount", 0) or 0)
+    return round(total, 2)
+
+
+def _sum_purchase_online_out(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
+    stmt = (
+        select(PurchasePayment)
+        .join(Purchase, Purchase.id == PurchasePayment.purchase_id)
+        .where(Purchase.is_deleted == False)  # noqa: E712
+        .where(PurchasePayment.is_deleted == False)  # noqa: E712
+        .where(PurchasePayment.is_writeoff == False)  # noqa: E712
+    )
+    if start_iso:
+        stmt = stmt.where(PurchasePayment.paid_at >= start_iso)
+    if end_iso:
+        stmt = stmt.where(PurchasePayment.paid_at <= end_iso)
+    rows = session.exec(stmt).all()
+    total = 0.0
+    for payment in rows:
+        total += float(getattr(payment, "online_amount", 0) or 0)
     return round(total, 2)
 
 
@@ -186,6 +207,7 @@ def _day_snapshot(session, date: str, *, include_entries: bool = False):
         + _sum_exchange_online_in(session, start_iso=anchor_effective_start, end_iso=prev_end)
         + _sum_cashbook_contra(session, start_iso=anchor_effective_start, end_iso=prev_end)
         - _sum_return_online(session, start_iso=anchor_effective_start, end_iso=prev_end)
+        - _sum_purchase_online_out(session, start_iso=anchor_effective_start, end_iso=prev_end)
         - _sum_exchange_online_out(session, start_iso=anchor_effective_start, end_iso=prev_end)
     )
 
@@ -200,13 +222,14 @@ def _day_snapshot(session, date: str, *, include_entries: bool = False):
     exchange_online_in_today = _sum_exchange_online_in(session, start_iso=day_start, end_iso=day_end)
     cashbook_contra_today = _sum_cashbook_contra(session, start_iso=day_start, end_iso=day_end)
     return_online_today = _sum_return_online(session, start_iso=day_start, end_iso=day_end)
+    purchase_online_today = _sum_purchase_online_out(session, start_iso=day_start, end_iso=day_end)
     exchange_online_out_today = _sum_exchange_online_out(session, start_iso=day_start, end_iso=day_end)
     day_summary["receipts"] = round(
         float(day_summary["receipts"]) + bill_online_today + exchange_online_in_today + cashbook_contra_today,
         2,
     )
     day_summary["withdrawals"] = round(
-        float(day_summary["withdrawals"]) + return_online_today + exchange_online_out_today,
+        float(day_summary["withdrawals"]) + return_online_today + purchase_online_today + exchange_online_out_today,
         2,
     )
     day_summary["bank_out"] = round(
@@ -366,9 +389,10 @@ def summary(
         exchange_online_in = _sum_exchange_online_in(session, start_iso=start_iso, end_iso=end_iso)
         cashbook_contra = _sum_cashbook_contra(session, start_iso=start_iso, end_iso=end_iso)
         return_online = _sum_return_online(session, start_iso=start_iso, end_iso=end_iso)
+        purchase_online = _sum_purchase_online_out(session, start_iso=start_iso, end_iso=end_iso)
         exchange_online_out = _sum_exchange_online_out(session, start_iso=start_iso, end_iso=end_iso)
         out["receipts"] = round(float(out["receipts"]) + bill_online + exchange_online_in + cashbook_contra, 2)
-        out["withdrawals"] = round(float(out["withdrawals"]) + return_online + exchange_online_out, 2)
+        out["withdrawals"] = round(float(out["withdrawals"]) + return_online + purchase_online + exchange_online_out, 2)
         out["bank_out"] = round(float(out["withdrawals"]) + float(out["expenses"]) + float(out["charges"]), 2)
         out["net_change"] = round(float(out["receipts"]) - float(out["bank_out"]), 2)
         return out

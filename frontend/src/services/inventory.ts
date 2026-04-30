@@ -7,6 +7,35 @@ export type ItemsPage = {
   next_offset: number | null
 }
 
+export type IncomingStockEntry = {
+  movement_id: number
+  item_id: number
+  name: string
+  brand?: string | null
+  product_id?: number | null
+  category_id?: number | null
+  expiry_date?: string | null
+  mrp: number
+  cost_price?: number
+  stock: number
+  rack_number: number
+  is_archived?: boolean
+  created_at?: string
+  updated_at?: string
+  incoming_at: string
+  delta: number
+  reason: string
+  ref_type?: string | null
+  ref_id?: number | null
+  note?: string | null
+}
+
+export type IncomingStockEntryPage = {
+  items: IncomingStockEntry[]
+  total: number
+  next_offset: number | null
+}
+
 export type InventoryDashboardStats = {
   inventory_total_qty: number
   inventory_total_types_all: number
@@ -214,6 +243,29 @@ export async function listAllItems(
       created_from: options?.created_from,
       incoming_from: options?.incoming_from,
     })
+    rows.push(...(page.items || []))
+    if (page.next_offset == null) break
+    offset = page.next_offset
+  }
+
+  return rows
+}
+
+export async function listIncomingStockEntries(
+  q: string = '',
+  options?: { include_archived?: boolean; incoming_from?: string },
+): Promise<IncomingStockEntry[]> {
+  const limit = 500
+  let offset = 0
+  const rows: IncomingStockEntry[] = []
+
+  while (true) {
+    const params: Record<string, string | number | boolean> = { limit, offset }
+    if (q) params.q = q
+    if (typeof options?.include_archived === 'boolean') params.include_archived = options.include_archived
+    if (options?.incoming_from) params.incoming_from = options.incoming_from
+    const { data } = await api.get('/inventory/incoming', { params })
+    const page = data as IncomingStockEntryPage
     rows.push(...(page.items || []))
     if (page.next_offset == null) break
     offset = page.next_offset

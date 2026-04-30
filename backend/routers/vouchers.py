@@ -307,8 +307,8 @@ def daybook(
                     party_name=party_map.get(int(purchase.party_id or 0)),
                     narration=payment.note or f"Payment for purchase {purchase.invoice_number}",
                     amount=_round2(payment.amount),
-                    cash_amount=0.0,
-                    online_amount=0.0,
+                    cash_amount=0.0 if bool(payment.is_writeoff) else _round2(getattr(payment, "cash_amount", 0.0)),
+                    online_amount=0.0 if bool(payment.is_writeoff) else _round2(getattr(payment, "online_amount", 0.0)),
                     status="DELETED" if is_deleted else purchase.payment_status,
                     is_deleted=is_deleted,
                 )

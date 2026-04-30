@@ -248,9 +248,13 @@ export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed =
           display: { xs: 'none', md: 'block' },
           position: 'sticky',
           top: 0,
+          width: collapsed ? 88 : 252,
+          minWidth: collapsed ? 88 : 252,
           height: '100vh',
           alignSelf: 'flex-start',
           flexShrink: 0,
+          overflow: 'hidden',
+          transition: 'width 180ms ease, min-width 180ms ease',
         }}
       >
         {renderSidebarBody(collapsed)}

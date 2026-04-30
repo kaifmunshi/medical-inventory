@@ -8,7 +8,7 @@ from sqlalchemy import text  # ✅ use sqlalchemy.text (NOT sqlmodel.text)
 
 from backend.controls import assert_financial_year_unlocked
 from backend.db import get_session
-from backend.models import BankbookEntry, CashbookEntry, CashbookCreate, CashbookOut, Bill, BillPayment, Return, ExchangeRecord
+from backend.models import BankbookEntry, CashbookEntry, CashbookCreate, CashbookOut, Bill, BillPayment, Return, ExchangeRecord, Purchase, PurchasePayment
 from backend.security import require_min_role
 
 router = APIRouter()
@@ -90,6 +90,25 @@ def _sum_bill_cash(session, *, start_iso: Optional[str] = None, end_iso: Optiona
     return round(total, 2)
 
 
+def _sum_purchase_cash_out(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
+    stmt = (
+        select(PurchasePayment)
+        .join(Purchase, Purchase.id == PurchasePayment.purchase_id)
+        .where(Purchase.is_deleted == False)  # noqa: E712
+        .where(PurchasePayment.is_deleted == False)  # noqa: E712
+        .where(PurchasePayment.is_writeoff == False)  # noqa: E712
+    )
+    if start_iso:
+        stmt = stmt.where(PurchasePayment.paid_at >= start_iso)
+    if end_iso:
+        stmt = stmt.where(PurchasePayment.paid_at <= end_iso)
+    rows = session.exec(stmt).all()
+    total = 0.0
+    for payment in rows:
+        total += float(getattr(payment, "cash_amount", 0) or 0)
+    return round(total, 2)
+
+
 def _sum_return_cash(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
     stmt = select(Return)
     if start_iso:
@@ -168,6 +187,7 @@ def _day_snapshot(session, date: str, *, include_entries: bool = False):
         + _sum_bill_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
         + _sum_exchange_cash_in(session, start_iso=anchor_effective_start, end_iso=prev_end)
         - _sum_return_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
+        - _sum_purchase_cash_out(session, start_iso=anchor_effective_start, end_iso=prev_end)
     )
     bankbook_contra_opening = _sum_bankbook_contra(session, start_iso=anchor_effective_start, end_iso=prev_end)
     opening_balance += (
@@ -186,13 +206,14 @@ def _day_snapshot(session, date: str, *, include_entries: bool = False):
     bill_cash_today = _sum_bill_cash(session, start_iso=day_start, end_iso=day_end)
     exchange_cash_in_today = _sum_exchange_cash_in(session, start_iso=day_start, end_iso=day_end)
     return_cash_today = _sum_return_cash(session, start_iso=day_start, end_iso=day_end)
+    purchase_cash_today = _sum_purchase_cash_out(session, start_iso=day_start, end_iso=day_end)
     bankbook_contra_today = _sum_bankbook_contra(session, start_iso=day_start, end_iso=day_end)
     day_summary["receipts"] = round(
         float(day_summary["receipts"]) + bill_cash_today + exchange_cash_in_today + float(bankbook_contra_today["receipts"]),
         2,
     )
     day_summary["withdrawals"] = round(
-        float(day_summary["withdrawals"]) + return_cash_today + float(bankbook_contra_today["withdrawals"]),
+        float(day_summary["withdrawals"]) + return_cash_today + purchase_cash_today + float(bankbook_contra_today["withdrawals"]),
         2,
     )
     day_summary["expenses"] = round(float(day_summary["expenses"]) + float(bankbook_contra_today["expenses"]), 2)
@@ -328,9 +349,10 @@ def summary(
         bill_cash = _sum_bill_cash(session, start_iso=start_iso, end_iso=end_iso)
         exchange_cash_in = _sum_exchange_cash_in(session, start_iso=start_iso, end_iso=end_iso)
         return_cash = _sum_return_cash(session, start_iso=start_iso, end_iso=end_iso)
+        purchase_cash = _sum_purchase_cash_out(session, start_iso=start_iso, end_iso=end_iso)
         bankbook_contra = _sum_bankbook_contra(session, start_iso=start_iso, end_iso=end_iso)
         out["receipts"] = round(float(out["receipts"]) + bill_cash + exchange_cash_in + float(bankbook_contra["receipts"]), 2)
-        out["withdrawals"] = round(float(out["withdrawals"]) + return_cash + float(bankbook_contra["withdrawals"]), 2)
+        out["withdrawals"] = round(float(out["withdrawals"]) + return_cash + purchase_cash + float(bankbook_contra["withdrawals"]), 2)
         out["expenses"] = round(float(out["expenses"]) + float(bankbook_contra["expenses"]), 2)
         out["cash_out"] = round(float(out["withdrawals"]) + float(out["expenses"]), 2)
         out["net_change"] = round(float(out["receipts"]) - float(out["cash_out"]), 2)

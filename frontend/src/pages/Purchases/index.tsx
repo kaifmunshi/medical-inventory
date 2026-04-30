@@ -25,9 +25,8 @@ import PaymentsIcon from '@mui/icons-material/Payments'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { createParty, fetchParties } from '../../services/parties'
-import { listAllItems } from '../../services/inventory'
+import { listIncomingStockEntries, type IncomingStockEntry } from '../../services/inventory'
 import { createBrand, createCategory, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
-import { fetchFinancialYears } from '../../services/settings'
 import {
   addPurchasePayment,
   cancelPurchase,
@@ -39,10 +38,12 @@ import {
   fetchSupplierLedgerSummary,
   updatePurchase,
 } from '../../services/purchases'
-import type { Category, FinancialYear, Item, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
+import type { Category, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 
-type DraftItem = PurchaseItemPayload & { key: string }
+type DraftItem = PurchaseItemPayload & { key: string; existing_stock_movement_id?: number }
+
+const EXISTING_INVENTORY_FROM_DATE = '2026-04-01'
 
 function makeEmptyItem(): DraftItem {
   return {
@@ -85,12 +86,6 @@ function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'co
   return lineBaseTotal(item) / totalQty
 }
 
-function currentFinancialYearStart() {
-  const now = new Date()
-  const year = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1
-  return `${year}-04-01`
-}
-
 function fmtDate(value?: string | null) {
   const raw = String(value || '')
   if (!raw) return '-'
@@ -105,16 +100,17 @@ function fmtDate(value?: string | null) {
   }
 }
 
-function inventoryBatchLabel(item: Item) {
-  const incomingDate = item.last_incoming_at || item.created_at
+function incomingEntryLabel(entry: IncomingStockEntry) {
   const parts = [
-    `#${item.id}`,
-    item.last_incoming_at ? `Incoming ${fmtDate(incomingDate)}` : `Added ${fmtDate(incomingDate)}`,
-    item.name,
-    item.brand || '',
-    item.expiry_date ? `Exp ${item.expiry_date}` : '',
-    `MRP ${money(item.mrp)}`,
-    `Stock ${Number(item.stock || 0)}`,
+    `#${entry.item_id}`,
+    `Incoming ${fmtDate(entry.incoming_at)}`,
+    `+${Number(entry.delta || 0)}`,
+    entry.name,
+    entry.brand || '',
+    entry.expiry_date ? `Exp ${entry.expiry_date}` : '',
+    `MRP ${money(entry.mrp)}`,
+    `Current ${Number(entry.stock || 0)}`,
+    entry.reason || '',
   ].filter(Boolean)
   return parts.join(' | ')
 }
@@ -164,6 +160,9 @@ export default function PurchasesPage() {
   const [editItems, setEditItems] = useState<DraftItem[]>([makeEmptyItem()])
   const [paymentOpen, setPaymentOpen] = useState(false)
   const [paymentAmount, setPaymentAmount] = useState('0')
+  const [paymentMode, setPaymentMode] = useState<'cash' | 'online' | 'split'>('cash')
+  const [paymentCash, setPaymentCash] = useState('0')
+  const [paymentOnline, setPaymentOnline] = useState('0')
   const [paymentDate, setPaymentDate] = useState(today)
   const [paymentNote, setPaymentNote] = useState('')
   const [paymentType, setPaymentType] = useState<'payment' | 'writeoff'>('payment')
@@ -187,16 +186,6 @@ export default function PurchasesPage() {
   const [brandTargetKey, setBrandTargetKey] = useState<string | null>(null)
   const [newBrandName, setNewBrandName] = useState('')
 
-  const financialYearsQ = useQuery<FinancialYear[], Error>({
-    queryKey: ['settings-financial-years'],
-    queryFn: fetchFinancialYears,
-  })
-  const activeFinancialYear = useMemo(
-    () => (financialYearsQ.data || []).find((year) => year.is_active) || null,
-    [financialYearsQ.data],
-  )
-  const existingInventoryFromDate = activeFinancialYear?.start_date || currentFinancialYearStart()
-
   const suppliersQ = useQuery<Party[], Error>({
     queryKey: ['suppliers-select'],
     queryFn: () => fetchParties({ party_group: 'SUNDRY_CREDITOR', is_active: true }),
@@ -216,11 +205,11 @@ export default function PurchasesPage() {
     queryFn: () => fetchProducts({ q: productSearch.trim() || undefined }),
   })
 
-  const inventoryBatchesQ = useQuery<Item[], Error>({
-    queryKey: ['purchase-existing-inventory', inventorySearch, existingInventoryFromDate],
-    queryFn: () => listAllItems(inventorySearch.trim(), {
+  const inventoryBatchesQ = useQuery<IncomingStockEntry[], Error>({
+    queryKey: ['purchase-existing-inventory', inventorySearch, EXISTING_INVENTORY_FROM_DATE],
+    queryFn: () => listIncomingStockEntries(inventorySearch.trim(), {
       include_archived: true,
-      incoming_from: existingInventoryFromDate,
+      incoming_from: EXISTING_INVENTORY_FROM_DATE,
     }),
   })
 
@@ -253,13 +242,20 @@ export default function PurchasesPage() {
 
   useEffect(() => {
     const supplierId = Number(searchParams.get('supplier_id') || 0)
+    const purchaseId = Number(searchParams.get('purchase_id') || 0)
     const shouldAdd = searchParams.get('new') === '1'
+    if (purchaseId > 0) setSelectedPurchaseId(purchaseId)
     if (supplierId > 0) {
       setPartyId(supplierId)
       setFilterPartyId(supplierId)
     }
     if (shouldAdd) setAddOpen(true)
-    if (supplierId > 0 || shouldAdd) setSearchParams({}, { replace: true })
+    if (supplierId > 0 || shouldAdd) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('supplier_id')
+      next.delete('new')
+      setSearchParams(next, { replace: true })
+    }
   }, [searchParams, setSearchParams])
 
   const createM = useMutation({
@@ -297,8 +293,13 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
       queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
       setPaymentOpen(false)
       setPaymentAmount('0')
+      setPaymentMode('cash')
+      setPaymentCash('0')
+      setPaymentOnline('0')
       setPaymentNote('')
       setPaymentType('payment')
       setPaymentDate(today)
@@ -408,7 +409,41 @@ export default function PurchasesPage() {
   const selectedSupplierName = selectedPurchase
     ? suppliers.find((s) => Number(s.id) === Number(selectedPurchase.party_id))?.name || `Supplier #${selectedPurchase.party_id}`
     : ''
+  const selectedPurchaseOutstanding = selectedPurchase
+    ? Math.max(0, Number(selectedPurchase.total_amount || 0) - Number(selectedPurchase.paid_amount || 0) - Number(selectedPurchase.writeoff_amount || 0))
+    : 0
+  const purchasePaymentCash = paymentType === 'writeoff' || paymentMode === 'online' ? 0 : Number(paymentCash || 0)
+  const purchasePaymentOnline = paymentType === 'writeoff' || paymentMode === 'cash' ? 0 : Number(paymentOnline || 0)
+  const purchasePaymentAmount = paymentType === 'writeoff'
+    ? Number(paymentAmount || 0)
+    : Number((purchasePaymentCash + purchasePaymentOnline).toFixed(2))
+  const purchasePaymentPartsInvalid = paymentType === 'writeoff'
+    ? Number.isNaN(purchasePaymentAmount) || purchasePaymentAmount < 0
+    : Number.isNaN(purchasePaymentCash) || Number.isNaN(purchasePaymentOnline) || purchasePaymentCash < 0 || purchasePaymentOnline < 0
+  const purchasePaymentError =
+    purchasePaymentPartsInvalid
+      ? 'Invalid amount'
+      : purchasePaymentAmount <= 0
+      ? 'Amount must be greater than 0'
+      : purchasePaymentAmount > selectedPurchaseOutstanding + 0.01
+        ? `Max ${money(selectedPurchaseOutstanding)}`
+        : ''
   const supplierNameFor = (id: number) => suppliers.find((supplier) => Number(supplier.id) === Number(id))?.name || `Supplier #${id}`
+
+  useEffect(() => {
+    if (!paymentOpen || paymentType !== 'payment' || paymentMode !== 'split') return
+    const cash = Number(paymentCash || 0)
+    if (Number.isNaN(cash) || cash < 0) {
+      setPaymentOnline((prev) => (prev === '0' ? prev : '0'))
+    } else if (cash > selectedPurchaseOutstanding) {
+      const outstanding = money(selectedPurchaseOutstanding)
+      setPaymentCash((prev) => (prev === outstanding ? prev : outstanding))
+      setPaymentOnline((prev) => (prev === '0' ? prev : '0'))
+    } else {
+      const online = money(selectedPurchaseOutstanding - cash)
+      setPaymentOnline((prev) => (prev === online ? prev : online))
+    }
+  }, [paymentMode, paymentOpen, paymentType, selectedPurchaseOutstanding])
 
   function resetForm() {
     setPartyId(null)
@@ -457,22 +492,26 @@ export default function PurchasesPage() {
       conversion_qty: product.default_conversion_qty ?? undefined,
     }
     if (editMode) updateEditItem(itemKey, patch)
-    else updateItem(itemKey, patch)
+    else {
+      updateItem(itemKey, patch)
+      setInventorySearch(product.name)
+    }
   }
 
-  function applyExistingInventory(itemKey: string, inventoryItem: Item | null, editMode = false) {
-    if (!inventoryItem) return
+  function applyExistingInventory(itemKey: string, incomingEntry: IncomingStockEntry | null, editMode = false) {
+    if (!incomingEntry) return
     const patch = {
-      existing_inventory_item_id: inventoryItem.id,
-      product_id: inventoryItem.product_id ?? undefined,
-      product_name: inventoryItem.name,
-      brand: inventoryItem.brand || '',
-      category_id: inventoryItem.category_id ?? undefined,
-      expiry_date: inventoryItem.expiry_date || '',
-      rack_number: inventoryItem.rack_number || 0,
-      sealed_qty: Number(inventoryItem.stock || 0) > 0 ? Number(inventoryItem.stock || 0) : 1,
-      cost_price: Number(inventoryItem.cost_price || 0),
-      mrp: Number(inventoryItem.mrp || 0),
+      existing_stock_movement_id: incomingEntry.movement_id,
+      existing_inventory_item_id: incomingEntry.item_id,
+      product_id: incomingEntry.product_id ?? undefined,
+      product_name: incomingEntry.name,
+      brand: incomingEntry.brand || '',
+      category_id: incomingEntry.category_id ?? undefined,
+      expiry_date: incomingEntry.expiry_date || '',
+      rack_number: incomingEntry.rack_number || 0,
+      sealed_qty: Math.max(1, Number(incomingEntry.delta || 0)),
+      cost_price: Number(incomingEntry.cost_price || 0),
+      mrp: Number(incomingEntry.mrp || 0),
       rounding_adjustment: 0,
     }
     if (editMode) updateEditItem(itemKey, patch)
@@ -481,6 +520,68 @@ export default function PurchasesPage() {
 
   function openDetail(purchaseId: number) {
     setSelectedPurchaseId(purchaseId)
+  }
+
+  function closeDetail() {
+    setSelectedPurchaseId(null)
+    if (searchParams.has('purchase_id')) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('purchase_id')
+      setSearchParams(next, { replace: true })
+    }
+  }
+
+  function openPaymentDialog() {
+    const outstanding = money(selectedPurchaseOutstanding)
+    setPaymentType('payment')
+    setPaymentMode('cash')
+    setPaymentCash(outstanding)
+    setPaymentOnline('0')
+    setPaymentAmount(outstanding)
+    setPaymentDate(today)
+    setPaymentNote('')
+    setPaymentOpen(true)
+  }
+
+  function setPaymentModeAndAmounts(next: 'cash' | 'online' | 'split') {
+    setPaymentMode(next)
+    const outstanding = money(selectedPurchaseOutstanding)
+    if (next === 'cash') {
+      setPaymentCash(outstanding)
+      setPaymentOnline('0')
+    }
+    if (next === 'online') {
+      setPaymentCash('0')
+      setPaymentOnline(outstanding)
+    }
+    if (next === 'split') {
+      setPaymentCash(outstanding)
+      setPaymentOnline('0')
+    }
+  }
+
+  function setPaymentSplitCashAmount(value: string) {
+    const cash = Number(value || 0)
+    if (Number.isNaN(cash) || cash < 0) {
+      setPaymentCash(value)
+      setPaymentOnline('0')
+      return
+    }
+    const cappedCash = Math.min(cash, selectedPurchaseOutstanding)
+    setPaymentCash(cash > selectedPurchaseOutstanding ? money(selectedPurchaseOutstanding) : value)
+    setPaymentOnline(money(selectedPurchaseOutstanding - cappedCash))
+  }
+
+  function setPaymentSplitOnlineAmount(value: string) {
+    const online = Number(value || 0)
+    if (Number.isNaN(online) || online < 0) {
+      setPaymentOnline(value)
+      setPaymentCash('0')
+      return
+    }
+    const cappedOnline = Math.min(online, selectedPurchaseOutstanding)
+    setPaymentOnline(online > selectedPurchaseOutstanding ? money(selectedPurchaseOutstanding) : value)
+    setPaymentCash(money(selectedPurchaseOutstanding - cappedOnline))
   }
 
   function openEditHeader() {
@@ -537,6 +638,10 @@ export default function PurchasesPage() {
     }))
   }
 
+  function purchasePayloadItems(draftItems: DraftItem[]): PurchaseItemPayload[] {
+    return cleanItems(draftItems).map(({ key, existing_stock_movement_id, ...rest }) => rest)
+  }
+
   function submit() {
     if (!partyId) {
       toast.push('Select a supplier first', 'error')
@@ -559,7 +664,7 @@ export default function PurchasesPage() {
       discount_amount: Number(discountAmount || 0),
       gst_amount: 0,
       rounding_adjustment: Number(roundingAdjustment || 0),
-      items: cleanedItems.map(({ key, ...rest }) => rest),
+      items: purchasePayloadItems(items),
       payments: [
         ...(Number(paidAmount || 0) > 0 ? [{ amount: Number(paidAmount), note: 'Initial payment', is_writeoff: false }] : []),
         ...(Number(writeoffAmount || 0) > 0 ? [{ amount: Number(writeoffAmount), note: 'Initial write-off', is_writeoff: true }] : []),
@@ -585,10 +690,17 @@ export default function PurchasesPage() {
 
   function savePayment() {
     if (!selectedPurchaseId) return
+    if (purchasePaymentError) {
+      toast.push(purchasePaymentError, 'error')
+      return
+    }
     addPaymentM.mutate({
       id: selectedPurchaseId,
       payload: {
-        amount: Number(paymentAmount || 0),
+        amount: purchasePaymentAmount,
+        mode: paymentMode,
+        cash_amount: purchasePaymentCash,
+        online_amount: purchasePaymentOnline,
         note: paymentNote.trim() || undefined,
         paid_at: paymentDate,
         is_writeoff: paymentType === 'writeoff',
@@ -605,7 +717,7 @@ export default function PurchasesPage() {
     }
     replaceItemsM.mutate({
       id: selectedPurchaseId,
-      items: cleanedItems.map(({ key, ...rest }) => rest),
+      items: purchasePayloadItems(editItems),
     })
   }
 
@@ -697,7 +809,7 @@ export default function PurchasesPage() {
                         size="small"
                         color="info"
                         icon={<Inventory2OutlinedIcon />}
-                        label={`Existing #${item.existing_inventory_item_id}`}
+                        label={`Existing #${item.existing_inventory_item_id}${item.existing_stock_movement_id ? ` / In #${item.existing_stock_movement_id}` : ''}`}
                         variant="outlined"
                       />
                     ) : null}
@@ -720,14 +832,40 @@ export default function PurchasesPage() {
                       size="small"
                       options={inventoryBatches}
                       filterOptions={(options) => options}
-                      value={inventoryBatches.find((batch) => Number(batch.id) === Number(item.existing_inventory_item_id)) || null}
-                      getOptionLabel={inventoryBatchLabel}
+                      value={
+                        inventoryBatches.find((entry) => Number(entry.movement_id) === Number(item.existing_stock_movement_id)) ||
+                        inventoryBatches.find((entry) => Number(entry.item_id) === Number(item.existing_inventory_item_id)) ||
+                        null
+                      }
+                      isOptionEqualToValue={(option, value) => Number(option.movement_id) === Number(value.movement_id)}
+                      getOptionLabel={incomingEntryLabel}
                       onInputChange={(_, value) => setInventorySearch(value)}
                       onChange={(_, value) => {
                         if (value) applyExistingInventory(item.key, value, editMode)
-                        else patchItem(item.key, { existing_inventory_item_id: undefined })
+                        else patchItem(item.key, { existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
                       }}
-                      renderInput={(params) => <TextField {...params} label="Attach Existing Batch" fullWidth />}
+                      renderOption={(props, option) => (
+                        <li {...props} key={option.movement_id}>
+                          <Stack gap={0.25} sx={{ width: '100%' }}>
+                            <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
+                              <Typography variant="body2" fontWeight={700}>#{option.item_id}</Typography>
+                              <Chip size="small" color="success" label={`+${Number(option.delta || 0)}`} />
+                              <Typography variant="body2">{option.name}{option.brand ? ` | ${option.brand}` : ''}</Typography>
+                            </Stack>
+                            <Typography variant="caption" color="text.secondary">
+                              Incoming {fmtDate(option.incoming_at)} | Exp {option.expiry_date || '-'} | MRP {money(option.mrp)} | Current {Number(option.stock || 0)} | {option.reason}
+                            </Typography>
+                          </Stack>
+                        </li>
+                      )}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          label="Attach Existing Batch"
+                          helperText="Incoming stock from 01 Apr 2026 onward"
+                          fullWidth
+                        />
+                      )}
                     />
                   </Grid>
                   <Grid item xs={12} md={3.5}>
@@ -1132,7 +1270,7 @@ export default function PurchasesPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={Boolean(selectedPurchaseId)} onClose={() => setSelectedPurchaseId(null)} fullWidth maxWidth="lg">
+      <Dialog open={Boolean(selectedPurchaseId)} onClose={closeDetail} fullWidth maxWidth="lg">
         <DialogTitle>Purchase Detail</DialogTitle>
         <DialogContent dividers>
           {!selectedPurchase && <Typography>Loading...</Typography>}
@@ -1146,7 +1284,7 @@ export default function PurchasesPage() {
                 <Stack direction="row" gap={1}>
                   <Button variant="outlined" onClick={openEditHeader}>Edit Header</Button>
                   <Button variant="outlined" onClick={openEditItems}>Edit Items</Button>
-                  <Button variant="contained" startIcon={<PaymentsIcon />} onClick={() => setPaymentOpen(true)}>Add Payment</Button>
+	                  <Button variant="contained" startIcon={<PaymentsIcon />} onClick={openPaymentDialog}>Add Payment</Button>
                   <Button color="error" variant="outlined" onClick={() => setCancelConfirmOpen(true)}>Cancel Purchase</Button>
                 </Stack>
               </Stack>
@@ -1212,25 +1350,31 @@ export default function PurchasesPage() {
               <Box sx={{ overflowX: 'auto' }}>
                 <table className="table">
                   <thead>
-                    <tr>
-                      <th>When</th>
-                      <th>Type</th>
-                      <th>Amount</th>
-                      <th>Note</th>
-                    </tr>
+	                    <tr>
+	                      <th>When</th>
+	                      <th>Type</th>
+	                      <th>Mode</th>
+	                      <th>Cash</th>
+	                      <th>Online</th>
+	                      <th>Amount</th>
+	                      <th>Note</th>
+	                    </tr>
                   </thead>
                   <tbody>
                     {selectedPurchase.payments.map((payment) => (
-                      <tr key={payment.id}>
-                        <td>{fmtDateTime(payment.paid_at)}</td>
-                        <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
-                        <td>{money(payment.amount)}</td>
-                        <td>{payment.note || '-'}</td>
-                      </tr>
+	                      <tr key={payment.id}>
+	                        <td>{fmtDateTime(payment.paid_at)}</td>
+	                        <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
+	                        <td>{payment.is_writeoff ? '-' : (payment.mode || 'cash')}</td>
+	                        <td>{payment.is_writeoff ? '-' : money(payment.cash_amount || 0)}</td>
+	                        <td>{payment.is_writeoff ? '-' : money(payment.online_amount || 0)}</td>
+	                        <td>{money(payment.amount)}</td>
+	                        <td>{payment.note || '-'}</td>
+	                      </tr>
                     ))}
                     {selectedPurchase.payments.length === 0 && (
                       <tr>
-                        <td colSpan={4}>
+	                        <td colSpan={7}>
                           <Box p={2} color="text.secondary">No payments yet.</Box>
                         </td>
                       </tr>
@@ -1242,7 +1386,7 @@ export default function PurchasesPage() {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setSelectedPurchaseId(null)}>Close</Button>
+          <Button onClick={closeDetail}>Close</Button>
         </DialogActions>
       </Dialog>
 
@@ -1302,18 +1446,86 @@ export default function PurchasesPage() {
         <DialogTitle>Add Payment / Write-off</DialogTitle>
         <DialogContent dividers>
           <Stack gap={2} mt={1}>
-            <TextField select label="Entry Type" value={paymentType} onChange={(e) => setPaymentType(e.target.value as 'payment' | 'writeoff')} fullWidth>
-              <MenuItem value="payment">Payment</MenuItem>
-              <MenuItem value="writeoff">Write-off</MenuItem>
-            </TextField>
-            <TextField label="Amount" type="number" value={paymentAmount} onChange={(e) => setPaymentAmount(e.target.value)} fullWidth />
-            <TextField label="Date" type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+	            <TextField
+	              select
+	              label="Entry Type"
+	              value={paymentType}
+	              onChange={(e) => {
+	                const next = e.target.value as 'payment' | 'writeoff'
+	                setPaymentType(next)
+	                if (next === 'writeoff') {
+	                  setPaymentCash('0')
+	                  setPaymentOnline('0')
+	                  setPaymentAmount(money(selectedPurchaseOutstanding))
+	                } else {
+	                  setPaymentMode('cash')
+	                  setPaymentCash(money(selectedPurchaseOutstanding))
+	                  setPaymentOnline('0')
+	                }
+	              }}
+	              fullWidth
+	            >
+	              <MenuItem value="payment">Payment</MenuItem>
+	              <MenuItem value="writeoff">Write-off</MenuItem>
+	            </TextField>
+	            {paymentType === 'payment' ? (
+	              <>
+	                <TextField
+	                  select
+	                  label="Mode"
+	                  value={paymentMode}
+	                  onChange={(e) => setPaymentModeAndAmounts(e.target.value as 'cash' | 'online' | 'split')}
+	                  fullWidth
+	                >
+	                  <MenuItem value="cash">Cash</MenuItem>
+	                  <MenuItem value="online">Online</MenuItem>
+	                  <MenuItem value="split">Split</MenuItem>
+	                </TextField>
+	                <TextField
+		                  label="Cash Amount"
+		                  type="number"
+		                  value={paymentMode === 'online' ? '0' : paymentCash}
+		                  onChange={(e) => {
+		                    if (paymentMode === 'split') setPaymentSplitCashAmount(e.target.value)
+		                    else setPaymentCash(e.target.value)
+		                  }}
+		                  disabled={paymentMode === 'online'}
+		                  inputProps={{ min: 0, max: money(selectedPurchaseOutstanding), step: '0.01' }}
+		                  fullWidth
+	                />
+	                <TextField
+		                  label="Online Amount"
+		                  type="number"
+		                  value={paymentMode === 'cash' ? '0' : paymentOnline}
+		                  onChange={(e) => {
+		                    if (paymentMode === 'split') setPaymentSplitOnlineAmount(e.target.value)
+		                    else setPaymentOnline(e.target.value)
+		                  }}
+		                  disabled={paymentMode === 'cash'}
+		                  inputProps={{ min: 0, max: money(selectedPurchaseOutstanding), step: '0.01' }}
+		                  fullWidth
+	                />
+	              </>
+	            ) : (
+	              <TextField
+	                label="Amount"
+	                type="number"
+	                value={paymentAmount}
+	                onChange={(e) => setPaymentAmount(e.target.value)}
+	                inputProps={{ min: 0, max: money(selectedPurchaseOutstanding), step: '0.01' }}
+	                fullWidth
+	              />
+	            )}
+	            <Typography variant="body2" color={purchasePaymentError ? 'error' : 'text.secondary'}>
+	              Amount {money(purchasePaymentAmount)} / Outstanding {money(selectedPurchaseOutstanding)}
+	            </Typography>
+	            <TextField label="Date" type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
             <TextField label="Note" value={paymentNote} onChange={(e) => setPaymentNote(e.target.value)} multiline minRows={2} fullWidth />
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setPaymentOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={savePayment} disabled={addPaymentM.isPending}>Save</Button>
+          <Button variant="contained" onClick={savePayment} disabled={addPaymentM.isPending || Boolean(purchasePaymentError)}>Save</Button>
         </DialogActions>
       </Dialog>
 

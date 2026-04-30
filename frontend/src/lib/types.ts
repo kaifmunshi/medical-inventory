@@ -168,6 +168,9 @@ export interface PurchaseItemPayload {
 
 export interface PurchasePaymentPayload {
   amount: number
+  mode?: 'cash' | 'online' | 'split' | 'writeoff'
+  cash_amount?: number
+  online_amount?: number
   note?: string
   is_writeoff?: boolean
 }
@@ -198,7 +201,10 @@ export interface PurchasePayment {
   id: ID
   purchase_id: ID
   paid_at: string
+  mode: 'cash' | 'online' | 'split' | 'writeoff'
   amount: number
+  cash_amount: number
+  online_amount: number
   note?: string | null
   is_writeoff: boolean
   is_deleted: boolean

@@ -4,7 +4,12 @@ import {
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogContent,
+  DialogTitle,
   Divider,
+  IconButton,
+  Link,
   MenuItem,
   Paper,
   Skeleton,
@@ -13,30 +18,32 @@ import {
   Tabs,
   TextField,
   Tooltip,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from '@mui/material'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
+import CloseIcon from '@mui/icons-material/Close'
+import EditIcon from '@mui/icons-material/Edit'
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
 import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
-import SummarizeOutlinedIcon from '@mui/icons-material/SummarizeOutlined'
-import ViewStreamOutlinedIcon from '@mui/icons-material/ViewStreamOutlined'
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { getAudit } from '../../services/audit'
-import { getBill } from '../../services/billing'
+import BillEditDialog from '../../components/billing/BillEditDialog'
+import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
+import { getBill, type Bill } from '../../services/billing'
 import {
   getGroupLedger,
   getGroupLedgerSummary,
   getItemGroup,
   getStockLedgerReconciliation,
 } from '../../services/inventory'
-import { fetchPurchase } from '../../services/purchases'
-import { getExchangeByReturn, getReturn } from '../../services/returns'
-import { buildSalesReportLink, buildStockReportLink } from '../../lib/reportLinks'
+import { buildStockReportLink } from '../../lib/reportLinks'
 import { formatLedgerNote } from '../../lib/stockLedger'
 
-type StockCardTab = 'summary' | 'product' | 'batch' | 'batches'
+type StockCardTab = 'ledger' | 'batches'
+type LedgerScope = 'product' | 'batch'
 
 const LEDGER_LIMIT = 60
 
@@ -49,20 +56,17 @@ function formatExpiry(exp?: string | null) {
   return `${d}-${m}-${y}`
 }
 
-function formatDateTime(value?: string | null) {
+function formatDateOnly(value?: string | null) {
   const raw = String(value || '')
   if (!raw) return '-'
   try {
-    return new Date(raw).toLocaleString('en-IN', {
+    return new Date(raw).toLocaleDateString('en-IN', {
       day: '2-digit',
       month: 'short',
       year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true,
     })
   } catch {
-    return raw
+    return formatExpiry(raw)
   }
 }
 
@@ -77,6 +81,34 @@ function toDateInput(daysAgo = 0) {
 
 function formatSigned(value: number) {
   return `${value > 0 ? '+' : ''}${value}`
+}
+
+function money(n: number | string | undefined | null) {
+  return Number(n || 0).toFixed(2)
+}
+
+function round2(n: number) {
+  return Math.round(n * 100) / 100
+}
+
+function computeBillProration(bill: any) {
+  const items = (bill?.items || []) as any[]
+  const sub = items.reduce((sum: number, item: any) => sum + Number(item.mrp) * Number(item.quantity), 0)
+  const discPct = Number(bill?.discount_percent || 0)
+  const taxPct = Number(bill?.tax_percent || 0)
+  const afterDisc = sub - (sub * discPct) / 100
+  const computedTotal = afterDisc + (afterDisc * taxPct) / 100
+  const finalTotal = bill?.total_amount !== undefined && bill?.total_amount !== null ? Number(bill.total_amount) : computedTotal
+  const factor = computedTotal > 0 ? finalTotal / computedTotal : 1
+  return { discPct, taxPct, factor }
+}
+
+function chargedLine(bill: any, mrp: number, qty: number) {
+  const { discPct, taxPct, factor } = computeBillProration(bill)
+  const lineSub = Number(mrp) * Number(qty)
+  const afterDisc = lineSub * (1 - discPct / 100)
+  const afterTax = afterDisc * (1 + taxPct / 100)
+  return round2(afterTax * factor)
 }
 
 function reasonLabel(reason: string) {
@@ -157,24 +189,28 @@ function buildProductSearch(name: string, brand?: string | null) {
 
 export default function StockCardPage() {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [searchParams] = useSearchParams()
   const name = (searchParams.get('name') || '').trim()
   const brand = (searchParams.get('brand') || '').trim()
   const requestedBatchId = Number(searchParams.get('batchId') || 0) || null
-  const requestedTab = (searchParams.get('tab') || '').trim() as StockCardTab
+  const requestedTab = (searchParams.get('tab') || '').trim()
 
   const [tab, setTab] = useState<StockCardTab>(
-    requestedTab === 'product' || requestedTab === 'batch' || requestedTab === 'batches' || requestedTab === 'summary'
-      ? requestedTab
-      : requestedBatchId
-        ? 'batch'
-        : 'summary'
+    requestedTab === 'batches' ? 'batches' : 'ledger'
+  )
+  const [ledgerScope, setLedgerScope] = useState<LedgerScope>(
+    requestedTab === 'batch' || requestedBatchId ? 'batch' : 'product'
   )
   const [from, setFrom] = useState(() => toDateInput(30))
   const [to, setTo] = useState(() => toDateInput(0))
   const [reason, setReason] = useState('')
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(requestedBatchId)
   const [selectedMovementId, setSelectedMovementId] = useState<number | null>(null)
+  const [billOpen, setBillOpen] = useState(false)
+  const [billLoading, setBillLoading] = useState(false)
+  const [billDetail, setBillDetail] = useState<Bill | null>(null)
+  const [billEditOpen, setBillEditOpen] = useState(false)
 
   const groupQ = useQuery({
     queryKey: ['inventory-group', name, brand],
@@ -276,53 +312,10 @@ export default function StockCardPage() {
     [batchLedgerQ.data]
   )
 
-  const productRowsWithOpening = useMemo(() => {
-    if (!from || productSummaryQ.isLoading) return productRows
-    const opening = Number(productSummaryQ.data?.opening_stock || 0)
-    return [
-      ...productRows,
-      {
-        id: -1,
-        ts: `${from}T00:00:00`,
-        delta: opening,
-        reason: 'OPENING',
-        ref_type: null,
-        ref_id: null,
-        note: `Opening stock at ${from}`,
-        item_id: 0,
-        expiry_date: null,
-        mrp: null,
-        rack_number: null,
-        balance_before: 0,
-        balance_after: opening,
-      },
-    ]
-  }, [from, productRows, productSummaryQ.data?.opening_stock, productSummaryQ.isLoading])
+  const productRowsWithOpening = productRows
+  const batchRowsWithOpening = batchRows
 
-  const batchRowsWithOpening = useMemo(() => {
-    if (!from || batchSummaryQ.isLoading || !currentBatch?.id) return batchRows
-    const opening = Number(batchSummaryQ.data?.opening_stock || 0)
-    return [
-      ...batchRows,
-      {
-        id: -2,
-        ts: `${from}T00:00:00`,
-        delta: opening,
-        reason: 'OPENING',
-        ref_type: null,
-        ref_id: null,
-        note: `Opening stock at ${from}`,
-        item_id: Number(currentBatch.id),
-        expiry_date: currentBatch.expiry_date,
-        mrp: currentBatch.mrp,
-        rack_number: currentBatch.rack_number,
-        balance_before: 0,
-        balance_after: opening,
-      },
-    ]
-  }, [batchRows, batchSummaryQ.data?.opening_stock, batchSummaryQ.isLoading, currentBatch, from])
-
-  const activeRows = tab === 'batch' ? batchRowsWithOpening : productRowsWithOpening
+  const activeRows = ledgerScope === 'batch' ? batchRowsWithOpening : productRowsWithOpening
 
   useEffect(() => {
     if (!activeRows.length) {
@@ -332,40 +325,7 @@ export default function StockCardPage() {
     if (!selectedMovementId || !activeRows.some((row) => Number(row.id) === Number(selectedMovementId))) {
       setSelectedMovementId(Number(activeRows[0].id))
     }
-  }, [activeRows, selectedMovementId, tab])
-
-  const selectedMovement = useMemo(
-    () => activeRows.find((row) => Number(row.id) === Number(selectedMovementId)) || null,
-    [activeRows, selectedMovementId]
-  )
-
-  const sourceSpec = useMemo(() => {
-    if (!selectedMovement?.ref_id) return { kind: null as null | string, id: null as number | null }
-    const reasonKey = String(selectedMovement.reason || '').toUpperCase()
-    const refType = String(selectedMovement.ref_type || '').toUpperCase()
-    const refId = Number(selectedMovement.ref_id || 0) || null
-    if (refType === 'BILL' && refId) return { kind: 'bill', id: refId }
-    if (refType === 'PURCHASE' && refId) return { kind: 'purchase', id: refId }
-    if (refType === 'RETURN' && refId) return { kind: 'return', id: refId }
-    if (refType === 'AUDIT' && refId) return { kind: 'audit', id: refId }
-    if (refType === 'EXCHANGE' && reasonKey === 'EXCHANGE_IN' && refId) return { kind: 'exchange', id: refId }
-    if (refType === 'EXCHANGE' && reasonKey === 'EXCHANGE_OUT' && refId) return { kind: 'bill', id: refId }
-    return { kind: null as null | string, id: null as number | null }
-  }, [selectedMovement])
-
-  const sourceQ = useQuery({
-    queryKey: ['stock-card-source', sourceSpec.kind, sourceSpec.id],
-    enabled: !!sourceSpec.kind && !!sourceSpec.id,
-    queryFn: async () => {
-      if (!sourceSpec.kind || !sourceSpec.id) return null
-      if (sourceSpec.kind === 'bill') return getBill(sourceSpec.id)
-      if (sourceSpec.kind === 'purchase') return fetchPurchase(sourceSpec.id)
-      if (sourceSpec.kind === 'return') return getReturn(sourceSpec.id)
-      if (sourceSpec.kind === 'audit') return getAudit(sourceSpec.id)
-      if (sourceSpec.kind === 'exchange') return getExchangeByReturn(sourceSpec.id)
-      return null
-    },
-  })
+  }, [activeRows, ledgerScope, selectedMovementId])
 
   const nearExpiryCount = useMemo(
     () => batches.filter((batch) => Number(batch.stock || 0) > 0 && (daysUntilExpiry(batch.expiry_date) ?? 9999) <= 90).length,
@@ -399,44 +359,28 @@ export default function StockCardPage() {
     navigate(buildProductSearch(name, brand || undefined))
   }
 
-  function openSourcePage() {
-    if (!selectedMovement) return
-    const refId = Number(selectedMovement.ref_id || 0) || null
-    const refType = String(selectedMovement.ref_type || '').toUpperCase()
-    const reasonKey = String(selectedMovement.reason || '').toUpperCase()
-    if (refType === 'BILL' && refId) {
-      navigate(
-        buildSalesReportLink({
-          billId: refId,
-          from: '2000-01-01',
-          to: '2099-12-31',
-        })
-      )
-      return
+  async function openBillDetail(billId: number) {
+    if (!Number.isFinite(Number(billId)) || Number(billId) <= 0) return
+    setBillOpen(true)
+    setBillLoading(true)
+    setBillDetail(null)
+    try {
+      const bill = await getBill(Number(billId))
+      setBillDetail(bill)
+    } catch {
+      setBillDetail(null)
+    } finally {
+      setBillLoading(false)
     }
-    if (refType === 'PURCHASE') {
-      navigate('/purchases')
-      return
-    }
-    if (refType === 'RETURN' || refType === 'EXCHANGE') {
-      navigate('/returns')
-      return
-    }
-    if (refType === 'AUDIT') {
-      navigate('/stock-audit')
-    }
-    if (reasonKey === 'RECON_ADJUST') {
-      navigate(
-        buildStockReportLink({
-          q: name,
-          name,
-          brand,
-          from,
-          to,
-          openReconcile: true,
-        })
-      )
-    }
+  }
+
+  function refreshLedgerAfterBillChange(updatedBill?: Bill | null) {
+    if (updatedBill) setBillDetail(updatedBill)
+    queryClient.invalidateQueries({ queryKey: ['stock-card-product-ledger'] })
+    queryClient.invalidateQueries({ queryKey: ['stock-card-batch-ledger'] })
+    queryClient.invalidateQueries({ queryKey: ['inventory-group-summary'] })
+    queryClient.invalidateQueries({ queryKey: ['inventory-group'] })
+    queryClient.invalidateQueries({ queryKey: ['inventory-dashboard-stats'] })
   }
 
   function quickRange(days: number | 'all') {
@@ -451,7 +395,8 @@ export default function StockCardPage() {
 
   function openBatch(batchId: number) {
     setSelectedBatchId(batchId)
-    setTab('batch')
+    setLedgerScope('batch')
+    setTab('ledger')
   }
 
   function summaryMetric(label: string, value: string, helper?: string) {
@@ -486,154 +431,21 @@ export default function StockCardPage() {
     ) : tile
   }
 
-  function renderSourceDetails() {
-    if (!selectedMovement) {
-      return (
-        <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2.5 }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
-            Movement Inspector
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
-            Select a movement row to inspect its source and impact.
-          </Typography>
-        </Paper>
-      )
+  function ledgerSourceLink(row: any) {
+    const refId = Number(row.ref_id || 0) || null
+    const refType = String(row.ref_type || '').toUpperCase()
+    const reasonKey = String(row.reason || '').toUpperCase()
+    if (!refId) return null
+    if (refType === 'BILL') {
+      return { kind: 'bill' as const, id: refId }
     }
-
-    const sourceData: any = sourceQ.data
-    const movementNote = formatLedgerNote(selectedMovement.note)
-
-    return (
-      <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2.5, position: 'sticky', top: 12 }}>
-        <Stack gap={1.2}>
-          <Box>
-            <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>
-              Movement Inspector
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Row #{selectedMovement.id} • {reasonLabel(selectedMovement.reason)}
-            </Typography>
-          </Box>
-
-          <Stack direction="row" gap={1} flexWrap="wrap">
-            {deltaChip(Number(selectedMovement.delta || 0))}
-            <Chip
-              size="small"
-              label={`Batch #${selectedMovement.item_id}`}
-              variant="outlined"
-              sx={{ borderRadius: 999, fontWeight: 800 }}
-            />
-            <Chip
-              size="small"
-              label={formatDateTime(selectedMovement.ts)}
-              variant="outlined"
-              sx={{ borderRadius: 999, fontWeight: 800 }}
-            />
-          </Stack>
-
-          <Paper variant="outlined" sx={{ p: 1, borderRadius: 2, bgcolor: 'rgba(15,23,42,0.02)' }}>
-            <Typography variant="caption" color="text.secondary">
-              Before / After
-            </Typography>
-            <Typography sx={{ fontWeight: 900, mt: 0.25 }}>
-              {selectedMovement.balance_before} {'->'} {selectedMovement.balance_after}
-            </Typography>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-              Ref: {selectedMovement.ref_type ? `${selectedMovement.ref_type}${selectedMovement.ref_id ? ` #${selectedMovement.ref_id}` : ''}` : '-'}
-            </Typography>
-            {movementNote ? (
-              <Typography variant="body2" sx={{ mt: 0.7 }}>
-                {movementNote}
-              </Typography>
-            ) : null}
-          </Paper>
-
-          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
-            <Button
-              variant="outlined"
-              onClick={() => openBatch(Number(selectedMovement.item_id))}
-              startIcon={<ViewStreamOutlinedIcon />}
-              size="small"
-            >
-              View Batch Ledger
-            </Button>
-            <Button variant="outlined" onClick={openSourcePage} startIcon={<OpenInNewIcon />} size="small">
-              Open Source Page
-            </Button>
-          </Stack>
-
-          <Divider />
-
-          <Box>
-            <Typography variant="subtitle2" sx={{ fontWeight: 900 }}>
-              Source Snapshot
-            </Typography>
-            {sourceQ.isLoading ? (
-              <Stack gap={1} sx={{ mt: 1 }}>
-                <Skeleton variant="rounded" height={32} />
-                <Skeleton variant="rounded" height={32} />
-                <Skeleton variant="rounded" height={32} />
-              </Stack>
-            ) : sourceQ.isError ? (
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                Source details could not be loaded for this row.
-              </Typography>
-            ) : sourceSpec.kind === 'bill' && sourceData ? (
-              <Stack gap={0.8} sx={{ mt: 1 }}>
-                <Typography variant="body2">Bill #{sourceData.id}</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  {formatDateTime(sourceData.date_time)} • {sourceData.payment_mode || '-'}
-                </Typography>
-                <Typography variant="body2">Total: Rs {Number(sourceData.total_amount || 0).toFixed(2)}</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Status: {sourceData.payment_status || '-'} {sourceData.is_deleted ? '• Deleted' : ''}
-                </Typography>
-              </Stack>
-            ) : sourceSpec.kind === 'purchase' && sourceData ? (
-              <Stack gap={0.8} sx={{ mt: 1 }}>
-                <Typography variant="body2">Purchase #{sourceData.id}</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Invoice: {sourceData.invoice_number || '-'} • {formatDateTime(sourceData.created_at)}
-                </Typography>
-                <Typography variant="body2">Total: Rs {Number(sourceData.total_amount || 0).toFixed(2)}</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Status: {sourceData.payment_status || '-'}
-                </Typography>
-              </Stack>
-            ) : sourceSpec.kind === 'return' && sourceData ? (
-              <Stack gap={0.8} sx={{ mt: 1 }}>
-                <Typography variant="body2">Return #{sourceData.id}</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Source Bill #{sourceData.source_bill_id} • {formatDateTime(sourceData.date_time || sourceData.created_at)}
-                </Typography>
-                <Typography variant="body2">
-                  Refund: Rs {Number(sourceData.refund_cash || 0).toFixed(2)} cash / Rs {Number(sourceData.refund_online || 0).toFixed(2)} online
-                </Typography>
-              </Stack>
-            ) : sourceSpec.kind === 'exchange' && sourceData ? (
-              <Stack gap={0.8} sx={{ mt: 1 }}>
-                <Typography variant="body2">Exchange #{sourceData.id}</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Source Bill #{sourceData.source_bill_id || '-'} • New Bill #{sourceData.new_bill_id || '-'}
-                </Typography>
-                <Typography variant="body2">Net Due: Rs {Number(sourceData.net_due || 0).toFixed(2)}</Typography>
-              </Stack>
-            ) : sourceSpec.kind === 'audit' && sourceData ? (
-              <Stack gap={0.8} sx={{ mt: 1 }}>
-                <Typography variant="body2">{sourceData.name || `Audit #${sourceData.id}`}</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Status: {sourceData.status || '-'} • Closed: {formatDateTime(sourceData.closed_at)}
-                </Typography>
-              </Stack>
-            ) : (
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                This movement does not have a richer source snapshot.
-              </Typography>
-            )}
-          </Box>
-        </Stack>
-      </Paper>
-    )
+    if (refType === 'PURCHASE') {
+      return { kind: 'purchase' as const, id: refId }
+    }
+    if (refType === 'EXCHANGE' && reasonKey === 'EXCHANGE_OUT') {
+      return { kind: 'bill' as const, id: refId }
+    }
+    return null
   }
 
   function renderLedgerTable(rows: any[], loading: boolean, hasMore: boolean, onLoadMore: () => void, loadingMore: boolean) {
@@ -643,21 +455,19 @@ export default function StockCardPage() {
           <table className="table">
             <thead>
               <tr>
-                <th>TS</th>
+                <th>Date</th>
                 <th>Batch</th>
-                <th>Delta</th>
-                <th>Reason</th>
-                <th>Ref</th>
-                <th>Before</th>
-                <th>After</th>
-                <th>Note</th>
+                <th>Particulars</th>
+                <th>Op Bal</th>
+                <th>Qty</th>
+                <th>Cl Bal</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 Array.from({ length: 8 }).map((_, index) => (
                   <tr key={`sk-${index}`}>
-                    <td colSpan={8}>
+                    <td colSpan={6}>
                       <Box py={0.75}>
                         <Skeleton variant="rounded" height={34} />
                       </Box>
@@ -666,7 +476,7 @@ export default function StockCardPage() {
                 ))
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={6}>
                     <Box p={2} color="text.secondary">
                       No ledger rows for the selected range.
                     </Box>
@@ -676,6 +486,8 @@ export default function StockCardPage() {
                 rows.map((row) => {
                   const selected = Number(row.id) === Number(selectedMovementId)
                   const formattedNote = formatLedgerNote(row.note)
+                  const refLabel = row.ref_type ? `${row.ref_type}${row.ref_id ? ` #${row.ref_id}` : ''}` : ''
+                  const sourceLink = ledgerSourceLink(row)
                   return (
                     <tr
                       key={`row-${row.id}`}
@@ -685,7 +497,9 @@ export default function StockCardPage() {
                         background: selected ? 'rgba(20,92,59,0.08)' : undefined,
                       }}
                     >
-                      <td>{formatDateTime(row.ts)}</td>
+                      <td>
+                        <Typography sx={{ fontWeight: 800 }}>{formatDateOnly(row.ts)}</Typography>
+                      </td>
                       <td>
                         <Stack gap={0.2}>
                           <Typography sx={{ fontWeight: 800 }}>
@@ -696,14 +510,42 @@ export default function StockCardPage() {
                           </Typography>
                         </Stack>
                       </td>
-                      <td>{deltaChip(Number(row.delta || 0))}</td>
-                      <td>{statusChip(reasonLabel(row.reason), 'info')}</td>
-                      <td>{row.ref_type ? `${row.ref_type}${row.ref_id ? ` #${row.ref_id}` : ''}` : '-'}</td>
-                      <td>{row.balance_before}</td>
-                      <td>{row.balance_after}</td>
-                      <td style={{ maxWidth: 240, whiteSpace: 'normal', wordBreak: 'break-word' }}>
-                        {formattedNote || '-'}
+                      <td style={{ maxWidth: 340, whiteSpace: 'normal', wordBreak: 'break-word' }}>
+                        <Stack gap={0.2}>
+                          <Typography sx={{ fontWeight: 800 }}>{reasonLabel(row.reason)}</Typography>
+                          {refLabel || formattedNote ? (
+                            <Typography variant="caption" color="text.secondary" component="div">
+                              {sourceLink && refLabel ? (
+                                <Link
+                                  component="button"
+                                  underline="hover"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    if (sourceLink.kind === 'bill') openBillDetail(sourceLink.id)
+                                    else navigate(`/purchases?purchase_id=${sourceLink.id}`)
+                                  }}
+                                  sx={{
+                                    border: 0,
+                                    p: 0,
+                                    font: 'inherit',
+                                    fontWeight: 800,
+                                    verticalAlign: 'baseline',
+                                  }}
+                                >
+                                  {refLabel}
+                                </Link>
+                              ) : (
+                                refLabel
+                              )}
+                              {refLabel && formattedNote ? ' | ' : ''}
+                              {formattedNote || ''}
+                            </Typography>
+                          ) : null}
+                        </Stack>
                       </td>
+                      <td>{row.balance_before}</td>
+                      <td>{deltaChip(Number(row.delta || 0))}</td>
+                      <td>{row.balance_after}</td>
                     </tr>
                   )
                 })
@@ -748,8 +590,16 @@ export default function StockCardPage() {
   }
 
   const expiryDays = daysUntilExpiry(groupQ.data.earliest_expiry)
+  const ledgerSummary = ledgerScope === 'batch' ? batchSummaryQ.data : productSummaryQ.data
+  const ledgerSummaryLoading = ledgerScope === 'batch' ? batchSummaryQ.isLoading : productSummaryQ.isLoading
+  const ledgerRows = ledgerScope === 'batch' ? batchRowsWithOpening : productRowsWithOpening
+  const ledgerLoading = ledgerScope === 'batch' ? batchLedgerQ.isLoading : productLedgerQ.isLoading
+  const ledgerHasMore = ledgerScope === 'batch' ? Boolean(batchLedgerQ.hasNextPage) : Boolean(productLedgerQ.hasNextPage)
+  const ledgerLoadingMore = ledgerScope === 'batch' ? batchLedgerQ.isFetchingNextPage : productLedgerQ.isFetchingNextPage
+  const loadMoreLedger = ledgerScope === 'batch' ? () => batchLedgerQ.fetchNextPage() : () => productLedgerQ.fetchNextPage()
 
   return (
+    <>
     <Stack gap={1.5}>
       <Paper
         sx={{
@@ -870,192 +720,92 @@ export default function StockCardPage() {
       <Paper sx={{ borderRadius: 2.5, overflow: 'hidden' }}>
         <Tabs
           value={tab}
-          onChange={(_, value) => setTab(value)}
+          onChange={(_, value) => value && setTab(value)}
           variant="scrollable"
           scrollButtons="auto"
           sx={{ minHeight: 44, '& .MuiTab-root': { minHeight: 44 } }}
         >
-          <Tab value="summary" icon={<SummarizeOutlinedIcon fontSize="small" />} iconPosition="start" label="Summary" />
-          <Tab value="product" icon={<ReceiptLongIcon fontSize="small" />} iconPosition="start" label="Product Ledger" />
-          <Tab value="batch" icon={<ViewStreamOutlinedIcon fontSize="small" />} iconPosition="start" label="Batch Ledger" />
+          <Tab value="ledger" icon={<ReceiptLongIcon fontSize="small" />} iconPosition="start" label="Ledger" />
           <Tab value="batches" icon={<Inventory2OutlinedIcon fontSize="small" />} iconPosition="start" label="Batches" />
         </Tabs>
       </Paper>
 
-      {tab === 'summary' ? (
-        <Stack gap={1.5}>
-          <Stack direction="row" gap={1.25} flexWrap="wrap">
-            {summaryMetric(
-              'Opening Stock',
-              String(productSummaryQ.data?.opening_stock ?? '-'),
-              from ? `At ${formatExpiry(from)}` : 'Start of full history'
-            )}
-            {summaryMetric('Inward Qty', String(productSummaryQ.data?.inward_qty ?? '-'), 'Purchases, returns, positive adjustments')}
-            {summaryMetric('Outward Qty', String(productSummaryQ.data?.outward_qty ?? '-'), 'Sales, exchange out, negative adjustments')}
-            {summaryMetric('Closing Stock', String(productSummaryQ.data?.closing_stock ?? '-'), to ? `At ${formatExpiry(to)}` : 'Latest ledger close')}
-            {summaryMetric(
-              'Ledger Gap',
-              formatSigned(productSummaryQ.data?.ledger_balance_gap ?? 0),
-              `Gap = current stock (${productSummaryQ.data?.current_stock ?? '-'}) - total ledger movement balance. 0 means ledger matches stock.`
-            )}
-          </Stack>
-
-          <Stack direction={{ xs: 'column', xl: 'row' }} gap={1.5}>
-            <Paper sx={{ p: 1.5, borderRadius: 2.5, flex: 1 }}>
-              <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>
-                Product Summary
-              </Typography>
-              <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1 }}>
-                {productSummaryQ.isLoading ? (
-                  Array.from({ length: 5 }).map((_, index) => <Skeleton key={`ps-${index}`} variant="rounded" height={28} width={110} />)
-                ) : (
-                  <>
-                    <Chip size="small" label={`Movements: ${productSummaryQ.data?.movement_count ?? 0}`} />
-                    <Chip size="small" label={`Last Movement: ${formatDateTime(productSummaryQ.data?.last_movement_ts)}`} variant="outlined" />
-                    <Chip size="small" label={`Last Purchase: ${formatDateTime(productSummaryQ.data?.last_purchase_ts)}`} variant="outlined" />
-                    <Chip size="small" label={`Last Sale: ${formatDateTime(productSummaryQ.data?.last_sale_ts)}`} variant="outlined" />
-                    <Chip size="small" label={`Last Adjust: ${formatDateTime(productSummaryQ.data?.last_adjustment_ts)}`} variant="outlined" />
-                  </>
-                )}
-              </Stack>
-
-              <Divider sx={{ my: 2 }} />
-
-              <Typography variant="subtitle2" sx={{ fontWeight: 900, mb: 1 }}>
-                Recent Product Movements
-              </Typography>
-              {renderLedgerTable(
-                productRowsWithOpening.slice(0, 6),
-                productLedgerQ.isLoading,
-                productLedgerQ.hasNextPage,
-                () => productLedgerQ.fetchNextPage(),
-                productLedgerQ.isFetchingNextPage
-              )}
-            </Paper>
-
-            <Stack gap={1.5} sx={{ width: { xs: '100%', xl: 360 } }}>
-              <Paper sx={{ p: 1.5, borderRadius: 2.5 }}>
-                <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>
-                  Focus Batch
-                </Typography>
-                {currentBatch ? (
-                  <Stack gap={0.85} sx={{ mt: 1 }}>
-                    <Typography variant="body1" sx={{ fontWeight: 800 }}>
-                      Batch #{currentBatch.id}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Exp {formatExpiry(currentBatch.expiry_date)} • MRP {currentBatch.mrp} • Rack {currentBatch.rack_number}
-                    </Typography>
-                    <Stack direction="row" gap={1} flexWrap="wrap">
-                      <Chip size="small" label={`Stock ${currentBatch.stock}`} />
-                      <Tooltip
-                        title={`Gap = current batch stock (${batchSummaryQ.data?.current_stock ?? '-'}) - total ledger movement balance for this batch.`}
-                        arrow
-                      >
-                        <Chip size="small" label={`Batch Gap ${formatSigned(batchSummaryQ.data?.ledger_balance_gap ?? 0)}`} variant="outlined" />
-                      </Tooltip>
-                    </Stack>
-                    <Button variant="outlined" onClick={() => setTab('batch')} size="small">
-                      Open Batch Ledger
-                    </Button>
-                  </Stack>
-                ) : (
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                    No batch is available for inspection.
-                  </Typography>
-                )}
-              </Paper>
-
-              {renderSourceDetails()}
-            </Stack>
-          </Stack>
-        </Stack>
-      ) : null}
-
-      {tab === 'product' ? (
-        <Stack direction={{ xs: 'column', xl: 'row' }} gap={1.5}>
-          <Stack gap={2} sx={{ flex: 1 }}>
-            <Paper sx={{ p: 1.5, borderRadius: 2.5 }}>
-              <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>
-                Product Ledger
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Combined view across all batches for {groupQ.data.name}.
-              </Typography>
-              <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.25 }}>
-                <Chip size="small" label={`Opening ${productSummaryQ.data?.opening_stock ?? '-'}`} />
-                <Chip size="small" label={`Inward ${productSummaryQ.data?.inward_qty ?? '-'}`} variant="outlined" />
-                <Chip size="small" label={`Outward ${productSummaryQ.data?.outward_qty ?? '-'}`} variant="outlined" />
-                <Chip size="small" label={`Closing ${productSummaryQ.data?.closing_stock ?? '-'}`} color="primary" />
-              </Stack>
-            </Paper>
-
-            {renderLedgerTable(
-              productRowsWithOpening,
-              productLedgerQ.isLoading,
-              Boolean(productLedgerQ.hasNextPage),
-              () => productLedgerQ.fetchNextPage(),
-              productLedgerQ.isFetchingNextPage
-            )}
-          </Stack>
-
-          <Box sx={{ width: { xs: '100%', xl: 340 } }}>{renderSourceDetails()}</Box>
-        </Stack>
-      ) : null}
-
-      {tab === 'batch' ? (
+      {tab === 'ledger' ? (
         <Stack direction={{ xs: 'column', xl: 'row' }} gap={1.5}>
           <Stack gap={2} sx={{ flex: 1 }}>
             <Paper sx={{ p: 1.5, borderRadius: 2.5 }}>
               <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} justifyContent="space-between">
                 <Box>
                   <Typography variant="subtitle1" sx={{ fontWeight: 900 }}>
-                    Batch Ledger
+                    Stock Ledger
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    One batch at a time. No product totals mixed into the row view.
+                    {ledgerScope === 'batch'
+                      ? 'Selected batch movement with opening and closing balance.'
+                      : `Combined movement across all batches for ${groupQ.data.name}.`}
                   </Typography>
                 </Box>
-                <TextField
-                  select
-                  size="small"
-                  label="Batch"
-                  value={currentBatch?.id || ''}
-                  onChange={(e) => setSelectedBatchId(Number(e.target.value) || null)}
-                  sx={{ minWidth: 260 }}
-                >
-                  {batches.map((batch) => (
-                    <MenuItem key={batch.id} value={batch.id}>
-                      #{batch.id} • Exp {formatExpiry(batch.expiry_date)} • MRP {batch.mrp} • Stock {batch.stock}
-                    </MenuItem>
-                  ))}
-                </TextField>
+                <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
+                  <ToggleButtonGroup
+                    size="small"
+                    exclusive
+                    value={ledgerScope}
+                    onChange={(_, value: LedgerScope | null) => {
+                      if (value) setLedgerScope(value)
+                    }}
+                  >
+                    <ToggleButton value="product">Product</ToggleButton>
+                    <ToggleButton value="batch">Batch</ToggleButton>
+                  </ToggleButtonGroup>
+                  {ledgerScope === 'batch' ? (
+                    <TextField
+                      select
+                      size="small"
+                      label="Batch"
+                      value={currentBatch?.id || ''}
+                      onChange={(e) => setSelectedBatchId(Number(e.target.value) || null)}
+                      sx={{ minWidth: 260 }}
+                    >
+                      {batches.map((batch) => (
+                        <MenuItem key={batch.id} value={batch.id}>
+                          #{batch.id} • Exp {formatExpiry(batch.expiry_date)} • MRP {batch.mrp} • Stock {batch.stock}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  ) : null}
+                </Stack>
               </Stack>
 
               <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.25 }}>
-                <Chip size="small" label={`Opening ${batchSummaryQ.data?.opening_stock ?? '-'}`} />
-                <Chip size="small" label={`Inward ${batchSummaryQ.data?.inward_qty ?? '-'}`} variant="outlined" />
-                <Chip size="small" label={`Outward ${batchSummaryQ.data?.outward_qty ?? '-'}`} variant="outlined" />
-                <Chip size="small" label={`Closing ${batchSummaryQ.data?.closing_stock ?? '-'}`} color="primary" />
+                {ledgerSummaryLoading ? (
+                  Array.from({ length: 5 }).map((_, index) => <Skeleton key={`ls-${index}`} variant="rounded" height={24} width={96} />)
+                ) : (
+                  <>
+                    <Chip size="small" label={`Opening ${ledgerSummary?.opening_stock ?? '-'}`} />
+                    <Chip size="small" label={`Inward ${ledgerSummary?.inward_qty ?? '-'}`} variant="outlined" />
+                    <Chip size="small" label={`Outward ${ledgerSummary?.outward_qty ?? '-'}`} variant="outlined" />
+                    <Chip size="small" label={`Closing ${ledgerSummary?.closing_stock ?? '-'}`} color="primary" />
+                    <Chip size="small" label={`Movements ${ledgerSummary?.movement_count ?? 0}`} variant="outlined" />
+                  </>
+                )}
                 <Tooltip
-                  title={`Gap = current batch stock (${batchSummaryQ.data?.current_stock ?? '-'}) - total ledger movement balance for this batch.`}
+                  title={`Gap = current stock (${ledgerSummary?.current_stock ?? '-'}) - total ledger movement balance.`}
                   arrow
                 >
-                  <Chip size="small" label={`Gap ${formatSigned(batchSummaryQ.data?.ledger_balance_gap ?? 0)}`} variant="outlined" />
+                  <Chip size="small" label={`Gap ${formatSigned(ledgerSummary?.ledger_balance_gap ?? 0)}`} variant="outlined" />
                 </Tooltip>
               </Stack>
             </Paper>
 
             {renderLedgerTable(
-              batchRowsWithOpening,
-              batchLedgerQ.isLoading,
-              Boolean(batchLedgerQ.hasNextPage),
-              () => batchLedgerQ.fetchNextPage(),
-              batchLedgerQ.isFetchingNextPage
+              ledgerRows,
+              ledgerLoading,
+              ledgerHasMore,
+              loadMoreLedger,
+              ledgerLoadingMore
             )}
           </Stack>
-
-          <Box sx={{ width: { xs: '100%', xl: 340 } }}>{renderSourceDetails()}</Box>
+          {/* Movement Inspector intentionally hidden; source links now live in ledger rows. */}
         </Stack>
       ) : null}
 
@@ -1131,5 +881,101 @@ export default function StockCardPage() {
         </Paper>
       ) : null}
     </Stack>
+
+    <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        Bill Details {billDetail?.id ? `#${billDetail.id}` : ''}
+        <IconButton onClick={() => setBillOpen(false)} size="small">
+          <CloseIcon />
+        </IconButton>
+      </DialogTitle>
+      <DialogContent dividers>
+        {billLoading ? (
+          <Typography color="text.secondary">Loading...</Typography>
+        ) : !billDetail ? (
+          <Typography color="error">Failed to load bill details.</Typography>
+        ) : (
+          <Stack gap={2}>
+            <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
+              <Typography variant="subtitle1">
+                ID: <b>{billDetail.id}</b>
+              </Typography>
+              <Typography variant="subtitle1">
+                Date/Time: <b>{billDetail.date_time || '-'}</b>
+              </Typography>
+            </Stack>
+
+            <Divider />
+
+            <Box sx={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th style={{ minWidth: 220 }}>Item</th>
+                    <th>Qty</th>
+                    <th>MRP</th>
+                    <th>Line Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(billDetail.items || []).map((item: any, index: number) => {
+                    const itemName = item.item_name || item.name || item.item?.name || `#${item.item_id}`
+                    const qty = Number(item.quantity || 0)
+                    const mrp = Number(item.mrp || 0)
+                    return (
+                      <tr key={`bill-item-${index}`}>
+                        <td>{itemName}</td>
+                        <td>{qty}</td>
+                        <td>{money(mrp)}</td>
+                        <td>{money(chargedLine(billDetail, mrp, qty))}</td>
+                      </tr>
+                    )
+                  })}
+                  {(billDetail.items || []).length === 0 ? (
+                    <tr>
+                      <td colSpan={4}>
+                        <Box p={2} color="text.secondary">No items.</Box>
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </Box>
+
+            <Stack gap={0.5} sx={{ ml: 'auto', maxWidth: 420 }}>
+              <Typography>Total: <b>{money(billDetail.total_amount || 0)}</b></Typography>
+              <Typography>Payment Mode: <b>{billDetail.payment_mode || '-'}</b></Typography>
+              <Typography>Payment Status: <b>{billDetail.payment_status || (billDetail.is_credit ? 'UNPAID' : 'PAID')}</b></Typography>
+              <Typography>Paid Amount: <b>{money(billDetail.paid_amount || 0)}</b></Typography>
+              <Typography>
+                Pending Amount:{' '}
+                <b>{money(Math.max(0, Number(billDetail.total_amount || 0) - Number(billDetail.paid_amount || 0) - Number(billDetail.writeoff_amount || 0)))}</b>
+              </Typography>
+              {billDetail.notes ? (
+                <Typography sx={{ mt: 1 }}>
+                  Notes: <i>{billDetail.notes}</i>
+                </Typography>
+              ) : null}
+              <Box sx={{ pt: 1 }}>
+                <Button size="small" variant="outlined" startIcon={<EditIcon />} onClick={() => setBillEditOpen(true)}>
+                  Edit Bill
+                </Button>
+              </Box>
+            </Stack>
+
+            <Divider />
+            <BillPaymentsPanel bill={billDetail} onBillUpdated={refreshLedgerAfterBillChange} />
+          </Stack>
+        )}
+      </DialogContent>
+    </Dialog>
+
+    <BillEditDialog
+      open={billEditOpen}
+      bill={billDetail}
+      onClose={() => setBillEditOpen(false)}
+      onSaved={refreshLedgerAfterBillChange}
+    />
+    </>
   )
 }

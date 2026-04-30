@@ -428,7 +428,7 @@ export default function Inventory() {
   }
 
   return (
-    <Stack gap={2}>
+    <Stack gap={2} sx={{ minWidth: 0, width: '100%' }}>
       <Typography variant="h5">Inventory</Typography>
 
       <Paper
@@ -564,7 +564,7 @@ export default function Inventory() {
         </Stack>
       </Paper>
 
-      <Paper sx={{ p: 2 }}>
+      <Paper sx={{ p: 2, minWidth: 0, width: '100%', overflow: 'hidden' }}>
         {isLoading ? (
           <Loading />
         ) : (
@@ -572,14 +572,35 @@ export default function Inventory() {
             <Box
               component="div"
               sx={{
+                width: '100%',
+                maxWidth: '100%',
+                minWidth: 0,
                 overflowX: 'auto',
+                WebkitOverflowScrolling: 'touch',
                 '& .inventory-grid': {
                   borderCollapse: 'collapse',
-                  minWidth: 980,
+                  width: '100%',
+                  minWidth: 1180,
+                  tableLayout: 'fixed',
                 },
+                '& .inventory-grid th:nth-of-type(1), & .inventory-grid td:nth-of-type(1)': { width: 260 },
+                '& .inventory-grid th:nth-of-type(2), & .inventory-grid td:nth-of-type(2)': { width: 76 },
+                '& .inventory-grid th:nth-of-type(3), & .inventory-grid td:nth-of-type(3)': { width: 150 },
+                '& .inventory-grid th:nth-of-type(4), & .inventory-grid td:nth-of-type(4)': { width: 140 },
+                '& .inventory-grid th:nth-of-type(5), & .inventory-grid td:nth-of-type(5)': { width: 130 },
+                '& .inventory-grid th:nth-of-type(6), & .inventory-grid td:nth-of-type(6)': { width: 92 },
+                '& .inventory-grid th:nth-of-type(7), & .inventory-grid td:nth-of-type(7)': { width: 72 },
+                '& .inventory-grid th:nth-of-type(8), & .inventory-grid td:nth-of-type(8)': { width: 260 },
                 '& .inventory-grid thead th': {
                   borderBottom: '1px solid rgba(0,0,0,0.14)',
                   background: 'rgba(255,255,255,0.98)',
+                },
+                '& .inventory-grid th, & .inventory-grid td': {
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                },
+                '& .inventory-grid th:last-of-type, & .inventory-grid td:last-of-type': {
+                  overflow: 'visible',
                 },
                 '& .inventory-grid tbody tr > td': {
                   background: '#fff',
@@ -609,8 +630,8 @@ export default function Inventory() {
                     <th>Category</th>
                     <th>Earliest Expiry</th>
                     <th>MRP</th>
-                    <th>Total Stock</th>
-                    <th style={{ width: 220 }}>Actions</th>
+                    <th>Stock</th>
+                    <th style={{ width: 260 }}>Actions</th>
                   </tr>
                 </thead>
 

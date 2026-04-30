@@ -304,7 +304,18 @@ def post_purchase_voucher(session, purchase: Purchase, party: Party) -> Voucher:
     )
 
 
-def post_purchase_payment_voucher(session, purchase: Purchase, party: Party, payment_id: int, amount: float, is_writeoff: bool, note: Optional[str], paid_at: str) -> Voucher:
+def post_purchase_payment_voucher(
+    session,
+    purchase: Purchase,
+    party: Party,
+    payment_id: int,
+    amount: float,
+    is_writeoff: bool,
+    note: Optional[str],
+    paid_at: str,
+    cash_amount: float = 0.0,
+    online_amount: float = 0.0,
+) -> Voucher:
     ledgers = ensure_accounting_setup(session)
     creditor_ledger = ensure_party_ledger(session, party)
     total = round2(amount)
@@ -317,10 +328,17 @@ def post_purchase_payment_voucher(session, purchase: Purchase, party: Party, pay
         source_type = "PURCHASE_WRITEOFF"
         voucher_no = f"PW-{payment_id}"
     else:
+        cash = round2(cash_amount)
+        online = round2(online_amount)
+        if cash <= 0 and online <= 0:
+            cash = total
         lines = [
             {"ledger_id": int(creditor_ledger.id), "entry_type": "DR", "amount": total, "narration": note or "Supplier payment"},
-            {"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "CR", "amount": total, "narration": note or "Supplier payment"},
         ]
+        if cash > 0:
+            lines.append({"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "CR", "amount": cash, "narration": note or "Supplier payment"})
+        if online > 0:
+            lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "CR", "amount": online, "narration": note or "Supplier payment"})
         voucher_type = "PAYMENT"
         source_type = "PURCHASE_PAYMENT"
         voucher_no = f"PP-{payment_id}"
@@ -448,6 +466,8 @@ def sync_existing_vouchers(session) -> None:
             bool(payment.is_writeoff),
             payment.note,
             payment.paid_at,
+            float(getattr(payment, "cash_amount", 0) or 0),
+            float(getattr(payment, "online_amount", 0) or 0),
         )
 
     for receipt in session.exec(select(PartyReceipt)).all():

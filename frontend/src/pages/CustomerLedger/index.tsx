@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Box,
   Button,
+  Chip,
   Dialog,
   DialogActions,
   DialogContent,
@@ -47,6 +48,7 @@ export default function CustomerLedgerPage() {
   const [customerId, setCustomerId] = useState('')
   const [receiptOpen, setReceiptOpen] = useState(false)
   const [mode, setMode] = useState<'cash' | 'online' | 'split'>('cash')
+  const [receiptAmount, setReceiptAmount] = useState('0')
   const [cashAmount, setCashAmount] = useState('0')
   const [onlineAmount, setOnlineAmount] = useState('0')
   const [paymentDate, setPaymentDate] = useState(today)
@@ -160,6 +162,7 @@ export default function CustomerLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
       setReceiptOpen(false)
       setMode('cash')
+      setReceiptAmount('0')
       setCashAmount('0')
       setOnlineAmount('0')
       setPaymentDate(today)
@@ -175,10 +178,19 @@ export default function CustomerLedgerPage() {
   const adjustments = receiptAdjustmentsQ.data || []
   const totalOutstanding = ledgerRows.reduce((sum, row) => sum + Number(row.outstanding_amount || 0), 0)
   const adjustmentTotal = Object.values(adjustmentDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
-  const receiptCashAmount = mode === 'online' ? 0 : Number(cashAmount || 0)
-  const receiptOnlineAmount = mode === 'cash' ? 0 : Number(onlineAmount || 0)
-  const receiptTotal = receiptCashAmount + receiptOnlineAmount
+  const receiptTotal = Number(receiptAmount || 0)
+  const receiptCashAmount = mode === 'cash' ? receiptTotal : mode === 'online' ? 0 : Number(cashAmount || 0)
+  const receiptOnlineAmount = mode === 'online' ? receiptTotal : mode === 'cash' ? 0 : Number(onlineAmount || 0)
   const onAccountAmount = Math.max(0, receiptTotal - adjustmentTotal)
+  const openBillsForReceipt = useMemo(
+    () =>
+      [...openBills].sort((a, b) => {
+        const byDate = String(a.bill_date || '').localeCompare(String(b.bill_date || ''))
+        if (byDate !== 0) return byDate
+        return Number(a.bill_id || 0) - Number(b.bill_id || 0)
+      }),
+    [openBills],
+  )
 
   const adjustmentMap = useMemo(() => {
     const map = new Map<number, number>()
@@ -251,12 +263,14 @@ export default function CustomerLedgerPage() {
 
     return [...partyReceiptRows, ...directPaymentRows].sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')))
   }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receipts])
+  const receiptHistoryTotal = receiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
 
   function openReceiptDialog() {
     setAdjustmentDrafts(
       Object.fromEntries(openBills.map((bill) => [Number(bill.bill_id), '0'])),
     )
     setMode('cash')
+    setReceiptAmount('0')
     setCashAmount('0')
     setOnlineAmount('0')
     setPaymentDate(today)
@@ -266,6 +280,78 @@ export default function CustomerLedgerPage() {
 
   function setDraft(billId: number, value: string) {
     setAdjustmentDrafts((prev) => ({ ...prev, [billId]: value }))
+  }
+
+  function setReceiptMode(next: 'cash' | 'online' | 'split') {
+    setMode(next)
+    const total = String(receiptAmount || '0')
+    if (next === 'cash') {
+      setCashAmount(total)
+      setOnlineAmount('0')
+    } else if (next === 'online') {
+      setCashAmount('0')
+      setOnlineAmount(total)
+    } else {
+      setCashAmount(total)
+      setOnlineAmount('0')
+    }
+  }
+
+  function handleReceiptAmountChange(raw: string) {
+    setReceiptAmount(raw)
+    if (mode === 'cash') {
+      setCashAmount(raw)
+      setOnlineAmount('0')
+    } else if (mode === 'online') {
+      setCashAmount('0')
+      setOnlineAmount(raw)
+    } else {
+      setCashAmount(raw)
+      setOnlineAmount('0')
+    }
+  }
+
+  function setSplitCash(raw: string) {
+    setCashAmount(raw)
+    setReceiptAmount(String(Number(raw || 0) + Number(onlineAmount || 0)))
+  }
+
+  function setSplitOnline(raw: string) {
+    setOnlineAmount(raw)
+    setReceiptAmount(String(Number(cashAmount || 0) + Number(raw || 0)))
+  }
+
+  function fillBillAdjustmentOnFocus(bill: OpenBill) {
+    const billId = Number(bill.bill_id)
+    const current = Number(adjustmentDrafts[billId] || 0)
+    if (current > 0) return
+    const usedElsewhere = Object.entries(adjustmentDrafts).reduce((sum, [id, value]) => {
+      return Number(id) === billId ? sum : sum + Number(value || 0)
+    }, 0)
+    const remaining = Math.max(0, receiptTotal - usedElsewhere)
+    if (remaining <= 0) return
+    setDraft(billId, String(Math.min(Number(bill.outstanding_amount || 0), remaining)))
+  }
+
+  function clampBillAdjustment(bill: OpenBill) {
+    const billId = Number(bill.bill_id)
+    const raw = Number(adjustmentDrafts[billId] || 0)
+    if (!Number.isFinite(raw) || raw <= 0) {
+      setDraft(billId, '0')
+      return
+    }
+    setDraft(billId, String(Math.min(raw, Number(bill.outstanding_amount || 0))))
+  }
+
+  function fillAdjustmentsFromReceipt() {
+    let remaining = receiptTotal
+    const next: Record<number, string> = {}
+    for (const bill of openBillsForReceipt) {
+      const amount = Math.min(Number(bill.outstanding_amount || 0), Math.max(0, remaining))
+      next[Number(bill.bill_id)] = amount > 0 ? String(amount) : '0'
+      remaining = Math.max(0, remaining - amount)
+    }
+    setAdjustmentDrafts(next)
   }
 
   async function openBillDetail(billId: number) {
@@ -366,16 +452,17 @@ export default function CustomerLedgerPage() {
 
       {selectedCustomer && (
         <Paper sx={{ p: 2 }}>
-          <Stack direction={{ xs: 'column', md: 'row' }} gap={2} justifyContent="space-between">
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={2} justifyContent="space-between" alignItems={{ md: 'center' }}>
             <div>
               <Typography fontWeight={700}>{selectedCustomer.name}</Typography>
               <Typography variant="body2" color="text.secondary">
                 {[selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).join(' • ') || 'Customer master record'}
               </Typography>
             </div>
-            <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
-              <Typography fontWeight={700}>Outstanding: {money(totalOutstanding)}</Typography>
-              <Typography>Total Receipts: {money(receiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0))}</Typography>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
+              <Chip color={totalOutstanding > 0 ? 'error' : 'success'} label={`Outstanding Rs ${money(totalOutstanding)}`} sx={{ fontWeight: 900 }} />
+              <Chip color="primary" variant="outlined" label={`Open Bills ${openBills.length}`} sx={{ fontWeight: 800 }} />
+              <Chip color="success" variant="outlined" label={`Receipts Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
             </Stack>
           </Stack>
         </Paper>
@@ -387,39 +474,45 @@ export default function CustomerLedgerPage() {
           <table className="table">
             <thead>
               <tr>
-                <th>Bill ID</th>
-                <th>Date</th>
-                <th>Total</th>
-                <th>Paid</th>
-                <th>Write-off</th>
+                <th>Bill</th>
+                <th>Amount</th>
                 <th>Outstanding</th>
                 <th>Status</th>
+                <th>Notes</th>
               </tr>
             </thead>
             <tbody>
               {openBills.map((row) => (
-                <tr key={row.bill_id}>
+                <tr key={row.bill_id} style={{ background: Number(row.outstanding_amount || 0) > 0 ? '#fff8e1' : undefined }}>
                   <td>
-                    <Link
-                      component="button"
-                      underline="hover"
-                      onClick={() => openBillDetail(Number(row.bill_id))}
-                      sx={{ fontWeight: 600 }}
-                    >
-                      {row.bill_id}
-                    </Link>
+                    <Stack gap={0.25}>
+                      <Link
+                        component="button"
+                        underline="hover"
+                        onClick={() => openBillDetail(Number(row.bill_id))}
+                        sx={{ fontWeight: 800 }}
+                      >
+                        Bill #{row.bill_id}
+                      </Link>
+                      <Typography variant="caption" color="text.secondary">{row.bill_date}</Typography>
+                    </Stack>
                   </td>
-                  <td>{row.bill_date}</td>
-                  <td>{money(row.total_amount)}</td>
-                  <td>{money(row.paid_amount)}</td>
-                  <td>{money(row.writeoff_amount)}</td>
-                  <td>{money(row.outstanding_amount)}</td>
-                  <td>{row.payment_status}</td>
+                  <td>
+                    <Stack gap={0.25}>
+                      <Typography variant="body2" fontWeight={800}>Rs {money(row.total_amount)}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Paid Rs {money(row.paid_amount)}{Number(row.writeoff_amount || 0) > 0 ? ` | Write-off Rs ${money(row.writeoff_amount)}` : ''}
+                      </Typography>
+                    </Stack>
+                  </td>
+                  <td><Typography fontWeight={900}>Rs {money(row.outstanding_amount)}</Typography></td>
+                  <td>{statusChip(row.payment_status)}</td>
+                  <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{row.notes || '-'}</td>
                 </tr>
               ))}
               {openBills.length === 0 && (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={5}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No open bills for this customer.' : 'Select a customer to view open bills.'}
                     </Box>
@@ -432,46 +525,52 @@ export default function CustomerLedgerPage() {
       </Paper>
 
       <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>Debtor Ledger</Typography>
+        <Typography variant="h6" sx={{ mb: 2 }}>Bill Ledger</Typography>
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
             <thead>
               <tr>
-                <th>Bill ID</th>
-                <th>Date</th>
-                <th>Total</th>
-                <th>Paid</th>
-                <th>Write-off</th>
-                <th>Outstanding</th>
+                <th>Bill</th>
+                <th>Bill Value</th>
+                <th>Settled</th>
+                <th>Balance</th>
                 <th>Status</th>
                 <th>Notes</th>
               </tr>
             </thead>
             <tbody>
               {ledgerRows.map((row) => (
-                <tr key={row.bill_id}>
+                <tr key={row.bill_id} style={{ background: row.payment_status === 'PAID' ? '#f1f8e9' : row.payment_status === 'PARTIAL' ? '#fff8e1' : '#ffebee' }}>
                   <td>
-                    <Link
-                      component="button"
-                      underline="hover"
-                      onClick={() => openBillDetail(Number(row.bill_id))}
-                      sx={{ fontWeight: 600 }}
-                    >
-                      {row.bill_id}
-                    </Link>
+                    <Stack gap={0.25}>
+                      <Link
+                        component="button"
+                        underline="hover"
+                        onClick={() => openBillDetail(Number(row.bill_id))}
+                        sx={{ fontWeight: 800 }}
+                      >
+                        Bill #{row.bill_id}
+                      </Link>
+                      <Typography variant="caption" color="text.secondary">{row.bill_date}</Typography>
+                    </Stack>
                   </td>
-                  <td>{row.bill_date}</td>
-                  <td>{money(row.total_amount)}</td>
-                  <td>{money(row.paid_amount)}</td>
-                  <td>{money(row.writeoff_amount)}</td>
-                  <td>{money(row.outstanding_amount)}</td>
-                  <td>{row.payment_status}</td>
+                  <td><Typography fontWeight={800}>Rs {money(row.total_amount)}</Typography></td>
+                  <td>
+                    <Stack gap={0.25}>
+                      <Typography variant="body2">Paid Rs {money(row.paid_amount)}</Typography>
+                      {Number(row.writeoff_amount || 0) > 0 ? (
+                        <Typography variant="caption" color="text.secondary">Write-off Rs {money(row.writeoff_amount)}</Typography>
+                      ) : null}
+                    </Stack>
+                  </td>
+                  <td><Typography fontWeight={900}>Rs {money(row.outstanding_amount)}</Typography></td>
+                  <td>{statusChip(row.payment_status)}</td>
                   <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{row.notes || '-'}</td>
                 </tr>
               ))}
               {ledgerRows.length === 0 && (
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={6}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No debtor ledger rows for this customer yet.' : 'Select a customer to view the ledger.'}
                     </Box>
@@ -489,40 +588,52 @@ export default function CustomerLedgerPage() {
           <table className="table">
             <thead>
               <tr>
-                <th>Receipt ID</th>
-                <th>When</th>
-                <th>Source</th>
+                <th>Receipt</th>
                 <th>Mode</th>
-                <th>Cash</th>
-                <th>Online</th>
                 <th>Total</th>
                 <th>Applied</th>
-                <th>On Account</th>
                 <th>Allocation</th>
-                <th>Note</th>
               </tr>
             </thead>
             <tbody>
               {receiptHistory.map((receipt) => {
                 return (
-                  <tr key={receipt.id}>
-                    <td>{receipt.receiptId}</td>
-                    <td>{receipt.when}</td>
-                    <td>{receipt.source}</td>
-                    <td>{receipt.mode}</td>
-                    <td>{money(receipt.cash)}</td>
-                    <td>{money(receipt.online)}</td>
-                    <td>{money(receipt.total)}</td>
-                    <td>{money(receipt.adjusted)}</td>
-                    <td>{money(receipt.onAccount)}</td>
-	                    <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{renderBillRefs(receipt.allocation)}</td>
-                    <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{receipt.note || '-'}</td>
+                  <tr key={receipt.id} style={{ background: Number(receipt.onAccount || 0) > 0 ? '#e3f2fd' : '#f1f8e9' }}>
+                    <td>
+                      <Stack gap={0.25}>
+                        <Typography fontWeight={800}>{receipt.source} #{receipt.receiptId}</Typography>
+                        <Typography variant="caption" color="text.secondary">{receipt.when}</Typography>
+                      </Stack>
+                    </td>
+                    <td>
+                      <Stack gap={0.5}>
+                        {modeChip(receipt.mode)}
+                        <Typography variant="caption" color="text.secondary">
+                          Cash Rs {money(receipt.cash)} | Online Rs {money(receipt.online)}
+                        </Typography>
+                      </Stack>
+                    </td>
+                    <td><Typography fontWeight={900}>Rs {money(receipt.total)}</Typography></td>
+                    <td>
+                      <Stack gap={0.25}>
+                        <Typography fontWeight={800}>Rs {money(receipt.adjusted)}</Typography>
+                        {Number(receipt.onAccount || 0) > 0 ? (
+                          <Chip size="small" color="info" variant="outlined" label={`On account Rs ${money(receipt.onAccount)}`} sx={{ fontWeight: 700, alignSelf: 'flex-start' }} />
+                        ) : null}
+                      </Stack>
+                    </td>
+                    <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
+                      <Stack gap={0.5}>
+                        <Typography variant="body2">{renderBillRefs(receipt.allocation)}</Typography>
+                        {receipt.note ? <Typography variant="caption" color="text.secondary">{receipt.note}</Typography> : null}
+                      </Stack>
+                    </td>
                   </tr>
                 )
               })}
               {receiptHistory.length === 0 && (
                 <tr>
-                  <td colSpan={11}>
+                  <td colSpan={5}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No receipts recorded for this customer yet.' : 'Select a customer to view receipts.'}
                     </Box>
@@ -539,78 +650,101 @@ export default function CustomerLedgerPage() {
         <DialogContent dividers>
           <Stack gap={2}>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
-	              <TextField
-	                select
-	                label="Mode"
-	                value={mode}
-	                onChange={(e) => {
-	                  const next = e.target.value as 'cash' | 'online' | 'split'
-	                  setMode(next)
-	                  if (next === 'cash') setOnlineAmount('0')
-	                  if (next === 'online') setCashAmount('0')
-	                }}
-	                fullWidth
-	              >
-	                <MenuItem value="cash">Cash</MenuItem>
-	                <MenuItem value="online">Online</MenuItem>
-	                <MenuItem value="split">Split</MenuItem>
-	              </TextField>
-	              <TextField
-	                label="Cash Amount"
-	                type="number"
-	                value={mode === 'online' ? '0' : cashAmount}
-	                onChange={(e) => setCashAmount(e.target.value)}
-	                disabled={mode === 'online'}
-	                fullWidth
-	              />
-	              <TextField
-	                label="Online Amount"
-	                type="number"
-	                value={mode === 'cash' ? '0' : onlineAmount}
-	                onChange={(e) => setOnlineAmount(e.target.value)}
-	                disabled={mode === 'cash'}
-	                fullWidth
-	              />
+              <TextField
+                label="Receipt Amount"
+                type="number"
+                value={receiptAmount}
+                onChange={(e) => handleReceiptAmountChange(e.target.value)}
+                helperText="Enter total first, then focus bill rows to auto-fill."
+                fullWidth
+              />
+              <TextField
+                select
+                label="Mode"
+                value={mode}
+                onChange={(e) => setReceiptMode(e.target.value as 'cash' | 'online' | 'split')}
+                fullWidth
+              >
+                <MenuItem value="cash">Cash</MenuItem>
+                <MenuItem value="online">Online</MenuItem>
+                <MenuItem value="split">Split</MenuItem>
+              </TextField>
+              {mode === 'split' ? (
+                <>
+                  <TextField
+                    label="Cash"
+                    type="number"
+                    value={cashAmount}
+                    onChange={(e) => setSplitCash(e.target.value)}
+                    fullWidth
+                  />
+                  <TextField
+                    label="Online"
+                    type="number"
+                    value={onlineAmount}
+                    onChange={(e) => setSplitOnline(e.target.value)}
+                    fullWidth
+                  />
+                </>
+              ) : null}
               <TextField label="Date" type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
             </Stack>
             <TextField label="Note" value={note} onChange={(e) => setNote(e.target.value)} multiline minRows={2} fullWidth />
 
-            <Typography variant="h6">Bill Adjustments</Typography>
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={1} justifyContent="space-between" alignItems={{ md: 'center' }}>
+              <Typography variant="h6">Bill Adjustments</Typography>
+              <Button variant="outlined" onClick={fillAdjustmentsFromReceipt} disabled={receiptTotal <= 0 || openBillsForReceipt.length === 0}>
+                Auto Fill
+              </Button>
+            </Stack>
             <Box sx={{ overflowX: 'auto' }}>
               <table className="table">
                 <thead>
                   <tr>
-                    <th>Bill ID</th>
-                    <th>Date</th>
+                    <th>Bill</th>
                     <th>Outstanding</th>
+                    <th>Remaining Receipt</th>
                     <th>Adjust Now</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {openBills.map((bill) => (
+                  {openBillsForReceipt.map((bill) => {
+                    const billId = Number(bill.bill_id)
+                    const usedElsewhere = Object.entries(adjustmentDrafts).reduce((sum, [id, value]) => {
+                      return Number(id) === billId ? sum : sum + Number(value || 0)
+                    }, 0)
+                    const remainingForThis = Math.max(0, receiptTotal - usedElsewhere)
+                    return (
                     <tr key={bill.bill_id}>
-	                      <td>
-	                        <Link
-	                          component="button"
-	                          underline="hover"
-	                          onClick={() => openBillDetail(Number(bill.bill_id))}
-	                          sx={{ fontWeight: 600 }}
-	                        >
-	                          {bill.bill_id}
-	                        </Link>
-	                      </td>
-                      <td>{bill.bill_date}</td>
-                      <td>{money(bill.outstanding_amount)}</td>
+                      <td>
+                        <Stack gap={0.25}>
+                          <Link
+                            component="button"
+                            underline="hover"
+                            onClick={() => openBillDetail(Number(bill.bill_id))}
+                            sx={{ fontWeight: 800 }}
+                          >
+                            Bill #{bill.bill_id}
+                          </Link>
+                          <Typography variant="caption" color="text.secondary">{bill.bill_date}</Typography>
+                        </Stack>
+                      </td>
+                      <td><Typography fontWeight={800}>Rs {money(bill.outstanding_amount)}</Typography></td>
+                      <td>Rs {money(remainingForThis)}</td>
                       <td>
                         <TextField
                           type="number"
                           value={adjustmentDrafts[Number(bill.bill_id)] ?? '0'}
                           onChange={(e) => setDraft(Number(bill.bill_id), e.target.value)}
-                          sx={{ width: 140 }}
+                          onFocus={() => fillBillAdjustmentOnFocus(bill)}
+                          onBlur={() => clampBillAdjustment(bill)}
+                          helperText="Focus to fill"
+                          sx={{ width: 150 }}
                         />
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                   {openBills.length === 0 && (
                     <tr>
                       <td colSpan={4}>
@@ -631,7 +765,7 @@ export default function CustomerLedgerPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setReceiptOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveReceipt} disabled={receiptM.isPending || !selectedParty}>
+          <Button variant="contained" onClick={saveReceipt} disabled={receiptM.isPending || !selectedParty || receiptTotal <= 0 || adjustmentTotal > receiptTotal}>
             Save Receipt
           </Button>
         </DialogActions>
@@ -748,5 +882,17 @@ export default function CustomerLedgerPage() {
         }}
       />
     </Stack>
-  )
-}
+    )
+  }
+
+  function statusChip(status: string) {
+    const normalized = String(status || 'UNPAID').toUpperCase()
+    const color = normalized === 'PAID' ? 'success' : normalized === 'PARTIAL' ? 'warning' : 'error'
+    return <Chip size="small" color={color as any} variant={normalized === 'PAID' ? 'filled' : 'outlined'} label={normalized} sx={{ fontWeight: 800 }} />
+  }
+
+  function modeChip(receiptMode: string) {
+    const normalized = String(receiptMode || '').toUpperCase()
+    const color = normalized === 'CASH' ? 'success' : normalized === 'ONLINE' ? 'primary' : 'secondary'
+    return <Chip size="small" color={color as any} variant="outlined" label={normalized || '-'} sx={{ fontWeight: 800 }} />
+  }

@@ -148,8 +148,58 @@ function matchesFilters(row: any, typeFilter: string, noteFilter: string) {
   const entryType = String(row?.entry_type || '').toUpperCase()
   const typeOk = typeFilter === 'ALL' || type === typeFilter || entryType === typeFilter
   const needle = noteFilter.trim().toLowerCase()
-  const noteOk = !needle || String(row?.note || '').toLowerCase().includes(needle)
+  const subText = (row?.subRows || []).map((sub: any) => `bill #${sub.bill_id} ${sub.amount}`).join(' ')
+  const noteOk = !needle || `${String(row?.note || '')} ${subText}`.toLowerCase().includes(needle)
   return typeOk && noteOk
+}
+
+function partyReceiptIdFromPayment(row: any): number | null {
+  const match = /party\s+receipt\s+#(\d+)/i.exec(String(row?.note || '').trim())
+  return match ? Number(match[1]) : null
+}
+
+function buildReceiptPaymentRows(payments: any[], amountField: 'cash_amount' | 'online_amount', label: 'Cash' | 'Online') {
+  const rows: any[] = []
+  const grouped = new Map<number, any>()
+  for (const p of payments || []) {
+    const amount = Number(p?.[amountField] || 0)
+    if (amount <= 0) continue
+    const receiptId = partyReceiptIdFromPayment(p)
+    if (!receiptId) {
+      rows.push({
+        id: `pay-${p.id}`,
+        created_at: p.received_at,
+        entry_type: 'RECEIPT',
+        pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
+        amount,
+        bill_id: Number(p.bill_id || 0),
+        note: `${label} payment for Bill #${p.bill_id}`,
+        source: 'BILL' as const,
+      })
+      continue
+    }
+    const current = grouped.get(receiptId) || {
+      id: `party-receipt-${label.toLowerCase()}-${receiptId}`,
+      receipt_id: receiptId,
+      created_at: p.received_at,
+      entry_type: 'RECEIPT',
+      pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
+      amount: 0,
+      note: `${label} customer receipt #${receiptId}`,
+      source: 'PARTY_RECEIPT' as const,
+      subRows: [],
+    }
+    current.amount = Number(current.amount || 0) + amount
+    if (p.mode === 'split') current.pill_type = 'SPLIT'
+    current.subRows.push({ bill_id: Number(p.bill_id || 0), amount, payment_id: p.id })
+    current.note = `${label} customer receipt #${receiptId}: ${current.subRows.map((sub: any) => `Bill #${sub.bill_id}`).join(', ')}`
+    grouped.set(receiptId, current)
+  }
+  for (const row of grouped.values()) {
+    row.subRows.sort((a: any, b: any) => Number(a.bill_id || 0) - Number(b.bill_id || 0))
+    rows.push(row)
+  }
+  return rows
 }
 
 function round2(n: number) {
@@ -471,34 +521,12 @@ export default function CashbookPage() {
 
   const billCashRowsDay = useMemo(() => {
     const payments = (qDayPayments.data || []) as any[]
-    return payments
-      .filter((p) => Number(p?.cash_amount || 0) > 0)
-      .map((p) => ({
-        id: `pay-${p.id}`,
-        created_at: p.received_at,
-        entry_type: 'RECEIPT',
-        pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
-        amount: Number(p.cash_amount || 0),
-        bill_id: Number(p.bill_id || 0),
-        note: `Cash payment for Bill #${p.bill_id}`,
-        source: 'BILL' as const,
-      }))
+    return buildReceiptPaymentRows(payments, 'cash_amount', 'Cash')
   }, [qDayPayments.data])
 
   const billCashRowsAll = useMemo(() => {
     const payments = (qAllPayments.data || []) as any[]
-    return payments
-      .filter((p) => Number(p?.cash_amount || 0) > 0)
-      .map((p) => ({
-        id: `pay-${p.id}`,
-        created_at: p.received_at,
-        entry_type: 'RECEIPT',
-        pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
-        amount: Number(p.cash_amount || 0),
-        bill_id: Number(p.bill_id || 0),
-        note: `Cash payment for Bill #${p.bill_id}`,
-        source: 'BILL' as const,
-      }))
+    return buildReceiptPaymentRows(payments, 'cash_amount', 'Cash')
   }, [qAllPayments.data])
 
   const returnCashRowsDay = useMemo(() => {
@@ -1093,6 +1121,15 @@ export default function CashbookPage() {
                                   Bill #{row.bill_id}
                                 </Link>
                               </Typography>
+                            ) : row.source === 'PARTY_RECEIPT' ? (
+                              <Stack gap={0.25}>
+                                <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                                  Customer receipt #{row.receipt_id}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary">
+                                  {(row.subRows || []).length} bill adjustment(s)
+                                </Typography>
+                              </Stack>
                             ) : (
                               <Typography variant="body2">{row.note || '-'}</Typography>
                             )}
@@ -1107,7 +1144,7 @@ export default function CashbookPage() {
                         >
                           {t === 'OPENING' ? '' : isIn ? '+' : '-'}Rs {money(row.amount)}
                         </TableCell>
-                        <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
+                        <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'PARTY_RECEIPT' ? 'Customer receipt' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
                         <TableCell align="right">
                           {row.source === 'CASHBOOK' ? (
                             <Stack direction="row" spacing={0.5} justifyContent="flex-end">
@@ -1139,6 +1176,25 @@ export default function CashbookPage() {
                           )}
                         </TableCell>
                       </TableRow>
+                      {(row.subRows || []).map((sub: any) => (
+                        <TableRow key={`${row.id}-sub-${sub.payment_id || sub.bill_id}`} sx={{ bgcolor: recordsFilter === 'ALL' ? dayColorMap[date] : '#fafafa' }}>
+                          <TableCell />
+                          <TableCell />
+                          <TableCell>
+                            <Stack direction="row" spacing={1} alignItems="center" sx={{ pl: 5 }}>
+                              <Typography variant="caption" color="text.secondary">Applied to</Typography>
+                              <Link component="button" onClick={() => openBillDetail(Number(sub.bill_id))} underline="hover" sx={{ fontSize: 13, fontWeight: 800 }}>
+                                Bill #{sub.bill_id}
+                              </Link>
+                            </Stack>
+                          </TableCell>
+                          <TableCell align="right" sx={{ color: 'success.main', fontWeight: 700 }}>
+                            +Rs {money(sub.amount)}
+                          </TableCell>
+                          <TableCell>Receipt bill</TableCell>
+                          <TableCell />
+                        </TableRow>
+                      ))}
                     </Fragment>
                   )
                 })

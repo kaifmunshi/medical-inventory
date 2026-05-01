@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy import func, or_
 from sqlmodel import select
 
-from backend.accounting import post_party_receipt_voucher
+from backend.accounting import mark_voucher_deleted, post_party_receipt_voucher
 from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import (
@@ -80,6 +80,52 @@ def _customer_note_matches_expr(name: str):
 
 def _round2(x: float) -> float:
     return float(f"{float(x or 0):.2f}")
+
+
+def _as_float(value) -> float:
+    try:
+        if value is None:
+            return 0.0
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _recalculate_bill_payment_state(session, bill: Bill) -> None:
+    payments = session.exec(
+        select(BillPayment).where(
+            BillPayment.bill_id == bill.id,
+            BillPayment.is_deleted == False,  # noqa: E712
+        )
+    ).all()
+    receipt_payments = [payment for payment in payments if not bool(getattr(payment, "is_writeoff", False))]
+    writeoff_payments = [payment for payment in payments if bool(getattr(payment, "is_writeoff", False))]
+
+    total_cash = _round2(sum(_as_float(payment.cash_amount) for payment in receipt_payments))
+    total_online = _round2(sum(_as_float(payment.online_amount) for payment in receipt_payments))
+    total_paid = _round2(total_cash + total_online)
+    total_writeoff = _round2(sum(_as_float(getattr(payment, "writeoff_amount", 0.0)) for payment in writeoff_payments))
+    bill_total = _round2(_as_float(bill.total_amount))
+    covered = _round2(total_paid + total_writeoff)
+
+    bill.payment_cash = total_cash
+    bill.payment_online = total_online
+    bill.paid_amount = total_paid
+    bill.writeoff_amount = total_writeoff
+
+    if covered <= 0:
+        bill.payment_status = "UNPAID"
+        bill.paid_at = None
+        bill.is_credit = True
+    elif covered + 0.0001 < bill_total:
+        bill.payment_status = "PARTIAL"
+        bill.paid_at = None
+        bill.is_credit = True
+    else:
+        bill.payment_status = "PAID"
+        latest_paid_at = max((str(payment.received_at or "") for payment in payments), default="")
+        bill.paid_at = latest_paid_at or None
+        bill.is_credit = False
 
 
 def _sync_customer_debtor_parties(session) -> None:
@@ -557,4 +603,61 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
             session.commit()
 
         session.commit()
+        return PartyReceiptOut(**receipt.dict())
+
+
+@router.delete("/{party_id}/receipts/{receipt_id}", response_model=PartyReceiptOut)
+def delete_party_receipt(party_id: int, receipt_id: int) -> PartyReceiptOut:
+    require_min_role("MANAGER", context="Customer receipt delete")
+    with get_session() as session:
+        _sync_customer_debtor_parties(session)
+        party = session.get(Party, party_id)
+        if not party or party.party_group != "SUNDRY_DEBTOR":
+            raise HTTPException(status_code=404, detail="Debtor party not found")
+
+        receipt = session.get(PartyReceipt, receipt_id)
+        if not receipt or int(receipt.party_id) != int(party_id):
+            raise HTTPException(status_code=404, detail="Receipt not found")
+        if bool(getattr(receipt, "is_deleted", False)):
+            return PartyReceiptOut(**receipt.dict())
+
+        assert_financial_year_unlocked(session, receipt.received_at, context="Customer receipt delete")
+        deleted_at = datetime.now().isoformat(timespec="seconds")
+        receipt.is_deleted = True
+        receipt.deleted_at = deleted_at
+        session.add(receipt)
+
+        affected_bill_ids = set()
+        adjustments = session.exec(
+            select(ReceiptBillAdjustment).where(ReceiptBillAdjustment.receipt_id == receipt.id)
+        ).all()
+        for adjustment in adjustments:
+            affected_bill_ids.add(int(adjustment.bill_id))
+            if adjustment.bill_payment_id is None:
+                continue
+            payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+            if payment and not bool(getattr(payment, "is_deleted", False)):
+                payment.is_deleted = True
+                payment.deleted_at = deleted_at
+                session.add(payment)
+            mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(adjustment.bill_payment_id))
+
+        for bill_id in affected_bill_ids:
+            bill = session.get(Bill, int(bill_id))
+            if not bill:
+                continue
+            _recalculate_bill_payment_state(session, bill)
+            session.add(bill)
+
+        mark_voucher_deleted(session, source_type="PARTY_RECEIPT", source_id=int(receipt.id))
+        log_audit(
+            session,
+            entity_type="PARTY_RECEIPT",
+            entity_id=int(receipt.id),
+            action="DELETE",
+            note=f"Deleted customer receipt #{receipt.id}",
+            details={"party_id": party.id, "total_amount": receipt.total_amount, "affected_bill_ids": sorted(affected_bill_ids)},
+        )
+        session.commit()
+        session.refresh(receipt)
         return PartyReceiptOut(**receipt.dict())

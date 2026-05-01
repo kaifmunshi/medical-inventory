@@ -69,3 +69,8 @@ export async function createPartyReceipt(
   const res = await api.post<PartyReceipt>(`/parties/${partyId}/receipts`, payload)
   return res.data
 }
+
+export async function deletePartyReceipt(partyId: number, receiptId: number): Promise<PartyReceipt> {
+  const res = await api.delete<PartyReceipt>(`/parties/${partyId}/receipts/${receiptId}`)
+  return res.data
+}

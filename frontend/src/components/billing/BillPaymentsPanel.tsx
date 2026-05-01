@@ -12,6 +12,7 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
+import DeleteIcon from '@mui/icons-material/Delete'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
@@ -19,6 +20,7 @@ import {
   getBill,
   listBillPayments,
   receivePayment,
+  undoBillPayment,
   type BillPaymentRow,
 } from '../../services/billing'
 import { todayRange } from '../../lib/date'
@@ -45,6 +47,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   const [note, setNote] = useState('')
   const [paymentDate, setPaymentDate] = useState(todayFrom)
   const [editPaymentRow, setEditPaymentRow] = useState<BillPaymentRow | null>(null)
+  const [deletePaymentRow, setDeletePaymentRow] = useState<BillPaymentRow | null>(null)
 
   const qPayments = useQuery({
     queryKey: ['bill-payments-panel', bill?.id],
@@ -86,12 +89,17 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   }
 
   function openEditPayment(payment: BillPaymentRow) {
+    if (isPartyReceiptPayment(payment)) return
     setEditPaymentRow(payment)
     setPayMode((payment?.mode as any) || 'cash')
     setCash(Number(payment?.cash_amount || 0) || '')
     setOnline(Number(payment?.online_amount || 0) || '')
     setNote(payment?.note || '')
     setPaymentDate(paymentDateOnly(payment?.received_at))
+  }
+
+  function isPartyReceiptPayment(payment: BillPaymentRow) {
+    return /^party receipt #/i.test(String(payment?.note || '').trim())
   }
 
   function handleSplitCash(raw: string) {
@@ -176,6 +184,17 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
     },
   })
 
+  const mDeletePay = useMutation({
+    mutationFn: async () => {
+      if (!bill?.id || !deletePaymentRow?.id) throw new Error('Payment missing')
+      return undoBillPayment(Number(bill.id), Number(deletePaymentRow.id))
+    },
+    onSuccess: async () => {
+      setDeletePaymentRow(null)
+      await syncBillAndPayments()
+    },
+  })
+
   return (
     <>
       {!bill?.is_deleted ? (
@@ -209,32 +228,40 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
               </tr>
             </thead>
             <tbody>
-              {activePayments.map((p) => (
-                <tr key={p.id}>
-                  <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {p.received_at ? String(p.received_at).slice(0, 10) : '-'}
-                  </td>
-                  <td>{p.mode || '-'}</td>
-                  <td>{money(p.cash_amount)}</td>
-                  <td>{money(p.online_amount)}</td>
-                  <td style={{ minWidth: 220 }}>{p.note || ''}</td>
-                  <td align="right">
-                    <Box
-                      sx={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'flex-end',
-                        gap: 0.25,
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      <IconButton size="small" onClick={() => openEditPayment(p)} disabled={mEditPay.isPending} color="primary" sx={{ p: 0.25 }}>
-                        <EditOutlinedIcon fontSize="small" />
-                      </IconButton>
-                    </Box>
-                  </td>
-                </tr>
-              ))}
+              {activePayments.map((p) => {
+                const managedByReceipt = isPartyReceiptPayment(p)
+                return (
+                  <tr key={p.id}>
+                    <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {p.received_at ? String(p.received_at).slice(0, 10) : '-'}
+                    </td>
+                    <td>{p.mode || '-'}</td>
+                    <td>{money(p.cash_amount)}</td>
+                    <td>{money(p.online_amount)}</td>
+                    <td style={{ minWidth: 220 }}>{p.note || ''}</td>
+                    <td align="right">
+                      {!managedByReceipt ? (
+                        <Box
+                          sx={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'flex-end',
+                            gap: 0.25,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          <IconButton size="small" onClick={() => openEditPayment(p)} disabled={mEditPay.isPending || mDeletePay.isPending} color="primary" sx={{ p: 0.25 }}>
+                            <EditOutlinedIcon fontSize="small" />
+                          </IconButton>
+                          <IconButton size="small" onClick={() => setDeletePaymentRow(p)} disabled={mEditPay.isPending || mDeletePay.isPending} color="error" sx={{ p: 0.25 }}>
+                            <DeleteIcon fontSize="small" />
+                          </IconButton>
+                        </Box>
+                      ) : null}
+                    </td>
+                  </tr>
+                )
+              })}
               {activePayments.length === 0 && (
                 <tr>
                   <td colSpan={6}>
@@ -289,6 +316,33 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
             </Box>
             {mEditPay.isError ? (
               <Typography color="error">{(mEditPay.error as any)?.message || 'Edit failed'}</Typography>
+            ) : null}
+          </Stack>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(deletePaymentRow)} onClose={() => !mDeletePay.isPending && setDeletePaymentRow(null)} fullWidth maxWidth="xs">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Delete Payment
+          <IconButton onClick={() => !mDeletePay.isPending && setDeletePaymentRow(null)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Typography>
+              Payment #{deletePaymentRow?.id} for Rs.{money(Number(deletePaymentRow?.cash_amount || 0) + Number(deletePaymentRow?.online_amount || 0))}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              The bill payment status will be recalculated.
+            </Typography>
+            <Box textAlign="right">
+              <Button color="error" variant="contained" onClick={() => mDeletePay.mutate()} disabled={mDeletePay.isPending}>
+                Delete Payment
+              </Button>
+            </Box>
+            {mDeletePay.isError ? (
+              <Typography color="error">{(mDeletePay.error as any)?.message || 'Delete failed'}</Typography>
             ) : null}
           </Stack>
         </DialogContent>

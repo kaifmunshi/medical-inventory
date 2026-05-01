@@ -17,19 +17,21 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
+import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchCustomers } from '../../services/customers'
 import {
   createPartyReceipt,
+  deletePartyReceipt,
   fetchDebtorLedger,
   fetchOpenBills,
   fetchParties,
   fetchPartyReceipts,
   fetchReceiptAdjustments,
 } from '../../services/parties'
-import { getBill, listPayments, type BillPaymentRow } from '../../services/billing'
+import { getBill, listPayments, undoBillPayment, type BillPaymentRow } from '../../services/billing'
 import type { Customer, DebtorLedgerRow, OpenBill, Party, PartyReceipt, ReceiptBillAdjustment } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 import BillEditDialog from '../../components/billing/BillEditDialog'
@@ -37,6 +39,23 @@ import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 
 function money(n: number) {
   return Number(n || 0).toFixed(2)
+}
+
+type ReceiptHistoryRow = {
+  id: string
+  receiptId: number
+  billId?: number
+  sourceType: 'party_receipt' | 'bill_payment'
+  when: string
+  source: string
+  mode: string
+  cash: number
+  online: number
+  total: number
+  adjusted: number
+  onAccount: number
+  allocation: string
+  note: string
 }
 
 export default function CustomerLedgerPage() {
@@ -58,6 +77,7 @@ export default function CustomerLedgerPage() {
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<any | null>(null)
   const [billEditOpen, setBillEditOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<ReceiptHistoryRow | null>(null)
 
   const customersQ = useQuery<Customer[], Error>({
     queryKey: ['customer-ledger-customers'],
@@ -159,6 +179,7 @@ export default function CustomerLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
       queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
       queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['bill-payments-panel'] })
       queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
       setReceiptOpen(false)
       setMode('cash')
@@ -170,6 +191,30 @@ export default function CustomerLedgerPage() {
       setAdjustmentDrafts({})
     },
     onError: (err: any) => toast.push(String(err?.message || 'Failed to record receipt'), 'error'),
+  })
+
+  const deleteReceiptM = useMutation({
+    mutationFn: async (row: ReceiptHistoryRow) => {
+      if (row.sourceType === 'party_receipt') {
+        if (!selectedParty?.id) throw new Error('Customer missing')
+        return deletePartyReceipt(Number(selectedParty.id), Number(row.receiptId))
+      }
+      if (!row.billId) throw new Error('Bill missing')
+      return undoBillPayment(Number(row.billId), Number(row.receiptId))
+    },
+    onSuccess: async (_data, row) => {
+      toast.push(row.sourceType === 'party_receipt' ? 'Receipt deleted' : 'Bill payment deleted', 'success')
+      setDeleteTarget(null)
+      refreshLedgerQueries()
+      if (billDetail?.id) {
+        try {
+          setBillDetail(await getBill(Number(billDetail.id)))
+        } catch {
+          // Keep the current bill dialog open even if the refresh fails.
+        }
+      }
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to delete receipt'), 'error'),
   })
 
   const ledgerRows = ledgerQ.data || []
@@ -211,7 +256,7 @@ export default function CustomerLedgerPage() {
     return map
   }, [adjustments])
 
-  const receiptHistory = useMemo(() => {
+  const receiptHistory = useMemo<ReceiptHistoryRow[]>(() => {
     const billIds = new Set(ledgerRows.map((row) => Number(row.bill_id)))
     const partyReceiptRows = receipts.map((receipt) => {
       const lines = adjustmentDetails.get(Number(receipt.id)) || []
@@ -225,6 +270,7 @@ export default function CustomerLedgerPage() {
       return {
         id: `party-${receipt.id}`,
         receiptId: receipt.id,
+        sourceType: 'party_receipt' as const,
         when: receipt.received_at,
         source: 'Customer receipt',
         mode: receipt.mode,
@@ -248,6 +294,8 @@ export default function CustomerLedgerPage() {
         return {
           id: `bill-payment-${payment.id}`,
           receiptId: payment.id,
+          billId: Number(payment.bill_id),
+          sourceType: 'bill_payment' as const,
           when: payment.received_at,
           source: 'Bill payment',
           mode: payment.mode,
@@ -375,6 +423,7 @@ export default function CustomerLedgerPage() {
     queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
     queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
     queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['bill-payments-panel'] })
     queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
   }
 
@@ -593,6 +642,7 @@ export default function CustomerLedgerPage() {
                 <th>Total</th>
                 <th>Applied</th>
                 <th>Allocation</th>
+                <th style={{ width: 72 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -628,12 +678,22 @@ export default function CustomerLedgerPage() {
                         {receipt.note ? <Typography variant="caption" color="text.secondary">{receipt.note}</Typography> : null}
                       </Stack>
                     </td>
+                    <td align="right">
+                      <IconButton
+                        size="small"
+                        color="error"
+                        onClick={() => setDeleteTarget(receipt)}
+                        disabled={deleteReceiptM.isPending}
+                      >
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    </td>
                   </tr>
                 )
               })}
               {receiptHistory.length === 0 && (
                 <tr>
-                  <td colSpan={5}>
+                  <td colSpan={6}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No receipts recorded for this customer yet.' : 'Select a customer to view receipts.'}
                     </Box>
@@ -767,6 +827,34 @@ export default function CustomerLedgerPage() {
           <Button onClick={() => setReceiptOpen(false)}>Cancel</Button>
           <Button variant="contained" onClick={saveReceipt} disabled={receiptM.isPending || !selectedParty || receiptTotal <= 0 || adjustmentTotal > receiptTotal}>
             Save Receipt
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(deleteTarget)} onClose={() => !deleteReceiptM.isPending && setDeleteTarget(null)} fullWidth maxWidth="xs">
+        <DialogTitle>{deleteTarget?.sourceType === 'party_receipt' ? 'Delete Receipt' : 'Delete Bill Payment'}</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={1}>
+            <Typography>
+              {deleteTarget?.source || 'Receipt'} #{deleteTarget?.receiptId} for Rs {money(Number(deleteTarget?.total || 0))}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Linked bill balances and statuses will be recalculated.
+            </Typography>
+            {deleteReceiptM.isError ? (
+              <Typography color="error">{(deleteReceiptM.error as any)?.message || 'Delete failed'}</Typography>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteTarget(null)} disabled={deleteReceiptM.isPending}>Cancel</Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => deleteTarget && deleteReceiptM.mutate(deleteTarget)}
+            disabled={!deleteTarget || deleteReceiptM.isPending}
+          >
+            Delete
           </Button>
         </DialogActions>
       </Dialog>

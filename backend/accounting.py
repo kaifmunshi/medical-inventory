@@ -443,12 +443,16 @@ def sync_existing_vouchers(session) -> None:
 
     for bill in session.exec(select(Bill)).all():
         post_sales_voucher(session, bill)
+        if bool(getattr(bill, "is_deleted", False)):
+            mark_voucher_deleted(session, source_type="BILL", source_id=int(bill.id or 0))
 
     for purchase in session.exec(select(Purchase)).all():
         party = party_map.get(int(purchase.party_id or 0))
         if not party:
             continue
         post_purchase_voucher(session, purchase, party)
+        if bool(getattr(purchase, "is_deleted", False)):
+            mark_voucher_deleted(session, source_type="PURCHASE", source_id=int(purchase.id or 0))
 
     for payment in session.exec(select(PurchasePayment)).all():
         purchase = session.get(Purchase, payment.purchase_id)
@@ -469,6 +473,9 @@ def sync_existing_vouchers(session) -> None:
             float(getattr(payment, "cash_amount", 0) or 0),
             float(getattr(payment, "online_amount", 0) or 0),
         )
+        if bool(getattr(payment, "is_deleted", False)) or bool(getattr(purchase, "is_deleted", False)):
+            source_type = "PURCHASE_WRITEOFF" if bool(payment.is_writeoff) else "PURCHASE_PAYMENT"
+            mark_voucher_deleted(session, source_type=source_type, source_id=int(payment.id or 0))
 
     for receipt in session.exec(select(PartyReceipt)).all():
         party = party_map.get(int(receipt.party_id or 0))
@@ -484,6 +491,8 @@ def sync_existing_vouchers(session) -> None:
             float(receipt.online_amount or 0),
             receipt.note,
         )
+        if bool(getattr(receipt, "is_deleted", False)):
+            mark_voucher_deleted(session, source_type="PARTY_RECEIPT", source_id=int(receipt.id or 0))
 
     for payment in session.exec(select(BillPayment)).all():
         if int(payment.id or 0) in receipt_adjustment_payment_ids:
@@ -505,3 +514,5 @@ def sync_existing_vouchers(session) -> None:
             bool(getattr(payment, "is_writeoff", False)),
             payment.note,
         )
+        if bool(getattr(payment, "is_deleted", False)) or bool(getattr(bill, "is_deleted", False)):
+            mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(payment.id or 0))

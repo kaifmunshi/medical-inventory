@@ -16,6 +16,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { listItems } from '../../services/inventory'
 import { openPack } from '../../services/lots'
+import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../ui/Toaster'
 
 export interface PickerItem {
@@ -109,12 +110,15 @@ export default function ItemPicker({
   const [q, setQ] = useState('')
   const [openDraftItem, setOpenDraftItem] = useState<PickerItem | null>(null)
   const [openDraftQty, setOpenDraftQty] = useState('1')
+  const searchTerm = q.trim()
+  const canSearchItems = searchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
 
-  const { data } = useQuery({
-    queryKey: ['billing-items', q],
+  const { data, isFetching } = useQuery({
+    queryKey: ['billing-items', searchTerm],
+    enabled: open && canSearchItems,
     queryFn: async () => {
       try {
-        return await listItems(q)
+        return await listItems(searchTerm)
       } catch (err: any) {
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load items'
         toast.push(String(msg), 'error')
@@ -124,7 +128,7 @@ export default function ItemPicker({
   })
 
   const items = ((() => {
-    const all = (data || []) as PickerItem[]
+    const all = canSearchItems ? (data || []) as PickerItem[] : []
     const byGroup = new Map<string, PickerItem[]>()
 
     for (const it of all) {
@@ -302,7 +306,7 @@ export default function ItemPicker({
 
             {items.length === 0 && (
               <Box p={2} color="text.secondary">
-                No items found.
+                {canSearchItems ? (isFetching ? 'Loading products...' : 'No items found.') : PRODUCT_SEARCH_PROMPT}
               </Box>
             )}
           </List>

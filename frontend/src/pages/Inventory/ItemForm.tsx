@@ -20,6 +20,7 @@ import { z } from 'zod'
 import React from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { listItemsPage } from '../../services/inventory'
+import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 
 export type ItemFormValues = z.infer<typeof itemSchema>
 
@@ -146,13 +147,15 @@ export default function ItemForm({
   const [debouncedSearch, setDebouncedSearch] = React.useState('')
 
   React.useEffect(() => {
-    if (!searchText.trim()) {
+    const term = searchText.trim()
+    if (term.length < PRODUCT_SEARCH_MIN_CHARS) {
       setDebouncedSearch('')
       return
     }
-    const t = setTimeout(() => setDebouncedSearch(searchText.trim()), 250)
+    const t = setTimeout(() => setDebouncedSearch(term), 250)
     return () => clearTimeout(t)
   }, [searchText])
+  const canSearchExistingItems = debouncedSearch.length >= PRODUCT_SEARCH_MIN_CHARS
 
   const {
     data,
@@ -165,11 +168,11 @@ export default function ItemForm({
     initialPageParam: 0,
     queryFn: ({ pageParam }) => listItemsPage(debouncedSearch, LIMIT, pageParam),
     getNextPageParam: (lastPage) => lastPage?.next_offset ?? undefined,
-    enabled: open && !isEditMode,
+    enabled: open && !isEditMode && canSearchExistingItems,
   })
 
   const options = React.useMemo(() => {
-    const all = data?.pages.flatMap((p) => p.items) ?? []
+    const all = canSearchExistingItems ? data?.pages.flatMap((p) => p.items) ?? [] : []
 
     // de-dupe by id only
     const seen = new Set<number>()
@@ -181,13 +184,16 @@ export default function ItemForm({
       out.push(it)
     }
 
-    // fallback if nothing loaded yet
-    if (out.length === 0 && Array.isArray(items) && items.length > 0) {
+    // fallback for legacy callers that still pass preloaded items
+    if (canSearchExistingItems && out.length === 0 && Array.isArray(items) && items.length > 0) {
+      const term = norm(debouncedSearch)
       const seen2 = new Set<number>()
       const out2: any[] = []
       for (const it of items) {
         const id = Number(it?.id)
         if (!id || seen2.has(id)) continue
+        const label = `${norm(it?.name)} ${norm(it?.brand)}`
+        if (!label.includes(term)) continue
         seen2.add(id)
         out2.push(it)
       }
@@ -223,7 +229,7 @@ export default function ItemForm({
     }
 
     return out
-  }, [data, items, showOutOfStock])
+  }, [canSearchExistingItems, data, debouncedSearch, items, showOutOfStock])
 
   const handleListboxScroll = (event: React.UIEvent<HTMLUListElement>) => {
     const listboxNode = event.currentTarget
@@ -301,7 +307,7 @@ export default function ItemForm({
 
               <Autocomplete
                 options={options}
-                loading={isLoading || isFetchingNextPage}
+                loading={canSearchExistingItems && (isLoading || isFetchingNextPage)}
                 value={pickedExisting}
                 onChange={(_, value) => {
                   applyFromExisting(value)
@@ -325,6 +331,7 @@ export default function ItemForm({
                   style: { maxHeight: 320, overflow: 'auto' },
                 }}
                 disablePortal
+                noOptionsText={canSearchExistingItems ? 'No items found' : PRODUCT_SEARCH_PROMPT}
                 isOptionEqualToValue={(opt: any, val: any) => Number(opt?.id) === Number(val?.id)}
                 groupBy={(option: any) => {
                   const n = option?.name ? String(option.name) : ''

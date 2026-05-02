@@ -31,6 +31,7 @@ import { createCustomer, fetchCustomers } from '../../services/customers'
 import type { Customer } from '../../lib/types'
 import { listItems } from '../../services/inventory'
 import { openPack } from '../../services/lots'
+import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
 
 interface CartRow {
@@ -224,9 +225,12 @@ export default function Billing() {
 
   // ✅ Beautiful confirm dialog for CASH
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
-  const { data: inventoryItems = [] } = useQuery({
-    queryKey: ['billing-grid-items', gridSearch],
-    queryFn: () => listItems(gridSearch),
+  const gridSearchTerm = gridSearch.trim()
+  const canSearchGridItems = gridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const { data: inventoryItems = [], isFetching: isFetchingGridItems } = useQuery({
+    queryKey: ['billing-grid-items', gridSearchTerm],
+    queryFn: () => listItems(gridSearchTerm),
+    enabled: canSearchGridItems,
   })
   const { data: customerOptions = [] } = useQuery({
     queryKey: ['billing-customers', customerQ],
@@ -1166,6 +1170,7 @@ export default function Billing() {
                     <Autocomplete
                       size="small"
                       options={inventoryItemsSorted}
+                      loading={canSearchGridItems && isFetchingGridItems}
                       value={
                         inventoryItemsSorted.find((it: any) => Number(it.id) === Number(r.item_id)) ||
                         (Number(r.item_id) > 0
@@ -1202,6 +1207,7 @@ export default function Billing() {
                         setGridSearch('')
                       }}
                       onClose={() => setGridSearch('')}
+                      noOptionsText={canSearchGridItems ? 'No items found' : PRODUCT_SEARCH_PROMPT}
                       ListboxProps={{ style: { maxHeight: 300 } }}
                       renderOption={(props, option: any) => (
                         <li

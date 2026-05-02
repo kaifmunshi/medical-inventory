@@ -31,6 +31,7 @@ import { listIncomingStockEntries, type IncomingStockEntry } from '../../service
 import { createBrand, createCategory, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
 import { addSupplierPayment, fetchPurchases, replacePurchaseItems, updatePurchase } from '../../services/purchases'
 import type { Category, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
+import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
 
 type DraftItem = PurchaseItemPayload & { key: string; existing_stock_movement_id?: number }
@@ -195,6 +196,10 @@ export default function SupplierLedgerPage() {
   const [brandDialogOpen, setBrandDialogOpen] = useState(false)
   const [brandTargetKey, setBrandTargetKey] = useState<string | null>(null)
   const [newBrandName, setNewBrandName] = useState('')
+  const productSearchTerm = productSearch.trim()
+  const canSearchProducts = productSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const inventorySearchTerm = inventorySearch.trim()
+  const canSearchInventoryBatches = inventorySearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
 
   const suppliersQ = useQuery<Party[], Error>({
     queryKey: ['suppliers-ledger-select'],
@@ -218,23 +223,25 @@ export default function SupplierLedgerPage() {
   })
 
   const productsQ = useQuery<Product[], Error>({
-    queryKey: ['purchase-products', productSearch],
-    queryFn: () => fetchProducts({ q: productSearch.trim() || undefined }),
+    queryKey: ['purchase-products', productSearchTerm],
+    queryFn: () => fetchProducts({ q: productSearchTerm }),
+    enabled: canSearchProducts,
   })
 
   const inventoryBatchesQ = useQuery<IncomingStockEntry[], Error>({
-    queryKey: ['purchase-existing-inventory', inventorySearch, EXISTING_INVENTORY_FROM_DATE],
-    queryFn: () => listIncomingStockEntries(inventorySearch.trim(), {
+    queryKey: ['purchase-existing-inventory', inventorySearchTerm, EXISTING_INVENTORY_FROM_DATE],
+    queryFn: () => listIncomingStockEntries(inventorySearchTerm, {
       include_archived: true,
       incoming_from: EXISTING_INVENTORY_FROM_DATE,
     }),
+    enabled: canSearchInventoryBatches,
   })
 
   const suppliers = suppliersQ.data || []
   const categories = categoriesQ.data || []
   const brandNames = (brandsQ.data || []).map((brand) => brand.name)
-  const products = productsQ.data || []
-  const inventoryBatches = inventoryBatchesQ.data || []
+  const products = canSearchProducts ? productsQ.data || [] : []
+  const inventoryBatches = canSearchInventoryBatches ? inventoryBatchesQ.data || [] : []
   const selectedSupplier = suppliers.find((supplier) => Number(supplier.id) === Number(partyId)) || null
   const purchases = purchasesQ.data || []
   const openingBalance = openingForSupplier(selectedSupplier)
@@ -763,6 +770,7 @@ export default function SupplierLedgerPage() {
                     <Autocomplete
                       size="small"
                       options={inventoryBatches}
+                      loading={canSearchInventoryBatches && inventoryBatchesQ.isFetching}
                       filterOptions={(options) => options}
                       value={
                         inventoryBatches.find((entry) => Number(entry.movement_id) === Number(item.existing_stock_movement_id)) ||
@@ -771,7 +779,11 @@ export default function SupplierLedgerPage() {
                       }
                       isOptionEqualToValue={(option, value) => Number(option.movement_id) === Number(value.movement_id)}
                       getOptionLabel={incomingEntryLabel}
-                      onInputChange={(_, value) => setInventorySearch(value)}
+                      noOptionsText={canSearchInventoryBatches ? 'No batches found' : PRODUCT_SEARCH_PROMPT}
+                      onInputChange={(_, value, reason) => {
+                        if (reason === 'input') setInventorySearch(value)
+                        if (reason === 'clear') setInventorySearch('')
+                      }}
                       onChange={(_, value) => {
                         if (value) applyExistingInventory(item.key, value)
                         else patchEditItem(item.key, { existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
@@ -804,8 +816,14 @@ export default function SupplierLedgerPage() {
                     <Autocomplete
                       size="small"
                       options={products}
+                      loading={canSearchProducts && productsQ.isFetching}
                       getOptionLabel={(option) => `${option.name}${option.brand ? ` | ${option.brand}` : ''}`}
-                      onInputChange={(_, value) => setProductSearch(value)}
+                      filterOptions={(options) => options}
+                      noOptionsText={canSearchProducts ? 'No products found' : PRODUCT_SEARCH_PROMPT}
+                      onInputChange={(_, value, reason) => {
+                        if (reason === 'input') setProductSearch(value)
+                        if (reason === 'clear' || reason === 'reset') setProductSearch('')
+                      }}
                       onChange={(_, value) => applyProduct(item.key, value)}
                       renderInput={(params) => <TextField {...params} label="Pick Product" fullWidth />}
                     />

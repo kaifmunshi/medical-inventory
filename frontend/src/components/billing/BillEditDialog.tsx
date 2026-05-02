@@ -22,6 +22,7 @@ import { createCustomer, fetchCustomers } from '../../services/customers'
 import { updateBill } from '../../services/billing'
 import { openPack } from '../../services/lots'
 import type { Customer } from '../../lib/types'
+import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 
 type EditMode = 'cash' | 'online' | 'split' | 'credit'
 type EditLine = {
@@ -297,6 +298,8 @@ export default function BillEditDialog({
   const [editNewCustomerAddress, setEditNewCustomerAddress] = useState('')
   const [editOpenLooseDraft, setEditOpenLooseDraft] = useState<any | null>(null)
   const [editOpenLooseQty, setEditOpenLooseQty] = useState('1')
+  const editItemSearchTerm = editItemQuery.trim()
+  const canSearchEditItems = editItemSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
 
   useEffect(() => {
     if (!open || !bill?.id) return
@@ -355,9 +358,9 @@ export default function BillEditDialog({
   }, [open, bill])
 
   const qEditItems = useQuery({
-    queryKey: ['edit-bill-items', editItemQuery],
-    enabled: open,
-    queryFn: () => listItems(editItemQuery),
+    queryKey: ['edit-bill-items', editItemSearchTerm],
+    enabled: open && canSearchEditItems,
+    queryFn: () => listItems(editItemSearchTerm),
   })
   const { data: editCustomerOptions = [] } = useQuery({
     queryKey: ['edit-billing-customers', editCustomerQ],
@@ -471,6 +474,7 @@ export default function BillEditDialog({
 
   const EDIT_SUGGESTIONS_PAGE_SIZE = 8
   const editSuggestionItems = useMemo(() => {
+    if (!canSearchEditItems) return []
     const out = [...(((qEditItems.data as any[]) || []) as any[])]
     out.sort((a: any, b: any) => {
       const an = String(a?.name ?? '').toLowerCase()
@@ -487,7 +491,7 @@ export default function BillEditDialog({
       return da.localeCompare(db)
     })
     return out
-  }, [qEditItems.data])
+  }, [canSearchEditItems, qEditItems.data])
   const editSuggestionTotalPages = Math.max(1, Math.ceil(editSuggestionItems.length / EDIT_SUGGESTIONS_PAGE_SIZE))
   const editSuggestionPageClamped = Math.min(editSuggestionPage, editSuggestionTotalPages - 1)
   const editSuggestionStart = editSuggestionPageClamped * EDIT_SUGGESTIONS_PAGE_SIZE
@@ -961,7 +965,13 @@ export default function BillEditDialog({
                     </Stack>
                   </Stack>
                 ))}
-                {editSuggestionItems.length === 0 ? <Box p={2}><Typography variant="body2" color="text.secondary" textAlign="center">No items found.</Typography></Box> : null}
+                {editSuggestionItems.length === 0 ? (
+                  <Box p={2}>
+                    <Typography variant="body2" color="text.secondary" textAlign="center">
+                      {canSearchEditItems ? (qEditItems.isFetching ? 'Loading products...' : 'No items found.') : PRODUCT_SEARCH_PROMPT}
+                    </Typography>
+                  </Box>
+                ) : null}
               </Box>
               {editSuggestionItems.length > EDIT_SUGGESTIONS_PAGE_SIZE && (
                 <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 1 }}>

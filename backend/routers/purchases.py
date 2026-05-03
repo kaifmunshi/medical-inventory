@@ -25,6 +25,7 @@ from backend.models import (
     PurchasePayment,
     PurchasePaymentCreate,
     PurchasePaymentOut,
+    PurchasePaymentUpdate,
     PurchaseUpdate,
     StockMovement,
     SupplierLedgerSummary,
@@ -456,6 +457,10 @@ def recompute_purchase_payment_state(session, purchase: Purchase) -> None:
     session.commit()
 
 
+def purchase_payment_source_type(payment: PurchasePayment) -> str:
+    return "PURCHASE_WRITEOFF" if bool(payment.is_writeoff) else "PURCHASE_PAYMENT"
+
+
 @router.post("/", response_model=PurchaseOut, status_code=201)
 def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
     invoice_number = clean_text(payload.invoice_number)
@@ -560,6 +565,13 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
         writeoff_amount = 0.0
         prepared_payments = []
         for payment in payload.payments:
+            payment_ts = f"{invoice_date}T00:00:00"
+            if payment.paid_at:
+                payment_date = clean_date(payment.paid_at)
+                if not payment_date:
+                    raise HTTPException(status_code=400, detail="paid_at is required")
+                payment_ts = f"{payment_date}T00:00:00"
+            assert_financial_year_unlocked(session, payment_ts, context="Purchase payment")
             mode, amount, cash_amount, online_amount = normalize_payment_mode(
                 payment.mode,
                 payment.amount,
@@ -574,6 +586,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     "cash_amount": cash_amount,
                     "online_amount": online_amount,
                     "note": clean_text(payment.note),
+                    "paid_at": payment_ts,
                     "is_writeoff": bool(payment.is_writeoff),
                 }
             )
@@ -705,11 +718,10 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             )
             session.add(purchase_item)
 
-        payment_ts = f"{invoice_date}T00:00:00"
         for payment in prepared_payments:
             payment_row = PurchasePayment(
                 purchase_id=purchase.id,
-                paid_at=payment_ts,
+                paid_at=payment["paid_at"],
                 mode=payment["mode"],
                 amount=payment["amount"],
                 cash_amount=payment["cash_amount"],
@@ -1054,6 +1066,176 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
             entity_id=int(payment.id),
             action="CREATE",
             note=f"Added payment to purchase #{row.id}",
+            details={"purchase_id": row.id, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
+        )
+        session.commit()
+        recompute_purchase_payment_state(session, row)
+        supplier = ensure_supplier(session, row.party_id)
+        post_purchase_payment_voucher(
+            session,
+            row,
+            supplier,
+            int(payment.id or 0),
+            float(payment.amount or 0),
+            bool(payment.is_writeoff),
+            payment.note,
+            payment.paid_at,
+            float(getattr(payment, "cash_amount", 0) or 0),
+            float(getattr(payment, "online_amount", 0) or 0),
+        )
+        session.commit()
+        session.refresh(row)
+        return make_purchase_out(session, row)
+
+
+@router.patch("/{purchase_id}/payments/{payment_id}", response_model=PurchaseOut)
+def update_purchase_payment(purchase_id: int, payment_id: int, payload: PurchasePaymentUpdate) -> PurchaseOut:
+    require_min_role("MANAGER", context="Purchase payment update")
+    data = payload.dict(exclude_unset=True)
+    with get_session() as session:
+        row = session.get(Purchase, purchase_id)
+        if not row or row.is_deleted:
+            raise HTTPException(status_code=404, detail="Purchase not found")
+        payment = session.get(PurchasePayment, payment_id)
+        if not payment or int(payment.purchase_id) != int(row.id) or payment.is_deleted:
+            raise HTTPException(status_code=404, detail="Payment not found")
+
+        assert_financial_year_unlocked(session, payment.paid_at, context="Purchase payment update")
+        old_source_type = purchase_payment_source_type(payment)
+
+        next_paid_at = payment.paid_at
+        if "paid_at" in data:
+            clean_paid_at = clean_date(data.get("paid_at"))
+            if not clean_paid_at:
+                raise HTTPException(status_code=400, detail="paid_at is required")
+            next_paid_at = f"{clean_paid_at}T00:00:00"
+            assert_financial_year_unlocked(session, next_paid_at, context="Purchase payment update")
+
+        next_is_writeoff = bool(data.get("is_writeoff", payment.is_writeoff))
+        mode, amount, cash_amount, online_amount = normalize_payment_mode(
+            data.get("mode", payment.mode),
+            data.get("amount", payment.amount),
+            data.get("cash_amount", payment.cash_amount),
+            data.get("online_amount", payment.online_amount),
+            next_is_writeoff,
+        )
+
+        active_payments = session.exec(
+            select(PurchasePayment).where(
+                PurchasePayment.purchase_id == row.id,
+                PurchasePayment.is_deleted == False,  # noqa: E712
+                PurchasePayment.id != payment.id,
+            )
+        ).all()
+        settled_elsewhere = round2(sum(float(p.amount or 0) for p in active_payments))
+        if settled_elsewhere + amount > float(row.total_amount or 0) + 0.0001:
+            raise HTTPException(status_code=400, detail="Payment exceeds outstanding amount")
+
+        payment.paid_at = next_paid_at
+        payment.mode = mode
+        payment.amount = amount
+        payment.cash_amount = cash_amount
+        payment.online_amount = online_amount
+        if "note" in data:
+            payment.note = clean_text(data.get("note"))
+        payment.is_writeoff = next_is_writeoff
+        session.add(payment)
+        log_audit(
+            session,
+            entity_type="PURCHASE_PAYMENT",
+            entity_id=int(payment.id),
+            action="UPDATE",
+            note=f"Updated payment #{payment.id} for purchase #{row.id}",
+            details={"purchase_id": row.id, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
+        )
+        session.commit()
+        recompute_purchase_payment_state(session, row)
+        supplier = ensure_supplier(session, row.party_id)
+        new_source_type = purchase_payment_source_type(payment)
+        if new_source_type != old_source_type:
+            mark_voucher_deleted(session, source_type=old_source_type, source_id=int(payment.id or 0))
+        post_purchase_payment_voucher(
+            session,
+            row,
+            supplier,
+            int(payment.id or 0),
+            float(payment.amount or 0),
+            bool(payment.is_writeoff),
+            payment.note,
+            payment.paid_at,
+            float(getattr(payment, "cash_amount", 0) or 0),
+            float(getattr(payment, "online_amount", 0) or 0),
+        )
+        session.commit()
+        session.refresh(row)
+        return make_purchase_out(session, row)
+
+
+@router.delete("/{purchase_id}/payments/{payment_id}", response_model=PurchaseOut)
+def delete_purchase_payment(purchase_id: int, payment_id: int) -> PurchaseOut:
+    require_min_role("MANAGER", context="Purchase payment delete")
+    with get_session() as session:
+        row = session.get(Purchase, purchase_id)
+        if not row or row.is_deleted:
+            raise HTTPException(status_code=404, detail="Purchase not found")
+        payment = session.get(PurchasePayment, payment_id)
+        if not payment or int(payment.purchase_id) != int(row.id) or payment.is_deleted:
+            raise HTTPException(status_code=404, detail="Payment not found")
+
+        assert_financial_year_unlocked(session, payment.paid_at, context="Purchase payment delete")
+        source_type = purchase_payment_source_type(payment)
+        payment.is_deleted = True
+        payment.deleted_at = now_ts()
+        session.add(payment)
+        log_audit(
+            session,
+            entity_type="PURCHASE_PAYMENT",
+            entity_id=int(payment.id),
+            action="DELETE",
+            note=f"Deleted payment #{payment.id} for purchase #{row.id}",
+            details={"purchase_id": row.id, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
+        )
+        session.commit()
+        recompute_purchase_payment_state(session, row)
+        mark_voucher_deleted(session, source_type=source_type, source_id=int(payment.id or 0))
+        session.commit()
+        session.refresh(row)
+        return make_purchase_out(session, row)
+
+
+@router.post("/{purchase_id}/payments/{payment_id}/restore", response_model=PurchaseOut)
+def restore_purchase_payment(purchase_id: int, payment_id: int) -> PurchaseOut:
+    require_min_role("MANAGER", context="Purchase payment restore")
+    with get_session() as session:
+        row = session.get(Purchase, purchase_id)
+        if not row or row.is_deleted:
+            raise HTTPException(status_code=404, detail="Purchase not found")
+        payment = session.get(PurchasePayment, payment_id)
+        if not payment or int(payment.purchase_id) != int(row.id):
+            raise HTTPException(status_code=404, detail="Payment not found")
+        if not payment.is_deleted:
+            raise HTTPException(status_code=400, detail="Payment is already active")
+
+        assert_financial_year_unlocked(session, payment.paid_at, context="Purchase payment restore")
+        active_payments = session.exec(
+            select(PurchasePayment).where(
+                PurchasePayment.purchase_id == row.id,
+                PurchasePayment.is_deleted == False,  # noqa: E712
+            )
+        ).all()
+        settled_active = round2(sum(float(p.amount or 0) for p in active_payments))
+        if settled_active + float(payment.amount or 0) > float(row.total_amount or 0) + 0.0001:
+            raise HTTPException(status_code=400, detail="Restored payment exceeds purchase total")
+
+        payment.is_deleted = False
+        payment.deleted_at = None
+        session.add(payment)
+        log_audit(
+            session,
+            entity_type="PURCHASE_PAYMENT",
+            entity_id=int(payment.id),
+            action="RESTORE",
+            note=f"Restored payment #{payment.id} for purchase #{row.id}",
             details={"purchase_id": row.id, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
         )
         session.commit()

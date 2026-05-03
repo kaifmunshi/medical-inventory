@@ -29,7 +29,7 @@ import { useSearchParams } from 'react-router-dom'
 import { fetchParties } from '../../services/parties'
 import { listIncomingStockEntries, type IncomingStockEntry } from '../../services/inventory'
 import { createBrand, createCategory, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
-import { addSupplierPayment, fetchPurchases, replacePurchaseItems, updatePurchase } from '../../services/purchases'
+import { addSupplierPayment, fetchPurchases, replacePurchaseItems, restorePurchasePayment, updatePurchase } from '../../services/purchases'
 import type { Category, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
@@ -247,6 +247,16 @@ export default function SupplierLedgerPage() {
   const openingBalance = openingForSupplier(selectedSupplier)
   const openPurchases = purchases.filter((purchase) => outstandingOf(purchase) > 0.0001)
   const selectedPurchase = purchases.find((purchase) => Number(purchase.id) === Number(selectedPurchaseId)) || null
+  const editSubtotal = Number(selectedPurchase?.subtotal_amount || 0)
+  const editGstAmount = Number(selectedPurchase?.gst_amount || 0)
+  const editDiscountValue = Number(editDiscountAmount || 0)
+  const editRoundingValue = Number(editRoundingAdjustment || 0)
+  const editBillAmount = editSubtotal - editDiscountValue + editGstAmount + editRoundingValue
+  const editPaidAmount = Number(selectedPurchase?.paid_amount || 0)
+  const editWriteoffAmount = Number(selectedPurchase?.writeoff_amount || 0)
+  const editCoveredAmount = editPaidAmount + editWriteoffAmount
+  const editOutstandingAmount = editBillAmount - editCoveredAmount
+  const editBillAmountInvalid = editBillAmount < editCoveredAmount - 0.0001
 
   const ledgerRows = useMemo(() => {
     const events = purchases.flatMap((purchase) => {
@@ -427,6 +437,20 @@ export default function SupplierLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to add payment'), 'error'),
+  })
+
+  const restorePaymentM = useMutation({
+    mutationFn: ({ id, paymentId }: { id: number; paymentId: number }) => restorePurchasePayment(id, paymentId),
+    onSuccess: () => {
+      toast.push('Payment restored', 'success')
+      queryClient.invalidateQueries({ queryKey: ['supplier-ledger-purchases'] })
+      queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['purchase-detail'] })
+      queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to restore payment'), 'error'),
   })
 
   const updateM = useMutation({
@@ -629,13 +653,16 @@ export default function SupplierLedgerPage() {
 
   function applyExistingInventory(itemKey: string, incomingEntry: IncomingStockEntry | null) {
     if (!incomingEntry) return
+    const incomingProduct = incomingEntry.product_id
+      ? products.find((product) => Number(product.id) === Number(incomingEntry.product_id))
+      : null
     patchEditItem(itemKey, {
       existing_stock_movement_id: incomingEntry.movement_id,
       existing_inventory_item_id: incomingEntry.item_id,
       product_id: incomingEntry.product_id ?? undefined,
       product_name: incomingEntry.name,
       brand: incomingEntry.brand || '',
-      category_id: incomingEntry.category_id ?? undefined,
+      category_id: incomingEntry.category_id ?? incomingProduct?.category_id ?? undefined,
       expiry_date: incomingEntry.expiry_date || '',
       rack_number: incomingEntry.rack_number || 0,
       sealed_qty: Math.max(1, Number(incomingEntry.delta || 0)),
@@ -709,7 +736,7 @@ export default function SupplierLedgerPage() {
     if (!selectedPurchaseId) return
     const cleaned = cleanEditItems()
     if (cleaned.some((item) => !item.product_name)) {
-      toast.push('Every line needs a product name', 'error')
+      toast.push('Every purchase item needs a product name', 'error')
       return
     }
     replaceItemsM.mutate({ id: selectedPurchaseId, items: cleaned })
@@ -726,23 +753,23 @@ export default function SupplierLedgerPage() {
           sx={{ px: 2, py: 1.5, bgcolor: 'rgba(31,107,74,0.05)', borderBottom: '1px solid', borderColor: 'divider' }}
         >
           <Box>
-            <Typography variant="subtitle1" fontWeight={700}>Product Lines</Typography>
+            <Typography variant="subtitle1" fontWeight={700}>Purchase Items</Typography>
             <Typography variant="caption" color="text.secondary">
-              {editItems.length} line{editItems.length === 1 ? '' : 's'} · Lines net {money(editItemsSubtotal)} · Free qty reduces average rate
+              {editItems.length} item{editItems.length === 1 ? '' : 's'} · Items net {money(editItemsSubtotal)} · Free qty reduces average rate
             </Typography>
           </Box>
           <Stack direction="row" gap={1}>
-            <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setEditItems((prev) => [...prev, makeEmptyItem()])}>Add Line</Button>
+            <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setEditItems((prev) => [...prev, makeEmptyItem()])}>Add Item</Button>
           </Stack>
         </Stack>
 
         <Stack divider={<Divider flexItem />} sx={{ p: 0 }}>
           {editItems.map((item, index) => (
-            <Box key={item.key} sx={{ p: 1.5 }}>
+            <Box key={item.key} sx={{ p: 1.5, bgcolor: 'background.paper' }}>
               <Stack gap={1.25}>
-                <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
-                  <Stack direction="row" gap={1} alignItems="center">
-                    <Chip size="small" label={`Line ${index + 1}`} />
+                <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1} flexWrap="wrap">
+                  <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap" sx={{ minWidth: 0 }}>
+                    <Chip size="small" label={`Item ${index + 1}`} />
                     {item.existing_inventory_item_id ? (
                       <Chip
                         size="small"
@@ -753,12 +780,16 @@ export default function SupplierLedgerPage() {
                       />
                     ) : null}
                     <Typography variant="caption" color="text.secondary">
-                      {item.product_name || 'New product line'}
+                      {item.product_name || 'New purchase item'}
                     </Typography>
+                    <Chip size="small" variant="outlined" label={`Qty ${Number(item.sealed_qty || 0)}`} />
+                    <Chip size="small" variant="outlined" label={`Free ${Number(item.free_qty || 0)}`} />
+                    <Chip size="small" variant="outlined" label={`Item Total ${money(lineBaseTotal(item))}`} />
                   </Stack>
                   <Button
                     color="error"
                     size="small"
+                    variant="outlined"
                     startIcon={<DeleteIcon />}
                     onClick={() => setEditItems((prev) => (prev.length === 1 ? prev : prev.filter((row) => row.key !== item.key)))}
                   >
@@ -894,10 +925,10 @@ export default function SupplierLedgerPage() {
                     <TextField size="small" label="MRP" type="number" value={item.mrp} onChange={(e) => patchEditItem(item.key, { mrp: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
-                    <TextField size="small" label="Discount" type="number" value={item.discount_amount || 0} onChange={(e) => patchEditItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                    <TextField size="small" label="Discount (Rs)" type="number" value={item.discount_amount || 0} onChange={(e) => patchEditItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
-                    <TextField size="small" label="Round Off" type="number" value={item.rounding_adjustment || 0} onChange={(e) => patchEditItem(item.key, { rounding_adjustment: Number(e.target.value) })} fullWidth />
+                    <TextField size="small" label="Round Off (+/-)" type="number" value={item.rounding_adjustment || 0} onChange={(e) => patchEditItem(item.key, { rounding_adjustment: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={12} md={2.8}>
                     <Stack gap={0.75}>
@@ -955,7 +986,7 @@ export default function SupplierLedgerPage() {
           onClick={() => openPaymentDialog()}
           disabled={!partyId || openPurchases.length === 0}
         >
-          Add Payment
+          Add Payment / Write-off
         </Button>
       </Stack>
 
@@ -1034,7 +1065,7 @@ export default function SupplierLedgerPage() {
                     <td>
                       {canAddForRow ? (
                         <Button size="small" variant="outlined" onClick={() => openPaymentDialog(purchase)}>
-                          Add Payment
+                          Add Payment / Write-off
                         </Button>
                       ) : null}
                     </td>
@@ -1056,13 +1087,13 @@ export default function SupplierLedgerPage() {
       </Paper>
 
       <Dialog open={paymentOpen} onClose={() => setPaymentOpen(false)} fullWidth maxWidth="lg">
-        <DialogTitle>Add Supplier Payment</DialogTitle>
+        <DialogTitle>Add Supplier Payment / Write-off</DialogTitle>
         <DialogContent dividers>
           <Stack gap={2} sx={{ pt: 1 }}>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
               <TextField
                 select
-                label="Type"
+                label="Entry Type"
                 value={paymentType}
                 onChange={(e) => {
                   const next = e.target.value as 'payment' | 'writeoff'
@@ -1237,7 +1268,7 @@ export default function SupplierLedgerPage() {
                   </Button>
                   {outstandingOf(selectedPurchase) > 0.0001 ? (
                     <Button variant="contained" startIcon={<PaymentsIcon />} onClick={() => openPaymentDialog(selectedPurchase)}>
-                      Add Payment
+                      Add Payment / Write-off
                     </Button>
                   ) : null}
                 </Stack>
@@ -1267,7 +1298,7 @@ export default function SupplierLedgerPage() {
                       <th>Free</th>
                       <th>Rate</th>
                       <th>MRP</th>
-                      <th>Line Total</th>
+                      <th>Item Total</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1302,11 +1333,13 @@ export default function SupplierLedgerPage() {
                       <th>Online</th>
                       <th>Amount</th>
                       <th>Note</th>
+                      <th>Status</th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
                     {(selectedPurchase.payments || []).map((payment) => (
-                      <tr key={payment.id}>
+                      <tr key={payment.id} style={{ opacity: payment.is_deleted ? 0.6 : 1 }}>
                         <td>{dateOnly(payment.paid_at)}</td>
                         <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
                         <td>{paymentModeLabel(payment.mode)}</td>
@@ -1314,11 +1347,24 @@ export default function SupplierLedgerPage() {
                         <td>{payment.is_writeoff ? '-' : money(payment.online_amount)}</td>
                         <td>{money(payment.amount)}</td>
                         <td>{payment.note || '-'}</td>
+                        <td>{payment.is_deleted ? <Chip size="small" label="Deleted" /> : <Chip size="small" color="success" variant="outlined" label="Active" />}</td>
+                        <td>
+                          {payment.is_deleted ? (
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              disabled={restorePaymentM.isPending}
+                              onClick={() => restorePaymentM.mutate({ id: Number(selectedPurchase.id), paymentId: Number(payment.id) })}
+                            >
+                              Restore
+                            </Button>
+                          ) : null}
+                        </td>
                       </tr>
                     ))}
                     {(selectedPurchase.payments || []).length === 0 && (
                       <tr>
-                        <td colSpan={7}>
+                        <td colSpan={9}>
                           <Box p={2} color="text.secondary">No payments yet.</Box>
                         </td>
                       </tr>
@@ -1377,18 +1423,61 @@ export default function SupplierLedgerPage() {
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Bill Adjustments</Typography>
               <Grid container spacing={2}>
                 <Grid item xs={12} md={6}>
-                  <TextField label="Invoice Discount" type="number" value={editDiscountAmount} onChange={(e) => setEditDiscountAmount(e.target.value)} fullWidth />
+                  <TextField label="Invoice Discount (Rs)" type="number" value={editDiscountAmount} onChange={(e) => setEditDiscountAmount(e.target.value)} fullWidth />
                 </Grid>
                 <Grid item xs={12} md={6}>
-                  <TextField label="Final Round Off" type="number" value={editRoundingAdjustment} onChange={(e) => setEditRoundingAdjustment(e.target.value)} fullWidth />
+                  <TextField label="Final Round Off (+/-)" type="number" value={editRoundingAdjustment} onChange={(e) => setEditRoundingAdjustment(e.target.value)} fullWidth />
                 </Grid>
               </Grid>
+            </Paper>
+
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Bill Totals</Typography>
+              <Grid container spacing={2}>
+                <Grid item xs={6} md={3}>
+                  <Typography variant="caption" color="text.secondary">Items Total</Typography>
+                  <Typography variant="h6">{money(editSubtotal)}</Typography>
+                </Grid>
+                <Grid item xs={6} md={3}>
+                  <Typography variant="caption" color="text.secondary">Invoice Discount (Rs)</Typography>
+                  <Typography variant="h6">{money(editDiscountValue)}</Typography>
+                </Grid>
+                <Grid item xs={6} md={3}>
+                  <Typography variant="caption" color="text.secondary">GST</Typography>
+                  <Typography variant="h6">{money(editGstAmount)}</Typography>
+                </Grid>
+                <Grid item xs={6} md={3}>
+                  <Typography variant="caption" color="text.secondary">Round Off (+/-)</Typography>
+                  <Typography variant="h6">{money(editRoundingValue)}</Typography>
+                </Grid>
+                <Grid item xs={12} md={3}>
+                  <Typography variant="caption" color="text.secondary">Bill Amount</Typography>
+                  <Typography variant="h5" fontWeight={800} color={editBillAmountInvalid ? 'error.main' : 'primary.main'}>{money(editBillAmount)}</Typography>
+                </Grid>
+                <Grid item xs={4} md={3}>
+                  <Typography variant="caption" color="text.secondary">Paid</Typography>
+                  <Typography fontWeight={700}>{money(editPaidAmount)}</Typography>
+                </Grid>
+                <Grid item xs={4} md={3}>
+                  <Typography variant="caption" color="text.secondary">Write-off</Typography>
+                  <Typography fontWeight={700}>{money(editWriteoffAmount)}</Typography>
+                </Grid>
+                <Grid item xs={4} md={3}>
+                  <Typography variant="caption" color="text.secondary">Outstanding</Typography>
+                  <Typography fontWeight={800} color={editOutstandingAmount < -0.0001 ? 'error.main' : 'text.primary'}>{money(editOutstandingAmount)}</Typography>
+                </Grid>
+              </Grid>
+              {editBillAmountInvalid ? (
+                <Typography variant="body2" color="error" sx={{ mt: 1.5 }}>
+                  Bill amount is below paid/write-off total of {money(editCoveredAmount)}.
+                </Typography>
+              ) : null}
             </Paper>
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditHeaderOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveHeaderEdit} disabled={updateM.isPending || !editPartyId}>
+          <Button variant="contained" onClick={saveHeaderEdit} disabled={updateM.isPending || !editPartyId || editBillAmountInvalid}>
             Save Changes
           </Button>
         </DialogActions>
@@ -1401,7 +1490,7 @@ export default function SupplierLedgerPage() {
               <Typography variant="h6">Edit Purchase Items</Typography>
               <Typography variant="body2" color="text.secondary">Only allowed while purchase stock is untouched.</Typography>
             </Box>
-            <Chip label={`${editItems.length} line${editItems.length === 1 ? '' : 's'}`} />
+            <Chip label={`${editItems.length} item${editItems.length === 1 ? '' : 's'}`} />
           </Stack>
         </DialogTitle>
         <DialogContent dividers>

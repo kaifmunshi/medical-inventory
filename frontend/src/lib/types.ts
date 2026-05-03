@@ -180,6 +180,7 @@ export interface PurchasePaymentPayload {
   cash_amount?: number
   online_amount?: number
   note?: string
+  paid_at?: string
   is_writeoff?: boolean
 }
 

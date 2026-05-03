@@ -404,6 +404,8 @@ def _attach_lot_metadata(session, items: List[Item]) -> None:
         if not pair:
             product = product_by_id.get(int(item.product_id)) if getattr(item, "product_id", None) is not None else None
             is_loose_enabled = bool(product.loose_sale_enabled) if product else False
+            if product and getattr(item, "category_id", None) is None and product.category_id is not None:
+                object.__setattr__(item, "category_id", product.category_id)
             object.__setattr__(item, "is_loose_stock", False)
             object.__setattr__(item, "stock_unit_label", (product.parent_unit_name if product else None) or "Pack")
             object.__setattr__(item, "parent_unit_name", product.parent_unit_name if product else None)
@@ -414,6 +416,10 @@ def _attach_lot_metadata(session, items: List[Item]) -> None:
         lot, product = pair
         is_loose = lot.opened_from_lot_id is not None
         unit_label = product.child_unit_name if is_loose else product.parent_unit_name
+        if getattr(item, "product_id", None) is None and product.id is not None:
+            object.__setattr__(item, "product_id", product.id)
+        if getattr(item, "category_id", None) is None and product.category_id is not None:
+            object.__setattr__(item, "category_id", product.category_id)
         object.__setattr__(item, "inventory_lot_id", lot.id)
         object.__setattr__(item, "opened_from_lot_id", lot.opened_from_lot_id)
         object.__setattr__(item, "is_loose_stock", bool(is_loose))
@@ -1150,7 +1156,27 @@ def list_items(
         if brand:
             base_stmt = base_stmt.where(func.lower(func.coalesce(Item.brand, "")) == brand.strip().lower())
         if category_id is not None:
-            base_stmt = base_stmt.where(Item.category_id == category_id)
+            product_category_exists = exists(
+                select(Product.id).where(
+                    Product.id == Item.product_id,
+                    Product.category_id == category_id,
+                )
+            )
+            lot_product_category_exists = exists(
+                select(InventoryLot.id)
+                .join(Product, Product.id == InventoryLot.product_id)
+                .where(
+                    InventoryLot.legacy_item_id == Item.id,
+                    Product.category_id == category_id,
+                )
+            )
+            base_stmt = base_stmt.where(
+                or_(
+                    Item.category_id == category_id,
+                    product_category_exists,
+                    lot_product_category_exists,
+                )
+            )
         if incoming_from:
             from_date = incoming_from.strip()[:10]
             try:
@@ -1286,19 +1312,46 @@ def list_incoming_stock_entries(
             .offset(offset)
         ).all()
 
+        row_items = [row[1] for row in rows]
+        item_ids = [int(item.id) for item in row_items if getattr(item, "id", None) is not None]
+        product_ids = [int(item.product_id) for item in row_items if getattr(item, "product_id", None) is not None]
+        product_by_id: Dict[int, Product] = {}
+        product_by_item_id: Dict[int, Product] = {}
+        if product_ids:
+            product_rows = session.exec(select(Product).where(Product.id.in_(product_ids))).all()
+            product_by_id = {int(product.id): product for product in product_rows if product.id is not None}
+        if item_ids:
+            lot_product_rows = session.exec(
+                select(InventoryLot.legacy_item_id, Product)
+                .join(Product, Product.id == InventoryLot.product_id)
+                .where(InventoryLot.legacy_item_id.in_(item_ids))
+            ).all()
+            product_by_item_id = {
+                int(item_id): product
+                for item_id, product in lot_product_rows
+                if item_id is not None and product.id is not None
+            }
+
         items: List[IncomingStockEntryOut] = []
         for row in rows:
             movement = row[0]
             item = row[1]
             effective_ts = row[2] or movement.ts
+            product = product_by_item_id.get(int(item.id or 0))
+            if product is None and getattr(item, "product_id", None) is not None:
+                product = product_by_id.get(int(item.product_id))
+            product_id = getattr(item, "product_id", None) or (product.id if product else None)
+            category_id = getattr(item, "category_id", None)
+            if category_id is None and product is not None:
+                category_id = product.category_id
             items.append(
                 IncomingStockEntryOut(
                     movement_id=int(movement.id or 0),
                     item_id=int(item.id or 0),
                     name=item.name,
                     brand=item.brand,
-                    product_id=getattr(item, "product_id", None),
-                    category_id=getattr(item, "category_id", None),
+                    product_id=product_id,
+                    category_id=category_id,
                     expiry_date=item.expiry_date,
                     mrp=float(item.mrp or 0),
                     cost_price=float(getattr(item, "cost_price", 0) or 0),

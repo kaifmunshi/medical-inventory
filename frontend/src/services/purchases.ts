@@ -33,6 +33,8 @@ export interface PurchasePaymentCreatePayload {
   is_writeoff?: boolean
 }
 
+export type PurchasePaymentUpdatePayload = Partial<PurchasePaymentCreatePayload>
+
 export interface SupplierPaymentCreatePayload {
   mode: 'cash' | 'online' | 'split'
   cash_amount?: number
@@ -71,6 +73,25 @@ export async function updatePurchase(id: number, payload: PurchaseUpdatePayload)
 
 export async function addPurchasePayment(id: number, payload: PurchasePaymentCreatePayload): Promise<Purchase> {
   const res = await api.post<Purchase>(`/purchases/${id}/payments`, payload)
+  return res.data
+}
+
+export async function updatePurchasePayment(
+  id: number,
+  paymentId: number,
+  payload: PurchasePaymentUpdatePayload,
+): Promise<Purchase> {
+  const res = await api.patch<Purchase>(`/purchases/${id}/payments/${paymentId}`, payload)
+  return res.data
+}
+
+export async function deletePurchasePayment(id: number, paymentId: number): Promise<Purchase> {
+  const res = await api.delete<Purchase>(`/purchases/${id}/payments/${paymentId}`)
+  return res.data
+}
+
+export async function restorePurchasePayment(id: number, paymentId: number): Promise<Purchase> {
+  const res = await api.post<Purchase>(`/purchases/${id}/payments/${paymentId}/restore`)
   return res.data
 }
 

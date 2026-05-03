@@ -402,6 +402,12 @@ export default function CustomerLedgerPage() {
     setAdjustmentDrafts(next)
   }
 
+  function clearReceiptAdjustments() {
+    setAdjustmentDrafts(
+      Object.fromEntries(openBillsForReceipt.map((bill) => [Number(bill.bill_id), '0'])),
+    )
+  }
+
   async function openBillDetail(billId: number) {
     if (!Number.isFinite(billId) || billId <= 0) return
     setBillOpen(true)
@@ -753,9 +759,14 @@ export default function CustomerLedgerPage() {
 
             <Stack direction={{ xs: 'column', md: 'row' }} gap={1} justifyContent="space-between" alignItems={{ md: 'center' }}>
               <Typography variant="h6">Bill Adjustments</Typography>
-              <Button variant="outlined" onClick={fillAdjustmentsFromReceipt} disabled={receiptTotal <= 0 || openBillsForReceipt.length === 0}>
-                Auto Fill
-              </Button>
+              <Stack direction="row" gap={1}>
+                <Button variant="outlined" onClick={fillAdjustmentsFromReceipt} disabled={receiptTotal <= 0 || openBillsForReceipt.length === 0}>
+                  Auto Fill
+                </Button>
+                <Button variant="outlined" color="inherit" onClick={clearReceiptAdjustments} disabled={openBillsForReceipt.length === 0}>
+                  Clear
+                </Button>
+              </Stack>
             </Stack>
             <Box sx={{ overflowX: 'auto' }}>
               <table className="table">

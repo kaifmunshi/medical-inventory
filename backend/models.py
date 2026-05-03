@@ -978,6 +978,7 @@ class PurchasePaymentIn(SQLModel):
     cash_amount: float = 0.0
     online_amount: float = 0.0
     note: Optional[str] = None
+    paid_at: Optional[str] = None
     is_writeoff: bool = False
 
 
@@ -1011,6 +1012,16 @@ class PurchasePaymentCreate(SQLModel):
     note: Optional[str] = None
     paid_at: Optional[str] = None
     is_writeoff: bool = False
+
+
+class PurchasePaymentUpdate(SQLModel):
+    amount: Optional[float] = None
+    mode: Optional[str] = None
+    cash_amount: Optional[float] = None
+    online_amount: Optional[float] = None
+    note: Optional[str] = None
+    paid_at: Optional[str] = None
+    is_writeoff: Optional[bool] = None
 
 
 class PurchaseItemOut(SQLModel):

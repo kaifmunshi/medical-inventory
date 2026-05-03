@@ -172,7 +172,7 @@ export default function Inventory() {
   const hasFilters = q.trim() !== '' || rackQ.trim() !== '' || brandFilter !== '' || categoryFilter !== ''
 
   const brandsQ = useQuery({ queryKey: ['inventory-brands'], queryFn: () => fetchBrands({ active_only: true }) })
-  const categoriesQ = useQuery({ queryKey: ['inventory-categories'], queryFn: () => fetchCategories({ active_only: true }) })
+  const categoriesQ = useQuery({ queryKey: ['inventory-categories'], queryFn: () => fetchCategories({ active_only: false }) })
   const productsQ = useQuery({
     queryKey: ['inventory-products-master'],
     queryFn: () => fetchProducts({ active_only: true, limit: 2000 }),
@@ -247,12 +247,14 @@ export default function Inventory() {
         mrpLabel = min === max ? min : `${min}–${max}`
       }
 
+      const groupCategoryId = sorted.find((x) => x?.category_id != null)?.category_id
+
       return {
         key,
         name: sorted[0]?.name,
         brand: sorted[0]?.brand,
-        category_id: sorted[0]?.category_id,
-        categoryName: sorted[0]?.category_id ? categoryNameById.get(Number(sorted[0].category_id)) || '-' : '-',
+        category_id: groupCategoryId,
+        categoryName: groupCategoryId ? categoryNameById.get(Number(groupCategoryId)) || '-' : '-',
         rackLabel,
         expiryLabel,
         mrpLabel,

@@ -362,8 +362,42 @@ export default function StockCardPage() {
     [batchLedgerQ.data]
   )
 
-  const productRowsWithOpening = productRows
-  const batchRowsWithOpening = batchRows
+  function inferredOpeningRow(summary: any, batch?: any | null) {
+    const opening = Number(summary?.opening_stock || 0)
+    if (!summary || opening === 0) return null
+    if (reason && reason !== 'OPENING') return null
+    return {
+      id: batch?.id ? -Number(batch.id) : -999999,
+      ts: summary.from_date ? `${summary.from_date}T00:00:00` : '',
+      delta: opening,
+      reason: 'OPENING',
+      ref_type: null,
+      ref_id: null,
+      note: summary.from_date
+        ? 'Opening balance for selected period'
+        : 'Opening stock carried before recorded create/purchase movements',
+      actor: 'system',
+      item_id: batch?.id || 0,
+      expiry_date: batch?.expiry_date || null,
+      mrp: batch?.mrp ?? null,
+      rack_number: batch?.rack_number ?? null,
+      balance_before: 0,
+      balance_after: opening,
+      is_synthetic_opening: true,
+    }
+  }
+
+  const productRowsWithOpening = useMemo(() => {
+    const opening = inferredOpeningRow(productSummaryQ.data, null)
+    if (!opening || productLedgerQ.hasNextPage) return productRows
+    return [...productRows, opening]
+  }, [productRows, productSummaryQ.data, productLedgerQ.hasNextPage, reason])
+
+  const batchRowsWithOpening = useMemo(() => {
+    const opening = inferredOpeningRow(batchSummaryQ.data, currentBatch)
+    if (!opening || batchLedgerQ.hasNextPage) return batchRows
+    return [...batchRows, opening]
+  }, [batchRows, batchSummaryQ.data, currentBatch, batchLedgerQ.hasNextPage, reason])
 
   const activeRows = ledgerScope === 'batch' ? batchRowsWithOpening : productRowsWithOpening
 
@@ -658,7 +692,9 @@ export default function StockCardPage() {
                       }}
                     >
                       <td>
-                        <Typography sx={{ fontWeight: 800 }}>{formatDateOnly(row.ts)}</Typography>
+                        <Typography sx={{ fontWeight: 800 }}>
+                          {row.is_synthetic_opening ? 'Opening' : formatDateOnly(row.ts)}
+                        </Typography>
                       </td>
                       <td>
                         <Stack gap={0.2}>

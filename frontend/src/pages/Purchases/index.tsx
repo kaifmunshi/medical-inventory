@@ -31,18 +31,22 @@ import {
   addPurchasePayment,
   cancelPurchase,
   createPurchase,
+  deletePurchasePayment,
   fetchPurchase,
   fetchPurchases,
   fetchSupplierLedger,
   replacePurchaseItems,
+  restorePurchasePayment,
   fetchSupplierLedgerSummary,
+  updatePurchasePayment,
   updatePurchase,
 } from '../../services/purchases'
-import type { Category, Party, Product, Purchase, PurchaseItemPayload } from '../../lib/types'
+import type { Category, Party, Product, Purchase, PurchaseItemPayload, PurchasePayment, PurchasePaymentPayload } from '../../lib/types'
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
 
 type DraftItem = PurchaseItemPayload & { key: string; existing_stock_movement_id?: number }
+type DraftPayment = PurchasePaymentPayload & { key: string; paid_at: string; is_deleted?: boolean }
 
 const EXISTING_INVENTORY_FROM_DATE = '2026-04-01'
 
@@ -163,9 +167,12 @@ export default function PurchasesPage() {
   const [notes, setNotes] = useState('')
   const [discountAmount, setDiscountAmount] = useState('0')
   const [roundingAdjustment, setRoundingAdjustment] = useState('0')
-  const [paidAmount, setPaidAmount] = useState('0')
-  const [writeoffAmount, setWriteoffAmount] = useState('0')
   const [items, setItems] = useState<DraftItem[]>([makeEmptyItem()])
+  const [draftPayments, setDraftPayments] = useState<DraftPayment[]>([])
+  const [editingDraftPaymentKey, setEditingDraftPaymentKey] = useState<string | null>(null)
+  const [paymentContext, setPaymentContext] = useState<'saved' | 'draft'>('saved')
+  const [expandedDraftLines, setExpandedDraftLines] = useState<Record<string, boolean>>({})
+  const [expandedEditLines, setExpandedEditLines] = useState<Record<string, boolean>>({})
 
   const [productSearch, setProductSearch] = useState('')
   const [inventorySearch, setInventorySearch] = useState('')
@@ -174,6 +181,10 @@ export default function PurchasesPage() {
   const [editItemsOpen, setEditItemsOpen] = useState(false)
   const [editItems, setEditItems] = useState<DraftItem[]>([makeEmptyItem()])
   const [paymentOpen, setPaymentOpen] = useState(false)
+  const [paymentPurchaseId, setPaymentPurchaseId] = useState<number | null>(null)
+  const [paymentHistoryPurchaseId, setPaymentHistoryPurchaseId] = useState<number | null>(null)
+  const [editingPayment, setEditingPayment] = useState<PurchasePayment | null>(null)
+  const [deletePaymentTarget, setDeletePaymentTarget] = useState<{ purchase: Purchase; payment: PurchasePayment } | null>(null)
   const [paymentAmount, setPaymentAmount] = useState('0')
   const [paymentMode, setPaymentMode] = useState<'cash' | 'online' | 'split'>('cash')
   const [paymentCash, setPaymentCash] = useState('0')
@@ -316,16 +327,50 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
       queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
       queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
-      setPaymentOpen(false)
-      setPaymentAmount('0')
-      setPaymentMode('cash')
-      setPaymentCash('0')
-      setPaymentOnline('0')
-      setPaymentNote('')
-      setPaymentType('payment')
-      setPaymentDate(today)
+      resetPaymentForm()
     },
     onError: (err: any) => toast.push(String(err?.message || 'Failed to save payment'), 'error'),
+  })
+
+  const updatePaymentM = useMutation({
+    mutationFn: ({ id, paymentId, payload }: { id: number; paymentId: number; payload: any }) => updatePurchasePayment(id, paymentId, payload),
+    onSuccess: (purchase) => {
+      toast.push('Payment updated', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
+      queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+      resetPaymentForm()
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to update payment'), 'error'),
+  })
+
+  const deletePaymentM = useMutation({
+    mutationFn: ({ id, paymentId }: { id: number; paymentId: number }) => deletePurchasePayment(id, paymentId),
+    onSuccess: (purchase) => {
+      toast.push('Payment deleted', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
+      queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+      setDeletePaymentTarget(null)
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to delete payment'), 'error'),
+  })
+
+  const restorePaymentM = useMutation({
+    mutationFn: ({ id, paymentId }: { id: number; paymentId: number }) => restorePurchasePayment(id, paymentId),
+    onSuccess: (purchase) => {
+      toast.push('Payment restored', 'success')
+      queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
+      queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to restore payment'), 'error'),
   })
 
   const cancelM = useMutation({
@@ -419,6 +464,13 @@ export default function PurchasesPage() {
     () => subtotal - Number(discountAmount || 0) + Number(roundingAdjustment || 0),
     [subtotal, discountAmount, roundingAdjustment],
   )
+  const draftPaymentTotal = draftPayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)
+  const draftPaidTotal = draftPayments.reduce((sum, payment) => sum + (payment.is_writeoff ? 0 : Number(payment.amount || 0)), 0)
+  const draftWriteoffTotal = draftPayments.reduce((sum, payment) => sum + (payment.is_writeoff ? Number(payment.amount || 0) : 0), 0)
+  const editingDraftPayment = editingDraftPaymentKey
+    ? draftPayments.find((payment) => payment.key === editingDraftPaymentKey) || null
+    : null
+  const draftPaymentAvailableAmount = Math.max(0, total - draftPaymentTotal) + (editingDraftPayment ? Number(editingDraftPayment.amount || 0) : 0)
 
   const suppliers = suppliersQ.data || []
   const categories = categoriesQ.data || []
@@ -427,12 +479,35 @@ export default function PurchasesPage() {
   const inventoryBatches = canSearchInventoryBatches ? inventoryBatchesQ.data || [] : []
   const purchases = purchasesQ.data || []
   const selectedPurchase = selectedPurchaseQ.data || null
+  const editSubtotal = Number(selectedPurchase?.subtotal_amount || 0)
+  const editGstAmount = Number(selectedPurchase?.gst_amount || 0)
+  const editDiscountValue = Number(editDiscountAmount || 0)
+  const editRoundingValue = Number(editRoundingAdjustment || 0)
+  const editBillAmount = editSubtotal - editDiscountValue + editGstAmount + editRoundingValue
+  const editPaidAmount = Number(selectedPurchase?.paid_amount || 0)
+  const editWriteoffAmount = Number(selectedPurchase?.writeoff_amount || 0)
+  const editCoveredAmount = editPaidAmount + editWriteoffAmount
+  const editOutstandingAmount = editBillAmount - editCoveredAmount
+  const editBillAmountInvalid = editBillAmount < editCoveredAmount - 0.0001
+  const editItemsSubtotal = editItems.reduce((sum, item) => sum + lineBaseTotal(item), 0)
+  const editItemsBillAmount = editItemsSubtotal - Number(selectedPurchase?.discount_amount || 0) + Number(selectedPurchase?.gst_amount || 0) + Number(selectedPurchase?.rounding_adjustment || 0)
+  const editItemsBillAmountInvalid = Boolean(selectedPurchase) && editItemsBillAmount < editCoveredAmount - 0.0001
   const selectedSupplierName = selectedPurchase
     ? suppliers.find((s) => Number(s.id) === Number(selectedPurchase.party_id))?.name || `Supplier #${selectedPurchase.party_id}`
     : ''
-  const selectedPurchaseOutstanding = selectedPurchase
-    ? Math.max(0, Number(selectedPurchase.total_amount || 0) - Number(selectedPurchase.paid_amount || 0) - Number(selectedPurchase.writeoff_amount || 0))
+  const paymentTargetPurchase = paymentPurchaseId
+    ? (Number(selectedPurchase?.id || 0) === Number(paymentPurchaseId) ? selectedPurchase : purchases.find((row) => Number(row.id) === Number(paymentPurchaseId)) || null)
+    : selectedPurchase
+  const paymentHistoryPurchase = paymentHistoryPurchaseId
+    ? purchases.find((row) => Number(row.id) === Number(paymentHistoryPurchaseId))
+      || (Number(selectedPurchase?.id || 0) === Number(paymentHistoryPurchaseId) ? selectedPurchase : null)
+    : null
+  const paymentTargetOutstanding = paymentTargetPurchase
+    ? Math.max(0, Number(paymentTargetPurchase.total_amount || 0) - Number(paymentTargetPurchase.paid_amount || 0) - Number(paymentTargetPurchase.writeoff_amount || 0))
     : 0
+  const paymentAvailableAmount = paymentContext === 'draft'
+    ? draftPaymentAvailableAmount
+    : paymentTargetOutstanding + (editingPayment && !editingPayment.is_deleted ? Number(editingPayment.amount || 0) : 0)
   const purchasePaymentCash = paymentType === 'writeoff' || paymentMode === 'online' ? 0 : Number(paymentCash || 0)
   const purchasePaymentOnline = paymentType === 'writeoff' || paymentMode === 'cash' ? 0 : Number(paymentOnline || 0)
   const purchasePaymentAmount = paymentType === 'writeoff'
@@ -446,8 +521,8 @@ export default function PurchasesPage() {
       ? 'Invalid amount'
       : purchasePaymentAmount <= 0
       ? 'Amount must be greater than 0'
-      : purchasePaymentAmount > selectedPurchaseOutstanding + 0.01
-        ? `Max ${money(selectedPurchaseOutstanding)}`
+      : purchasePaymentAmount > paymentAvailableAmount + 0.01
+        ? `Max ${money(paymentAvailableAmount)}`
         : ''
   const supplierNameFor = (id: number) => suppliers.find((supplier) => Number(supplier.id) === Number(id))?.name || `Supplier #${id}`
 
@@ -456,15 +531,15 @@ export default function PurchasesPage() {
     const cash = Number(paymentCash || 0)
     if (Number.isNaN(cash) || cash < 0) {
       setPaymentOnline((prev) => (prev === '0' ? prev : '0'))
-    } else if (cash > selectedPurchaseOutstanding) {
-      const outstanding = money(selectedPurchaseOutstanding)
+    } else if (cash > paymentAvailableAmount) {
+      const outstanding = money(paymentAvailableAmount)
       setPaymentCash((prev) => (prev === outstanding ? prev : outstanding))
       setPaymentOnline((prev) => (prev === '0' ? prev : '0'))
     } else {
-      const online = money(selectedPurchaseOutstanding - cash)
+      const online = money(paymentAvailableAmount - cash)
       setPaymentOnline((prev) => (prev === online ? prev : online))
     }
-  }, [paymentMode, paymentOpen, paymentType, selectedPurchaseOutstanding])
+  }, [paymentAvailableAmount, paymentCash, paymentMode, paymentOpen, paymentType])
 
   function resetForm() {
     setPartyId(null)
@@ -473,9 +548,11 @@ export default function PurchasesPage() {
     setNotes('')
     setDiscountAmount('0')
     setRoundingAdjustment('0')
-    setPaidAmount('0')
-    setWriteoffAmount('0')
-    setItems([makeEmptyItem()])
+    const firstItem = makeEmptyItem()
+    setItems([firstItem])
+    setDraftPayments([])
+    setEditingDraftPaymentKey(null)
+    setExpandedDraftLines({ [firstItem.key]: true })
   }
 
   function resetFilters() {
@@ -521,13 +598,16 @@ export default function PurchasesPage() {
 
   function applyExistingInventory(itemKey: string, incomingEntry: IncomingStockEntry | null, editMode = false) {
     if (!incomingEntry) return
+    const incomingProduct = incomingEntry.product_id
+      ? products.find((product) => Number(product.id) === Number(incomingEntry.product_id))
+      : null
     const patch = {
       existing_stock_movement_id: incomingEntry.movement_id,
       existing_inventory_item_id: incomingEntry.item_id,
       product_id: incomingEntry.product_id ?? undefined,
       product_name: incomingEntry.name,
       brand: incomingEntry.brand || '',
-      category_id: incomingEntry.category_id ?? undefined,
+      category_id: incomingEntry.category_id ?? incomingProduct?.category_id ?? undefined,
       expiry_date: incomingEntry.expiry_date || '',
       rack_number: incomingEntry.rack_number || 0,
       sealed_qty: Math.max(1, Number(incomingEntry.delta || 0)),
@@ -552,8 +632,29 @@ export default function PurchasesPage() {
     }
   }
 
-  function openPaymentDialog() {
-    const outstanding = money(selectedPurchaseOutstanding)
+  function resetPaymentForm() {
+    setPaymentOpen(false)
+    setPaymentPurchaseId(null)
+    setEditingPayment(null)
+    setEditingDraftPaymentKey(null)
+    setPaymentContext('saved')
+    setPaymentAmount('0')
+    setPaymentMode('cash')
+    setPaymentCash('0')
+    setPaymentOnline('0')
+    setPaymentNote('')
+    setPaymentType('payment')
+    setPaymentDate(today)
+  }
+
+  function openPaymentDialog(purchase?: Purchase) {
+    const target = purchase || selectedPurchase
+    if (!target) return
+    const outstanding = money(Math.max(0, Number(target.total_amount || 0) - Number(target.paid_amount || 0) - Number(target.writeoff_amount || 0)))
+    setPaymentContext('saved')
+    setPaymentPurchaseId(Number(target.id))
+    setEditingPayment(null)
+    setEditingDraftPaymentKey(null)
     setPaymentType('payment')
     setPaymentMode('cash')
     setPaymentCash(outstanding)
@@ -564,9 +665,55 @@ export default function PurchasesPage() {
     setPaymentOpen(true)
   }
 
+  function openEditPaymentDialog(purchase: Purchase, payment: PurchasePayment) {
+    setPaymentContext('saved')
+    setPaymentPurchaseId(Number(purchase.id))
+    setEditingPayment(payment)
+    setEditingDraftPaymentKey(null)
+    setPaymentType(payment.is_writeoff ? 'writeoff' : 'payment')
+    setPaymentMode(payment.is_writeoff ? 'cash' : (payment.mode as 'cash' | 'online' | 'split') || 'cash')
+    setPaymentCash(String(Number(payment.cash_amount || 0)))
+    setPaymentOnline(String(Number(payment.online_amount || 0)))
+    setPaymentAmount(String(Number(payment.amount || 0)))
+    setPaymentDate(String(payment.paid_at || '').slice(0, 10) || today)
+    setPaymentNote(payment.note || '')
+    setPaymentOpen(true)
+  }
+
+  function openDraftPaymentDialog() {
+    const available = money(Math.max(0, total - draftPaymentTotal))
+    setPaymentContext('draft')
+    setPaymentPurchaseId(null)
+    setEditingPayment(null)
+    setEditingDraftPaymentKey(null)
+    setPaymentType('payment')
+    setPaymentMode('cash')
+    setPaymentCash(available)
+    setPaymentOnline('0')
+    setPaymentAmount(available)
+    setPaymentDate(invoiceDate || today)
+    setPaymentNote('')
+    setPaymentOpen(true)
+  }
+
+  function openEditDraftPaymentDialog(payment: DraftPayment) {
+    setPaymentContext('draft')
+    setPaymentPurchaseId(null)
+    setEditingPayment(null)
+    setEditingDraftPaymentKey(payment.key)
+    setPaymentType(payment.is_writeoff ? 'writeoff' : 'payment')
+    setPaymentMode(payment.is_writeoff ? 'cash' : (payment.mode as 'cash' | 'online' | 'split') || 'cash')
+    setPaymentCash(String(Number(payment.cash_amount || 0)))
+    setPaymentOnline(String(Number(payment.online_amount || 0)))
+    setPaymentAmount(String(Number(payment.amount || 0)))
+    setPaymentDate(String(payment.paid_at || '').slice(0, 10) || invoiceDate || today)
+    setPaymentNote(payment.note || '')
+    setPaymentOpen(true)
+  }
+
   function setPaymentModeAndAmounts(next: 'cash' | 'online' | 'split') {
     setPaymentMode(next)
-    const outstanding = money(selectedPurchaseOutstanding)
+    const outstanding = money(paymentAvailableAmount)
     if (next === 'cash') {
       setPaymentCash(outstanding)
       setPaymentOnline('0')
@@ -588,9 +735,9 @@ export default function PurchasesPage() {
       setPaymentOnline('0')
       return
     }
-    const cappedCash = Math.min(cash, selectedPurchaseOutstanding)
-    setPaymentCash(cash > selectedPurchaseOutstanding ? money(selectedPurchaseOutstanding) : value)
-    setPaymentOnline(money(selectedPurchaseOutstanding - cappedCash))
+    const cappedCash = Math.min(cash, paymentAvailableAmount)
+    setPaymentCash(cash > paymentAvailableAmount ? money(paymentAvailableAmount) : value)
+    setPaymentOnline(money(paymentAvailableAmount - cappedCash))
   }
 
   function setPaymentSplitOnlineAmount(value: string) {
@@ -600,9 +747,9 @@ export default function PurchasesPage() {
       setPaymentCash('0')
       return
     }
-    const cappedOnline = Math.min(online, selectedPurchaseOutstanding)
-    setPaymentOnline(online > selectedPurchaseOutstanding ? money(selectedPurchaseOutstanding) : value)
-    setPaymentCash(money(selectedPurchaseOutstanding - cappedOnline))
+    const cappedOnline = Math.min(online, paymentAvailableAmount)
+    setPaymentOnline(online > paymentAvailableAmount ? money(paymentAvailableAmount) : value)
+    setPaymentCash(money(paymentAvailableAmount - cappedOnline))
   }
 
   function openEditHeader() {
@@ -620,7 +767,7 @@ export default function PurchasesPage() {
   function openEditItems() {
     const purchase = selectedPurchaseQ.data
     if (!purchase) return
-    setEditItems(purchase.items.map((item) => ({
+    const nextItems = purchase.items.map((item) => ({
       key: Math.random().toString(36).slice(2),
       existing_inventory_item_id: item.stock_source === 'ATTACHED' && item.inventory_item_id ? item.inventory_item_id : undefined,
       product_id: item.product_id,
@@ -641,7 +788,9 @@ export default function PurchasesPage() {
       parent_unit_name: '',
       child_unit_name: '',
       conversion_qty: undefined,
-    })))
+    }))
+    setEditItems(nextItems)
+    setExpandedEditLines({})
     setEditItemsOpen(true)
   }
 
@@ -674,7 +823,11 @@ export default function PurchasesPage() {
     }
     const cleanedItems = cleanItems(items)
     if (cleanedItems.some((item) => !item.product_name)) {
-      toast.push('Every line needs a product name', 'error')
+      toast.push('Every purchase item needs a product name', 'error')
+      return
+    }
+    if (draftPaymentTotal > total + 0.01) {
+      toast.push('Payments and write-offs exceed purchase total', 'error')
       return
     }
     createM.mutate({
@@ -686,10 +839,15 @@ export default function PurchasesPage() {
       gst_amount: 0,
       rounding_adjustment: Number(roundingAdjustment || 0),
       items: purchasePayloadItems(items),
-      payments: [
-        ...(Number(paidAmount || 0) > 0 ? [{ amount: Number(paidAmount), note: 'Initial payment', is_writeoff: false }] : []),
-        ...(Number(writeoffAmount || 0) > 0 ? [{ amount: Number(writeoffAmount), note: 'Initial write-off', is_writeoff: true }] : []),
-      ],
+      payments: draftPayments.map((payment) => ({
+        amount: Number(payment.amount || 0),
+        mode: payment.mode,
+        cash_amount: Number(payment.cash_amount || 0),
+        online_amount: Number(payment.online_amount || 0),
+        note: payment.note?.trim() || undefined,
+        paid_at: payment.paid_at || invoiceDate,
+        is_writeoff: Boolean(payment.is_writeoff),
+      })),
     })
   }
 
@@ -710,30 +868,51 @@ export default function PurchasesPage() {
   }
 
   function savePayment() {
-    if (!selectedPurchaseId) return
+    if (paymentContext !== 'draft' && !paymentPurchaseId) return
     if (purchasePaymentError) {
       toast.push(purchasePaymentError, 'error')
       return
     }
-    addPaymentM.mutate({
-      id: selectedPurchaseId,
-      payload: {
-        amount: purchasePaymentAmount,
-        mode: paymentMode,
-        cash_amount: purchasePaymentCash,
-        online_amount: purchasePaymentOnline,
-        note: paymentNote.trim() || undefined,
+    const payload = {
+      amount: purchasePaymentAmount,
+      mode: paymentMode,
+      cash_amount: purchasePaymentCash,
+      online_amount: purchasePaymentOnline,
+      note: paymentNote.trim(),
+      paid_at: paymentDate,
+      is_writeoff: paymentType === 'writeoff',
+    }
+    if (paymentContext === 'draft') {
+      const draft: DraftPayment = {
+        key: editingDraftPaymentKey || Math.random().toString(36).slice(2),
+        ...payload,
         paid_at: paymentDate,
-        is_writeoff: paymentType === 'writeoff',
-      },
-    })
+      }
+      setDraftPayments((prev) => (
+        editingDraftPaymentKey
+          ? prev.map((payment) => (payment.key === editingDraftPaymentKey ? draft : payment))
+          : [...prev, draft]
+      ))
+      resetPaymentForm()
+      return
+    }
+    const targetPaymentPurchaseId = Number(paymentPurchaseId)
+    if (editingPayment) {
+      updatePaymentM.mutate({ id: targetPaymentPurchaseId, paymentId: Number(editingPayment.id), payload })
+    } else {
+      addPaymentM.mutate({ id: targetPaymentPurchaseId, payload })
+    }
   }
 
   function saveItemReplacement() {
     if (!selectedPurchaseId) return
     const cleanedItems = cleanItems(editItems)
     if (cleanedItems.some((item) => !item.product_name)) {
-      toast.push('Every replacement line needs a product name', 'error')
+      toast.push('Every replacement purchase item needs a product name', 'error')
+      return
+    }
+    if (editItemsBillAmountInvalid) {
+      toast.push('Edited items reduce total below paid/write-off amount', 'error')
       return
     }
     replaceItemsM.mutate({
@@ -794,10 +973,18 @@ export default function PurchasesPage() {
     editMode = false,
   ) {
     const patchItem = editMode ? updateEditItem : updateItem
+    const expandedLines = editMode ? expandedEditLines : expandedDraftLines
+    const setExpandedLines = editMode ? setExpandedEditLines : setExpandedDraftLines
+    const defaultExpanded = !editMode
     const draftSubtotal = draftItems.reduce(
       (sum, item) => sum + lineBaseTotal(item),
       0,
     )
+    const headerDiscount = editMode ? Number(selectedPurchase?.discount_amount || 0) : 0
+    const headerGst = editMode ? Number(selectedPurchase?.gst_amount || 0) : 0
+    const headerRoundOff = editMode ? Number(selectedPurchase?.rounding_adjustment || 0) : 0
+    const draftBillTotal = draftSubtotal - headerDiscount + headerGst + headerRoundOff
+    const draftCovered = editMode ? Number(selectedPurchase?.paid_amount || 0) + Number(selectedPurchase?.writeoff_amount || 0) : 0
     return (
       <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
         <Stack
@@ -808,23 +995,35 @@ export default function PurchasesPage() {
           sx={{ px: 2, py: 1.5, bgcolor: 'rgba(31,107,74,0.05)', borderBottom: '1px solid', borderColor: 'divider' }}
         >
           <Box>
-            <Typography variant="subtitle1" fontWeight={700}>Product Lines</Typography>
+            <Typography variant="subtitle1" fontWeight={700}>Purchase Items</Typography>
             <Typography variant="caption" color="text.secondary">
-              {draftItems.length} line{draftItems.length === 1 ? '' : 's'} · Lines net {money(draftSubtotal)} · Free qty reduces average rate
+              {draftItems.length} item{draftItems.length === 1 ? '' : 's'} · Items net {money(draftSubtotal)} · Free qty reduces average rate
             </Typography>
           </Box>
           <Stack direction="row" gap={1}>
-            <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setDraftItems((prev) => [...prev, makeEmptyItem()])}>Add Line</Button>
+            <Button
+              variant="outlined"
+              startIcon={<AddIcon />}
+              onClick={() => {
+                const next = makeEmptyItem()
+                setDraftItems((prev) => [...prev, next])
+                setExpandedLines((prev) => ({ ...prev, [next.key]: true }))
+              }}
+            >
+              Add Item
+            </Button>
           </Stack>
         </Stack>
 
         <Stack divider={<Divider flexItem />} sx={{ p: 0 }}>
-          {draftItems.map((item, index) => (
-            <Box key={item.key} sx={{ p: 1.5 }}>
+          {draftItems.map((item, index) => {
+            const isExpanded = expandedLines[item.key] ?? defaultExpanded
+            return (
+            <Box key={item.key} sx={{ p: 1.5, bgcolor: isExpanded ? 'background.paper' : 'grey.50' }}>
               <Stack gap={1.25}>
-                <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
-                  <Stack direction="row" gap={1} alignItems="center">
-                    <Chip size="small" label={`Line ${index + 1}`} />
+                <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1} flexWrap="wrap">
+                  <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap" sx={{ minWidth: 0 }}>
+                    <Chip size="small" label={`Item ${index + 1}`} />
                     {item.existing_inventory_item_id ? (
                       <Chip
                         size="small"
@@ -835,18 +1034,28 @@ export default function PurchasesPage() {
                       />
                     ) : null}
                     <Typography variant="caption" color="text.secondary">
-                      {item.product_name || 'New product line'}
+                      {item.product_name || 'New purchase item'}
                     </Typography>
+                    <Chip size="small" variant="outlined" label={`Qty ${Number(item.sealed_qty || 0)}`} />
+                    <Chip size="small" variant="outlined" label={`Free ${Number(item.free_qty || 0)}`} />
+                    <Chip size="small" variant="outlined" label={`Item Total ${money(lineBaseTotal(item))}`} />
                   </Stack>
-                  <Button
-                    color="error"
-                    size="small"
-                    startIcon={<DeleteIcon />}
-                    onClick={() => setDraftItems((prev) => (prev.length === 1 ? prev : prev.filter((row) => row.key !== item.key)))}
-                  >
-                    Remove
-                  </Button>
+                  <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
+                    <Button size="small" variant="outlined" onClick={() => setExpandedLines((prev) => ({ ...prev, [item.key]: !isExpanded }))}>
+                      {isExpanded ? 'Collapse' : 'Expand'}
+                    </Button>
+                    <Button
+                      color="error"
+                      size="small"
+                      variant="outlined"
+                      startIcon={<DeleteIcon />}
+                      onClick={() => setDraftItems((prev) => (prev.length === 1 ? prev : prev.filter((row) => row.key !== item.key)))}
+                    >
+                      Remove
+                    </Button>
+                  </Stack>
                 </Stack>
+                {isExpanded ? (
                 <Grid container spacing={1.25} alignItems="center">
                   <Grid item xs={12} md={4}>
                     <Autocomplete
@@ -976,10 +1185,10 @@ export default function PurchasesPage() {
                     <TextField size="small" label="MRP" type="number" value={item.mrp} onChange={(e) => patchItem(item.key, { mrp: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
-                    <TextField size="small" label="Discount" type="number" value={item.discount_amount || 0} onChange={(e) => patchItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                    <TextField size="small" label="Discount (Rs)" type="number" value={item.discount_amount || 0} onChange={(e) => patchItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
-                    <TextField size="small" label="Round Off" type="number" value={item.rounding_adjustment || 0} onChange={(e) => patchItem(item.key, { rounding_adjustment: Number(e.target.value) })} fullWidth />
+                    <TextField size="small" label="Round Off (+/-)" type="number" value={item.rounding_adjustment || 0} onChange={(e) => patchItem(item.key, { rounding_adjustment: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={12} md={2.8}>
                     <Stack gap={0.75}>
@@ -1027,16 +1236,57 @@ export default function PurchasesPage() {
                     </>
                   )}
                 </Grid>
+                ) : null}
               </Stack>
             </Box>
-          ))}
+            )
+          })}
         </Stack>
+        {editMode ? (
+          <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'rgba(31,107,74,0.03)' }}>
+            <Grid container spacing={2} alignItems="center">
+              <Grid item xs={6} md={2}>
+                <Typography variant="caption" color="text.secondary">Items Net</Typography>
+                <Typography fontWeight={800}>{money(draftSubtotal)}</Typography>
+              </Grid>
+              <Grid item xs={6} md={2}>
+                <Typography variant="caption" color="text.secondary">Header Discount (Rs)</Typography>
+                <Typography fontWeight={800}>{money(headerDiscount)}</Typography>
+              </Grid>
+              <Grid item xs={6} md={2}>
+                <Typography variant="caption" color="text.secondary">GST</Typography>
+                <Typography fontWeight={800}>{money(headerGst)}</Typography>
+              </Grid>
+              <Grid item xs={6} md={2}>
+                <Typography variant="caption" color="text.secondary">Round Off (+/-)</Typography>
+                <Typography fontWeight={800}>{money(headerRoundOff)}</Typography>
+              </Grid>
+              <Grid item xs={6} md={2}>
+                <Typography variant="caption" color="text.secondary">Bill Amount</Typography>
+                <Typography variant="h6" fontWeight={900}>{money(draftBillTotal)}</Typography>
+              </Grid>
+              <Grid item xs={6} md={2}>
+                <Typography variant="caption" color="text.secondary">Outstanding</Typography>
+                <Typography fontWeight={900} color={draftBillTotal < draftCovered - 0.0001 ? 'error.main' : 'text.primary'}>
+                  {money(draftBillTotal - draftCovered)}
+                </Typography>
+              </Grid>
+            </Grid>
+            {draftBillTotal < draftCovered - 0.0001 ? (
+              <Typography variant="body2" color="error" sx={{ mt: 1 }}>
+                Edited items reduce the bill below paid/write-off total of {money(draftCovered)}.
+              </Typography>
+            ) : null}
+          </Box>
+        ) : null}
       </Paper>
     )
   }
 
   return (
     <Stack gap={2}>
+      {!addOpen && !editItemsOpen ? (
+      <>
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
         <Box>
           <Typography variant="h5">Purchase Desk</Typography>
@@ -1094,28 +1344,37 @@ export default function PurchasesPage() {
                 <th>Paid</th>
                 <th>Write-off</th>
                 <th>Status</th>
+                <th>Payments</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {purchases.map((purchase) => (
-                <tr key={purchase.id} onDoubleClick={() => openDetail(Number(purchase.id))} style={{ cursor: 'pointer' }}>
-                  <td>{purchase.id}</td>
-                  <td>{supplierNameFor(Number(purchase.party_id))}</td>
-                  <td>{purchase.invoice_number}</td>
-                  <td>{purchase.invoice_date}</td>
-                  <td>{money(purchase.total_amount)}</td>
-                  <td>{money(purchase.paid_amount)}</td>
-                  <td>{money(purchase.writeoff_amount)}</td>
-                  <td>{purchase.payment_status}</td>
-                  <td>
-                    <Button size="small" onClick={() => openDetail(Number(purchase.id))}>Open</Button>
-                  </td>
-                </tr>
-              ))}
+              {purchases.map((purchase) => {
+                const activePayments = (purchase.payments || []).filter((payment) => !payment.is_deleted)
+                return (
+                  <tr key={purchase.id} onDoubleClick={() => openDetail(Number(purchase.id))} style={{ cursor: 'pointer' }}>
+                    <td>{purchase.id}</td>
+                    <td>{supplierNameFor(Number(purchase.party_id))}</td>
+                    <td>{purchase.invoice_number}</td>
+                    <td>{purchase.invoice_date}</td>
+                    <td>{money(purchase.total_amount)}</td>
+                    <td>{money(purchase.paid_amount)}</td>
+                    <td>{money(purchase.writeoff_amount)}</td>
+                    <td>{purchase.payment_status}</td>
+                    <td>
+                      <Button size="small" startIcon={<PaymentsIcon />} onClick={() => setPaymentHistoryPurchaseId(Number(purchase.id))}>
+                        History ({activePayments.length})
+                      </Button>
+                    </td>
+                    <td>
+                      <Button size="small" onClick={() => openDetail(Number(purchase.id))}>Open</Button>
+                    </td>
+                  </tr>
+                )
+              })}
               {purchases.length === 0 && (
                 <tr>
-                  <td colSpan={9}>
+                  <td colSpan={10}>
                     <Box p={2} color="text.secondary">No purchases found.</Box>
                   </td>
                 </tr>
@@ -1124,9 +1383,113 @@ export default function PurchasesPage() {
           </table>
         </Box>
       </Paper>
+      </>
+      ) : null}
 
-      <Dialog open={addOpen} onClose={() => setAddOpen(false)} fullWidth maxWidth="lg">
+      <Dialog open={Boolean(paymentHistoryPurchaseId)} onClose={() => setPaymentHistoryPurchaseId(null)} fullWidth maxWidth="lg">
         <DialogTitle>
+          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
+            <Box>
+              <Typography variant="h6">Payment / Write-off History</Typography>
+              <Typography variant="body2" color="text.secondary">
+                {paymentHistoryPurchase
+                  ? `${supplierNameFor(Number(paymentHistoryPurchase.party_id))} | Invoice ${paymentHistoryPurchase.invoice_number}`
+                  : 'Purchase payment records'}
+              </Typography>
+            </Box>
+            {paymentHistoryPurchase ? (
+              <Stack direction="row" gap={1} alignItems="center">
+                <Chip label={`Outstanding ${money(Math.max(0, Number(paymentHistoryPurchase.total_amount || 0) - Number(paymentHistoryPurchase.paid_amount || 0) - Number(paymentHistoryPurchase.writeoff_amount || 0)))}`} color="warning" variant="outlined" />
+                <Button
+                  variant="contained"
+                  size="small"
+                  startIcon={<PaymentsIcon />}
+                  onClick={() => openPaymentDialog(paymentHistoryPurchase)}
+                  disabled={Math.max(0, Number(paymentHistoryPurchase.total_amount || 0) - Number(paymentHistoryPurchase.paid_amount || 0) - Number(paymentHistoryPurchase.writeoff_amount || 0)) <= 0}
+                >
+                  Add Payment / Write-off
+                </Button>
+              </Stack>
+            ) : null}
+          </Stack>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Box sx={{ overflowX: 'auto' }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Type</th>
+                  <th>Mode</th>
+                  <th>Cash</th>
+                  <th>Online</th>
+                  <th>Amount</th>
+                  <th>Note</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {(paymentHistoryPurchase?.payments || []).map((payment) => (
+                  <tr key={payment.id} style={{ opacity: payment.is_deleted ? 0.6 : 1 }}>
+                    <td>{fmtDateTime(payment.paid_at)}</td>
+                    <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
+                    <td>{payment.is_writeoff ? '-' : (payment.mode || 'cash')}</td>
+                    <td>{payment.is_writeoff ? '-' : money(payment.cash_amount || 0)}</td>
+                    <td>{payment.is_writeoff ? '-' : money(payment.online_amount || 0)}</td>
+                    <td>{money(payment.amount)}</td>
+                    <td>{payment.note || '-'}</td>
+                    <td>{payment.is_deleted ? <Chip size="small" label="Deleted" /> : <Chip size="small" color="success" variant="outlined" label="Active" />}</td>
+                    <td>
+                      <Stack direction="row" gap={1}>
+                        {payment.is_deleted ? (
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            disabled={!paymentHistoryPurchase || restorePaymentM.isPending}
+                            onClick={() => paymentHistoryPurchase && restorePaymentM.mutate({ id: Number(paymentHistoryPurchase.id), paymentId: Number(payment.id) })}
+                          >
+                            Restore
+                          </Button>
+                        ) : (
+                          <>
+                            <Button size="small" variant="outlined" disabled={!paymentHistoryPurchase} onClick={() => paymentHistoryPurchase && openEditPaymentDialog(paymentHistoryPurchase, payment)}>
+                              Edit
+                            </Button>
+                            <Button
+                              size="small"
+                              color="error"
+                              variant="outlined"
+                              disabled={!paymentHistoryPurchase}
+                              onClick={() => paymentHistoryPurchase && setDeletePaymentTarget({ purchase: paymentHistoryPurchase, payment })}
+                            >
+                              Delete
+                            </Button>
+                          </>
+                        )}
+                      </Stack>
+                    </td>
+                  </tr>
+                ))}
+                {(paymentHistoryPurchase?.payments || []).length === 0 ? (
+                  <tr>
+                    <td colSpan={9}>
+                      <Box p={2} color="text.secondary">No payments yet.</Box>
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPaymentHistoryPurchaseId(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      {addOpen ? (
+      <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
+        <Box sx={{ p: 2 }}>
           <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
             <Box>
               <Typography variant="h6">Add Purchase</Typography>
@@ -1134,10 +1497,14 @@ export default function PurchasesPage() {
                 {partyId ? supplierNameFor(partyId) : 'Select supplier'} | {invoiceDate || 'No date'}
               </Typography>
             </Box>
-            <Chip label={`Total ${money(total)}`} color="primary" />
+            <Stack direction="row" gap={1} alignItems="center">
+              <Button variant="outlined" onClick={() => setAddOpen(false)}>Back to Purchases</Button>
+              <Chip label={`Total ${money(total)}`} color="primary" />
+            </Stack>
           </Stack>
-        </DialogTitle>
-        <DialogContent dividers>
+        </Box>
+        <Divider />
+        <Box sx={{ p: 2 }}>
           <Stack gap={2}>
             {partyId && (
               <Paper variant="outlined" sx={{ p: 2, bgcolor: 'rgba(31,107,74,0.04)' }}>
@@ -1226,14 +1593,14 @@ export default function PurchasesPage() {
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Totals & Settlement</Typography>
               <Grid container spacing={2} alignItems="center">
                 <Grid item xs={12} md={3}>
-                  <Typography variant="caption" color="text.secondary">Lines Net Total</Typography>
+                  <Typography variant="caption" color="text.secondary">Items Net Total</Typography>
                   <Typography variant="h6">{money(subtotal)}</Typography>
                 </Grid>
                 <Grid item xs={12} md={3}>
-                  <TextField label="Invoice Discount" type="number" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} fullWidth />
+                  <TextField label="Invoice Discount (Rs)" type="number" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} fullWidth />
                 </Grid>
                 <Grid item xs={12} md={3}>
-                  <TextField label="Final Round Off" type="number" value={roundingAdjustment} onChange={(e) => setRoundingAdjustment(e.target.value)} fullWidth />
+                  <TextField label="Final Round Off (+/-)" type="number" value={roundingAdjustment} onChange={(e) => setRoundingAdjustment(e.target.value)} fullWidth />
                 </Grid>
                 <Grid item xs={12} md={3}>
                   <Typography variant="caption" color="text.secondary">Total</Typography>
@@ -1245,25 +1612,84 @@ export default function PurchasesPage() {
                       Free product impact
                     </Typography>
                     <Typography variant="body2" fontWeight={700}>
-                      Average rate is recalculated line-wise as net line amount divided by total inward quantity including free units.
+                      Average rate is recalculated per item as net item amount divided by total inward quantity including free units.
                     </Typography>
                   </Paper>
                 </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField label="Initial Payment" type="number" value={paidAmount} onChange={(e) => setPaidAmount(e.target.value)} fullWidth />
-                </Grid>
-                <Grid item xs={12} md={6}>
-                  <TextField label="Initial Write-off" type="number" value={writeoffAmount} onChange={(e) => setWriteoffAmount(e.target.value)} fullWidth />
+                <Grid item xs={12}>
+                  <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1} sx={{ mb: 1 }}>
+                    <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
+                      <Chip label={`Payments ${money(draftPaidTotal)}`} color="success" variant="outlined" />
+                      <Chip label={`Write-off ${money(draftWriteoffTotal)}`} variant="outlined" />
+                      <Chip label={`Outstanding ${money(Math.max(0, total - draftPaymentTotal))}`} color="warning" variant="outlined" />
+                    </Stack>
+                    <Button
+                      variant="contained"
+                      startIcon={<PaymentsIcon />}
+                      onClick={openDraftPaymentDialog}
+                      disabled={Math.max(0, total - draftPaymentTotal) <= 0}
+                    >
+                      Add Payment / Write-off
+                    </Button>
+                  </Stack>
+                  <Box sx={{ overflowX: 'auto' }}>
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Type</th>
+                          <th>Mode</th>
+                          <th>Cash</th>
+                          <th>Online</th>
+                          <th>Amount</th>
+                          <th>Note</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {draftPayments.map((payment) => (
+                          <tr key={payment.key}>
+                            <td>{payment.paid_at || '-'}</td>
+                            <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
+                            <td>{payment.is_writeoff ? '-' : payment.mode || 'cash'}</td>
+                            <td>{payment.is_writeoff ? '-' : money(Number(payment.cash_amount || 0))}</td>
+                            <td>{payment.is_writeoff ? '-' : money(Number(payment.online_amount || 0))}</td>
+                            <td>{money(Number(payment.amount || 0))}</td>
+                            <td>{payment.note || '-'}</td>
+                            <td>
+                              <Stack direction="row" gap={1}>
+                                <Button size="small" variant="outlined" onClick={() => openEditDraftPaymentDialog(payment)}>Edit</Button>
+                                <Button size="small" color="error" variant="outlined" onClick={() => setDraftPayments((prev) => prev.filter((row) => row.key !== payment.key))}>Delete</Button>
+                              </Stack>
+                            </td>
+                          </tr>
+                        ))}
+                        {draftPayments.length === 0 ? (
+                          <tr>
+                            <td colSpan={8}>
+                              <Box p={2} color="text.secondary">No payments added yet.</Box>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </tbody>
+                    </table>
+                  </Box>
+                  {draftPaymentTotal > total + 0.01 ? (
+                    <Typography variant="body2" color="error" sx={{ mt: 1 }}>
+                      Payments and write-offs exceed purchase total by {money(draftPaymentTotal - total)}.
+                    </Typography>
+                  ) : null}
                 </Grid>
               </Grid>
             </Paper>
           </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setAddOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={submit} disabled={createM.isPending}>Save Purchase</Button>
-        </DialogActions>
-      </Dialog>
+        </Box>
+        <Stack direction="row" justifyContent="flex-end" gap={1} sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}>
+          <Button onClick={() => setAddOpen(false)}>Back to Purchases</Button>
+          <Button variant="contained" onClick={submit} disabled={createM.isPending || draftPaymentTotal > total + 0.01}>Save Purchase</Button>
+        </Stack>
+      </Paper>
+      ) : null}
 
       <Dialog open={supplierDialogOpen} onClose={() => setSupplierDialogOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Add Supplier</DialogTitle>
@@ -1302,7 +1728,7 @@ export default function PurchasesPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={Boolean(selectedPurchaseId)} onClose={closeDetail} fullWidth maxWidth="lg">
+      <Dialog open={Boolean(selectedPurchaseId) && !editItemsOpen} onClose={closeDetail} fullWidth maxWidth="lg">
         <DialogTitle>Purchase Detail</DialogTitle>
         <DialogContent dividers>
           {!selectedPurchase && <Typography>Loading...</Typography>}
@@ -1316,7 +1742,7 @@ export default function PurchasesPage() {
                 <Stack direction="row" gap={1}>
                   <Button variant="outlined" onClick={openEditHeader}>Edit Header</Button>
                   <Button variant="outlined" onClick={openEditItems}>Edit Items</Button>
-	                  <Button variant="contained" startIcon={<PaymentsIcon />} onClick={openPaymentDialog}>Add Payment</Button>
+	                  <Button variant="contained" startIcon={<PaymentsIcon />} onClick={() => openPaymentDialog()}>Add Payment / Write-off</Button>
                   <Button color="error" variant="outlined" onClick={() => setCancelConfirmOpen(true)}>Cancel Purchase</Button>
                 </Stack>
               </Stack>
@@ -1347,9 +1773,9 @@ export default function PurchasesPage() {
                       <th>Rate</th>
                       <th>Avg Rate</th>
                       <th>MRP</th>
-                      <th>Discount</th>
-                      <th>Round Off</th>
-                      <th>Line Total</th>
+                      <th>Discount (Rs)</th>
+                      <th>Round Off (+/-)</th>
+                      <th>Item Total</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1390,11 +1816,13 @@ export default function PurchasesPage() {
 	                      <th>Online</th>
 	                      <th>Amount</th>
 	                      <th>Note</th>
+	                      <th>Status</th>
+	                      <th></th>
 	                    </tr>
                   </thead>
                   <tbody>
                     {selectedPurchase.payments.map((payment) => (
-	                      <tr key={payment.id}>
+	                      <tr key={payment.id} style={{ opacity: payment.is_deleted ? 0.6 : 1 }}>
 	                        <td>{fmtDateTime(payment.paid_at)}</td>
 	                        <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
 	                        <td>{payment.is_writeoff ? '-' : (payment.mode || 'cash')}</td>
@@ -1402,11 +1830,35 @@ export default function PurchasesPage() {
 	                        <td>{payment.is_writeoff ? '-' : money(payment.online_amount || 0)}</td>
 	                        <td>{money(payment.amount)}</td>
 	                        <td>{payment.note || '-'}</td>
+	                        <td>{payment.is_deleted ? <Chip size="small" label="Deleted" /> : <Chip size="small" color="success" variant="outlined" label="Active" />}</td>
+	                        <td>
+	                          <Stack direction="row" gap={1}>
+	                            {payment.is_deleted ? (
+	                              <Button
+	                                size="small"
+	                                variant="outlined"
+	                                disabled={restorePaymentM.isPending}
+	                                onClick={() => restorePaymentM.mutate({ id: Number(selectedPurchase.id), paymentId: Number(payment.id) })}
+	                              >
+	                                Restore
+	                              </Button>
+	                            ) : (
+	                              <>
+	                                <Button size="small" variant="outlined" onClick={() => openEditPaymentDialog(selectedPurchase, payment)}>
+	                                  Edit
+	                                </Button>
+	                                <Button size="small" color="error" variant="outlined" onClick={() => setDeletePaymentTarget({ purchase: selectedPurchase, payment })}>
+	                                  Delete
+	                                </Button>
+	                              </>
+	                            )}
+	                          </Stack>
+	                        </td>
 	                      </tr>
                     ))}
                     {selectedPurchase.payments.length === 0 && (
                       <tr>
-	                        <td colSpan={7}>
+	                        <td colSpan={9}>
                           <Box p={2} color="text.secondary">No payments yet.</Box>
                         </td>
                       </tr>
@@ -1459,23 +1911,66 @@ export default function PurchasesPage() {
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Bill Adjustments</Typography>
               <Grid container spacing={2}>
                 <Grid item xs={12} md={6}>
-                  <TextField label="Invoice Discount" type="number" value={editDiscountAmount} onChange={(e) => setEditDiscountAmount(e.target.value)} fullWidth />
+                  <TextField label="Invoice Discount (Rs)" type="number" value={editDiscountAmount} onChange={(e) => setEditDiscountAmount(e.target.value)} fullWidth />
                 </Grid>
                 <Grid item xs={12} md={6}>
-                  <TextField label="Final Round Off" type="number" value={editRoundingAdjustment} onChange={(e) => setEditRoundingAdjustment(e.target.value)} fullWidth />
+                  <TextField label="Final Round Off (+/-)" type="number" value={editRoundingAdjustment} onChange={(e) => setEditRoundingAdjustment(e.target.value)} fullWidth />
                 </Grid>
               </Grid>
+            </Paper>
+
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Bill Totals</Typography>
+              <Grid container spacing={2}>
+                <Grid item xs={6} md={3}>
+                  <Typography variant="caption" color="text.secondary">Items Total</Typography>
+                  <Typography variant="h6">{money(editSubtotal)}</Typography>
+                </Grid>
+                <Grid item xs={6} md={3}>
+                  <Typography variant="caption" color="text.secondary">Invoice Discount (Rs)</Typography>
+                  <Typography variant="h6">{money(editDiscountValue)}</Typography>
+                </Grid>
+                <Grid item xs={6} md={3}>
+                  <Typography variant="caption" color="text.secondary">GST</Typography>
+                  <Typography variant="h6">{money(editGstAmount)}</Typography>
+                </Grid>
+                <Grid item xs={6} md={3}>
+                  <Typography variant="caption" color="text.secondary">Round Off (+/-)</Typography>
+                  <Typography variant="h6">{money(editRoundingValue)}</Typography>
+                </Grid>
+                <Grid item xs={12} md={3}>
+                  <Typography variant="caption" color="text.secondary">Bill Amount</Typography>
+                  <Typography variant="h5" fontWeight={800} color={editBillAmountInvalid ? 'error.main' : 'primary.main'}>{money(editBillAmount)}</Typography>
+                </Grid>
+                <Grid item xs={4} md={3}>
+                  <Typography variant="caption" color="text.secondary">Paid</Typography>
+                  <Typography fontWeight={700}>{money(editPaidAmount)}</Typography>
+                </Grid>
+                <Grid item xs={4} md={3}>
+                  <Typography variant="caption" color="text.secondary">Write-off</Typography>
+                  <Typography fontWeight={700}>{money(editWriteoffAmount)}</Typography>
+                </Grid>
+                <Grid item xs={4} md={3}>
+                  <Typography variant="caption" color="text.secondary">Outstanding</Typography>
+                  <Typography fontWeight={800} color={editOutstandingAmount < -0.0001 ? 'error.main' : 'text.primary'}>{money(editOutstandingAmount)}</Typography>
+                </Grid>
+              </Grid>
+              {editBillAmountInvalid ? (
+                <Typography variant="body2" color="error" sx={{ mt: 1.5 }}>
+                  Bill amount is below paid/write-off total of {money(editCoveredAmount)}.
+                </Typography>
+              ) : null}
             </Paper>
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditHeaderOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveHeaderEdit} disabled={updateM.isPending}>Save Changes</Button>
+          <Button variant="contained" onClick={saveHeaderEdit} disabled={updateM.isPending || editBillAmountInvalid}>Save Changes</Button>
         </DialogActions>
       </Dialog>
 
-      <Dialog open={paymentOpen} onClose={() => setPaymentOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Add Payment / Write-off</DialogTitle>
+      <Dialog open={paymentOpen} onClose={resetPaymentForm} fullWidth maxWidth="sm">
+        <DialogTitle>{editingPayment || editingDraftPaymentKey ? 'Edit Payment / Write-off' : 'Add Payment / Write-off'}</DialogTitle>
         <DialogContent dividers>
           <Stack gap={2} mt={1}>
 	            <TextField
@@ -1488,10 +1983,10 @@ export default function PurchasesPage() {
 	                if (next === 'writeoff') {
 	                  setPaymentCash('0')
 	                  setPaymentOnline('0')
-	                  setPaymentAmount(money(selectedPurchaseOutstanding))
+	                  setPaymentAmount(money(paymentAvailableAmount))
 	                } else {
 	                  setPaymentMode('cash')
-	                  setPaymentCash(money(selectedPurchaseOutstanding))
+	                  setPaymentCash(money(paymentAvailableAmount))
 	                  setPaymentOnline('0')
 	                }
 	              }}
@@ -1522,7 +2017,7 @@ export default function PurchasesPage() {
 		                    else setPaymentCash(e.target.value)
 		                  }}
 		                  disabled={paymentMode === 'online'}
-		                  inputProps={{ min: 0, max: money(selectedPurchaseOutstanding), step: '0.01' }}
+		                  inputProps={{ min: 0, max: money(paymentAvailableAmount), step: '0.01' }}
 		                  fullWidth
 	                />
 	                <TextField
@@ -1534,7 +2029,7 @@ export default function PurchasesPage() {
 		                    else setPaymentOnline(e.target.value)
 		                  }}
 		                  disabled={paymentMode === 'cash'}
-		                  inputProps={{ min: 0, max: money(selectedPurchaseOutstanding), step: '0.01' }}
+		                  inputProps={{ min: 0, max: money(paymentAvailableAmount), step: '0.01' }}
 		                  fullWidth
 	                />
 	              </>
@@ -1544,43 +2039,82 @@ export default function PurchasesPage() {
 	                type="number"
 	                value={paymentAmount}
 	                onChange={(e) => setPaymentAmount(e.target.value)}
-	                inputProps={{ min: 0, max: money(selectedPurchaseOutstanding), step: '0.01' }}
+	                inputProps={{ min: 0, max: money(paymentAvailableAmount), step: '0.01' }}
 	                fullWidth
 	              />
 	            )}
 	            <Typography variant="body2" color={purchasePaymentError ? 'error' : 'text.secondary'}>
-	              Amount {money(purchasePaymentAmount)} / Outstanding {money(selectedPurchaseOutstanding)}
+	              Amount {money(purchasePaymentAmount)} / Available {money(paymentAvailableAmount)}
 	            </Typography>
 	            <TextField label="Date" type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
             <TextField label="Note" value={paymentNote} onChange={(e) => setPaymentNote(e.target.value)} multiline minRows={2} fullWidth />
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setPaymentOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={savePayment} disabled={addPaymentM.isPending || Boolean(purchasePaymentError)}>Save</Button>
+          <Button onClick={resetPaymentForm}>Cancel</Button>
+          <Button variant="contained" onClick={savePayment} disabled={addPaymentM.isPending || updatePaymentM.isPending || Boolean(purchasePaymentError)}>
+            {editingPayment || editingDraftPaymentKey ? 'Save Changes' : 'Save'}
+          </Button>
         </DialogActions>
       </Dialog>
 
-      <Dialog open={editItemsOpen} onClose={() => setEditItemsOpen(false)} fullWidth maxWidth="lg">
-        <DialogTitle>
+      <Dialog open={Boolean(deletePaymentTarget)} onClose={() => !deletePaymentM.isPending && setDeletePaymentTarget(null)} fullWidth maxWidth="xs">
+        <DialogTitle>Delete Payment</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={1}>
+            <Typography>
+              Delete {deletePaymentTarget?.payment.is_writeoff ? 'write-off' : 'payment'} #{deletePaymentTarget?.payment.id}?
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Invoice {deletePaymentTarget?.purchase.invoice_number || '-'} | Amount {money(Number(deletePaymentTarget?.payment.amount || 0))}
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeletePaymentTarget(null)} disabled={deletePaymentM.isPending}>Cancel</Button>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={!deletePaymentTarget || deletePaymentM.isPending}
+            onClick={() => {
+              if (!deletePaymentTarget) return
+              deletePaymentM.mutate({
+                id: Number(deletePaymentTarget.purchase.id),
+                paymentId: Number(deletePaymentTarget.payment.id),
+              })
+            }}
+          >
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {editItemsOpen ? (
+      <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
+        <Box sx={{ p: 2 }}>
           <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
             <Box>
               <Typography variant="h6">Edit Purchase Items</Typography>
               <Typography variant="body2" color="text.secondary">Only allowed while purchase stock is untouched.</Typography>
             </Box>
-            <Chip label={`${editItems.length} line${editItems.length === 1 ? '' : 's'}`} />
+            <Stack direction="row" gap={1} alignItems="center">
+              <Button variant="outlined" onClick={() => setEditItemsOpen(false)}>Back to Purchase</Button>
+              <Chip label={`${editItems.length} item${editItems.length === 1 ? '' : 's'}`} />
+            </Stack>
           </Stack>
-        </DialogTitle>
-        <DialogContent dividers>
+        </Box>
+        <Divider />
+        <Box sx={{ p: 2 }}>
           <Stack gap={2}>
             {itemEditor(editItems, setEditItems, true)}
           </Stack>
-        </DialogContent>
-        <DialogActions>
+        </Box>
+        <Stack direction="row" justifyContent="flex-end" gap={1} sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}>
           <Button onClick={() => setEditItemsOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveItemReplacement} disabled={replaceItemsM.isPending}>Save Items</Button>
-        </DialogActions>
-      </Dialog>
+          <Button variant="contained" onClick={saveItemReplacement} disabled={replaceItemsM.isPending || editItemsBillAmountInvalid}>Save Items</Button>
+        </Stack>
+      </Paper>
+      ) : null}
 
       <Dialog open={cancelConfirmOpen} onClose={() => setCancelConfirmOpen(false)} fullWidth maxWidth="xs">
         <DialogTitle>Cancel Purchase?</DialogTitle>

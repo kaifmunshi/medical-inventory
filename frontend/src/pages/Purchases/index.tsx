@@ -327,6 +327,10 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
       queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
       queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-all-purchase-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-all-purchase-payments'] })
       resetPaymentForm()
     },
     onError: (err: any) => toast.push(String(err?.message || 'Failed to save payment'), 'error'),
@@ -341,6 +345,10 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
       queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
       queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-all-purchase-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-all-purchase-payments'] })
       resetPaymentForm()
     },
     onError: (err: any) => toast.push(String(err?.message || 'Failed to update payment'), 'error'),
@@ -355,6 +363,10 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
       queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
       queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-all-purchase-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-all-purchase-payments'] })
       setDeletePaymentTarget(null)
     },
     onError: (err: any) => toast.push(String(err?.message || 'Failed to delete payment'), 'error'),
@@ -369,6 +381,10 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
       queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
       queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-all-purchase-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-all-purchase-payments'] })
     },
     onError: (err: any) => toast.push(String(err?.message || 'Failed to restore payment'), 'error'),
   })

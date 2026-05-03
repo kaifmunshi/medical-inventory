@@ -43,6 +43,7 @@ import {
 } from '../../services/cashbook'
 import { listBankbookEntries } from '../../services/bankbook'
 import { getBill, listPayments } from '../../services/billing'
+import { listPurchasePayments } from '../../services/purchases'
 import { listExchangeRecords, listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
@@ -114,6 +115,9 @@ function typeChipProps(type: string) {
   if (t === 'SPLIT') {
     return { label: 'Split', sx: { ...baseSx, bgcolor: '#9fe3b0', color: '#124b19' } }
   }
+  if (t === 'PAYMENT') {
+    return { label: 'Payment', sx: { ...baseSx, bgcolor: '#e0f2fe', color: '#075985' } }
+  }
   if (t === 'RECEIPT') {
     return { label: 'Receipt', sx: { ...baseSx, bgcolor: 'success.light', color: 'success.dark' } }
   }
@@ -132,6 +136,7 @@ const typeFilterOptions = [
   { value: 'OPENING', label: 'Opening' },
   { value: 'EXPENSE', label: 'Expense' },
   { value: 'WITHDRAWAL', label: 'Withdrawal' },
+  { value: 'PAYMENT', label: 'Payment' },
   { value: 'CONTRA', label: 'Contra' },
   { value: 'RETURN', label: 'Return' },
   { value: 'SPLIT', label: 'Split' },
@@ -200,6 +205,28 @@ function buildReceiptPaymentRows(payments: any[], amountField: 'cash_amount' | '
     rows.push(row)
   }
   return rows
+}
+
+function purchasePaymentNote(payment: any, label: 'Cash' | 'Online') {
+  const invoice = payment?.invoice_number ? ` ${payment.invoice_number}` : ` #${payment?.purchase_id || ''}`
+  const supplier = payment?.supplier_name ? ` - ${payment.supplier_name}` : ''
+  const note = payment?.note ? ` (${payment.note})` : ''
+  return `${label} supplier payment for purchase${invoice}${supplier}${note}`
+}
+
+function buildPurchaseCashRows(payments: any[]) {
+  return (payments || [])
+    .filter((p) => Number(p?.cash_amount || 0) > 0)
+    .map((p) => ({
+      id: `purchase-payment-cash-${p.id}`,
+      created_at: p.paid_at,
+      entry_type: 'WITHDRAWAL',
+      pill_type: p.mode === 'split' ? 'SPLIT' : 'PAYMENT',
+      amount: Number(p.cash_amount || 0),
+      purchase_id: Number(p.purchase_id || 0),
+      note: purchasePaymentNote(p, 'Cash'),
+      source: 'PURCHASE_PAYMENT' as const,
+    }))
 }
 
 function round2(n: number) {
@@ -313,6 +340,12 @@ export default function CashbookPage() {
     enabled: recordsFilter === 'DAY',
   })
 
+  const qDayPurchasePayments = useQuery({
+    queryKey: ['cashbook-purchase-payments-day', selectedDate],
+    queryFn: () => listPurchasePayments({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    enabled: recordsFilter === 'DAY',
+  })
+
   const qDayReturns = useQuery({
     queryKey: ['cashbook-returns-day', selectedDate],
     queryFn: () => listReturns({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
@@ -350,6 +383,23 @@ export default function CashbookPage() {
       const limit = 500
       while (true) {
         const rows = await listPayments({ from_date: allRange.from, to_date: allRange.to, limit, offset })
+        out.push(...(rows || []))
+        if (!rows || rows.length < limit) break
+        offset += limit
+      }
+      return out
+    },
+    enabled: canLoadAllRange,
+  })
+
+  const qAllPurchasePayments = useQuery({
+    queryKey: ['cashbook-all-purchase-payments', allView, allRange.from, allRange.to],
+    queryFn: async () => {
+      const out: any[] = []
+      let offset = 0
+      const limit = 500
+      while (true) {
+        const rows = await listPurchasePayments({ from_date: allRange.from, to_date: allRange.to, limit, offset })
         out.push(...(rows || []))
         if (!rows || rows.length < limit) break
         offset += limit
@@ -529,6 +579,16 @@ export default function CashbookPage() {
     return buildReceiptPaymentRows(payments, 'cash_amount', 'Cash')
   }, [qAllPayments.data])
 
+  const purchaseCashRowsDay = useMemo(() => {
+    const payments = (qDayPurchasePayments.data || []) as any[]
+    return buildPurchaseCashRows(payments)
+  }, [qDayPurchasePayments.data])
+
+  const purchaseCashRowsAll = useMemo(() => {
+    const payments = (qAllPurchasePayments.data || []) as any[]
+    return buildPurchaseCashRows(payments)
+  }, [qAllPurchasePayments.data])
+
   const returnCashRowsDay = useMemo(() => {
     const returns = (qDayReturns.data || []) as any[]
     const exchangeByReturnId = new Map<number, any>()
@@ -671,13 +731,14 @@ export default function CashbookPage() {
             },
             ...manualRowsDay,
             ...billCashRowsDay,
+            ...purchaseCashRowsDay,
             ...exchangeCashInRowsDay,
             ...contraRowsDay,
             ...returnCashRowsDay,
           ]
-        : [...manualRowsAll, ...billCashRowsAll, ...exchangeCashInRowsAll, ...contraRowsAll, ...returnCashRowsAll]
+        : [...manualRowsAll, ...billCashRowsAll, ...purchaseCashRowsAll, ...exchangeCashInRowsAll, ...contraRowsAll, ...returnCashRowsAll]
     return rows.sort((a: any, b: any) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
-  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, exchangeCashInRowsDay, contraRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, exchangeCashInRowsAll, contraRowsAll, returnCashRowsAll])
+  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, purchaseCashRowsDay, exchangeCashInRowsDay, contraRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, purchaseCashRowsAll, exchangeCashInRowsAll, contraRowsAll, returnCashRowsAll])
 
   const allLedgerDates = useMemo(() => {
     if (recordsFilter !== 'ALL') return []
@@ -1039,9 +1100,10 @@ export default function CashbookPage() {
             </TableHead>
             <TableBody>
               {(recordsFilter === 'DAY'
-                ? qDay.isLoading || qDayPayments.isLoading || qDayReturns.isLoading || qDayExchanges.isLoading || qDayBankbookContra.isLoading
+                ? qDay.isLoading || qDayPayments.isLoading || qDayPurchasePayments.isLoading || qDayReturns.isLoading || qDayExchanges.isLoading || qDayBankbookContra.isLoading
                 : qAllCashbook.isLoading ||
                   qAllPayments.isLoading ||
+                  qAllPurchasePayments.isLoading ||
                   qAllReturns.isLoading ||
                   qAllExchanges.isLoading ||
                   qAllBankbookContra.isLoading ||
@@ -1144,7 +1206,7 @@ export default function CashbookPage() {
                         >
                           {t === 'OPENING' ? '' : isIn ? '+' : '-'}Rs {money(row.amount)}
                         </TableCell>
-                        <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'PARTY_RECEIPT' ? 'Customer receipt' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
+                        <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'PARTY_RECEIPT' ? 'Customer receipt' : row.source === 'PURCHASE_PAYMENT' ? 'Purchase' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
                         <TableCell align="right">
                           {row.source === 'CASHBOOK' ? (
                             <Stack direction="row" spacing={0.5} justifyContent="flex-end">

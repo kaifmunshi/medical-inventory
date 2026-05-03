@@ -54,6 +54,20 @@ class SupplierPaymentCreate(SQLModel):
     allocations: List[SupplierPaymentAllocationIn]
 
 
+class PurchasePaymentBookRow(SQLModel):
+    id: int
+    purchase_id: int
+    paid_at: str
+    mode: str
+    amount: float
+    cash_amount: float
+    online_amount: float
+    note: Optional[str] = None
+    invoice_number: Optional[str] = None
+    party_id: int
+    supplier_name: Optional[str] = None
+
+
 STOCK_SOURCE_CREATED = "CREATED"
 STOCK_SOURCE_ATTACHED = "ATTACHED"
 
@@ -780,6 +794,60 @@ def list_purchases(
             stmt = stmt.where(Purchase.invoice_date <= clean_date(to_date))
         rows = session.exec(stmt.order_by(Purchase.id.desc()).offset(offset).limit(limit)).all()
         return [make_purchase_out(session, row) for row in rows]
+
+
+@router.get("/payments", response_model=List[PurchasePaymentBookRow])
+def list_purchase_payments(
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+) -> List[PurchasePaymentBookRow]:
+    start_iso = f"{clean_date(from_date)}T00:00:00" if from_date else None
+    end_iso = f"{clean_date(to_date)}T23:59:59.999999" if to_date else None
+
+    with get_session() as session:
+        stmt = (
+            select(PurchasePayment, Purchase)
+            .join(Purchase, Purchase.id == PurchasePayment.purchase_id)
+            .where(Purchase.is_deleted == False)  # noqa: E712
+            .where(PurchasePayment.is_deleted == False)  # noqa: E712
+            .where(PurchasePayment.is_writeoff == False)  # noqa: E712
+        )
+        if start_iso:
+            stmt = stmt.where(PurchasePayment.paid_at >= start_iso)
+        if end_iso:
+            stmt = stmt.where(PurchasePayment.paid_at <= end_iso)
+
+        rows = session.exec(
+            stmt.order_by(PurchasePayment.paid_at.desc(), PurchasePayment.id.desc())
+            .offset(offset)
+            .limit(limit)
+        ).all()
+        party_ids = {int(purchase.party_id or 0) for _payment, purchase in rows if purchase.party_id}
+        parties = (
+            session.exec(select(Party).where(Party.id.in_(party_ids))).all()
+            if party_ids
+            else []
+        )
+        party_map = {int(party.id or 0): party.name for party in parties}
+
+        return [
+            PurchasePaymentBookRow(
+                id=int(payment.id or 0),
+                purchase_id=int(purchase.id or 0),
+                paid_at=payment.paid_at,
+                mode=payment.mode,
+                amount=float(payment.amount or 0),
+                cash_amount=float(payment.cash_amount or 0),
+                online_amount=float(payment.online_amount or 0),
+                note=payment.note,
+                invoice_number=purchase.invoice_number,
+                party_id=int(purchase.party_id or 0),
+                supplier_name=party_map.get(int(purchase.party_id or 0)),
+            )
+            for payment, purchase in rows
+        ]
 
 
 @router.get("/{purchase_id}", response_model=PurchaseOut)

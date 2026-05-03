@@ -35,6 +35,20 @@ export interface PurchasePaymentCreatePayload {
 
 export type PurchasePaymentUpdatePayload = Partial<PurchasePaymentCreatePayload>
 
+export interface PurchasePaymentBookRow {
+  id: number
+  purchase_id: number
+  paid_at: string
+  mode: 'cash' | 'online' | 'split' | 'writeoff'
+  amount: number
+  cash_amount: number
+  online_amount: number
+  note?: string | null
+  invoice_number?: string | null
+  party_id: number
+  supplier_name?: string | null
+}
+
 export interface SupplierPaymentCreatePayload {
   mode: 'cash' | 'online' | 'split'
   cash_amount?: number
@@ -63,6 +77,16 @@ export async function fetchPurchases(params?: {
 
 export async function fetchPurchase(id: number): Promise<Purchase> {
   const res = await api.get<Purchase>(`/purchases/${id}`)
+  return res.data
+}
+
+export async function listPurchasePayments(params?: {
+  from_date?: string
+  to_date?: string
+  limit?: number
+  offset?: number
+}): Promise<PurchasePaymentBookRow[]> {
+  const res = await api.get<PurchasePaymentBookRow[]>('/purchases/payments', { params })
   return res.data
 }
 

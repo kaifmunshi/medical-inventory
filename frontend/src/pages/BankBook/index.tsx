@@ -44,6 +44,7 @@ import {
 } from '../../services/bankbook'
 import { listCashbookEntries } from '../../services/cashbook'
 import { getBill, listPayments } from '../../services/billing'
+import { listPurchasePayments } from '../../services/purchases'
 import { listExchangeRecords, listReturns } from '../../services/returns'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
@@ -108,6 +109,7 @@ function typeChipProps(type: string) {
   if (t === 'OPENING') return { label: 'Opening', sx: { ...baseSx, bgcolor: 'info.light', color: 'info.dark' } }
   if (t === 'RETURN') return { label: 'Refund', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
   if (t === 'SPLIT') return { label: 'Split', sx: { ...baseSx, bgcolor: '#9fe3b0', color: '#124b19' } }
+  if (t === 'PAYMENT') return { label: 'Payment', sx: { ...baseSx, bgcolor: '#e0f2fe', color: '#075985' } }
   if (t === 'CONTRA') return { label: 'Contra', sx: { ...baseSx, bgcolor: '#c7d2fe', color: '#1e3a8a' } }
   if (t === 'RECEIPT') return { label: 'Receipt', sx: { ...baseSx, bgcolor: 'success.light', color: 'success.dark' } }
   if (t === 'WITHDRAWAL') return { label: 'Withdrawal', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
@@ -120,6 +122,7 @@ const typeFilterOptions = [
   { value: 'OPENING', label: 'Opening' },
   { value: 'EXPENSE', label: 'Expense' },
   { value: 'WITHDRAWAL', label: 'Withdrawal' },
+  { value: 'PAYMENT', label: 'Payment' },
   { value: 'CONTRA', label: 'Contra' },
   { value: 'RETURN', label: 'Refund' },
   { value: 'SPLIT', label: 'Split' },
@@ -192,6 +195,30 @@ function buildOnlineReceiptRows(payments: any[]) {
     rows.push(row)
   }
   return rows
+}
+
+function purchasePaymentNote(payment: any) {
+  const invoice = payment?.invoice_number ? ` ${payment.invoice_number}` : ` #${payment?.purchase_id || ''}`
+  const supplier = payment?.supplier_name ? ` - ${payment.supplier_name}` : ''
+  const note = payment?.note ? ` (${payment.note})` : ''
+  return `Online supplier payment for purchase${invoice}${supplier}${note}`
+}
+
+function buildPurchaseOnlineRows(payments: any[]) {
+  return (payments || [])
+    .filter((p) => Number(p?.online_amount || 0) > 0)
+    .map((p) => ({
+      id: `purchase-payment-online-${p.id}`,
+      created_at: p.paid_at,
+      entry_type: 'WITHDRAWAL',
+      pill_type: p.mode === 'split' ? 'SPLIT' : 'PAYMENT',
+      amount: Number(p.online_amount || 0),
+      txn_charges: 0,
+      mode: 'ONLINE',
+      purchase_id: Number(p.purchase_id || 0),
+      note: purchasePaymentNote(p),
+      source: 'PURCHASE_PAYMENT' as const,
+    }))
 }
 
 function round2(n: number) {
@@ -347,6 +374,12 @@ export default function BankBookPage() {
     enabled: recordsFilter === 'DAY',
   })
 
+  const qDayPurchasePayments = useQuery({
+    queryKey: ['bankbook-purchase-payments-day', selectedDate],
+    queryFn: () => listPurchasePayments({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    enabled: recordsFilter === 'DAY',
+  })
+
   const qDayReturns = useQuery({
     queryKey: ['bankbook-returns-day', selectedDate],
     queryFn: () => listReturns({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
@@ -390,6 +423,23 @@ export default function BankBookPage() {
       const limit = 500
       while (true) {
         const rows = await listPayments({ from_date: allRange.from, to_date: allRange.to, limit, offset })
+        out.push(...(rows || []))
+        if (!rows || rows.length < limit) break
+        offset += limit
+      }
+      return out
+    },
+    enabled: canLoadAllRange,
+  })
+
+  const qAllPurchasePayments = useQuery({
+    queryKey: ['bankbook-all-purchase-payments', allView, allRange.from, allRange.to],
+    queryFn: async () => {
+      const out: any[] = []
+      let offset = 0
+      const limit = 500
+      while (true) {
+        const rows = await listPurchasePayments({ from_date: allRange.from, to_date: allRange.to, limit, offset })
         out.push(...(rows || []))
         if (!rows || rows.length < limit) break
         offset += limit
@@ -565,6 +615,16 @@ export default function BankBookPage() {
     const payments = (qAllPayments.data || []) as any[]
     return buildOnlineReceiptRows(payments)
   }, [qAllPayments.data])
+
+  const purchaseOnlineRowsDay = useMemo(() => {
+    const payments = (qDayPurchasePayments.data || []) as any[]
+    return buildPurchaseOnlineRows(payments)
+  }, [qDayPurchasePayments.data])
+
+  const purchaseOnlineRowsAll = useMemo(() => {
+    const payments = (qAllPurchasePayments.data || []) as any[]
+    return buildPurchaseOnlineRows(payments)
+  }, [qAllPurchasePayments.data])
 
   const returnOnlineRowsDay = useMemo(() => {
     const returns = (qDayReturns.data || []) as any[]
@@ -772,6 +832,7 @@ export default function BankBookPage() {
             ...manualRowsDay,
             ...manualChargeRowsDay,
             ...billOnlineRowsDay,
+            ...purchaseOnlineRowsDay,
             ...cashbookContraRowsDay,
             ...exchangeOnlineInRowsDay,
             ...exchangeOnlineOutRowsDay,
@@ -781,6 +842,7 @@ export default function BankBookPage() {
             ...manualRowsAll,
             ...manualChargeRowsAll,
             ...billOnlineRowsAll,
+            ...purchaseOnlineRowsAll,
             ...cashbookContraRowsAll,
             ...exchangeOnlineInRowsAll,
             ...exchangeOnlineOutRowsAll,
@@ -800,6 +862,7 @@ export default function BankBookPage() {
     manualRowsDay,
     manualChargeRowsDay,
     billOnlineRowsDay,
+    purchaseOnlineRowsDay,
     cashbookContraRowsDay,
     exchangeOnlineInRowsDay,
     exchangeOnlineOutRowsDay,
@@ -807,6 +870,7 @@ export default function BankBookPage() {
     manualRowsAll,
     manualChargeRowsAll,
     billOnlineRowsAll,
+    purchaseOnlineRowsAll,
     cashbookContraRowsAll,
     exchangeOnlineInRowsAll,
     exchangeOnlineOutRowsAll,
@@ -1231,11 +1295,13 @@ export default function BankBookPage() {
               {(recordsFilter === 'DAY'
                 ? qDay.isLoading ||
                   qDayPayments.isLoading ||
+                  qDayPurchasePayments.isLoading ||
                   qDayReturns.isLoading ||
                   qDayExchanges.isLoading ||
                   qDayCashbookContra.isLoading
                 : qAllBankbook.isLoading ||
                   qAllPayments.isLoading ||
+                  qAllPurchasePayments.isLoading ||
                   qAllReturns.isLoading ||
                   qAllExchanges.isLoading ||
                   qAllCashbookContra.isLoading ||
@@ -1353,6 +1419,8 @@ export default function BankBookPage() {
                             ? 'Bill'
                             : row.source === 'PARTY_RECEIPT'
                               ? 'Customer receipt'
+                              : row.source === 'PURCHASE_PAYMENT'
+                                ? 'Purchase'
                             : row.source === 'RETURN'
                               ? 'Return'
                               : row.source === 'EXCHANGE'

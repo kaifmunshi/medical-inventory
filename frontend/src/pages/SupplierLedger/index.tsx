@@ -435,6 +435,10 @@ export default function SupplierLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
       queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
       queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-all-purchase-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-all-purchase-payments'] })
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to add payment'), 'error'),
   })
@@ -449,6 +453,10 @@ export default function SupplierLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
       queryClient.invalidateQueries({ queryKey: ['cashbook-summary'] })
       queryClient.invalidateQueries({ queryKey: ['bankbook-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-all-purchase-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-purchase-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-all-purchase-payments'] })
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to restore payment'), 'error'),
   })

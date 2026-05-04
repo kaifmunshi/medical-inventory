@@ -461,8 +461,8 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['purchase-brands'] })
       queryClient.invalidateQueries({ queryKey: ['brand-master'] })
       if (brandTargetKey) {
-        updateItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined })
-        updateEditItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined })
+        updateItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
+        updateEditItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
       }
       setBrandDialogOpen(false)
       setBrandTargetKey(null)
@@ -594,6 +594,7 @@ export default function PurchasesPage() {
     if (!product) return
     const patch = {
       existing_inventory_item_id: undefined,
+      existing_stock_movement_id: undefined,
       product_id: product.id,
       product_name: product.name,
       alias: product.alias || '',
@@ -1136,7 +1137,7 @@ export default function PurchasesPage() {
                     />
                   </Grid>
                   <Grid item xs={12} md={3.5}>
-                    <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchItem(item.key, { product_name: e.target.value, product_id: undefined, existing_inventory_item_id: undefined })} fullWidth />
+                    <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchItem(item.key, { product_name: e.target.value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })} fullWidth />
                   </Grid>
                   <Grid item xs={12} md={2}>
                     <Stack direction="row" gap={1}>
@@ -1145,8 +1146,12 @@ export default function PurchasesPage() {
                         size="small"
                         options={brandNames}
                         value={item.brand || ''}
-                        onChange={(_, value) => patchItem(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined, existing_inventory_item_id: undefined })}
-                        onInputChange={(_, value) => patchItem(item.key, { brand: value, product_id: undefined, existing_inventory_item_id: undefined })}
+                        onChange={(_, value) => patchItem(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })}
+                        onInputChange={(_, value, reason) => {
+                          if (reason === 'input' || reason === 'clear') {
+                            patchItem(item.key, { brand: value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
+                          }
+                        }}
                         renderInput={(params) => <TextField {...params} label="Brand" fullWidth />}
                         sx={{ flex: 1 }}
                       />

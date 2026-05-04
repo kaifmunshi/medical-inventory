@@ -150,6 +150,33 @@ function reasonLabel(reason: string) {
   return labels[key] || key || '-'
 }
 
+function duplicateRepairKey(row: any) {
+  const reasonKey = String(row?.reason || '').toUpperCase()
+  const refType = String(row?.ref_type || '').toUpperCase()
+  const refId = Number(row?.ref_id || 0)
+  const itemId = Number(row?.item_id || 0)
+  if (!refId || !itemId || refType !== 'PURCHASE') return null
+  if (reasonKey !== 'PURCHASE' && reasonKey !== 'PURCHASE_DUPLICATE_REPAIR') return null
+  return `${refId}:${itemId}`
+}
+
+function visibleStockCardRows(rows: any[]) {
+  const repairedKeys = new Set(
+    rows
+      .filter((row) => String(row?.reason || '').toUpperCase() === 'PURCHASE_DUPLICATE_REPAIR')
+      .map(duplicateRepairKey)
+      .filter(Boolean)
+  )
+  if (!repairedKeys.size) return rows
+
+  return rows.filter((row) => {
+    const reasonKey = String(row?.reason || '').toUpperCase()
+    const key = duplicateRepairKey(row)
+    if (!key || !repairedKeys.has(key)) return true
+    return reasonKey !== 'PURCHASE' && reasonKey !== 'PURCHASE_DUPLICATE_REPAIR'
+  })
+}
+
 function deltaChip(delta: number) {
   const isPos = delta > 0
   const isNeg = delta < 0
@@ -361,6 +388,8 @@ export default function StockCardPage() {
     () => ((batchLedgerQ.data?.pages || []).flatMap((page) => page.items) as any[]) || [],
     [batchLedgerQ.data]
   )
+  const visibleProductRows = useMemo(() => visibleStockCardRows(productRows), [productRows])
+  const visibleBatchRows = useMemo(() => visibleStockCardRows(batchRows), [batchRows])
 
   function inferredOpeningRow(summary: any, batch?: any | null) {
     const opening = Number(summary?.opening_stock || 0)
@@ -389,15 +418,15 @@ export default function StockCardPage() {
 
   const productRowsWithOpening = useMemo(() => {
     const opening = inferredOpeningRow(productSummaryQ.data, null)
-    if (!opening || productLedgerQ.hasNextPage) return productRows
-    return [...productRows, opening]
-  }, [productRows, productSummaryQ.data, productLedgerQ.hasNextPage, reason])
+    if (!opening || productLedgerQ.hasNextPage) return visibleProductRows
+    return [...visibleProductRows, opening]
+  }, [visibleProductRows, productSummaryQ.data, productLedgerQ.hasNextPage, reason])
 
   const batchRowsWithOpening = useMemo(() => {
     const opening = inferredOpeningRow(batchSummaryQ.data, currentBatch)
-    if (!opening || batchLedgerQ.hasNextPage) return batchRows
-    return [...batchRows, opening]
-  }, [batchRows, batchSummaryQ.data, currentBatch, batchLedgerQ.hasNextPage, reason])
+    if (!opening || batchLedgerQ.hasNextPage) return visibleBatchRows
+    return [...visibleBatchRows, opening]
+  }, [visibleBatchRows, batchSummaryQ.data, currentBatch, batchLedgerQ.hasNextPage, reason])
 
   const activeRows = ledgerScope === 'batch' ? batchRowsWithOpening : productRowsWithOpening
 

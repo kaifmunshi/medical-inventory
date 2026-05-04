@@ -514,7 +514,7 @@ export default function SupplierLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['purchase-brands'] })
       queryClient.invalidateQueries({ queryKey: ['brand-master'] })
       if (brandTargetKey) {
-        patchEditItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined })
+        patchEditItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
       }
       setBrandDialogOpen(false)
       setBrandTargetKey(null)
@@ -646,6 +646,7 @@ export default function SupplierLedgerPage() {
     if (!product) return
     patchEditItem(itemKey, {
       existing_inventory_item_id: undefined,
+      existing_stock_movement_id: undefined,
       product_id: product.id,
       product_name: product.name,
       alias: product.alias || '',
@@ -877,8 +878,12 @@ export default function SupplierLedgerPage() {
                         size="small"
                         options={brandNames}
                         value={item.brand || ''}
-                        onChange={(_, value) => patchEditItem(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined, existing_inventory_item_id: undefined })}
-                        onInputChange={(_, value) => patchEditItem(item.key, { brand: value, product_id: undefined, existing_inventory_item_id: undefined })}
+                        onChange={(_, value) => patchEditItem(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })}
+                        onInputChange={(_, value, reason) => {
+                          if (reason === 'input' || reason === 'clear') {
+                            patchEditItem(item.key, { brand: value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
+                          }
+                        }}
                         renderInput={(params) => <TextField {...params} label="Brand" fullWidth />}
                         sx={{ flex: 1 }}
                       />

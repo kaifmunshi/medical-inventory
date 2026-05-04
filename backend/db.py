@@ -46,6 +46,289 @@ def _now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+PURCHASE_DUPLICATE_STOCK_REPAIR_TARGETS = [
+    {
+        "purchase_item_id": 14,
+        "invoice_number": "A000758",
+        "product_name": "Arq Badyan 500Ml",
+        "brand": "Hamdard",
+        "expiry_date": "2026-12-31",
+        "mrp": 120.0,
+        "qty": 3,
+        "old_item_id": 1467,
+        "restored_item_id": 1605,
+    },
+    {
+        "purchase_item_id": 19,
+        "invoice_number": "AYU2600051",
+        "product_name": "Rheumarx 30Cap",
+        "brand": "Ayukalp",
+        "expiry_date": "2027-12-31",
+        "mrp": 196.88,
+        "qty": 6,
+        "old_item_id": 1454,
+        "restored_item_id": 1610,
+    },
+    {
+        "purchase_item_id": 32,
+        "invoice_number": "GR 30",
+        "product_name": "Aerand Bhrust Harde 100Tab",
+        "brand": "Yash",
+        "expiry_date": "2029-02-28",
+        "mrp": 100.0,
+        "qty": 3,
+        "old_item_id": 1520,
+        "restored_item_id": 1623,
+    },
+    {
+        "purchase_item_id": 48,
+        "invoice_number": "A000037",
+        "product_name": "It. Ustukhuddus 150g",
+        "brand": "Hamdard",
+        "expiry_date": "2028-12-31",
+        "mrp": 75.0,
+        "qty": 3,
+        "old_item_id": 1314,
+        "restored_item_id": 1639,
+    },
+    {
+        "purchase_item_id": 129,
+        "invoice_number": "A000630",
+        "product_name": "MJ Hajrul Yahud 60 g",
+        "brand": "Hamdard",
+        "expiry_date": "2028-08-31",
+        "mrp": 60.0,
+        "qty": 1,
+        "old_item_id": 1586,
+        "restored_item_id": 1715,
+    },
+]
+
+
+def repair_purchase_duplicate_stock_links(session) -> int:
+    """Restore known purchase-created batches that a bulk duplicate repair hid."""
+    ts = _now_ts()
+    applied = []
+
+    for target in PURCHASE_DUPLICATE_STOCK_REPAIR_TARGETS:
+        row = session.exec(
+            text("""
+                SELECT
+                    p.id AS purchase_id,
+                    pi.id AS purchase_item_id,
+                    pi.cost_price,
+                    pi.effective_cost_price,
+                    pi.product_id,
+                    pi.lot_id AS current_lot_id,
+                    old_item.id AS old_item_id,
+                    old_item.stock AS old_stock,
+                    old_item.is_archived AS old_archived,
+                    restored_item.id AS restored_item_id,
+                    restored_item.stock AS restored_stock,
+                    restored_item.is_archived AS restored_archived,
+                    restored_lot.id AS restored_lot_id
+                FROM purchaseitem pi
+                JOIN purchase p ON p.id = pi.purchase_id
+                JOIN item old_item ON old_item.id = pi.inventory_item_id
+                JOIN item restored_item ON restored_item.id = :restored_item_id
+                LEFT JOIN inventorylot restored_lot ON restored_lot.legacy_item_id = restored_item.id
+                WHERE pi.id = :purchase_item_id
+                  AND p.invoice_number = :invoice_number
+                  AND COALESCE(p.is_deleted, 0) = 0
+                  AND COALESCE(pi.stock_source, 'CREATED') = 'ATTACHED'
+                  AND pi.inventory_item_id = :old_item_id
+                  AND old_item.id = :old_item_id
+                  AND COALESCE(old_item.stock, 0) = 0
+                  AND COALESCE(old_item.is_archived, 0) = 1
+                  AND lower(trim(COALESCE(pi.product_name, ''))) = lower(trim(:product_name))
+                  AND lower(trim(COALESCE(pi.brand, ''))) = lower(trim(:brand))
+                  AND COALESCE(pi.expiry_date, '') = COALESCE(:expiry_date, '')
+                  AND ABS(COALESCE(pi.mrp, 0) - :mrp) < 0.001
+                  AND (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)) = :qty
+                  AND lower(trim(COALESCE(restored_item.name, ''))) = lower(trim(:product_name))
+                  AND lower(trim(COALESCE(restored_item.brand, ''))) = lower(trim(:brand))
+                  AND COALESCE(restored_item.expiry_date, '') = COALESCE(:expiry_date, '')
+                  AND ABS(COALESCE(restored_item.mrp, 0) - :mrp) < 0.001
+                  AND EXISTS (
+                      SELECT 1
+                      FROM stockmovement sm
+                      WHERE sm.item_id = restored_item.id
+                        AND sm.ref_type = 'PURCHASE'
+                        AND sm.ref_id = p.id
+                        AND sm.reason = 'PURCHASE'
+                        AND sm.delta = :qty
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM stockmovement sm
+                      WHERE sm.item_id = restored_item.id
+                        AND sm.ref_type = 'PURCHASE'
+                        AND sm.ref_id = p.id
+                        AND sm.reason = 'PURCHASE_DUPLICATE_REPAIR'
+                        AND sm.delta = -:qty
+                        AND sm.note LIKE '%' || '#' || :old_item_id
+                  )
+                LIMIT 1
+            """).bindparams(**target),
+        ).first()
+
+        if not row:
+            continue
+
+        purchase_id = int(row[0])
+        restored_lot_id = int(row[12]) if row[12] is not None else None
+        if restored_lot_id is None:
+            continue
+
+        ledger_row = session.exec(
+            text("""
+                SELECT COALESCE(SUM(delta), 0)
+                FROM stockmovement
+                WHERE item_id = :restored_item_id
+                  AND NOT (
+                      reason = 'PURCHASE_DUPLICATE_REPAIR'
+                      AND ref_type = 'PURCHASE'
+                      AND ref_id = :purchase_id
+                  )
+            """).bindparams(
+                restored_item_id=int(target["restored_item_id"]),
+                purchase_id=purchase_id,
+            ),
+        ).first()
+        restored_stock = max(0, int(ledger_row[0] or 0) if ledger_row else int(target["qty"]))
+        effective_cost = float(row[3] or row[2] or 0)
+
+        session.exec(
+            text("""
+                UPDATE purchaseitem
+                SET inventory_item_id = :restored_item_id,
+                    lot_id = :restored_lot_id,
+                    stock_source = 'CREATED'
+                WHERE id = :purchase_item_id
+                  AND purchase_id = :purchase_id
+                  AND inventory_item_id = :old_item_id
+            """).bindparams(
+                restored_item_id=int(target["restored_item_id"]),
+                restored_lot_id=restored_lot_id,
+                purchase_item_id=int(target["purchase_item_id"]),
+                purchase_id=purchase_id,
+                old_item_id=int(target["old_item_id"]),
+            ),
+        )
+        session.exec(
+            text("""
+                UPDATE item
+                SET stock = :restored_stock,
+                    is_archived = CASE WHEN :restored_stock > 0 THEN 0 ELSE 1 END,
+                    archived_at = CASE WHEN :restored_stock > 0 THEN NULL ELSE archived_at END,
+                    cost_price = :effective_cost,
+                    product_id = COALESCE(product_id, :product_id),
+                    updated_at = :ts
+                WHERE id = :restored_item_id
+            """).bindparams(
+                restored_stock=restored_stock,
+                effective_cost=effective_cost,
+                product_id=row[4],
+                ts=ts,
+                restored_item_id=int(target["restored_item_id"]),
+            ),
+        )
+        session.exec(
+            text("""
+                UPDATE inventorylot
+                SET sealed_qty = :restored_stock,
+                    loose_qty = 0,
+                    is_active = CASE WHEN :restored_stock > 0 THEN 1 ELSE 0 END,
+                    cost_price = :effective_cost,
+                    updated_at = :ts
+                WHERE id = :restored_lot_id
+                  AND legacy_item_id = :restored_item_id
+            """).bindparams(
+                restored_stock=restored_stock,
+                effective_cost=effective_cost,
+                ts=ts,
+                restored_lot_id=restored_lot_id,
+                restored_item_id=int(target["restored_item_id"]),
+            ),
+        )
+        session.exec(
+            text("""
+                UPDATE item
+                SET stock = 0,
+                    is_archived = 1,
+                    cost_price = 0,
+                    updated_at = :ts
+                WHERE id = :old_item_id
+                  AND COALESCE(stock, 0) = 0
+            """).bindparams(ts=ts, old_item_id=int(target["old_item_id"])),
+        )
+        session.exec(
+            text("""
+                UPDATE inventorylot
+                SET sealed_qty = 0,
+                    loose_qty = 0,
+                    is_active = 0,
+                    cost_price = 0,
+                    updated_at = :ts
+                WHERE legacy_item_id = :old_item_id
+            """).bindparams(ts=ts, old_item_id=int(target["old_item_id"])),
+        )
+        session.exec(
+            text("""
+                DELETE FROM stockmovement
+                WHERE ref_type = 'PURCHASE'
+                  AND ref_id = :purchase_id
+                  AND (
+                      (
+                          item_id = :old_item_id
+                          AND reason = 'PURCHASE_LINK'
+                          AND COALESCE(note, '') LIKE 'Bulk repair:%'
+                      )
+                      OR (
+                          item_id = :restored_item_id
+                          AND reason = 'PURCHASE_DUPLICATE_REPAIR'
+                          AND COALESCE(note, '') LIKE 'Bulk repair:%'
+                      )
+                  )
+            """).bindparams(
+                purchase_id=purchase_id,
+                old_item_id=int(target["old_item_id"]),
+                restored_item_id=int(target["restored_item_id"]),
+            ),
+        )
+        applied.append(
+            {
+                "purchase_id": purchase_id,
+                "purchase_item_id": int(target["purchase_item_id"]),
+                "invoice_number": str(target["invoice_number"]),
+                "product_name": str(target["product_name"]),
+                "restored_item_id": int(target["restored_item_id"]),
+                "old_linked_item_id": int(target["old_item_id"]),
+                "restored_qty": restored_stock,
+            }
+        )
+
+    if applied:
+        import json
+
+        session.exec(
+            text("""
+                INSERT INTO auditlog (event_ts, entity_type, entity_id, action, note, details_json, actor)
+                VALUES (
+                    :ts,
+                    'PURCHASE',
+                    NULL,
+                    'DATA_REPAIR',
+                    'Restored purchase-created stock batches after incorrect duplicate repair',
+                    :details_json,
+                    'migration'
+                )
+            """).bindparams(ts=ts, details_json=json.dumps(applied, separators=(",", ":"))),
+        )
+
+    return len(applied)
+
+
 def migrate_db():
     with Session(engine) as session:
         # ---------- item table migration ----------
@@ -846,6 +1129,27 @@ def migrate_db():
             )
         """))
         session.commit()
+
+        # ---------- one-time data repair: bad bulk purchase duplicate repair ----------
+        purchase_duplicate_repair_key = "repair_purchase_duplicate_stock_links_v1"
+        purchase_duplicate_repair_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=purchase_duplicate_repair_key),
+        ).first()
+        if not purchase_duplicate_repair_done:
+            ts_repair = _now_ts()
+            repaired_count = repair_purchase_duplicate_stock_links(session)
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=purchase_duplicate_repair_key,
+                    value=f"done:{repaired_count}",
+                    ts=ts_repair,
+                ),
+            )
+            session.commit()
 
         # ---------- default financial year ----------
         fy_count_row = session.exec(text("SELECT COUNT(*) FROM financialyear")).one()

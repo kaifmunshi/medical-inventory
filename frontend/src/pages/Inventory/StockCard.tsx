@@ -97,6 +97,12 @@ function formatSigned(value: number) {
   return `${value > 0 ? '+' : ''}${value}`
 }
 
+function movementTone(delta: number) {
+  if (delta > 0) return 'success.main'
+  if (delta < 0) return 'error.main'
+  return 'text.primary'
+}
+
 function money(n: number | string | undefined | null) {
   return Number(n || 0).toFixed(2)
 }
@@ -156,25 +162,86 @@ function duplicateRepairKey(row: any) {
   const refId = Number(row?.ref_id || 0)
   const itemId = Number(row?.item_id || 0)
   if (!refId || !itemId || refType !== 'PURCHASE') return null
-  if (reasonKey !== 'PURCHASE' && reasonKey !== 'PURCHASE_DUPLICATE_REPAIR') return null
+  if (reasonKey !== 'PURCHASE' && reasonKey !== 'PURCHASE_DUPLICATE_REPAIR' && reasonKey !== 'PURCHASE_EDIT') return null
   return `${refId}:${itemId}`
 }
 
-function visibleStockCardRows(rows: any[]) {
-  const repairedKeys = new Set(
-    rows
-      .filter((row) => String(row?.reason || '').toUpperCase() === 'PURCHASE_DUPLICATE_REPAIR')
-      .map(duplicateRepairKey)
-      .filter(Boolean)
-  )
-  if (!repairedKeys.size) return rows
+function dateOnly(value: any) {
+  return String(value || '').slice(0, 10)
+}
 
-  return rows.filter((row) => {
+function canMergePurchaseLinkSource(row: any, link: any) {
+  const reasonKey = String(row?.reason || '').toUpperCase()
+  return (
+    Number(row?.item_id || 0) === Number(link?.item_id || 0) &&
+    Number(row?.delta || 0) > 0 &&
+    (reasonKey === 'OPENING' || reasonKey === 'INVENTORY_ADD') &&
+    dateOnly(row?.ts) === dateOnly(link?.ts)
+  )
+}
+
+function visibleStockCardRows(rows: any[]) {
+  const hiddenCorrectionKeys = new Set<string>()
+
+  rows.forEach((row) => {
+    if (String(row?.reason || '').toUpperCase() === 'PURCHASE_DUPLICATE_REPAIR') {
+      const key = duplicateRepairKey(row)
+      if (key) hiddenCorrectionKeys.add(key)
+    }
+  })
+
+  const purchaseEditKeys = new Set<string>(
+    rows
+      .filter((row) => String(row?.reason || '').toUpperCase() === 'PURCHASE_EDIT')
+      .map(duplicateRepairKey)
+      .filter((key): key is string => Boolean(key))
+  )
+  purchaseEditKeys.forEach((key) => {
+    const purchaseEditNet = rows
+      .filter((row) => duplicateRepairKey(row) === key)
+      .filter((row) => {
+        const reasonKey = String(row?.reason || '').toUpperCase()
+        return reasonKey === 'PURCHASE' || reasonKey === 'PURCHASE_EDIT'
+      })
+      .reduce((sum, row) => sum + Number(row?.delta || 0), 0)
+    if (purchaseEditNet === 0) hiddenCorrectionKeys.add(key)
+  })
+
+  const correctionFilteredRows = hiddenCorrectionKeys.size ? rows.filter((row) => {
     const reasonKey = String(row?.reason || '').toUpperCase()
     const key = duplicateRepairKey(row)
-    if (!key || !repairedKeys.has(key)) return true
-    return reasonKey !== 'PURCHASE' && reasonKey !== 'PURCHASE_DUPLICATE_REPAIR'
+    if (!key || !hiddenCorrectionKeys.has(key)) return true
+    return reasonKey !== 'PURCHASE' && reasonKey !== 'PURCHASE_DUPLICATE_REPAIR' && reasonKey !== 'PURCHASE_EDIT'
+  }) : rows
+
+  const purchaseLinks = correctionFilteredRows.filter(
+    (row) => String(row?.reason || '').toUpperCase() === 'PURCHASE_LINK'
+  )
+  if (!purchaseLinks.length) return correctionFilteredRows
+
+  const sourceById = new Map<number, any>()
+  const mergedLinkIds = new Set<number>()
+  purchaseLinks.forEach((link) => {
+    const source = correctionFilteredRows.find((row) => canMergePurchaseLinkSource(row, link))
+    if (!source) return
+    sourceById.set(Number(source.id), {
+      ...source,
+      ts: link.ts || source.ts,
+      reason: 'PURCHASE_LINK',
+      ref_type: link.ref_type,
+      ref_id: link.ref_id,
+      note: null,
+      actor: link.actor || source.actor,
+      merged_purchase_link: true,
+    })
+    mergedLinkIds.add(Number(link.id))
   })
+
+  if (!sourceById.size) return correctionFilteredRows
+
+  return correctionFilteredRows
+    .filter((row) => !mergedLinkIds.has(Number(row.id)))
+    .map((row) => sourceById.get(Number(row.id)) || row)
 }
 
 function deltaChip(delta: number) {
@@ -188,9 +255,9 @@ function deltaChip(delta: number) {
         borderRadius: 999,
         fontWeight: 900,
         ...(isPos
-          ? { bgcolor: 'rgba(46,125,50,0.14)', color: 'success.main' }
+          ? { bgcolor: 'rgba(46,125,50,0.14)', color: movementTone(delta) }
           : isNeg
-            ? { bgcolor: 'rgba(211,47,47,0.14)', color: 'error.main' }
+            ? { bgcolor: 'rgba(211,47,47,0.14)', color: movementTone(delta) }
             : { bgcolor: 'rgba(0,0,0,0.08)' }),
       }}
     />
@@ -708,9 +775,11 @@ export default function StockCardPage() {
               ) : (
                 rows.map((row) => {
                   const selected = Number(row.id) === Number(selectedMovementId)
-                  const formattedNote = formatLedgerNote(row.note)
+                  const formattedNote = row.merged_purchase_link ? '' : formatLedgerNote(row.note)
                   const refLabel = row.ref_type ? `${row.ref_type}${row.ref_id ? ` #${row.ref_id}` : ''}` : ''
                   const sourceLink = ledgerSourceLink(row)
+                  const delta = Number(row.delta || 0)
+                  const tone = movementTone(delta)
                   return (
                     <tr
                       key={`row-${row.id}`}
@@ -768,9 +837,17 @@ export default function StockCardPage() {
                           ) : null}
                         </Stack>
                       </td>
-                      <td>{row.balance_before}</td>
-                      <td>{deltaChip(Number(row.delta || 0))}</td>
-                      <td>{row.balance_after}</td>
+                      <td>
+                        <Typography sx={{ color: tone, fontWeight: 800 }}>
+                          {row.balance_before}
+                        </Typography>
+                      </td>
+                      <td>{deltaChip(delta)}</td>
+                      <td>
+                        <Typography sx={{ color: tone, fontWeight: 800 }}>
+                          {row.balance_after}
+                        </Typography>
+                      </td>
                     </tr>
                   )
                 })

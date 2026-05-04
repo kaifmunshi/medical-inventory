@@ -1250,10 +1250,10 @@ export default function CashbookPage() {
                               </Link>
                             </Stack>
                           </TableCell>
-                          <TableCell align="right" sx={{ color: 'success.main', fontWeight: 700 }}>
-                            +Rs {money(sub.amount)}
+                          <TableCell align="right" sx={{ color: 'text.secondary', fontWeight: 600 }}>
+                            Rs {money(sub.amount)}
                           </TableCell>
-                          <TableCell>Receipt bill</TableCell>
+                          <TableCell sx={{ color: 'text.secondary' }}>Receipt bill</TableCell>
                           <TableCell />
                         </TableRow>
                       ))}

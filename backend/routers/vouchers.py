@@ -289,10 +289,11 @@ def daybook(
         elif deleted_filter == "deleted":
             purchase_payment_stmt = purchase_payment_stmt.where(PurchasePayment.is_deleted == True)  # noqa: E712
         for payment in session.exec(purchase_payment_stmt).all():
-            purchase = session.get(Purchase, payment.purchase_id)
-            if not purchase:
+            purchase = session.get(Purchase, payment.purchase_id) if int(payment.purchase_id or 0) > 0 else None
+            payment_party_id = int(purchase.party_id or 0) if purchase else int(getattr(payment, "party_id", 0) or 0)
+            if not payment_party_id:
                 continue
-            is_deleted = bool(payment.is_deleted) or bool(purchase.is_deleted)
+            is_deleted = bool(payment.is_deleted) or bool(getattr(purchase, "is_deleted", False))
             if deleted_filter == "active" and is_deleted:
                 continue
             if deleted_filter == "deleted" and not is_deleted:
@@ -304,12 +305,16 @@ def daybook(
                     source_type="PURCHASE_PAYMENT",
                     source_id=int(payment.id or 0),
                     voucher_no=f"PP-{payment.id}",
-                    party_name=party_map.get(int(purchase.party_id or 0)),
-                    narration=payment.note or f"Payment for purchase {purchase.invoice_number}",
+                    party_name=party_map.get(payment_party_id),
+                    narration=payment.note or (
+                        f"Payment for purchase {purchase.invoice_number}"
+                        if purchase
+                        else "Supplier payment without purchase"
+                    ),
                     amount=_round2(payment.amount),
                     cash_amount=0.0 if bool(payment.is_writeoff) else _round2(getattr(payment, "cash_amount", 0.0)),
                     online_amount=0.0 if bool(payment.is_writeoff) else _round2(getattr(payment, "online_amount", 0.0)),
-                    status="DELETED" if is_deleted else purchase.payment_status,
+                    status="DELETED" if is_deleted else (purchase.payment_status if purchase else "PAID"),
                     is_deleted=is_deleted,
                 )
             )

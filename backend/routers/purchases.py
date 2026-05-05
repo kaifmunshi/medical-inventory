@@ -45,18 +45,20 @@ class SupplierPaymentAllocationIn(SQLModel):
 
 
 class SupplierPaymentCreate(SQLModel):
+    amount: Optional[float] = None
     mode: str = "cash"
     cash_amount: float = 0.0
     online_amount: float = 0.0
     note: Optional[str] = None
     payment_date: Optional[str] = None
     is_writeoff: bool = False
-    allocations: List[SupplierPaymentAllocationIn]
+    allocations: List[SupplierPaymentAllocationIn] = []
 
 
 class PurchasePaymentBookRow(SQLModel):
     id: int
     purchase_id: int
+    party_id: int
     paid_at: str
     mode: str
     amount: float
@@ -64,8 +66,10 @@ class PurchasePaymentBookRow(SQLModel):
     online_amount: float
     note: Optional[str] = None
     invoice_number: Optional[str] = None
-    party_id: int
     supplier_name: Optional[str] = None
+    is_writeoff: bool = False
+    is_deleted: bool = False
+    deleted_at: Optional[str] = None
 
 
 STOCK_SOURCE_CREATED = "CREATED"
@@ -387,6 +391,12 @@ def make_purchase_out(session, row: Purchase) -> PurchaseOut:
         items=[PurchaseItemOut(**item.dict()) for item in items],
         payments=[PurchasePaymentOut(**payment.dict()) for payment in payments],
     )
+
+
+def make_purchase_payment_out(payment: PurchasePayment, party_id: Optional[int] = None) -> PurchasePaymentOut:
+    data = payment.dict()
+    data["party_id"] = party_id if party_id is not None else data.get("party_id")
+    return PurchasePaymentOut(**data)
 
 
 def purchase_item_total_qty(item: PurchaseItem) -> int:
@@ -735,6 +745,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
         for payment in prepared_payments:
             payment_row = PurchasePayment(
                 purchase_id=purchase.id,
+                party_id=supplier.id,
                 paid_at=payment["paid_at"],
                 mode=payment["mode"],
                 amount=payment["amount"],
@@ -800,6 +811,9 @@ def list_purchases(
 def list_purchase_payments(
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
+    party_id: Optional[int] = Query(None),
+    include_writeoffs: bool = Query(False),
+    include_deleted: bool = Query(False),
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
 ) -> List[PurchasePaymentBookRow]:
@@ -807,24 +821,44 @@ def list_purchase_payments(
     end_iso = f"{clean_date(to_date)}T23:59:59.999999" if to_date else None
 
     with get_session() as session:
-        stmt = (
-            select(PurchasePayment, Purchase)
-            .join(Purchase, Purchase.id == PurchasePayment.purchase_id)
-            .where(Purchase.is_deleted == False)  # noqa: E712
-            .where(PurchasePayment.is_deleted == False)  # noqa: E712
-            .where(PurchasePayment.is_writeoff == False)  # noqa: E712
-        )
+        stmt = select(PurchasePayment)
+        if not include_deleted:
+            stmt = stmt.where(PurchasePayment.is_deleted == False)  # noqa: E712
+        if not include_writeoffs:
+            stmt = stmt.where(PurchasePayment.is_writeoff == False)  # noqa: E712
+        if party_id is not None:
+            stmt = stmt.where(PurchasePayment.party_id == int(party_id))
         if start_iso:
             stmt = stmt.where(PurchasePayment.paid_at >= start_iso)
         if end_iso:
             stmt = stmt.where(PurchasePayment.paid_at <= end_iso)
 
-        rows = session.exec(
+        payments = session.exec(
             stmt.order_by(PurchasePayment.paid_at.desc(), PurchasePayment.id.desc())
             .offset(offset)
             .limit(limit)
         ).all()
-        party_ids = {int(purchase.party_id or 0) for _payment, purchase in rows if purchase.party_id}
+        purchase_ids = {int(payment.purchase_id or 0) for payment in payments if int(payment.purchase_id or 0) > 0}
+        purchases = (
+            session.exec(select(Purchase).where(Purchase.id.in_(purchase_ids))).all()
+            if purchase_ids
+            else []
+        )
+        purchase_map = {int(purchase.id or 0): purchase for purchase in purchases}
+
+        filtered: List[tuple[PurchasePayment, Optional[Purchase], int]] = []
+        for payment in payments:
+            purchase = purchase_map.get(int(payment.purchase_id or 0))
+            if purchase and purchase.is_deleted and not include_deleted:
+                continue
+            resolved_party_id = int(purchase.party_id or 0) if purchase else int(getattr(payment, "party_id", 0) or 0)
+            if not resolved_party_id:
+                continue
+            if party_id is not None and resolved_party_id != int(party_id):
+                continue
+            filtered.append((payment, purchase, resolved_party_id))
+
+        party_ids = {resolved_party_id for _payment, _purchase, resolved_party_id in filtered}
         parties = (
             session.exec(select(Party).where(Party.id.in_(party_ids))).all()
             if party_ids
@@ -835,18 +869,21 @@ def list_purchase_payments(
         return [
             PurchasePaymentBookRow(
                 id=int(payment.id or 0),
-                purchase_id=int(purchase.id or 0),
+                purchase_id=int(purchase.id or 0) if purchase else 0,
+                party_id=resolved_party_id,
                 paid_at=payment.paid_at,
                 mode=payment.mode,
                 amount=float(payment.amount or 0),
                 cash_amount=float(payment.cash_amount or 0),
                 online_amount=float(payment.online_amount or 0),
                 note=payment.note,
-                invoice_number=purchase.invoice_number,
-                party_id=int(purchase.party_id or 0),
-                supplier_name=party_map.get(int(purchase.party_id or 0)),
+                invoice_number=purchase.invoice_number if purchase else None,
+                supplier_name=party_map.get(resolved_party_id),
+                is_writeoff=bool(payment.is_writeoff),
+                is_deleted=bool(payment.is_deleted) or bool(getattr(purchase, "is_deleted", False)),
+                deleted_at=payment.deleted_at,
             )
-            for payment, purchase in rows
+            for payment, purchase, resolved_party_id in filtered
         ]
 
 
@@ -928,6 +965,11 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
         if "rounding_adjustment" in data:
             row.rounding_adjustment = round2(data["rounding_adjustment"])
 
+        if "party_id" in data:
+            for payment in session.exec(select(PurchasePayment).where(PurchasePayment.purchase_id == row.id)).all():
+                payment.party_id = row.party_id
+                session.add(payment)
+
         row.total_amount = round2(
             float(row.subtotal_amount or 0)
             - float(row.discount_amount or 0)
@@ -960,11 +1002,8 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
 
 @router.post("/supplier-payment/{party_id}", response_model=List[PurchaseOut])
 def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[PurchaseOut]:
-    if not payload.allocations:
-        raise HTTPException(status_code=400, detail="At least one purchase allocation is required")
-
     allocation_map: Dict[int, float] = {}
-    for allocation in payload.allocations:
+    for allocation in payload.allocations or []:
         purchase_id = int(allocation.purchase_id or 0)
         amount = round2(allocation.amount)
         if purchase_id <= 0:
@@ -974,9 +1013,15 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
         allocation_map[purchase_id] = round2(allocation_map.get(purchase_id, 0.0) + amount)
 
     allocation_total = round2(sum(allocation_map.values()))
+    payment_total = allocation_total
+    if not allocation_map:
+        if payload.amount is not None:
+            payment_total = round2(payload.amount)
+        else:
+            payment_total = round2(float(payload.cash_amount or 0) + float(payload.online_amount or 0))
     mode, total_amount, cash_amount, online_amount = normalize_payment_mode(
         payload.mode,
-        allocation_total,
+        payment_total,
         payload.cash_amount,
         payload.online_amount,
         bool(payload.is_writeoff),
@@ -992,6 +1037,45 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
     with get_session() as session:
         supplier = ensure_supplier(session, party_id)
         assert_financial_year_unlocked(session, payment_ts, context="Supplier payment")
+
+        if not allocation_map:
+            payment = PurchasePayment(
+                purchase_id=0,
+                party_id=supplier.id,
+                paid_at=payment_ts,
+                mode=mode,
+                amount=total_amount,
+                cash_amount=cash_amount,
+                online_amount=online_amount,
+                note=clean_text(payload.note),
+                is_writeoff=bool(payload.is_writeoff),
+                is_deleted=False,
+                deleted_at=None,
+            )
+            session.add(payment)
+            session.flush()
+            post_purchase_payment_voucher(
+                session,
+                None,
+                supplier,
+                int(payment.id or 0),
+                float(payment.amount or 0),
+                bool(payment.is_writeoff),
+                payment.note,
+                payment.paid_at,
+                float(payment.cash_amount or 0),
+                float(payment.online_amount or 0),
+            )
+            log_audit(
+                session,
+                entity_type="PURCHASE_PAYMENT",
+                entity_id=int(payment.id),
+                action="CREATE",
+                note=f"Added supplier payment without purchase for {supplier.name}",
+                details={"party_id": supplier.id, "amount": payment.amount, "mode": payment.mode, "is_writeoff": bool(payment.is_writeoff), "unallocated": True},
+            )
+            session.commit()
+            return []
 
         purchase_ids = list(allocation_map.keys())
         rows = session.exec(
@@ -1041,6 +1125,7 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
 
             payment = PurchasePayment(
                 purchase_id=row.id,
+                party_id=supplier.id,
                 paid_at=payment_ts,
                 mode=mode,
                 amount=amount,
@@ -1083,6 +1168,189 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
         return [make_purchase_out(session, purchases_by_id[purchase_id]) for purchase_id, _amount in allocations]
 
 
+def supplier_payment_context(session, party_id: int, payment_id: int) -> tuple[Party, PurchasePayment, Optional[Purchase]]:
+    supplier = ensure_supplier(session, party_id)
+    payment = session.get(PurchasePayment, payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    purchase = session.get(Purchase, payment.purchase_id) if int(payment.purchase_id or 0) > 0 else None
+    if purchase:
+        if purchase.is_deleted:
+            raise HTTPException(status_code=404, detail="Purchase not found")
+        if int(purchase.party_id or 0) != int(supplier.id):
+            raise HTTPException(status_code=404, detail="Payment not found")
+    elif int(getattr(payment, "party_id", 0) or 0) != int(supplier.id):
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    return supplier, payment, purchase
+
+
+@router.patch("/supplier-payment/{party_id}/payments/{payment_id}", response_model=PurchasePaymentOut)
+def update_supplier_payment(party_id: int, payment_id: int, payload: PurchasePaymentUpdate) -> PurchasePaymentOut:
+    require_min_role("MANAGER", context="Supplier payment update")
+    data = payload.dict(exclude_unset=True)
+    with get_session() as session:
+        supplier, payment, purchase = supplier_payment_context(session, party_id, payment_id)
+        if payment.is_deleted:
+            raise HTTPException(status_code=404, detail="Payment not found")
+
+        assert_financial_year_unlocked(session, payment.paid_at, context="Supplier payment update")
+        old_source_type = purchase_payment_source_type(payment)
+
+        next_paid_at = payment.paid_at
+        if "paid_at" in data:
+            clean_paid_at = clean_date(data.get("paid_at"))
+            if not clean_paid_at:
+                raise HTTPException(status_code=400, detail="paid_at is required")
+            next_paid_at = f"{clean_paid_at}T00:00:00"
+            assert_financial_year_unlocked(session, next_paid_at, context="Supplier payment update")
+
+        next_is_writeoff = bool(data.get("is_writeoff", payment.is_writeoff))
+        mode, amount, cash_amount, online_amount = normalize_payment_mode(
+            data.get("mode", payment.mode),
+            data.get("amount", payment.amount),
+            data.get("cash_amount", payment.cash_amount),
+            data.get("online_amount", payment.online_amount),
+            next_is_writeoff,
+        )
+
+        if purchase:
+            active_payments = session.exec(
+                select(PurchasePayment).where(
+                    PurchasePayment.purchase_id == purchase.id,
+                    PurchasePayment.is_deleted == False,  # noqa: E712
+                    PurchasePayment.id != payment.id,
+                )
+            ).all()
+            settled_elsewhere = round2(sum(float(p.amount or 0) for p in active_payments))
+            if settled_elsewhere + amount > float(purchase.total_amount or 0) + 0.0001:
+                raise HTTPException(status_code=400, detail="Payment exceeds outstanding amount")
+
+        payment.party_id = supplier.id
+        payment.paid_at = next_paid_at
+        payment.mode = mode
+        payment.amount = amount
+        payment.cash_amount = cash_amount
+        payment.online_amount = online_amount
+        if "note" in data:
+            payment.note = clean_text(data.get("note"))
+        payment.is_writeoff = next_is_writeoff
+        session.add(payment)
+        log_audit(
+            session,
+            entity_type="PURCHASE_PAYMENT",
+            entity_id=int(payment.id),
+            action="UPDATE",
+            note=f"Updated supplier payment #{payment.id}",
+            details={"party_id": supplier.id, "purchase_id": purchase.id if purchase else None, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
+        )
+        session.commit()
+        if purchase:
+            recompute_purchase_payment_state(session, purchase)
+        new_source_type = purchase_payment_source_type(payment)
+        if new_source_type != old_source_type:
+            mark_voucher_deleted(session, source_type=old_source_type, source_id=int(payment.id or 0))
+        post_purchase_payment_voucher(
+            session,
+            purchase,
+            supplier,
+            int(payment.id or 0),
+            float(payment.amount or 0),
+            bool(payment.is_writeoff),
+            payment.note,
+            payment.paid_at,
+            float(getattr(payment, "cash_amount", 0) or 0),
+            float(getattr(payment, "online_amount", 0) or 0),
+        )
+        session.commit()
+        session.refresh(payment)
+        return make_purchase_payment_out(payment, int(supplier.id))
+
+
+@router.delete("/supplier-payment/{party_id}/payments/{payment_id}", response_model=PurchasePaymentOut)
+def delete_supplier_payment(party_id: int, payment_id: int) -> PurchasePaymentOut:
+    require_min_role("MANAGER", context="Supplier payment delete")
+    with get_session() as session:
+        supplier, payment, purchase = supplier_payment_context(session, party_id, payment_id)
+        if payment.is_deleted:
+            raise HTTPException(status_code=404, detail="Payment not found")
+
+        assert_financial_year_unlocked(session, payment.paid_at, context="Supplier payment delete")
+        source_type = purchase_payment_source_type(payment)
+        payment.party_id = supplier.id
+        payment.is_deleted = True
+        payment.deleted_at = now_ts()
+        session.add(payment)
+        log_audit(
+            session,
+            entity_type="PURCHASE_PAYMENT",
+            entity_id=int(payment.id),
+            action="DELETE",
+            note=f"Deleted supplier payment #{payment.id}",
+            details={"party_id": supplier.id, "purchase_id": purchase.id if purchase else None, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
+        )
+        session.commit()
+        if purchase:
+            recompute_purchase_payment_state(session, purchase)
+        mark_voucher_deleted(session, source_type=source_type, source_id=int(payment.id or 0))
+        session.commit()
+        session.refresh(payment)
+        return make_purchase_payment_out(payment, int(supplier.id))
+
+
+@router.post("/supplier-payment/{party_id}/payments/{payment_id}/restore", response_model=PurchasePaymentOut)
+def restore_supplier_payment(party_id: int, payment_id: int) -> PurchasePaymentOut:
+    require_min_role("MANAGER", context="Supplier payment restore")
+    with get_session() as session:
+        supplier, payment, purchase = supplier_payment_context(session, party_id, payment_id)
+        if not payment.is_deleted:
+            raise HTTPException(status_code=400, detail="Payment is already active")
+
+        assert_financial_year_unlocked(session, payment.paid_at, context="Supplier payment restore")
+        if purchase:
+            active_payments = session.exec(
+                select(PurchasePayment).where(
+                    PurchasePayment.purchase_id == purchase.id,
+                    PurchasePayment.is_deleted == False,  # noqa: E712
+                )
+            ).all()
+            settled_active = round2(sum(float(p.amount or 0) for p in active_payments))
+            if settled_active + float(payment.amount or 0) > float(purchase.total_amount or 0) + 0.0001:
+                raise HTTPException(status_code=400, detail="Restored payment exceeds purchase total")
+
+        payment.party_id = supplier.id
+        payment.is_deleted = False
+        payment.deleted_at = None
+        session.add(payment)
+        log_audit(
+            session,
+            entity_type="PURCHASE_PAYMENT",
+            entity_id=int(payment.id),
+            action="RESTORE",
+            note=f"Restored supplier payment #{payment.id}",
+            details={"party_id": supplier.id, "purchase_id": purchase.id if purchase else None, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
+        )
+        session.commit()
+        if purchase:
+            recompute_purchase_payment_state(session, purchase)
+        post_purchase_payment_voucher(
+            session,
+            purchase,
+            supplier,
+            int(payment.id or 0),
+            float(payment.amount or 0),
+            bool(payment.is_writeoff),
+            payment.note,
+            payment.paid_at,
+            float(getattr(payment, "cash_amount", 0) or 0),
+            float(getattr(payment, "online_amount", 0) or 0),
+        )
+        session.commit()
+        session.refresh(payment)
+        return make_purchase_payment_out(payment, int(supplier.id))
+
+
 @router.post("/{purchase_id}/payments", response_model=PurchaseOut)
 def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> PurchaseOut:
     mode, amount, cash_amount, online_amount = normalize_payment_mode(
@@ -1116,6 +1384,7 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
 
         payment = PurchasePayment(
             purchase_id=row.id,
+            party_id=row.party_id,
             paid_at=paid_at,
             mode=mode,
             amount=amount,
@@ -1200,6 +1469,7 @@ def update_purchase_payment(purchase_id: int, payment_id: int, payload: Purchase
             raise HTTPException(status_code=400, detail="Payment exceeds outstanding amount")
 
         payment.paid_at = next_paid_at
+        payment.party_id = row.party_id
         payment.mode = mode
         payment.amount = amount
         payment.cash_amount = cash_amount
@@ -1253,6 +1523,7 @@ def delete_purchase_payment(purchase_id: int, payment_id: int) -> PurchaseOut:
         assert_financial_year_unlocked(session, payment.paid_at, context="Purchase payment delete")
         source_type = purchase_payment_source_type(payment)
         payment.is_deleted = True
+        payment.party_id = row.party_id
         payment.deleted_at = now_ts()
         session.add(payment)
         log_audit(
@@ -1296,6 +1567,7 @@ def restore_purchase_payment(purchase_id: int, payment_id: int) -> PurchaseOut:
             raise HTTPException(status_code=400, detail="Restored payment exceeds purchase total")
 
         payment.is_deleted = False
+        payment.party_id = row.party_id
         payment.deleted_at = None
         session.add(payment)
         log_audit(
@@ -1666,8 +1938,21 @@ def supplier_summary(party_id: int) -> SupplierLedgerSummary:
             select(Purchase).where(Purchase.party_id == party_id, Purchase.is_deleted == False)  # noqa: E712
         ).all()
         total_purchases = round2(sum(float(row.total_amount or 0) for row in rows))
-        total_paid = round2(sum(float(row.paid_amount or 0) for row in rows))
-        total_writeoff = round2(sum(float(row.writeoff_amount or 0) for row in rows))
+        payments = session.exec(
+            select(PurchasePayment).where(
+                PurchasePayment.party_id == party_id,
+                PurchasePayment.is_deleted == False,  # noqa: E712
+            )
+        ).all()
+        active_payments: List[PurchasePayment] = []
+        for payment in payments:
+            if int(payment.purchase_id or 0) > 0:
+                purchase = session.get(Purchase, payment.purchase_id)
+                if not purchase or purchase.is_deleted:
+                    continue
+            active_payments.append(payment)
+        total_paid = round2(sum(float(row.amount or 0) for row in active_payments if not bool(row.is_writeoff)))
+        total_writeoff = round2(sum(float(row.amount or 0) for row in active_payments if bool(row.is_writeoff)))
         outstanding = round2(total_purchases - total_paid - total_writeoff)
         return SupplierLedgerSummary(
             party_id=party_id,

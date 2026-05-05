@@ -838,6 +838,7 @@ def migrate_db():
             CREATE TABLE IF NOT EXISTS purchasepayment (
                 id INTEGER PRIMARY KEY,
                 purchase_id INTEGER NOT NULL,
+                party_id INTEGER,
                 paid_at TEXT NOT NULL,
                 mode TEXT NOT NULL DEFAULT 'cash',
                 amount REAL NOT NULL DEFAULT 0,
@@ -851,6 +852,8 @@ def migrate_db():
         """))
         purchase_payment_cols = session.exec(text("PRAGMA table_info(purchasepayment)")).all()
         purchase_payment_col_names = {c[1] for c in purchase_payment_cols}
+        if "party_id" not in purchase_payment_col_names:
+            session.exec(text("ALTER TABLE purchasepayment ADD COLUMN party_id INTEGER"))
         if "mode" not in purchase_payment_col_names:
             session.exec(text("ALTER TABLE purchasepayment ADD COLUMN mode TEXT NOT NULL DEFAULT 'cash'"))
         if "cash_amount" not in purchase_payment_col_names:
@@ -870,6 +873,16 @@ def migrate_db():
               AND COALESCE(cash_amount, 0) = 0
               AND COALESCE(online_amount, 0) = 0
         """))
+        session.exec(text("""
+            UPDATE purchasepayment
+            SET party_id = (
+                SELECT purchase.party_id
+                FROM purchase
+                WHERE purchase.id = purchasepayment.purchase_id
+            )
+            WHERE party_id IS NULL
+              AND COALESCE(purchase_id, 0) > 0
+        """))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchase_party_id ON purchase (party_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchase_invoice_number ON purchase (invoice_number)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchase_payment_status ON purchase (payment_status)"))
@@ -880,6 +893,7 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchaseitem_lot_id ON purchaseitem (lot_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchaseitem_stock_source ON purchaseitem (stock_source)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_purchase_id ON purchasepayment (purchase_id)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_party_id ON purchasepayment (party_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_paid_at ON purchasepayment (paid_at)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_mode ON purchasepayment (mode)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_is_writeoff ON purchasepayment (is_writeoff)"))

@@ -93,8 +93,6 @@ def _sum_bill_cash(session, *, start_iso: Optional[str] = None, end_iso: Optiona
 def _sum_purchase_cash_out(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
     stmt = (
         select(PurchasePayment)
-        .join(Purchase, Purchase.id == PurchasePayment.purchase_id)
-        .where(Purchase.is_deleted == False)  # noqa: E712
         .where(PurchasePayment.is_deleted == False)  # noqa: E712
         .where(PurchasePayment.is_writeoff == False)  # noqa: E712
     )
@@ -105,6 +103,10 @@ def _sum_purchase_cash_out(session, *, start_iso: Optional[str] = None, end_iso:
     rows = session.exec(stmt).all()
     total = 0.0
     for payment in rows:
+        if int(getattr(payment, "purchase_id", 0) or 0) > 0:
+            purchase = session.get(Purchase, payment.purchase_id)
+            if not purchase or purchase.is_deleted:
+                continue
         total += float(getattr(payment, "cash_amount", 0) or 0)
     return round(total, 2)
 

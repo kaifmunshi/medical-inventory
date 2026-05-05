@@ -306,7 +306,7 @@ def post_purchase_voucher(session, purchase: Purchase, party: Party) -> Voucher:
 
 def post_purchase_payment_voucher(
     session,
-    purchase: Purchase,
+    purchase: Optional[Purchase],
     party: Party,
     payment_id: int,
     amount: float,
@@ -349,7 +349,11 @@ def post_purchase_payment_voucher(
         source_id=int(payment_id),
         voucher_date=str(paid_at or "")[:10],
         voucher_no=voucher_no,
-        narration=note or f"Purchase settlement for {purchase.invoice_number}",
+        narration=note or (
+            f"Purchase settlement for {purchase.invoice_number}"
+            if purchase
+            else f"Supplier payment to {party.name}"
+        ),
         total_amount=total,
         lines=lines,
     )
@@ -455,10 +459,9 @@ def sync_existing_vouchers(session) -> None:
             mark_voucher_deleted(session, source_type="PURCHASE", source_id=int(purchase.id or 0))
 
     for payment in session.exec(select(PurchasePayment)).all():
-        purchase = session.get(Purchase, payment.purchase_id)
-        if not purchase:
-            continue
-        party = party_map.get(int(purchase.party_id or 0))
+        purchase = session.get(Purchase, payment.purchase_id) if int(payment.purchase_id or 0) > 0 else None
+        party_id = int(purchase.party_id or 0) if purchase else int(getattr(payment, "party_id", 0) or 0)
+        party = party_map.get(party_id)
         if not party:
             continue
         post_purchase_payment_voucher(

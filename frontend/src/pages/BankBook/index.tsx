@@ -198,10 +198,10 @@ function buildOnlineReceiptRows(payments: any[]) {
 }
 
 function purchasePaymentNote(payment: any) {
-  const invoice = payment?.invoice_number ? ` ${payment.invoice_number}` : ` #${payment?.purchase_id || ''}`
+  const invoice = payment?.invoice_number ? ` ${payment.invoice_number}` : payment?.purchase_id ? ` #${payment.purchase_id}` : ' without bill'
   const supplier = payment?.supplier_name ? ` - ${payment.supplier_name}` : ''
   const note = payment?.note ? ` (${payment.note})` : ''
-  return `Online supplier payment for purchase${invoice}${supplier}${note}`
+  return `Online supplier payment${payment?.purchase_id ? ' for purchase' : ''}${invoice}${supplier}${note}`
 }
 
 function buildPurchaseOnlineRows(payments: any[]) {

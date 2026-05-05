@@ -208,10 +208,10 @@ function buildReceiptPaymentRows(payments: any[], amountField: 'cash_amount' | '
 }
 
 function purchasePaymentNote(payment: any, label: 'Cash' | 'Online') {
-  const invoice = payment?.invoice_number ? ` ${payment.invoice_number}` : ` #${payment?.purchase_id || ''}`
+  const invoice = payment?.invoice_number ? ` ${payment.invoice_number}` : payment?.purchase_id ? ` #${payment.purchase_id}` : ' without bill'
   const supplier = payment?.supplier_name ? ` - ${payment.supplier_name}` : ''
   const note = payment?.note ? ` (${payment.note})` : ''
-  return `${label} supplier payment for purchase${invoice}${supplier}${note}`
+  return `${label} supplier payment${payment?.purchase_id ? ' for purchase' : ''}${invoice}${supplier}${note}`
 }
 
 function buildPurchaseCashRows(payments: any[]) {

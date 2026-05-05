@@ -209,6 +209,7 @@ export interface PurchaseItem {
 export interface PurchasePayment {
   id: ID
   purchase_id: ID
+  party_id?: ID | null
   paid_at: string
   mode: 'cash' | 'online' | 'split' | 'writeoff'
   amount: number

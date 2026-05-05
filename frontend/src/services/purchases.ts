@@ -38,6 +38,7 @@ export type PurchasePaymentUpdatePayload = Partial<PurchasePaymentCreatePayload>
 export interface PurchasePaymentBookRow {
   id: number
   purchase_id: number
+  party_id: number
   paid_at: string
   mode: 'cash' | 'online' | 'split' | 'writeoff'
   amount: number
@@ -45,11 +46,14 @@ export interface PurchasePaymentBookRow {
   online_amount: number
   note?: string | null
   invoice_number?: string | null
-  party_id: number
   supplier_name?: string | null
+  is_writeoff?: boolean
+  is_deleted?: boolean
+  deleted_at?: string | null
 }
 
 export interface SupplierPaymentCreatePayload {
+  amount?: number
   mode: 'cash' | 'online' | 'split'
   cash_amount?: number
   online_amount?: number
@@ -83,6 +87,9 @@ export async function fetchPurchase(id: number): Promise<Purchase> {
 export async function listPurchasePayments(params?: {
   from_date?: string
   to_date?: string
+  party_id?: number
+  include_writeoffs?: boolean
+  include_deleted?: boolean
   limit?: number
   offset?: number
 }): Promise<PurchasePaymentBookRow[]> {
@@ -121,6 +128,25 @@ export async function restorePurchasePayment(id: number, paymentId: number): Pro
 
 export async function addSupplierPayment(id: number, payload: SupplierPaymentCreatePayload): Promise<Purchase[]> {
   const res = await api.post<Purchase[]>(`/purchases/supplier-payment/${id}`, payload)
+  return res.data
+}
+
+export async function updateSupplierPayment(
+  id: number,
+  paymentId: number,
+  payload: PurchasePaymentUpdatePayload,
+): Promise<PurchasePaymentBookRow> {
+  const res = await api.patch<PurchasePaymentBookRow>(`/purchases/supplier-payment/${id}/payments/${paymentId}`, payload)
+  return res.data
+}
+
+export async function deleteSupplierPayment(id: number, paymentId: number): Promise<PurchasePaymentBookRow> {
+  const res = await api.delete<PurchasePaymentBookRow>(`/purchases/supplier-payment/${id}/payments/${paymentId}`)
+  return res.data
+}
+
+export async function restoreSupplierPayment(id: number, paymentId: number): Promise<PurchasePaymentBookRow> {
+  const res = await api.post<PurchasePaymentBookRow>(`/purchases/supplier-payment/${id}/payments/${paymentId}/restore`)
   return res.data
 }
 

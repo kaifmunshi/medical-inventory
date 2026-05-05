@@ -754,6 +754,7 @@ class PurchaseItem(SQLModel, table=True):
 class PurchasePayment(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     purchase_id: int = Field(index=True)
+    party_id: Optional[int] = Field(default=None, index=True)
     paid_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"), index=True)
     mode: str = Field(default="cash", index=True)
     amount: float = 0.0
@@ -1049,6 +1050,7 @@ class PurchaseItemOut(SQLModel):
 class PurchasePaymentOut(SQLModel):
     id: int
     purchase_id: int
+    party_id: Optional[int] = None
     paid_at: str
     mode: str = "cash"
     amount: float

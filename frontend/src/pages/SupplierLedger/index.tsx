@@ -38,6 +38,7 @@ import {
   restoreSupplierPayment,
   updatePurchase,
   updateSupplierPayment,
+  type PurchaseBankMode,
   type PurchasePaymentBookRow,
 } from '../../services/purchases'
 import type { Category, Party, Product, Purchase, PurchaseItemPayload, PurchasePayment } from '../../lib/types'
@@ -47,6 +48,13 @@ import { useToast } from '../../components/ui/Toaster'
 type DraftItem = PurchaseItemPayload & { key: string; existing_stock_movement_id?: number }
 
 const EXISTING_INVENTORY_FROM_DATE = '2026-04-01'
+const bankModeOptions: Array<{ value: PurchaseBankMode; label: string }> = [
+  { value: 'UPI', label: 'UPI' },
+  { value: 'NEFT', label: 'NEFT' },
+  { value: 'RTGS', label: 'RTGS' },
+  { value: 'IMPS', label: 'IMPS' },
+  { value: 'BANK_DEPOSIT', label: 'Bank Deposit' },
+]
 
 function makeEmptyItem(): DraftItem {
   return {
@@ -113,6 +121,10 @@ function paymentModeLabel(mode?: string | null) {
   if (raw === 'split') return 'Split'
   if (raw === 'writeoff') return 'Write-off'
   return 'Cash'
+}
+
+function bankModeLabel(mode?: string | null) {
+  return bankModeOptions.find((option) => option.value === mode)?.label || 'UPI'
 }
 
 function lineGrossTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price'>) {
@@ -187,12 +199,16 @@ export default function SupplierLedgerPage() {
   const [paymentAmount, setPaymentAmount] = useState('0')
   const [paymentCash, setPaymentCash] = useState('0')
   const [paymentOnline, setPaymentOnline] = useState('0')
+  const [paymentBankMode, setPaymentBankMode] = useState<PurchaseBankMode>('UPI')
+  const [paymentTransactionId, setPaymentTransactionId] = useState('')
+  const [paymentTxnCharges, setPaymentTxnCharges] = useState('0')
   const [paymentDate, setPaymentDate] = useState(today)
   const [paymentNote, setPaymentNote] = useState('')
   const [allocationDrafts, setAllocationDrafts] = useState<Record<number, string>>({})
   const [editingPayment, setEditingPayment] = useState<PurchasePaymentBookRow | PurchasePayment | null>(null)
   const [deletePaymentTarget, setDeletePaymentTarget] = useState<PurchasePaymentBookRow | PurchasePayment | null>(null)
   const [selectedPurchaseId, setSelectedPurchaseId] = useState<number | null>(null)
+  const [highlightedPaymentId, setHighlightedPaymentId] = useState<number | null>(null)
   const [editHeaderOpen, setEditHeaderOpen] = useState(false)
   const [editItemsOpen, setEditItemsOpen] = useState(false)
   const [editPartyId, setEditPartyId] = useState<number | null>(null)
@@ -307,6 +323,9 @@ export default function SupplierLedgerPage() {
       const isWriteoff = Boolean(payment.is_writeoff)
       const isDeleted = Boolean(payment.is_deleted)
       const purchaseLabel = purchase?.invoice_number || payment.invoice_number || (payment.purchase_id ? `#${payment.purchase_id}` : '')
+      const bankDetail = !isWriteoff && Number(payment.online_amount || 0) > 0
+        ? ` / ${bankModeLabel(payment.bank_mode || 'UPI')}${payment.transaction_id ? ` / Txn ${payment.transaction_id}` : ''}${Number(payment.txn_charges || 0) > 0 ? ` / Charges Rs ${money(payment.txn_charges)}` : ''}`
+        : ''
       return {
         id: `payment-${payment.id}`,
         sortTs: payment.paid_at || `${today}T00:00:00`,
@@ -322,7 +341,7 @@ export default function SupplierLedgerPage() {
         purchaseAmount: 0,
         paidAmount: isWriteoff ? 0 : Number(payment.amount || 0),
         writeoffAmount: isWriteoff ? Number(payment.amount || 0) : 0,
-        mode: paymentModeLabel(payment.mode),
+        mode: `${paymentModeLabel(payment.mode)}${bankDetail}`,
         note: payment.note || '',
       }
     })
@@ -403,6 +422,8 @@ export default function SupplierLedgerPage() {
     : paymentMode === 'online'
         ? supplierPaymentBaseTotal
         : Number(paymentOnline || 0)
+  const supplierPaymentTxnCharges =
+    paymentType === 'payment' && supplierPaymentOnline > 0 ? Number(paymentTxnCharges || 0) : 0
   const splitPaymentInvalid =
     paymentType === 'payment' &&
     paymentMode === 'split' &&
@@ -410,6 +431,9 @@ export default function SupplierLedgerPage() {
       Number.isNaN(supplierPaymentOnline) ||
       supplierPaymentCash < 0 ||
       supplierPaymentOnline < 0)
+  const bankChargeInvalid =
+    paymentType === 'payment' &&
+    (Number.isNaN(supplierPaymentTxnCharges) || supplierPaymentTxnCharges < 0)
   const supplierPaymentTotal =
     paymentType === 'writeoff' || paymentMode !== 'split'
       ? supplierPaymentBaseTotal
@@ -420,6 +444,7 @@ export default function SupplierLedgerPage() {
     supplierPaymentBaseTotal > 0 &&
     (paymentUsesAmountField || !hasAllocationIssues) &&
     !splitPaymentInvalid &&
+    !bankChargeInvalid &&
     (paymentType === 'writeoff' || Math.abs(allocationDifference) <= 0.01)
 
   useEffect(() => {
@@ -445,13 +470,27 @@ export default function SupplierLedgerPage() {
     }
   }, [paymentMode, paymentOpen, paymentType, supplierPaymentBaseTotal])
 
+  useEffect(() => {
+    if (!paymentOpen || paymentType !== 'payment' || supplierPaymentOnline > 0) return
+    setPaymentTxnCharges((prev) => (prev === '0' ? prev : '0'))
+    setPaymentTransactionId((prev) => (prev === '' ? prev : ''))
+  }, [paymentOpen, paymentType, supplierPaymentOnline])
+
+  useEffect(() => {
+    if (!paymentOpen || paymentBankMode === 'UPI') return
+    setPaymentTransactionId((prev) => (prev === '' ? prev : ''))
+  }, [paymentBankMode, paymentOpen])
+
   const addPaymentM = useMutation({
     mutationFn: () =>
       addSupplierPayment(Number(partyId), {
         amount: supplierPaymentBaseTotal,
         mode: paymentMode,
+        bank_mode: supplierPaymentOnline > 0 ? paymentBankMode : undefined,
+        transaction_id: supplierPaymentOnline > 0 && paymentBankMode === 'UPI' ? paymentTransactionId.trim() || undefined : undefined,
         cash_amount: supplierPaymentCash,
         online_amount: supplierPaymentOnline,
+        txn_charges: supplierPaymentTxnCharges,
         payment_date: paymentDate,
         note: paymentNote.trim() || undefined,
         is_writeoff: paymentType === 'writeoff',
@@ -470,6 +509,8 @@ export default function SupplierLedgerPage() {
       setPaymentAmount('0')
       setPaymentCash('0')
       setPaymentOnline('0')
+      setPaymentBankMode('UPI')
+      setPaymentTxnCharges('0')
       setPaymentDate(today)
       setPaymentNote('')
       setAllocationDrafts({})
@@ -622,6 +663,9 @@ export default function SupplierLedgerPage() {
     setPaymentAmount(targetAmount)
     setPaymentCash(targetAmount)
     setPaymentOnline('0')
+    setPaymentBankMode('UPI')
+    setPaymentTransactionId('')
+    setPaymentTxnCharges('0')
     setPaymentDate(today)
     setPaymentNote('')
     setAllocationDrafts(
@@ -644,6 +688,9 @@ export default function SupplierLedgerPage() {
     setPaymentAmount('0')
     setPaymentCash('0')
     setPaymentOnline('0')
+    setPaymentBankMode('UPI')
+    setPaymentTransactionId('')
+    setPaymentTxnCharges('0')
     setPaymentDate(today)
     setPaymentNote('')
     setAllocationDrafts({})
@@ -657,10 +704,19 @@ export default function SupplierLedgerPage() {
     setPaymentAmount(String(Number(payment.amount || 0)))
     setPaymentCash(String(Number(payment.cash_amount || 0)))
     setPaymentOnline(String(Number(payment.online_amount || 0)))
+    setPaymentBankMode((payment.bank_mode || 'UPI') as PurchaseBankMode)
+    setPaymentTransactionId(payment.transaction_id || '')
+    setPaymentTxnCharges(String(Number(payment.txn_charges || 0)))
     setPaymentDate(String(payment.paid_at || '').slice(0, 10) || today)
     setPaymentNote(payment.note || '')
     setAllocationDrafts({})
     setPaymentOpen(true)
+  }
+
+  function openPaymentInBill(purchaseId: number, paymentId: number) {
+    if (!purchaseId) return
+    setSelectedPurchaseId(purchaseId)
+    setHighlightedPaymentId(paymentId)
   }
 
   function savePayment() {
@@ -672,8 +728,11 @@ export default function SupplierLedgerPage() {
         payload: {
           amount: supplierPaymentBaseTotal,
           mode: paymentMode,
+          bank_mode: supplierPaymentOnline > 0 ? paymentBankMode : undefined,
+          transaction_id: supplierPaymentOnline > 0 && paymentBankMode === 'UPI' ? paymentTransactionId.trim() || undefined : undefined,
           cash_amount: supplierPaymentCash,
           online_amount: supplierPaymentOnline,
+          txn_charges: supplierPaymentTxnCharges,
           paid_at: paymentDate,
           note: paymentNote.trim() || undefined,
           is_writeoff: paymentType === 'writeoff',
@@ -694,6 +753,8 @@ export default function SupplierLedgerPage() {
     if (next === 'cash') {
       setPaymentCash(total)
       setPaymentOnline('0')
+      setPaymentTransactionId('')
+      setPaymentTxnCharges('0')
     }
     if (next === 'online') {
       setPaymentCash('0')
@@ -1209,7 +1270,14 @@ export default function SupplierLedgerPage() {
                           <Link
                             component="button"
                             underline="hover"
-                            onClick={() => setSelectedPurchaseId(Number(row.purchaseId))}
+                            onClick={() => {
+                              if (row.paymentId) {
+                                openPaymentInBill(Number(row.purchaseId), Number(row.paymentId))
+                              } else {
+                                setHighlightedPaymentId(null)
+                                setSelectedPurchaseId(Number(row.purchaseId))
+                              }
+                            }}
                             sx={{ fontWeight: 800, textAlign: 'left' }}
                           >
                             {row.particulars}
@@ -1219,7 +1287,19 @@ export default function SupplierLedgerPage() {
                         )}
                         <Typography variant="caption" color="text.secondary">
                           {Number(row.purchaseId || 0) > 0 ? `Purchase #${row.purchaseId}` : 'No bill'}
-                          {row.paymentId ? ` | Payment #${row.paymentId}` : ''}
+                          {row.paymentId && Number(row.purchaseId || 0) > 0 ? (
+                            <>
+                              {' | '}
+                              <Link
+                                component="button"
+                                underline="hover"
+                                onClick={() => openPaymentInBill(Number(row.purchaseId), Number(row.paymentId))}
+                                sx={{ fontSize: 'inherit', verticalAlign: 'baseline' }}
+                              >
+                                Payment #{row.paymentId}
+                              </Link>
+                            </>
+                          ) : row.paymentId ? ` | Payment #${row.paymentId}` : ''}
                           {row.mode ? ` | ${row.mode}` : ''}
                           {row.isDeleted ? ' | Deleted' : ''}
                         </Typography>
@@ -1239,16 +1319,36 @@ export default function SupplierLedgerPage() {
 	                      ) : payment ? (
 	                        <Stack direction="row" gap={1}>
 	                          {payment.is_deleted ? (
-	                            <Button
-	                              size="small"
-	                              variant="outlined"
-	                              disabled={!partyId || restorePaymentM.isPending}
-	                              onClick={() => restorePaymentM.mutate({ supplierId: Number(partyId), paymentId: Number(payment.id) })}
-	                            >
-	                              Restore
-	                            </Button>
+                              <>
+                                {Number(payment.purchase_id || 0) > 0 ? (
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    onClick={() => openPaymentInBill(Number(payment.purchase_id), Number(payment.id))}
+                                  >
+                                    View
+                                  </Button>
+                                ) : null}
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  disabled={!partyId || restorePaymentM.isPending}
+                                  onClick={() => restorePaymentM.mutate({ supplierId: Number(partyId), paymentId: Number(payment.id) })}
+                                >
+                                  Restore
+                                </Button>
+                              </>
 	                          ) : (
 	                            <>
+                                {Number(payment.purchase_id || 0) > 0 ? (
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    onClick={() => openPaymentInBill(Number(payment.purchase_id), Number(payment.id))}
+                                  >
+                                    View
+                                  </Button>
+                                ) : null}
 	                              <Button size="small" variant="outlined" onClick={() => openEditPayment(payment)}>
 	                                Edit
 	                              </Button>
@@ -1292,6 +1392,8 @@ export default function SupplierLedgerPage() {
 	                  if (next === 'writeoff') {
 	                    setPaymentCash('0')
 	                    setPaymentOnline('0')
+	                    setPaymentTransactionId('')
+	                    setPaymentTxnCharges('0')
 	                  } else {
 	                    setPaymentMode('cash')
 	                  }
@@ -1381,7 +1483,10 @@ export default function SupplierLedgerPage() {
                             <Link
                               component="button"
                               underline="hover"
-                              onClick={() => setSelectedPurchaseId(Number(purchase.id))}
+                              onClick={() => {
+                                setHighlightedPaymentId(null)
+                                setSelectedPurchaseId(Number(purchase.id))
+                              }}
                               sx={{ fontWeight: 700 }}
                             >
                               {purchase.invoice_number || `#${purchase.id}`}
@@ -1444,12 +1549,55 @@ export default function SupplierLedgerPage() {
 	              </Stack>
 	            ) : null}
 
+            {paymentType === 'payment' && supplierPaymentOnline > 0 ? (
+              <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+                <TextField
+                  select
+                  label="Bank Mode"
+                  value={paymentBankMode}
+                  onChange={(e) => setPaymentBankMode(e.target.value as PurchaseBankMode)}
+                  fullWidth
+                >
+                  {bankModeOptions.map((option) => (
+                    <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                  ))}
+                </TextField>
+                {paymentBankMode === 'UPI' ? (
+                  <TextField
+                    label="Transaction ID"
+                    value={paymentTransactionId}
+                    onChange={(e) => setPaymentTransactionId(e.target.value)}
+                    fullWidth
+                  />
+                ) : null}
+                <TextField
+                  label="Bank Charges"
+                  type="number"
+                  value={paymentTxnCharges}
+                  onChange={(e) => setPaymentTxnCharges(e.target.value)}
+                  inputProps={{ min: 0, step: '0.01' }}
+                  error={bankChargeInvalid}
+                  helperText="Posted as Bank Charges (Expense)"
+                  fullWidth
+                />
+              </Stack>
+            ) : null}
+
 		            <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
 		              <Typography>{paymentUsesAmountField ? 'Payment Amount' : 'Applied Total'}: {money(supplierPaymentBaseTotal)}</Typography>
 	              {paymentType === 'payment' ? (
 	                <>
 	                  <Typography>Cash: {money(supplierPaymentCash)}</Typography>
 	                  <Typography>Online: {money(supplierPaymentOnline)}</Typography>
+                    {supplierPaymentOnline > 0 ? (
+                      <>
+                        <Typography>Bank: {bankModeLabel(paymentBankMode)}</Typography>
+                        {paymentBankMode === 'UPI' && paymentTransactionId.trim() ? (
+                          <Typography>Txn: {paymentTransactionId.trim()}</Typography>
+                        ) : null}
+                        <Typography>Charges: {money(supplierPaymentTxnCharges)}</Typography>
+                      </>
+                    ) : null}
 	                </>
 	              ) : null}
 	              {paymentMode === 'split' ? (
@@ -1482,6 +1630,7 @@ export default function SupplierLedgerPage() {
             <Typography variant="body2" color="text.secondary">
               Amount {money(Number(deletePaymentTarget?.amount || 0))}
               {(deletePaymentTarget as any)?.purchase_id ? ` | Purchase #${(deletePaymentTarget as any).purchase_id}` : ' | No bill'}
+              {Number((deletePaymentTarget as any)?.txn_charges || 0) > 0 ? ` | Charges ${money((deletePaymentTarget as any).txn_charges)}` : ''}
             </Typography>
           </Stack>
         </DialogContent>
@@ -1504,7 +1653,15 @@ export default function SupplierLedgerPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={Boolean(selectedPurchaseId)} onClose={() => setSelectedPurchaseId(null)} fullWidth maxWidth="lg">
+      <Dialog
+        open={Boolean(selectedPurchaseId)}
+        onClose={() => {
+          setSelectedPurchaseId(null)
+          setHighlightedPaymentId(null)
+        }}
+        fullWidth
+        maxWidth="lg"
+      >
         <DialogTitle>Purchase Detail {selectedPurchase?.invoice_number ? `- ${selectedPurchase.invoice_number}` : ''}</DialogTitle>
         <DialogContent dividers>
           {!selectedPurchase ? (
@@ -1588,6 +1745,9 @@ export default function SupplierLedgerPage() {
                       <th>Mode</th>
                       <th>Cash</th>
                       <th>Online</th>
+                      <th>Bank</th>
+                      <th>Txn ID</th>
+                      <th>Charges</th>
                       <th>Amount</th>
                       <th>Note</th>
                       <th>Status</th>
@@ -1596,12 +1756,21 @@ export default function SupplierLedgerPage() {
                   </thead>
                   <tbody>
                     {(selectedPurchase.payments || []).map((payment) => (
-                      <tr key={payment.id} style={{ opacity: payment.is_deleted ? 0.6 : 1 }}>
+                      <tr
+                        key={payment.id}
+                        style={{
+                          opacity: payment.is_deleted ? 0.6 : 1,
+                          backgroundColor: Number(highlightedPaymentId || 0) === Number(payment.id) ? '#fff8e1' : undefined,
+                        }}
+                      >
                         <td>{dateOnly(payment.paid_at)}</td>
-                        <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
+                        <td>{payment.is_writeoff ? `Write-off #${payment.id}` : `Payment #${payment.id}`}</td>
                         <td>{paymentModeLabel(payment.mode)}</td>
                         <td>{payment.is_writeoff ? '-' : money(payment.cash_amount)}</td>
                         <td>{payment.is_writeoff ? '-' : money(payment.online_amount)}</td>
+                        <td>{!payment.is_writeoff && Number(payment.online_amount || 0) > 0 ? bankModeLabel(payment.bank_mode || 'UPI') : '-'}</td>
+                        <td>{!payment.is_writeoff && payment.transaction_id ? payment.transaction_id : '-'}</td>
+                        <td>{!payment.is_writeoff && Number(payment.txn_charges || 0) > 0 ? money(payment.txn_charges) : '-'}</td>
                         <td>{money(payment.amount)}</td>
                         <td>{payment.note || '-'}</td>
                         <td>{payment.is_deleted ? <Chip size="small" label="Deleted" /> : <Chip size="small" color="success" variant="outlined" label="Active" />}</td>
@@ -1630,7 +1799,7 @@ export default function SupplierLedgerPage() {
                     ))}
                     {(selectedPurchase.payments || []).length === 0 && (
                       <tr>
-                        <td colSpan={9}>
+                        <td colSpan={12}>
                           <Box p={2} color="text.secondary">No payments yet.</Box>
                         </td>
                       </tr>
@@ -1642,7 +1811,10 @@ export default function SupplierLedgerPage() {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setSelectedPurchaseId(null)}>Close</Button>
+          <Button onClick={() => {
+            setSelectedPurchaseId(null)
+            setHighlightedPaymentId(null)
+          }}>Close</Button>
         </DialogActions>
       </Dialog>
 

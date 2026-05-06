@@ -34,7 +34,7 @@ import { getBill, listBills, listPayments } from '../../services/billing'
 import { listReturns } from '../../services/returns'
 import { listCashbookEntries, updateCashbookEntry, type CashbookType } from '../../services/cashbook'
 import { listBankbookEntries, updateBankbookEntry, type BankbookMode, type BankbookType } from '../../services/bankbook'
-import { fetchPurchases } from '../../services/purchases'
+import { fetchPurchases, listPurchasePayments } from '../../services/purchases'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 
 type DayRow = {
@@ -284,13 +284,20 @@ export default function SalesBookPage() {
     enabled: validRange,
   })
 
+  const qPurchasePayments = useQuery({
+    queryKey: ['sales-book-purchase-payments', from, to],
+    queryFn: () => listPurchasePayments({ from_date: from, to_date: to, limit: 2000 }),
+    enabled: validRange,
+  })
+
   const loading =
     qBills.isLoading ||
     qPayments.isLoading ||
     qReturns.isLoading ||
     qCashbook.isLoading ||
     qBankbook.isLoading ||
-    qPurchases.isLoading
+    qPurchases.isLoading ||
+    qPurchasePayments.isLoading
 
   const rows = useMemo(() => {
     if (!validRange) return [] as DayRow[]
@@ -357,6 +364,15 @@ export default function SalesBookPage() {
       bankbookMap.set(d, prev)
     }
 
+    for (const pmt of (qPurchasePayments.data || []) as any[]) {
+      const d = String(pmt?.paid_at || '').slice(0, 10)
+      const charges = Number(pmt?.txn_charges || 0)
+      if (!d || charges <= 0 || Number(pmt?.online_amount || 0) <= 0) continue
+      const prev = bankbookMap.get(d) || { expenses: 0, withdrawals: 0 }
+      prev.expenses += charges
+      bankbookMap.set(d, prev)
+    }
+
     const out: DayRow[] = []
     for (let d = from; d <= to; d = addDaysYmd(d, 1)) {
       const b = billsMap.get(d) || { billed: 0, credit: 0 }
@@ -390,7 +406,7 @@ export default function SalesBookPage() {
       })
     }
     return out
-  }, [validRange, from, to, qBills.data, qPayments.data, qReturns.data, qCashbook.data, qBankbook.data, qPurchases.data])
+  }, [validRange, from, to, qBills.data, qPayments.data, qReturns.data, qCashbook.data, qBankbook.data, qPurchases.data, qPurchasePayments.data])
 
   const displayRows = useMemo(() => {
     if (viewMode === 'daily') {

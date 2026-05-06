@@ -1,6 +1,6 @@
 import api from './api'
 
-export type BankbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE' | 'OPENING' | 'CONTRA'
+export type BankbookType = 'RECEIPT' | 'DEPOSIT' | 'DEPOSITS' | 'WITHDRAWAL' | 'WITHDRAWALS' | 'EXPENSE' | 'OPENING' | 'CONTRA'
 export type BankbookMode = 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | 'BANK_DEPOSIT' | 'OPENING'
 
 export type BankbookCreate = {

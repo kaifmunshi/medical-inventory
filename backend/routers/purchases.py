@@ -47,8 +47,11 @@ class SupplierPaymentAllocationIn(SQLModel):
 class SupplierPaymentCreate(SQLModel):
     amount: Optional[float] = None
     mode: str = "cash"
+    bank_mode: Optional[str] = None
+    transaction_id: Optional[str] = None
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    txn_charges: float = 0.0
     note: Optional[str] = None
     payment_date: Optional[str] = None
     is_writeoff: bool = False
@@ -61,9 +64,12 @@ class PurchasePaymentBookRow(SQLModel):
     party_id: int
     paid_at: str
     mode: str
+    bank_mode: Optional[str] = None
+    transaction_id: Optional[str] = None
     amount: float
     cash_amount: float
     online_amount: float
+    txn_charges: float = 0.0
     note: Optional[str] = None
     invoice_number: Optional[str] = None
     supplier_name: Optional[str] = None
@@ -74,6 +80,7 @@ class PurchasePaymentBookRow(SQLModel):
 
 STOCK_SOURCE_CREATED = "CREATED"
 STOCK_SOURCE_ATTACHED = "ATTACHED"
+VALID_BANK_MODES = {"UPI", "NEFT", "RTGS", "IMPS", "BANK_DEPOSIT"}
 
 
 def now_ts() -> str:
@@ -135,6 +142,29 @@ def normalize_payment_mode(mode: Optional[str], amount: float, cash_amount: floa
         raise HTTPException(status_code=400, detail="cash_amount + online_amount must equal amount")
 
     return normalized, total, cash, online
+
+
+def normalize_purchase_bank_details(
+    *,
+    is_writeoff: bool,
+    online_amount: float,
+    bank_mode: Optional[str],
+    transaction_id: Optional[str],
+    txn_charges: Optional[float],
+) -> tuple[Optional[str], Optional[str], float]:
+    charges = round2(txn_charges or 0)
+    if charges < 0:
+        raise HTTPException(status_code=400, detail="txn_charges cannot be negative")
+    if is_writeoff or round2(online_amount) <= 0:
+        if charges > 0:
+            raise HTTPException(status_code=400, detail="txn_charges require an online/bank amount")
+        return None, None, 0.0
+
+    normalized_bank_mode = str(bank_mode or "UPI").strip().upper()
+    if normalized_bank_mode not in VALID_BANK_MODES:
+        raise HTTPException(status_code=400, detail="bank_mode must be UPI, NEFT, RTGS, IMPS or BANK_DEPOSIT")
+    normalized_transaction_id = clean_text(transaction_id) if normalized_bank_mode == "UPI" else None
+    return normalized_bank_mode, normalized_transaction_id, charges
 
 
 def ensure_supplier(session, party_id: int) -> Party:
@@ -603,12 +633,22 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 payment.online_amount,
                 bool(payment.is_writeoff),
             )
+            bank_mode, transaction_id, txn_charges = normalize_purchase_bank_details(
+                is_writeoff=bool(payment.is_writeoff),
+                online_amount=online_amount,
+                bank_mode=payment.bank_mode,
+                transaction_id=payment.transaction_id,
+                txn_charges=payment.txn_charges,
+            )
             prepared_payments.append(
                 {
                     "mode": mode,
+                    "bank_mode": bank_mode,
+                    "transaction_id": transaction_id,
                     "amount": amount,
                     "cash_amount": cash_amount,
                     "online_amount": online_amount,
+                    "txn_charges": txn_charges,
                     "note": clean_text(payment.note),
                     "paid_at": payment_ts,
                     "is_writeoff": bool(payment.is_writeoff),
@@ -748,9 +788,12 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 party_id=supplier.id,
                 paid_at=payment["paid_at"],
                 mode=payment["mode"],
+                bank_mode=payment["bank_mode"],
+                transaction_id=payment["transaction_id"],
                 amount=payment["amount"],
                 cash_amount=payment["cash_amount"],
                 online_amount=payment["online_amount"],
+                txn_charges=payment["txn_charges"],
                 note=payment["note"],
                 is_writeoff=bool(payment["is_writeoff"]),
                 is_deleted=False,
@@ -782,6 +825,9 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 payment.paid_at,
                 float(getattr(payment, "cash_amount", 0) or 0),
                 float(getattr(payment, "online_amount", 0) or 0),
+                getattr(payment, "bank_mode", None),
+                float(getattr(payment, "txn_charges", 0) or 0),
+                getattr(payment, "transaction_id", None),
             )
         session.commit()
         return make_purchase_out(session, purchase)
@@ -873,9 +919,12 @@ def list_purchase_payments(
                 party_id=resolved_party_id,
                 paid_at=payment.paid_at,
                 mode=payment.mode,
+                bank_mode=getattr(payment, "bank_mode", None),
+                transaction_id=getattr(payment, "transaction_id", None),
                 amount=float(payment.amount or 0),
                 cash_amount=float(payment.cash_amount or 0),
                 online_amount=float(payment.online_amount or 0),
+                txn_charges=float(getattr(payment, "txn_charges", 0) or 0),
                 note=payment.note,
                 invoice_number=purchase.invoice_number if purchase else None,
                 supplier_name=party_map.get(resolved_party_id),
@@ -1026,6 +1075,13 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
         payload.online_amount,
         bool(payload.is_writeoff),
     )
+    bank_mode, transaction_id, txn_charges = normalize_purchase_bank_details(
+        is_writeoff=bool(payload.is_writeoff),
+        online_amount=online_amount,
+        bank_mode=payload.bank_mode,
+        transaction_id=payload.transaction_id,
+        txn_charges=payload.txn_charges,
+    )
 
     payment_ts = payload.payment_date
     if payment_ts:
@@ -1044,9 +1100,12 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
                 party_id=supplier.id,
                 paid_at=payment_ts,
                 mode=mode,
+                bank_mode=bank_mode,
+                transaction_id=transaction_id,
                 amount=total_amount,
                 cash_amount=cash_amount,
                 online_amount=online_amount,
+                txn_charges=txn_charges,
                 note=clean_text(payload.note),
                 is_writeoff=bool(payload.is_writeoff),
                 is_deleted=False,
@@ -1065,6 +1124,9 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
                 payment.paid_at,
                 float(payment.cash_amount or 0),
                 float(payment.online_amount or 0),
+                payment.bank_mode,
+                float(payment.txn_charges or 0),
+                payment.transaction_id,
             )
             log_audit(
                 session,
@@ -1072,7 +1134,16 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
                 entity_id=int(payment.id),
                 action="CREATE",
                 note=f"Added supplier payment without purchase for {supplier.name}",
-                details={"party_id": supplier.id, "amount": payment.amount, "mode": payment.mode, "is_writeoff": bool(payment.is_writeoff), "unallocated": True},
+                details={
+                    "party_id": supplier.id,
+                    "amount": payment.amount,
+                    "mode": payment.mode,
+                    "bank_mode": payment.bank_mode,
+                    "transaction_id": payment.transaction_id,
+                    "txn_charges": payment.txn_charges,
+                    "is_writeoff": bool(payment.is_writeoff),
+                    "unallocated": True,
+                },
             )
             session.commit()
             return []
@@ -1103,6 +1174,7 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
 
         cash_remaining = cash_amount
         online_remaining = online_amount
+        charges_remaining = txn_charges
         allocations = list(allocation_map.items())
         for index, (purchase_id, amount) in enumerate(allocations):
             row = purchases_by_id[purchase_id]
@@ -1123,14 +1195,25 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
                 cash_share = max(0.0, cash_share)
                 online_share = max(0.0, online_share)
 
+            charge_share = 0.0
+            if not bool(payload.is_writeoff) and online_share > 0 and txn_charges > 0:
+                if online_remaining <= online_share + 0.0001:
+                    charge_share = round2(charges_remaining)
+                else:
+                    charge_share = round2((txn_charges / online_amount) * online_share) if online_amount > 0 else 0.0
+                    charge_share = min(charges_remaining, max(0.0, charge_share))
+
             payment = PurchasePayment(
                 purchase_id=row.id,
                 party_id=supplier.id,
                 paid_at=payment_ts,
                 mode=mode,
+                bank_mode=bank_mode if online_share > 0 else None,
+                transaction_id=transaction_id if online_share > 0 and bank_mode == "UPI" else None,
                 amount=amount,
                 cash_amount=cash_share,
                 online_amount=online_share,
+                txn_charges=charge_share,
                 note=clean_text(payload.note),
                 is_writeoff=bool(payload.is_writeoff),
                 is_deleted=False,
@@ -1152,6 +1235,9 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
                 payment.paid_at,
                 float(payment.cash_amount or 0),
                 float(payment.online_amount or 0),
+                payment.bank_mode,
+                float(payment.txn_charges or 0),
+                payment.transaction_id,
             )
             log_audit(
                 session,
@@ -1159,10 +1245,19 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
                 entity_id=int(payment.id),
                 action="CREATE",
                 note=f"Added supplier payment to purchase #{row.id}",
-                details={"purchase_id": row.id, "amount": payment.amount, "mode": payment.mode, "is_writeoff": bool(payment.is_writeoff)},
+                details={
+                    "purchase_id": row.id,
+                    "amount": payment.amount,
+                    "mode": payment.mode,
+                    "bank_mode": payment.bank_mode,
+                    "transaction_id": payment.transaction_id,
+                    "txn_charges": payment.txn_charges,
+                    "is_writeoff": bool(payment.is_writeoff),
+                },
             )
             cash_remaining = round2(cash_remaining - cash_share)
             online_remaining = round2(online_remaining - online_share)
+            charges_remaining = round2(charges_remaining - charge_share)
 
         session.commit()
         return [make_purchase_out(session, purchases_by_id[purchase_id]) for purchase_id, _amount in allocations]
@@ -1214,6 +1309,13 @@ def update_supplier_payment(party_id: int, payment_id: int, payload: PurchasePay
             data.get("online_amount", payment.online_amount),
             next_is_writeoff,
         )
+        bank_mode, transaction_id, txn_charges = normalize_purchase_bank_details(
+            is_writeoff=next_is_writeoff,
+            online_amount=online_amount,
+            bank_mode=data.get("bank_mode", getattr(payment, "bank_mode", None)),
+            transaction_id=data.get("transaction_id", getattr(payment, "transaction_id", None)),
+            txn_charges=data.get("txn_charges", getattr(payment, "txn_charges", 0)),
+        )
 
         if purchase:
             active_payments = session.exec(
@@ -1230,9 +1332,12 @@ def update_supplier_payment(party_id: int, payment_id: int, payload: PurchasePay
         payment.party_id = supplier.id
         payment.paid_at = next_paid_at
         payment.mode = mode
+        payment.bank_mode = bank_mode
+        payment.transaction_id = transaction_id
         payment.amount = amount
         payment.cash_amount = cash_amount
         payment.online_amount = online_amount
+        payment.txn_charges = txn_charges
         if "note" in data:
             payment.note = clean_text(data.get("note"))
         payment.is_writeoff = next_is_writeoff
@@ -1243,7 +1348,16 @@ def update_supplier_payment(party_id: int, payment_id: int, payload: PurchasePay
             entity_id=int(payment.id),
             action="UPDATE",
             note=f"Updated supplier payment #{payment.id}",
-            details={"party_id": supplier.id, "purchase_id": purchase.id if purchase else None, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
+            details={
+                "party_id": supplier.id,
+                "purchase_id": purchase.id if purchase else None,
+                "amount": payment.amount,
+                "mode": payment.mode,
+                "bank_mode": payment.bank_mode,
+                "transaction_id": payment.transaction_id,
+                "txn_charges": payment.txn_charges,
+                "is_writeoff": bool(payment.is_writeoff),
+            },
         )
         session.commit()
         if purchase:
@@ -1262,6 +1376,9 @@ def update_supplier_payment(party_id: int, payment_id: int, payload: PurchasePay
             payment.paid_at,
             float(getattr(payment, "cash_amount", 0) or 0),
             float(getattr(payment, "online_amount", 0) or 0),
+            getattr(payment, "bank_mode", None),
+            float(getattr(payment, "txn_charges", 0) or 0),
+            getattr(payment, "transaction_id", None),
         )
         session.commit()
         session.refresh(payment)
@@ -1345,6 +1462,9 @@ def restore_supplier_payment(party_id: int, payment_id: int) -> PurchasePaymentO
             payment.paid_at,
             float(getattr(payment, "cash_amount", 0) or 0),
             float(getattr(payment, "online_amount", 0) or 0),
+            getattr(payment, "bank_mode", None),
+            float(getattr(payment, "txn_charges", 0) or 0),
+            getattr(payment, "transaction_id", None),
         )
         session.commit()
         session.refresh(payment)
@@ -1359,6 +1479,13 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
         payload.cash_amount,
         payload.online_amount,
         bool(payload.is_writeoff),
+    )
+    bank_mode, transaction_id, txn_charges = normalize_purchase_bank_details(
+        is_writeoff=bool(payload.is_writeoff),
+        online_amount=online_amount,
+        bank_mode=payload.bank_mode,
+        transaction_id=payload.transaction_id,
+        txn_charges=payload.txn_charges,
     )
 
     with get_session() as session:
@@ -1387,9 +1514,12 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
             party_id=row.party_id,
             paid_at=paid_at,
             mode=mode,
+            bank_mode=bank_mode,
+            transaction_id=transaction_id,
             amount=amount,
             cash_amount=cash_amount,
             online_amount=online_amount,
+            txn_charges=txn_charges,
             note=clean_text(payload.note),
             is_writeoff=bool(payload.is_writeoff),
             is_deleted=False,
@@ -1403,7 +1533,15 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
             entity_id=int(payment.id),
             action="CREATE",
             note=f"Added payment to purchase #{row.id}",
-            details={"purchase_id": row.id, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
+            details={
+                "purchase_id": row.id,
+                "amount": payment.amount,
+                "mode": payment.mode,
+                "bank_mode": payment.bank_mode,
+                "transaction_id": payment.transaction_id,
+                "txn_charges": payment.txn_charges,
+                "is_writeoff": bool(payment.is_writeoff),
+            },
         )
         session.commit()
         recompute_purchase_payment_state(session, row)
@@ -1419,6 +1557,9 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
             payment.paid_at,
             float(getattr(payment, "cash_amount", 0) or 0),
             float(getattr(payment, "online_amount", 0) or 0),
+            getattr(payment, "bank_mode", None),
+            float(getattr(payment, "txn_charges", 0) or 0),
+            getattr(payment, "transaction_id", None),
         )
         session.commit()
         session.refresh(row)
@@ -1456,6 +1597,13 @@ def update_purchase_payment(purchase_id: int, payment_id: int, payload: Purchase
             data.get("online_amount", payment.online_amount),
             next_is_writeoff,
         )
+        bank_mode, transaction_id, txn_charges = normalize_purchase_bank_details(
+            is_writeoff=next_is_writeoff,
+            online_amount=online_amount,
+            bank_mode=data.get("bank_mode", getattr(payment, "bank_mode", None)),
+            transaction_id=data.get("transaction_id", getattr(payment, "transaction_id", None)),
+            txn_charges=data.get("txn_charges", getattr(payment, "txn_charges", 0)),
+        )
 
         active_payments = session.exec(
             select(PurchasePayment).where(
@@ -1471,9 +1619,12 @@ def update_purchase_payment(purchase_id: int, payment_id: int, payload: Purchase
         payment.paid_at = next_paid_at
         payment.party_id = row.party_id
         payment.mode = mode
+        payment.bank_mode = bank_mode
+        payment.transaction_id = transaction_id
         payment.amount = amount
         payment.cash_amount = cash_amount
         payment.online_amount = online_amount
+        payment.txn_charges = txn_charges
         if "note" in data:
             payment.note = clean_text(data.get("note"))
         payment.is_writeoff = next_is_writeoff
@@ -1484,7 +1635,15 @@ def update_purchase_payment(purchase_id: int, payment_id: int, payload: Purchase
             entity_id=int(payment.id),
             action="UPDATE",
             note=f"Updated payment #{payment.id} for purchase #{row.id}",
-            details={"purchase_id": row.id, "amount": payment.amount, "is_writeoff": bool(payment.is_writeoff)},
+            details={
+                "purchase_id": row.id,
+                "amount": payment.amount,
+                "mode": payment.mode,
+                "bank_mode": payment.bank_mode,
+                "transaction_id": payment.transaction_id,
+                "txn_charges": payment.txn_charges,
+                "is_writeoff": bool(payment.is_writeoff),
+            },
         )
         session.commit()
         recompute_purchase_payment_state(session, row)
@@ -1503,6 +1662,9 @@ def update_purchase_payment(purchase_id: int, payment_id: int, payload: Purchase
             payment.paid_at,
             float(getattr(payment, "cash_amount", 0) or 0),
             float(getattr(payment, "online_amount", 0) or 0),
+            getattr(payment, "bank_mode", None),
+            float(getattr(payment, "txn_charges", 0) or 0),
+            getattr(payment, "transaction_id", None),
         )
         session.commit()
         session.refresh(row)
@@ -1592,6 +1754,9 @@ def restore_purchase_payment(purchase_id: int, payment_id: int) -> PurchaseOut:
             payment.paid_at,
             float(getattr(payment, "cash_amount", 0) or 0),
             float(getattr(payment, "online_amount", 0) or 0),
+            getattr(payment, "bank_mode", None),
+            float(getattr(payment, "txn_charges", 0) or 0),
+            getattr(payment, "transaction_id", None),
         )
         session.commit()
         session.refresh(row)

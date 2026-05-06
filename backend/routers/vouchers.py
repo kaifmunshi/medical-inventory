@@ -298,6 +298,7 @@ def daybook(
                 continue
             if deleted_filter == "deleted" and not is_deleted:
                 continue
+            transaction_suffix = f" | Txn {payment.transaction_id}" if getattr(payment, "transaction_id", None) else ""
             rows.append(
                 VoucherDayBookRow(
                     ts=payment.paid_at,
@@ -306,11 +307,11 @@ def daybook(
                     source_id=int(payment.id or 0),
                     voucher_no=f"PP-{payment.id}",
                     party_name=party_map.get(payment_party_id),
-                    narration=payment.note or (
+                    narration=(payment.note or (
                         f"Payment for purchase {purchase.invoice_number}"
                         if purchase
                         else "Supplier payment without purchase"
-                    ),
+                    )) + transaction_suffix,
                     amount=_round2(payment.amount),
                     cash_amount=0.0 if bool(payment.is_writeoff) else _round2(getattr(payment, "cash_amount", 0.0)),
                     online_amount=0.0 if bool(payment.is_writeoff) else _round2(getattr(payment, "online_amount", 0.0)),
@@ -318,6 +319,28 @@ def daybook(
                     is_deleted=is_deleted,
                 )
             )
+            bank_charges = _round2(float(getattr(payment, "txn_charges", 0) or 0))
+            if not bool(payment.is_writeoff) and bank_charges > 0 and float(getattr(payment, "online_amount", 0) or 0) > 0:
+                rows.append(
+                    VoucherDayBookRow(
+                        ts=payment.paid_at,
+                        voucher_type="EXPENSE",
+                        source_type="PURCHASE_PAYMENT_CHARGE",
+                        source_id=int(payment.id or 0),
+                        voucher_no=f"PBC-{payment.id}",
+                        party_name=party_map.get(payment_party_id),
+                        narration=(payment.note or (
+                            f"Bank charges for purchase {purchase.invoice_number}"
+                            if purchase
+                            else "Bank charges for supplier payment"
+                        )) + transaction_suffix,
+                        amount=bank_charges,
+                        cash_amount=0.0,
+                        online_amount=bank_charges,
+                        status="DELETED" if is_deleted else "POSTED",
+                        is_deleted=is_deleted,
+                    )
+                )
 
         party_receipt_stmt = select(PartyReceipt).where(
             PartyReceipt.received_at >= start_iso,

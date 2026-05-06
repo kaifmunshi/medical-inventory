@@ -12,6 +12,7 @@ import {
   Divider,
   FormControlLabel,
   Grid,
+  Link,
   MenuItem,
   Paper,
   Stack,
@@ -40,6 +41,7 @@ import {
   fetchSupplierLedgerSummary,
   updatePurchasePayment,
   updatePurchase,
+  type PurchaseBankMode,
 } from '../../services/purchases'
 import type { Category, Party, Product, Purchase, PurchaseItemPayload, PurchasePayment, PurchasePaymentPayload } from '../../lib/types'
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
@@ -49,6 +51,12 @@ type DraftItem = PurchaseItemPayload & { key: string; existing_stock_movement_id
 type DraftPayment = PurchasePaymentPayload & { key: string; paid_at: string; is_deleted?: boolean }
 
 const EXISTING_INVENTORY_FROM_DATE = '2026-04-01'
+const bankModeOptions: Array<{ value: PurchaseBankMode; label: string }> = [
+  { value: 'UPI', label: 'UPI' },
+  { value: 'NEFT', label: 'NEFT' },
+  { value: 'RTGS', label: 'RTGS' },
+  { value: 'IMPS', label: 'IMPS' },
+]
 
 function makeEmptyItem(): DraftItem {
   return {
@@ -75,6 +83,18 @@ function makeEmptyItem(): DraftItem {
 
 function money(n: number) {
   return Number(n || 0).toFixed(2)
+}
+
+function paymentModeLabel(mode?: string | null) {
+  const raw = String(mode || '').toLowerCase()
+  if (raw === 'online') return 'Online'
+  if (raw === 'split') return 'Split'
+  if (raw === 'writeoff') return 'Write-off'
+  return 'Cash'
+}
+
+function bankModeLabel(mode?: string | null) {
+  return bankModeOptions.find((option) => option.value === mode)?.label || 'UPI'
 }
 
 function lineGrossTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price'>) {
@@ -183,12 +203,16 @@ export default function PurchasesPage() {
   const [paymentOpen, setPaymentOpen] = useState(false)
   const [paymentPurchaseId, setPaymentPurchaseId] = useState<number | null>(null)
   const [paymentHistoryPurchaseId, setPaymentHistoryPurchaseId] = useState<number | null>(null)
+  const [highlightedPaymentId, setHighlightedPaymentId] = useState<number | null>(null)
   const [editingPayment, setEditingPayment] = useState<PurchasePayment | null>(null)
   const [deletePaymentTarget, setDeletePaymentTarget] = useState<{ purchase: Purchase; payment: PurchasePayment } | null>(null)
   const [paymentAmount, setPaymentAmount] = useState('0')
   const [paymentMode, setPaymentMode] = useState<'cash' | 'online' | 'split'>('cash')
   const [paymentCash, setPaymentCash] = useState('0')
   const [paymentOnline, setPaymentOnline] = useState('0')
+  const [paymentBankMode, setPaymentBankMode] = useState<PurchaseBankMode>('UPI')
+  const [paymentTransactionId, setPaymentTransactionId] = useState('')
+  const [paymentTxnCharges, setPaymentTxnCharges] = useState('0')
   const [paymentDate, setPaymentDate] = useState(today)
   const [paymentNote, setPaymentNote] = useState('')
   const [paymentType, setPaymentType] = useState<'payment' | 'writeoff'>('payment')
@@ -275,8 +299,12 @@ export default function PurchasesPage() {
   useEffect(() => {
     const supplierId = Number(searchParams.get('supplier_id') || 0)
     const purchaseId = Number(searchParams.get('purchase_id') || 0)
+    const paymentId = Number(searchParams.get('payment_id') || 0)
     const shouldAdd = searchParams.get('new') === '1'
-    if (purchaseId > 0) setSelectedPurchaseId(purchaseId)
+    if (purchaseId > 0) {
+      setSelectedPurchaseId(purchaseId)
+      setHighlightedPaymentId(paymentId > 0 ? paymentId : null)
+    }
     if (supplierId > 0) {
       setPartyId(supplierId)
       setFilterPartyId(supplierId)
@@ -526,15 +554,21 @@ export default function PurchasesPage() {
     : paymentTargetOutstanding + (editingPayment && !editingPayment.is_deleted ? Number(editingPayment.amount || 0) : 0)
   const purchasePaymentCash = paymentType === 'writeoff' || paymentMode === 'online' ? 0 : Number(paymentCash || 0)
   const purchasePaymentOnline = paymentType === 'writeoff' || paymentMode === 'cash' ? 0 : Number(paymentOnline || 0)
+  const purchasePaymentTxnCharges = paymentType === 'payment' && purchasePaymentOnline > 0 ? Number(paymentTxnCharges || 0) : 0
   const purchasePaymentAmount = paymentType === 'writeoff'
     ? Number(paymentAmount || 0)
     : Number((purchasePaymentCash + purchasePaymentOnline).toFixed(2))
   const purchasePaymentPartsInvalid = paymentType === 'writeoff'
     ? Number.isNaN(purchasePaymentAmount) || purchasePaymentAmount < 0
     : Number.isNaN(purchasePaymentCash) || Number.isNaN(purchasePaymentOnline) || purchasePaymentCash < 0 || purchasePaymentOnline < 0
+  const purchasePaymentChargesInvalid =
+    paymentType === 'payment' &&
+    (Number.isNaN(purchasePaymentTxnCharges) || purchasePaymentTxnCharges < 0)
   const purchasePaymentError =
     purchasePaymentPartsInvalid
       ? 'Invalid amount'
+      : purchasePaymentChargesInvalid
+        ? 'Invalid bank charges'
       : purchasePaymentAmount <= 0
       ? 'Amount must be greater than 0'
       : purchasePaymentAmount > paymentAvailableAmount + 0.01
@@ -556,6 +590,17 @@ export default function PurchasesPage() {
       setPaymentOnline((prev) => (prev === online ? prev : online))
     }
   }, [paymentAvailableAmount, paymentCash, paymentMode, paymentOpen, paymentType])
+
+  useEffect(() => {
+    if (!paymentOpen || paymentType !== 'payment' || purchasePaymentOnline > 0) return
+    setPaymentTransactionId((prev) => (prev === '' ? prev : ''))
+    setPaymentTxnCharges((prev) => (prev === '0' ? prev : '0'))
+  }, [paymentOpen, paymentType, purchasePaymentOnline])
+
+  useEffect(() => {
+    if (!paymentOpen || paymentBankMode === 'UPI') return
+    setPaymentTransactionId((prev) => (prev === '' ? prev : ''))
+  }, [paymentBankMode, paymentOpen])
 
   function resetForm() {
     setPartyId(null)
@@ -637,16 +682,25 @@ export default function PurchasesPage() {
   }
 
   function openDetail(purchaseId: number) {
+    setHighlightedPaymentId(null)
     setSelectedPurchaseId(purchaseId)
   }
 
   function closeDetail() {
     setSelectedPurchaseId(null)
+    setHighlightedPaymentId(null)
     if (searchParams.has('purchase_id')) {
       const next = new URLSearchParams(searchParams)
       next.delete('purchase_id')
+      next.delete('payment_id')
       setSearchParams(next, { replace: true })
     }
+  }
+
+  function openPaymentInPurchasePopup(purchaseId: number, paymentId: number) {
+    setPaymentHistoryPurchaseId(null)
+    setSelectedPurchaseId(purchaseId)
+    setHighlightedPaymentId(paymentId)
   }
 
   function resetPaymentForm() {
@@ -659,6 +713,9 @@ export default function PurchasesPage() {
     setPaymentMode('cash')
     setPaymentCash('0')
     setPaymentOnline('0')
+    setPaymentBankMode('UPI')
+    setPaymentTransactionId('')
+    setPaymentTxnCharges('0')
     setPaymentNote('')
     setPaymentType('payment')
     setPaymentDate(today)
@@ -676,6 +733,9 @@ export default function PurchasesPage() {
     setPaymentMode('cash')
     setPaymentCash(outstanding)
     setPaymentOnline('0')
+    setPaymentBankMode('UPI')
+    setPaymentTransactionId('')
+    setPaymentTxnCharges('0')
     setPaymentAmount(outstanding)
     setPaymentDate(today)
     setPaymentNote('')
@@ -691,6 +751,9 @@ export default function PurchasesPage() {
     setPaymentMode(payment.is_writeoff ? 'cash' : (payment.mode as 'cash' | 'online' | 'split') || 'cash')
     setPaymentCash(String(Number(payment.cash_amount || 0)))
     setPaymentOnline(String(Number(payment.online_amount || 0)))
+    setPaymentBankMode((payment.bank_mode || 'UPI') as PurchaseBankMode)
+    setPaymentTransactionId(payment.transaction_id || '')
+    setPaymentTxnCharges(String(Number(payment.txn_charges || 0)))
     setPaymentAmount(String(Number(payment.amount || 0)))
     setPaymentDate(String(payment.paid_at || '').slice(0, 10) || today)
     setPaymentNote(payment.note || '')
@@ -707,6 +770,9 @@ export default function PurchasesPage() {
     setPaymentMode('cash')
     setPaymentCash(available)
     setPaymentOnline('0')
+    setPaymentBankMode('UPI')
+    setPaymentTransactionId('')
+    setPaymentTxnCharges('0')
     setPaymentAmount(available)
     setPaymentDate(invoiceDate || today)
     setPaymentNote('')
@@ -722,6 +788,9 @@ export default function PurchasesPage() {
     setPaymentMode(payment.is_writeoff ? 'cash' : (payment.mode as 'cash' | 'online' | 'split') || 'cash')
     setPaymentCash(String(Number(payment.cash_amount || 0)))
     setPaymentOnline(String(Number(payment.online_amount || 0)))
+    setPaymentBankMode((payment.bank_mode || 'UPI') as PurchaseBankMode)
+    setPaymentTransactionId(payment.transaction_id || '')
+    setPaymentTxnCharges(String(Number(payment.txn_charges || 0)))
     setPaymentAmount(String(Number(payment.amount || 0)))
     setPaymentDate(String(payment.paid_at || '').slice(0, 10) || invoiceDate || today)
     setPaymentNote(payment.note || '')
@@ -734,6 +803,8 @@ export default function PurchasesPage() {
     if (next === 'cash') {
       setPaymentCash(outstanding)
       setPaymentOnline('0')
+      setPaymentTransactionId('')
+      setPaymentTxnCharges('0')
     }
     if (next === 'online') {
       setPaymentCash('0')
@@ -859,8 +930,11 @@ export default function PurchasesPage() {
       payments: draftPayments.map((payment) => ({
         amount: Number(payment.amount || 0),
         mode: payment.mode,
+        bank_mode: Number(payment.online_amount || 0) > 0 ? payment.bank_mode : undefined,
+        transaction_id: Number(payment.online_amount || 0) > 0 && payment.bank_mode === 'UPI' ? payment.transaction_id?.trim() || undefined : undefined,
         cash_amount: Number(payment.cash_amount || 0),
         online_amount: Number(payment.online_amount || 0),
+        txn_charges: Number(payment.txn_charges || 0),
         note: payment.note?.trim() || undefined,
         paid_at: payment.paid_at || invoiceDate,
         is_writeoff: Boolean(payment.is_writeoff),
@@ -893,8 +967,11 @@ export default function PurchasesPage() {
     const payload = {
       amount: purchasePaymentAmount,
       mode: paymentMode,
+      bank_mode: purchasePaymentOnline > 0 ? paymentBankMode : undefined,
+      transaction_id: purchasePaymentOnline > 0 && paymentBankMode === 'UPI' ? paymentTransactionId.trim() || undefined : undefined,
       cash_amount: purchasePaymentCash,
       online_amount: purchasePaymentOnline,
+      txn_charges: purchasePaymentTxnCharges,
       note: paymentNote.trim(),
       paid_at: paymentDate,
       is_writeoff: paymentType === 'writeoff',
@@ -1444,6 +1521,9 @@ export default function PurchasesPage() {
                   <th>Mode</th>
                   <th>Cash</th>
                   <th>Online</th>
+                  <th>Bank</th>
+                  <th>Txn ID</th>
+                  <th>Charges</th>
                   <th>Amount</th>
                   <th>Note</th>
                   <th>Status</th>
@@ -1454,10 +1534,24 @@ export default function PurchasesPage() {
                 {(paymentHistoryPurchase?.payments || []).map((payment) => (
                   <tr key={payment.id} style={{ opacity: payment.is_deleted ? 0.6 : 1 }}>
                     <td>{fmtDateTime(payment.paid_at)}</td>
-                    <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
-                    <td>{payment.is_writeoff ? '-' : (payment.mode || 'cash')}</td>
+                    <td>
+                      {paymentHistoryPurchase ? (
+                        <Link
+                          component="button"
+                          underline="hover"
+                          onClick={() => openPaymentInPurchasePopup(Number(paymentHistoryPurchase.id), Number(payment.id))}
+                          sx={{ fontWeight: 700 }}
+                        >
+                          {payment.is_writeoff ? `Write-off #${payment.id}` : `Payment #${payment.id}`}
+                        </Link>
+                      ) : payment.is_writeoff ? `Write-off #${payment.id}` : `Payment #${payment.id}`}
+                    </td>
+                    <td>{payment.is_writeoff ? '-' : paymentModeLabel(payment.mode)}</td>
                     <td>{payment.is_writeoff ? '-' : money(payment.cash_amount || 0)}</td>
                     <td>{payment.is_writeoff ? '-' : money(payment.online_amount || 0)}</td>
+                    <td>{!payment.is_writeoff && Number(payment.online_amount || 0) > 0 ? bankModeLabel(payment.bank_mode || 'UPI') : '-'}</td>
+                    <td>{!payment.is_writeoff && payment.transaction_id ? payment.transaction_id : '-'}</td>
+                    <td>{!payment.is_writeoff && Number(payment.txn_charges || 0) > 0 ? money(payment.txn_charges) : '-'}</td>
                     <td>{money(payment.amount)}</td>
                     <td>{payment.note || '-'}</td>
                     <td>{payment.is_deleted ? <Chip size="small" label="Deleted" /> : <Chip size="small" color="success" variant="outlined" label="Active" />}</td>
@@ -1494,7 +1588,7 @@ export default function PurchasesPage() {
                 ))}
                 {(paymentHistoryPurchase?.payments || []).length === 0 ? (
                   <tr>
-                    <td colSpan={9}>
+                    <td colSpan={12}>
                       <Box p={2} color="text.secondary">No payments yet.</Box>
                     </td>
                   </tr>
@@ -1662,6 +1756,9 @@ export default function PurchasesPage() {
                           <th>Mode</th>
                           <th>Cash</th>
                           <th>Online</th>
+                          <th>Bank</th>
+                          <th>Txn ID</th>
+                          <th>Charges</th>
                           <th>Amount</th>
                           <th>Note</th>
                           <th></th>
@@ -1672,9 +1769,12 @@ export default function PurchasesPage() {
                           <tr key={payment.key}>
                             <td>{payment.paid_at || '-'}</td>
                             <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
-                            <td>{payment.is_writeoff ? '-' : payment.mode || 'cash'}</td>
+                            <td>{payment.is_writeoff ? '-' : paymentModeLabel(payment.mode)}</td>
                             <td>{payment.is_writeoff ? '-' : money(Number(payment.cash_amount || 0))}</td>
                             <td>{payment.is_writeoff ? '-' : money(Number(payment.online_amount || 0))}</td>
+                            <td>{!payment.is_writeoff && Number(payment.online_amount || 0) > 0 ? bankModeLabel(payment.bank_mode || 'UPI') : '-'}</td>
+                            <td>{!payment.is_writeoff && payment.transaction_id ? payment.transaction_id : '-'}</td>
+                            <td>{!payment.is_writeoff && Number(payment.txn_charges || 0) > 0 ? money(Number(payment.txn_charges || 0)) : '-'}</td>
                             <td>{money(Number(payment.amount || 0))}</td>
                             <td>{payment.note || '-'}</td>
                             <td>
@@ -1687,7 +1787,7 @@ export default function PurchasesPage() {
                         ))}
                         {draftPayments.length === 0 ? (
                           <tr>
-                            <td colSpan={8}>
+                            <td colSpan={11}>
                               <Box p={2} color="text.secondary">No payments added yet.</Box>
                             </td>
                           </tr>
@@ -1835,6 +1935,9 @@ export default function PurchasesPage() {
 	                      <th>Mode</th>
 	                      <th>Cash</th>
 	                      <th>Online</th>
+	                      <th>Bank</th>
+	                      <th>Txn ID</th>
+	                      <th>Charges</th>
 	                      <th>Amount</th>
 	                      <th>Note</th>
 	                      <th>Status</th>
@@ -1843,12 +1946,21 @@ export default function PurchasesPage() {
                   </thead>
                   <tbody>
                     {selectedPurchase.payments.map((payment) => (
-	                      <tr key={payment.id} style={{ opacity: payment.is_deleted ? 0.6 : 1 }}>
+	                      <tr
+                          key={payment.id}
+                          style={{
+                            opacity: payment.is_deleted ? 0.6 : 1,
+                            backgroundColor: Number(highlightedPaymentId || 0) === Number(payment.id) ? '#fff8e1' : undefined,
+                          }}
+                        >
 	                        <td>{fmtDateTime(payment.paid_at)}</td>
-	                        <td>{payment.is_writeoff ? 'Write-off' : 'Payment'}</td>
-	                        <td>{payment.is_writeoff ? '-' : (payment.mode || 'cash')}</td>
+	                        <td>{payment.is_writeoff ? `Write-off #${payment.id}` : `Payment #${payment.id}`}</td>
+	                        <td>{payment.is_writeoff ? '-' : paymentModeLabel(payment.mode)}</td>
 	                        <td>{payment.is_writeoff ? '-' : money(payment.cash_amount || 0)}</td>
 	                        <td>{payment.is_writeoff ? '-' : money(payment.online_amount || 0)}</td>
+	                        <td>{!payment.is_writeoff && Number(payment.online_amount || 0) > 0 ? bankModeLabel(payment.bank_mode || 'UPI') : '-'}</td>
+	                        <td>{!payment.is_writeoff && payment.transaction_id ? payment.transaction_id : '-'}</td>
+	                        <td>{!payment.is_writeoff && Number(payment.txn_charges || 0) > 0 ? money(payment.txn_charges) : '-'}</td>
 	                        <td>{money(payment.amount)}</td>
 	                        <td>{payment.note || '-'}</td>
 	                        <td>{payment.is_deleted ? <Chip size="small" label="Deleted" /> : <Chip size="small" color="success" variant="outlined" label="Active" />}</td>
@@ -1879,7 +1991,7 @@ export default function PurchasesPage() {
                     ))}
                     {selectedPurchase.payments.length === 0 && (
                       <tr>
-	                        <td colSpan={9}>
+	                        <td colSpan={12}>
                           <Box p={2} color="text.secondary">No payments yet.</Box>
                         </td>
                       </tr>
@@ -2004,11 +2116,15 @@ export default function PurchasesPage() {
 	                if (next === 'writeoff') {
 	                  setPaymentCash('0')
 	                  setPaymentOnline('0')
+	                  setPaymentTransactionId('')
+	                  setPaymentTxnCharges('0')
 	                  setPaymentAmount(money(paymentAvailableAmount))
 	                } else {
 	                  setPaymentMode('cash')
 	                  setPaymentCash(money(paymentAvailableAmount))
 	                  setPaymentOnline('0')
+	                  setPaymentTransactionId('')
+	                  setPaymentTxnCharges('0')
 	                }
 	              }}
 	              fullWidth
@@ -2064,8 +2180,42 @@ export default function PurchasesPage() {
 	                fullWidth
 	              />
 	            )}
+            {paymentType === 'payment' && purchasePaymentOnline > 0 ? (
+              <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+                <TextField
+                  select
+                  label="Bank Mode"
+                  value={paymentBankMode}
+                  onChange={(e) => setPaymentBankMode(e.target.value as PurchaseBankMode)}
+                  fullWidth
+                >
+                  {bankModeOptions.map((option) => (
+                    <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                  ))}
+                </TextField>
+                {paymentBankMode === 'UPI' ? (
+                  <TextField
+                    label="Transaction ID"
+                    value={paymentTransactionId}
+                    onChange={(e) => setPaymentTransactionId(e.target.value)}
+                    fullWidth
+                  />
+                ) : null}
+                <TextField
+                  label="Bank Charges"
+                  type="number"
+                  value={paymentTxnCharges}
+                  onChange={(e) => setPaymentTxnCharges(e.target.value)}
+                  inputProps={{ min: 0, step: '0.01' }}
+                  error={purchasePaymentChargesInvalid}
+                  helperText="Posted as Bank Charges (Expense)"
+                  fullWidth
+                />
+              </Stack>
+            ) : null}
 	            <Typography variant="body2" color={purchasePaymentError ? 'error' : 'text.secondary'}>
 	              Amount {money(purchasePaymentAmount)} / Available {money(paymentAvailableAmount)}
+                {purchasePaymentOnline > 0 ? ` / Bank ${bankModeLabel(paymentBankMode)}${paymentBankMode === 'UPI' && paymentTransactionId.trim() ? ` / Txn ${paymentTransactionId.trim()}` : ''} / Charges ${money(purchasePaymentTxnCharges)}` : ''}
 	            </Typography>
 	            <TextField label="Date" type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
             <TextField label="Note" value={paymentNote} onChange={(e) => setPaymentNote(e.target.value)} multiline minRows={2} fullWidth />
@@ -2088,6 +2238,7 @@ export default function PurchasesPage() {
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Invoice {deletePaymentTarget?.purchase.invoice_number || '-'} | Amount {money(Number(deletePaymentTarget?.payment.amount || 0))}
+              {Number(deletePaymentTarget?.payment.txn_charges || 0) > 0 ? ` | Charges ${money(Number(deletePaymentTarget?.payment.txn_charges || 0))}` : ''}
             </Typography>
           </Stack>
         </DialogContent>

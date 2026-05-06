@@ -25,6 +25,16 @@ router = APIRouter()
 
 VALID_ENTRY_TYPES = {"RECEIPT", "WITHDRAWAL", "EXPENSE", "OPENING", "CONTRA"}
 VALID_MODES = {"UPI", "NEFT", "RTGS", "IMPS", "BANK_DEPOSIT"}
+ENTRY_TYPE_ALIASES = {
+    "DEPOSIT": "RECEIPT",
+    "DEPOSITS": "RECEIPT",
+    "BANK_IN": "RECEIPT",
+    "BANKIN": "RECEIPT",
+    "WITHDRAW": "WITHDRAWAL",
+    "WITHDRAWALS": "WITHDRAWAL",
+    "BANK_OUT": "WITHDRAWAL",
+    "BANKOUT": "WITHDRAWAL",
+}
 
 
 def today_yyyy_mm_dd() -> str:
@@ -50,6 +60,14 @@ def _parse_ymd(date_str: str) -> datetime:
         return datetime.strptime(date_str, "%Y-%m-%d")
     except Exception:
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+
+def _normalize_entry_type(value: Optional[str]) -> str:
+    raw = str(value or "").strip().upper().replace(" ", "_").replace("-", "_")
+    et = ENTRY_TYPE_ALIASES.get(raw, raw)
+    if et not in VALID_ENTRY_TYPES:
+        raise HTTPException(status_code=400, detail="entry_type must be DEPOSIT/RECEIPT, WITHDRAWAL(S), EXPENSE, OPENING or CONTRA")
+    return et
 
 
 def _sum_rows(rows: List[BankbookEntry]):
@@ -120,6 +138,29 @@ def _sum_purchase_online_out(session, *, start_iso: Optional[str] = None, end_is
             if not purchase or purchase.is_deleted:
                 continue
         total += float(getattr(payment, "online_amount", 0) or 0)
+    return round(total, 2)
+
+
+def _sum_purchase_bank_charges(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
+    stmt = (
+        select(PurchasePayment)
+        .where(PurchasePayment.is_deleted == False)  # noqa: E712
+        .where(PurchasePayment.is_writeoff == False)  # noqa: E712
+    )
+    if start_iso:
+        stmt = stmt.where(PurchasePayment.paid_at >= start_iso)
+    if end_iso:
+        stmt = stmt.where(PurchasePayment.paid_at <= end_iso)
+    rows = session.exec(stmt).all()
+    total = 0.0
+    for payment in rows:
+        if int(getattr(payment, "purchase_id", 0) or 0) > 0:
+            purchase = session.get(Purchase, payment.purchase_id)
+            if not purchase or purchase.is_deleted:
+                continue
+        if float(getattr(payment, "online_amount", 0) or 0) <= 0:
+            continue
+        total += float(getattr(payment, "txn_charges", 0) or 0)
     return round(total, 2)
 
 
@@ -210,6 +251,7 @@ def _day_snapshot(session, date: str, *, include_entries: bool = False):
         + _sum_cashbook_contra(session, start_iso=anchor_effective_start, end_iso=prev_end)
         - _sum_return_online(session, start_iso=anchor_effective_start, end_iso=prev_end)
         - _sum_purchase_online_out(session, start_iso=anchor_effective_start, end_iso=prev_end)
+        - _sum_purchase_bank_charges(session, start_iso=anchor_effective_start, end_iso=prev_end)
         - _sum_exchange_online_out(session, start_iso=anchor_effective_start, end_iso=prev_end)
     )
 
@@ -225,6 +267,7 @@ def _day_snapshot(session, date: str, *, include_entries: bool = False):
     cashbook_contra_today = _sum_cashbook_contra(session, start_iso=day_start, end_iso=day_end)
     return_online_today = _sum_return_online(session, start_iso=day_start, end_iso=day_end)
     purchase_online_today = _sum_purchase_online_out(session, start_iso=day_start, end_iso=day_end)
+    purchase_bank_charges_today = _sum_purchase_bank_charges(session, start_iso=day_start, end_iso=day_end)
     exchange_online_out_today = _sum_exchange_online_out(session, start_iso=day_start, end_iso=day_end)
     day_summary["receipts"] = round(
         float(day_summary["receipts"]) + bill_online_today + exchange_online_in_today + cashbook_contra_today,
@@ -234,6 +277,7 @@ def _day_snapshot(session, date: str, *, include_entries: bool = False):
         float(day_summary["withdrawals"]) + return_online_today + purchase_online_today + exchange_online_out_today,
         2,
     )
+    day_summary["charges"] = round(float(day_summary["charges"]) + purchase_bank_charges_today, 2)
     day_summary["bank_out"] = round(
         float(day_summary["withdrawals"]) + float(day_summary["expenses"]) + float(day_summary["charges"]),
         2,
@@ -265,9 +309,7 @@ def _iter_dates(from_date: str, to_date: str):
 
 @router.post("/", response_model=BankbookOut)
 def create_entry(payload: BankbookCreate):
-    et = (payload.entry_type or "").strip().upper()
-    if et not in VALID_ENTRY_TYPES:
-        raise HTTPException(status_code=400, detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, OPENING or CONTRA")
+    et = _normalize_entry_type(payload.entry_type)
 
     mode = (payload.mode or "").strip().upper()
     if et == "OPENING":
@@ -310,9 +352,7 @@ def create_entry(payload: BankbookCreate):
 @router.patch("/entry/{entry_id}", response_model=BankbookOut)
 def update_entry(entry_id: int, payload: BankbookCreate):
     require_min_role("MANAGER", context="Bankbook entry edit")
-    et = (payload.entry_type or "").strip().upper()
-    if et not in VALID_ENTRY_TYPES:
-        raise HTTPException(status_code=400, detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, OPENING or CONTRA")
+    et = _normalize_entry_type(payload.entry_type)
 
     mode = (payload.mode or "").strip().upper()
     if et == "OPENING":
@@ -392,9 +432,11 @@ def summary(
         cashbook_contra = _sum_cashbook_contra(session, start_iso=start_iso, end_iso=end_iso)
         return_online = _sum_return_online(session, start_iso=start_iso, end_iso=end_iso)
         purchase_online = _sum_purchase_online_out(session, start_iso=start_iso, end_iso=end_iso)
+        purchase_bank_charges = _sum_purchase_bank_charges(session, start_iso=start_iso, end_iso=end_iso)
         exchange_online_out = _sum_exchange_online_out(session, start_iso=start_iso, end_iso=end_iso)
         out["receipts"] = round(float(out["receipts"]) + bill_online + exchange_online_in + cashbook_contra, 2)
         out["withdrawals"] = round(float(out["withdrawals"]) + return_online + purchase_online + exchange_online_out, 2)
+        out["charges"] = round(float(out["charges"]) + purchase_bank_charges, 2)
         out["bank_out"] = round(float(out["withdrawals"]) + float(out["expenses"]) + float(out["charges"]), 2)
         out["net_change"] = round(float(out["receipts"]) - float(out["bank_out"]), 2)
         return out

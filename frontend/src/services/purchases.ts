@@ -1,6 +1,8 @@
 import api from './api'
 import type { Purchase, PurchaseItemPayload, PurchaseLedgerRow, PurchasePaymentPayload, SupplierLedgerSummary } from '../lib/types'
 
+export type PurchaseBankMode = 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | 'BANK_DEPOSIT'
+
 export interface PurchaseCreatePayload {
   party_id: number
   invoice_number: string
@@ -26,8 +28,11 @@ export interface PurchaseUpdatePayload {
 export interface PurchasePaymentCreatePayload {
   amount: number
   mode?: 'cash' | 'online' | 'split' | 'writeoff'
+  bank_mode?: PurchaseBankMode
+  transaction_id?: string
   cash_amount?: number
   online_amount?: number
+  txn_charges?: number
   note?: string
   paid_at?: string
   is_writeoff?: boolean
@@ -41,9 +46,12 @@ export interface PurchasePaymentBookRow {
   party_id: number
   paid_at: string
   mode: 'cash' | 'online' | 'split' | 'writeoff'
+  bank_mode?: PurchaseBankMode | null
+  transaction_id?: string | null
   amount: number
   cash_amount: number
   online_amount: number
+  txn_charges: number
   note?: string | null
   invoice_number?: string | null
   supplier_name?: string | null
@@ -55,8 +63,11 @@ export interface PurchasePaymentBookRow {
 export interface SupplierPaymentCreatePayload {
   amount?: number
   mode: 'cash' | 'online' | 'split'
+  bank_mode?: PurchaseBankMode
+  transaction_id?: string
   cash_amount?: number
   online_amount?: number
+  txn_charges?: number
   note?: string
   payment_date?: string
   is_writeoff?: boolean

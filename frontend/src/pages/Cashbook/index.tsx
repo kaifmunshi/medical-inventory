@@ -224,6 +224,7 @@ function buildPurchaseCashRows(payments: any[]) {
       pill_type: p.mode === 'split' ? 'SPLIT' : 'PAYMENT',
       amount: Number(p.cash_amount || 0),
       purchase_id: Number(p.purchase_id || 0),
+      payment_id: Number(p.id || 0),
       note: purchasePaymentNote(p, 'Cash'),
       source: 'PURCHASE_PAYMENT' as const,
     }))
@@ -1192,6 +1193,16 @@ export default function CashbookPage() {
                                   {(row.subRows || []).length} bill adjustment(s)
                                 </Typography>
                               </Stack>
+                            ) : row.source === 'PURCHASE_PAYMENT' && Number(row.purchase_id || 0) > 0 ? (
+                              <Typography variant="body2">
+                                {row.note || 'Supplier payment'}{' '}
+                                <Link
+                                  href={`/purchases?purchase_id=${row.purchase_id}&payment_id=${row.payment_id || ''}`}
+                                  underline="hover"
+                                >
+                                  Payment #{row.payment_id || '-'}
+                                </Link>
+                              </Typography>
                             ) : (
                               <Typography variant="body2">{row.note || '-'}</Typography>
                             )}

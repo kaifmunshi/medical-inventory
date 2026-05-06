@@ -841,9 +841,12 @@ def migrate_db():
                 party_id INTEGER,
                 paid_at TEXT NOT NULL,
                 mode TEXT NOT NULL DEFAULT 'cash',
+                bank_mode TEXT,
+                transaction_id TEXT,
                 amount REAL NOT NULL DEFAULT 0,
                 cash_amount REAL NOT NULL DEFAULT 0,
                 online_amount REAL NOT NULL DEFAULT 0,
+                txn_charges REAL NOT NULL DEFAULT 0,
                 note TEXT,
                 is_writeoff INTEGER NOT NULL DEFAULT 0,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -856,10 +859,16 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchasepayment ADD COLUMN party_id INTEGER"))
         if "mode" not in purchase_payment_col_names:
             session.exec(text("ALTER TABLE purchasepayment ADD COLUMN mode TEXT NOT NULL DEFAULT 'cash'"))
+        if "bank_mode" not in purchase_payment_col_names:
+            session.exec(text("ALTER TABLE purchasepayment ADD COLUMN bank_mode TEXT"))
+        if "transaction_id" not in purchase_payment_col_names:
+            session.exec(text("ALTER TABLE purchasepayment ADD COLUMN transaction_id TEXT"))
         if "cash_amount" not in purchase_payment_col_names:
             session.exec(text("ALTER TABLE purchasepayment ADD COLUMN cash_amount REAL NOT NULL DEFAULT 0"))
         if "online_amount" not in purchase_payment_col_names:
             session.exec(text("ALTER TABLE purchasepayment ADD COLUMN online_amount REAL NOT NULL DEFAULT 0"))
+        if "txn_charges" not in purchase_payment_col_names:
+            session.exec(text("ALTER TABLE purchasepayment ADD COLUMN txn_charges REAL NOT NULL DEFAULT 0"))
         session.exec(text("""
             UPDATE purchasepayment
             SET mode = CASE WHEN is_writeoff = 1 THEN 'writeoff' ELSE 'cash' END
@@ -883,6 +892,13 @@ def migrate_db():
             WHERE party_id IS NULL
               AND COALESCE(purchase_id, 0) > 0
         """))
+        session.exec(text("""
+            UPDATE purchasepayment
+            SET bank_mode = 'UPI'
+            WHERE is_writeoff = 0
+              AND COALESCE(online_amount, 0) > 0
+              AND (bank_mode IS NULL OR TRIM(bank_mode) = '')
+        """))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchase_party_id ON purchase (party_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchase_invoice_number ON purchase (invoice_number)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchase_payment_status ON purchase (payment_status)"))
@@ -896,6 +912,8 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_party_id ON purchasepayment (party_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_paid_at ON purchasepayment (paid_at)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_mode ON purchasepayment (mode)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_bank_mode ON purchasepayment (bank_mode)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_transaction_id ON purchasepayment (transaction_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_is_writeoff ON purchasepayment (is_writeoff)"))
         session.commit()
 

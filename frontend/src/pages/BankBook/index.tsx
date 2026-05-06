@@ -111,17 +111,17 @@ function typeChipProps(type: string) {
   if (t === 'SPLIT') return { label: 'Split', sx: { ...baseSx, bgcolor: '#9fe3b0', color: '#124b19' } }
   if (t === 'PAYMENT') return { label: 'Payment', sx: { ...baseSx, bgcolor: '#e0f2fe', color: '#075985' } }
   if (t === 'CONTRA') return { label: 'Contra', sx: { ...baseSx, bgcolor: '#c7d2fe', color: '#1e3a8a' } }
-  if (t === 'RECEIPT') return { label: 'Receipt', sx: { ...baseSx, bgcolor: 'success.light', color: 'success.dark' } }
-  if (t === 'WITHDRAWAL') return { label: 'Withdrawal', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
+  if (t === 'RECEIPT' || t === 'DEPOSIT' || t === 'DEPOSITS') return { label: 'Deposit', sx: { ...baseSx, bgcolor: 'success.light', color: 'success.dark' } }
+  if (t === 'WITHDRAWAL' || t === 'WITHDRAWALS') return { label: 'Withdrawals', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
   return { label: 'Expense', sx: { ...baseSx, bgcolor: 'error.light', color: 'error.dark' } }
 }
 
 const typeFilterOptions = [
   { value: 'ALL', label: 'All Types' },
-  { value: 'RECEIPT', label: 'Receipt' },
+  { value: 'RECEIPT', label: 'Deposit' },
   { value: 'OPENING', label: 'Opening' },
   { value: 'EXPENSE', label: 'Expense' },
-  { value: 'WITHDRAWAL', label: 'Withdrawal' },
+  { value: 'WITHDRAWAL', label: 'Withdrawals' },
   { value: 'PAYMENT', label: 'Payment' },
   { value: 'CONTRA', label: 'Contra' },
   { value: 'RETURN', label: 'Refund' },
@@ -200,8 +200,9 @@ function buildOnlineReceiptRows(payments: any[]) {
 function purchasePaymentNote(payment: any) {
   const invoice = payment?.invoice_number ? ` ${payment.invoice_number}` : payment?.purchase_id ? ` #${payment.purchase_id}` : ' without bill'
   const supplier = payment?.supplier_name ? ` - ${payment.supplier_name}` : ''
+  const txn = payment?.transaction_id ? ` [Txn ${payment.transaction_id}]` : ''
   const note = payment?.note ? ` (${payment.note})` : ''
-  return `Online supplier payment${payment?.purchase_id ? ' for purchase' : ''}${invoice}${supplier}${note}`
+  return `Online supplier payment${payment?.purchase_id ? ' for purchase' : ''}${invoice}${supplier}${txn}${note}`
 }
 
 function buildPurchaseOnlineRows(payments: any[]) {
@@ -213,11 +214,31 @@ function buildPurchaseOnlineRows(payments: any[]) {
       entry_type: 'WITHDRAWAL',
       pill_type: p.mode === 'split' ? 'SPLIT' : 'PAYMENT',
       amount: Number(p.online_amount || 0),
-      txn_charges: 0,
-      mode: 'ONLINE',
+      txn_charges: Number(p.txn_charges || 0),
+      mode: String(p.bank_mode || 'UPI').toUpperCase(),
       purchase_id: Number(p.purchase_id || 0),
+      payment_id: Number(p.id || 0),
       note: purchasePaymentNote(p),
       source: 'PURCHASE_PAYMENT' as const,
+    }))
+}
+
+function buildPurchaseChargeRows(payments: any[]) {
+  return (payments || [])
+    .filter((p) => Number(p?.online_amount || 0) > 0 && Number(p?.txn_charges || 0) > 0)
+    .map((p) => ({
+      id: `purchase-payment-charge-${p.id}`,
+      created_at: p.paid_at,
+      entry_type: 'EXPENSE',
+      pill_type: 'EXPENSE',
+      amount: Number(p.txn_charges || 0),
+      txn_charges: 0,
+      mode: String(p.bank_mode || 'UPI').toUpperCase(),
+      purchase_id: Number(p.purchase_id || 0),
+      linked_payment_id: Number(p.id || 0),
+      note: `Bank charges linked to supplier payment #${p.id}${p.supplier_name ? ` - ${p.supplier_name}` : ''}${p.transaction_id ? ` [Txn ${p.transaction_id}]` : ''}`,
+      source: 'PURCHASE_PAYMENT_CHARGE' as const,
+      sort_order: 1,
     }))
 }
 
@@ -621,9 +642,19 @@ export default function BankBookPage() {
     return buildPurchaseOnlineRows(payments)
   }, [qDayPurchasePayments.data])
 
+  const purchaseChargeRowsDay = useMemo(() => {
+    const payments = (qDayPurchasePayments.data || []) as any[]
+    return buildPurchaseChargeRows(payments)
+  }, [qDayPurchasePayments.data])
+
   const purchaseOnlineRowsAll = useMemo(() => {
     const payments = (qAllPurchasePayments.data || []) as any[]
     return buildPurchaseOnlineRows(payments)
+  }, [qAllPurchasePayments.data])
+
+  const purchaseChargeRowsAll = useMemo(() => {
+    const payments = (qAllPurchasePayments.data || []) as any[]
+    return buildPurchaseChargeRows(payments)
   }, [qAllPurchasePayments.data])
 
   const returnOnlineRowsDay = useMemo(() => {
@@ -833,6 +864,7 @@ export default function BankBookPage() {
             ...manualChargeRowsDay,
             ...billOnlineRowsDay,
             ...purchaseOnlineRowsDay,
+            ...purchaseChargeRowsDay,
             ...cashbookContraRowsDay,
             ...exchangeOnlineInRowsDay,
             ...exchangeOnlineOutRowsDay,
@@ -843,6 +875,7 @@ export default function BankBookPage() {
             ...manualChargeRowsAll,
             ...billOnlineRowsAll,
             ...purchaseOnlineRowsAll,
+            ...purchaseChargeRowsAll,
             ...cashbookContraRowsAll,
             ...exchangeOnlineInRowsAll,
             ...exchangeOnlineOutRowsAll,
@@ -863,6 +896,7 @@ export default function BankBookPage() {
     manualChargeRowsDay,
     billOnlineRowsDay,
     purchaseOnlineRowsDay,
+    purchaseChargeRowsDay,
     cashbookContraRowsDay,
     exchangeOnlineInRowsDay,
     exchangeOnlineOutRowsDay,
@@ -871,6 +905,7 @@ export default function BankBookPage() {
     manualChargeRowsAll,
     billOnlineRowsAll,
     purchaseOnlineRowsAll,
+    purchaseChargeRowsAll,
     cashbookContraRowsAll,
     exchangeOnlineInRowsAll,
     exchangeOnlineOutRowsAll,
@@ -924,7 +959,7 @@ export default function BankBookPage() {
       if (t === 'RECEIPT') receipts += amt
       else if (t === 'WITHDRAWAL' || t === 'CONTRA') withdrawals += amt
       else expenses += amt
-      if (r.source === 'BANKBOOK_CHARGE') charges += amt
+      if (r.source === 'BANKBOOK_CHARGE' || r.source === 'PURCHASE_PAYMENT_CHARGE') charges += amt
     }
     const bankOut = withdrawals + expenses
     const netChange = receipts - bankOut
@@ -1090,7 +1125,7 @@ export default function BankBookPage() {
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} flexWrap="wrap">
           {recordsFilter === 'DAY' ? <Chip label={`Opening: Rs ${money(day?.opening_balance)}`} /> : null}
-          <Chip color="success" variant="outlined" label={`Receipts: Rs ${money(computed.receipts)}`} />
+          <Chip color="success" variant="outlined" label={`Deposits: Rs ${money(computed.receipts)}`} />
           <Chip color="error" variant="outlined" label={`Expenses: Rs ${money(computed.expenses)}`} />
           <Chip color="warning" variant="outlined" label={`Withdrawals: Rs ${money(computed.withdrawals)}`} />
           <Chip color="secondary" variant="outlined" label={`Charges: Rs ${money(computed.charges)}`} />
@@ -1133,9 +1168,9 @@ export default function BankBookPage() {
               >
                 <MenuItem value="OPENING">Opening Balance (1 Apr)</MenuItem>
                 <MenuItem value="CONTRA">Contra (Bank to Cash)</MenuItem>
-                <MenuItem value="RECEIPT">Receipt (Bank In)</MenuItem>
+                <MenuItem value="RECEIPT">Deposit (Bank In)</MenuItem>
                 <MenuItem value="EXPENSE">Expense (Bank Out)</MenuItem>
-                <MenuItem value="WITHDRAWAL">Withdrawal (Bank Out)</MenuItem>
+                <MenuItem value="WITHDRAWAL">Withdrawals (Bank Out)</MenuItem>
               </TextField>
               {entryType !== 'OPENING' && entryType !== 'CONTRA' ? (
                 <TextField
@@ -1397,6 +1432,16 @@ export default function BankBookPage() {
                                   {(row.subRows || []).length} bill adjustment(s)
                                 </Typography>
                               </Stack>
+                            ) : (row.source === 'PURCHASE_PAYMENT' || row.source === 'PURCHASE_PAYMENT_CHARGE') && Number(row.purchase_id || 0) > 0 ? (
+                              <Typography variant="body2">
+                                {row.note || 'Supplier payment'}{' '}
+                                <Link
+                                  href={`/purchases?purchase_id=${row.purchase_id}&payment_id=${row.payment_id || row.linked_payment_id || ''}`}
+                                  underline="hover"
+                                >
+                                  Payment #{row.payment_id || row.linked_payment_id || '-'}
+                                </Link>
+                              </Typography>
                             ) : (
                               <Typography variant="body2">{row.note || '-'}</Typography>
                             )}
@@ -1421,6 +1466,8 @@ export default function BankBookPage() {
                               ? 'Customer receipt'
                               : row.source === 'PURCHASE_PAYMENT'
                                 ? 'Purchase'
+                                : row.source === 'PURCHASE_PAYMENT_CHARGE'
+                                  ? 'Bank charges'
                             : row.source === 'RETURN'
                               ? 'Return'
                               : row.source === 'EXCHANGE'
@@ -1481,7 +1528,7 @@ export default function BankBookPage() {
                             Rs {money(sub.amount)}
                           </TableCell>
                           <TableCell align="right">-</TableCell>
-                          <TableCell sx={{ color: 'text.secondary' }}>Receipt bill</TableCell>
+                          <TableCell sx={{ color: 'text.secondary' }}>Deposit bill</TableCell>
                           <TableCell />
                         </TableRow>
                       ))}
@@ -1666,9 +1713,9 @@ export default function BankBookPage() {
             >
               <MenuItem value="OPENING">Opening Balance (1 Apr)</MenuItem>
               <MenuItem value="CONTRA">Contra (Bank to Cash)</MenuItem>
-              <MenuItem value="RECEIPT">Receipt (Bank In)</MenuItem>
+              <MenuItem value="RECEIPT">Deposit (Bank In)</MenuItem>
               <MenuItem value="EXPENSE">Expense (Bank Out)</MenuItem>
-              <MenuItem value="WITHDRAWAL">Withdrawal (Bank Out)</MenuItem>
+              <MenuItem value="WITHDRAWAL">Withdrawals (Bank Out)</MenuItem>
             </TextField>
             {editType !== 'OPENING' && editType !== 'CONTRA' ? (
               <TextField

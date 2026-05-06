@@ -53,6 +53,7 @@ SYSTEM_LEDGERS = {
     "SALES_RECEIVABLE_CONTROL": ("Sales Receivable Control", "SUNDRY_DEBTORS"),
     "CUSTOMER_WRITE_OFF": ("Customer Write-off", "INDIRECT_EXPENSE"),
     "PURCHASE_WRITE_OFF": ("Purchase Write-off", "INDIRECT_INCOME"),
+    "BANK_CHARGES": ("Bank Charges", "INDIRECT_EXPENSE"),
 }
 
 
@@ -315,6 +316,9 @@ def post_purchase_payment_voucher(
     paid_at: str,
     cash_amount: float = 0.0,
     online_amount: float = 0.0,
+    bank_mode: Optional[str] = None,
+    txn_charges: float = 0.0,
+    transaction_id: Optional[str] = None,
 ) -> Voucher:
     ledgers = ensure_accounting_setup(session)
     creditor_ledger = ensure_party_ledger(session, party)
@@ -330,18 +334,25 @@ def post_purchase_payment_voucher(
     else:
         cash = round2(cash_amount)
         online = round2(online_amount)
+        charges = round2(txn_charges) if online > 0 else 0.0
         if cash <= 0 and online <= 0:
             cash = total
         lines = [
             {"ledger_id": int(creditor_ledger.id), "entry_type": "DR", "amount": total, "narration": note or "Supplier payment"},
         ]
+        if charges > 0:
+            lines.append({"ledger_id": int(ledgers["BANK_CHARGES"].id), "entry_type": "DR", "amount": charges, "narration": note or "Bank charges"})
         if cash > 0:
             lines.append({"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "CR", "amount": cash, "narration": note or "Supplier payment"})
         if online > 0:
-            lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "CR", "amount": online, "narration": note or "Supplier payment"})
+            bank_narration = f"{bank_mode} supplier payment" if bank_mode else "Supplier payment"
+            if transaction_id:
+                bank_narration = f"{bank_narration} ({transaction_id})"
+            lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "CR", "amount": round2(online + charges), "narration": note or bank_narration})
         voucher_type = "PAYMENT"
         source_type = "PURCHASE_PAYMENT"
         voucher_no = f"PP-{payment_id}"
+        total = round2(total + charges)
     return upsert_voucher(
         session,
         voucher_type=voucher_type,
@@ -475,6 +486,9 @@ def sync_existing_vouchers(session) -> None:
             payment.paid_at,
             float(getattr(payment, "cash_amount", 0) or 0),
             float(getattr(payment, "online_amount", 0) or 0),
+            getattr(payment, "bank_mode", None),
+            float(getattr(payment, "txn_charges", 0) or 0),
+            getattr(payment, "transaction_id", None),
         )
         if bool(getattr(payment, "is_deleted", False)) or bool(getattr(purchase, "is_deleted", False)):
             source_type = "PURCHASE_WRITEOFF" if bool(payment.is_writeoff) else "PURCHASE_PAYMENT"

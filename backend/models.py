@@ -757,9 +757,12 @@ class PurchasePayment(SQLModel, table=True):
     party_id: Optional[int] = Field(default=None, index=True)
     paid_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"), index=True)
     mode: str = Field(default="cash", index=True)
+    bank_mode: Optional[str] = Field(default=None, index=True)
+    transaction_id: Optional[str] = Field(default=None, index=True)
     amount: float = 0.0
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    txn_charges: float = 0.0
     note: Optional[str] = None
     is_writeoff: bool = Field(default=False, index=True)
     is_deleted: bool = Field(default=False, index=True)
@@ -976,8 +979,11 @@ class PurchaseItemIn(SQLModel):
 class PurchasePaymentIn(SQLModel):
     amount: float
     mode: Optional[str] = None
+    bank_mode: Optional[str] = None
+    transaction_id: Optional[str] = None
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    txn_charges: float = 0.0
     note: Optional[str] = None
     paid_at: Optional[str] = None
     is_writeoff: bool = False
@@ -1008,8 +1014,11 @@ class PurchaseUpdate(SQLModel):
 class PurchasePaymentCreate(SQLModel):
     amount: float
     mode: Optional[str] = None
+    bank_mode: Optional[str] = None
+    transaction_id: Optional[str] = None
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    txn_charges: float = 0.0
     note: Optional[str] = None
     paid_at: Optional[str] = None
     is_writeoff: bool = False
@@ -1018,8 +1027,11 @@ class PurchasePaymentCreate(SQLModel):
 class PurchasePaymentUpdate(SQLModel):
     amount: Optional[float] = None
     mode: Optional[str] = None
+    bank_mode: Optional[str] = None
+    transaction_id: Optional[str] = None
     cash_amount: Optional[float] = None
     online_amount: Optional[float] = None
+    txn_charges: Optional[float] = None
     note: Optional[str] = None
     paid_at: Optional[str] = None
     is_writeoff: Optional[bool] = None
@@ -1053,9 +1065,12 @@ class PurchasePaymentOut(SQLModel):
     party_id: Optional[int] = None
     paid_at: str
     mode: str = "cash"
+    bank_mode: Optional[str] = None
+    transaction_id: Optional[str] = None
     amount: float
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    txn_charges: float = 0.0
     note: Optional[str] = None
     is_writeoff: bool
     is_deleted: bool

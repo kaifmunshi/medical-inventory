@@ -80,7 +80,7 @@ class PurchasePaymentBookRow(SQLModel):
 
 STOCK_SOURCE_CREATED = "CREATED"
 STOCK_SOURCE_ATTACHED = "ATTACHED"
-VALID_BANK_MODES = {"UPI", "NEFT", "RTGS", "IMPS", "BANK_DEPOSIT"}
+VALID_BANK_MODES = {"UPI", "NEFT", "RTGS", "IMPS"}
 
 
 def now_ts() -> str:
@@ -162,7 +162,7 @@ def normalize_purchase_bank_details(
 
     normalized_bank_mode = str(bank_mode or "UPI").strip().upper()
     if normalized_bank_mode not in VALID_BANK_MODES:
-        raise HTTPException(status_code=400, detail="bank_mode must be UPI, NEFT, RTGS, IMPS or BANK_DEPOSIT")
+        raise HTTPException(status_code=400, detail="bank_mode must be UPI, NEFT, RTGS or IMPS")
     normalized_transaction_id = clean_text(transaction_id) if normalized_bank_mode == "UPI" else None
     return normalized_bank_mode, normalized_transaction_id, charges
 

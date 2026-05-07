@@ -53,7 +53,6 @@ const bankModeOptions: Array<{ value: PurchaseBankMode; label: string }> = [
   { value: 'NEFT', label: 'NEFT' },
   { value: 'RTGS', label: 'RTGS' },
   { value: 'IMPS', label: 'IMPS' },
-  { value: 'BANK_DEPOSIT', label: 'Bank Deposit' },
 ]
 
 function makeEmptyItem(): DraftItem {

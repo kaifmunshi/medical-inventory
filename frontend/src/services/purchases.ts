@@ -1,7 +1,7 @@
 import api from './api'
 import type { Purchase, PurchaseItemPayload, PurchaseLedgerRow, PurchasePaymentPayload, SupplierLedgerSummary } from '../lib/types'
 
-export type PurchaseBankMode = 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | 'BANK_DEPOSIT'
+export type PurchaseBankMode = 'UPI' | 'NEFT' | 'RTGS' | 'IMPS'
 
 export interface PurchaseCreatePayload {
   party_id: number

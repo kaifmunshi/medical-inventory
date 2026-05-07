@@ -177,7 +177,7 @@ export interface PurchaseItemPayload {
 export interface PurchasePaymentPayload {
   amount: number
   mode?: 'cash' | 'online' | 'split' | 'writeoff'
-  bank_mode?: 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | 'BANK_DEPOSIT'
+  bank_mode?: 'UPI' | 'NEFT' | 'RTGS' | 'IMPS'
   transaction_id?: string
   cash_amount?: number
   online_amount?: number
@@ -215,7 +215,7 @@ export interface PurchasePayment {
   party_id?: ID | null
   paid_at: string
   mode: 'cash' | 'online' | 'split' | 'writeoff'
-  bank_mode?: 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | 'BANK_DEPOSIT' | null
+  bank_mode?: 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | null
   transaction_id?: string | null
   amount: number
   cash_amount: number

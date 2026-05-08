@@ -298,6 +298,11 @@ export async function deleteItem(id: number): Promise<void> {
   await api.delete(`/inventory/${id}`)
 }
 
+export async function deleteOpeningStockMovement(movementId: number): Promise<{ deleted_movement_id: number; removed_qty: number; item: Item }> {
+  const { data } = await api.delete(`/inventory/ledger/opening/${movementId}`)
+  return data
+}
+
 export async function adjustStock(id: number, delta: number): Promise<Item> {
   const { data } = await api.post(`/inventory/${id}/adjust`, null, { params: { delta } })
   return data

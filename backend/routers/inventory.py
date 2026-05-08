@@ -11,6 +11,7 @@ from backend.utils.archive_rules import apply_archive_rules
 from sqlalchemy import and_, case, func, literal, or_, exists
 from sqlalchemy.orm import aliased
 
+from backend.controls import log_audit
 from backend.db import get_session
 from backend.models import (
     Bill,
@@ -29,6 +30,7 @@ from backend.models import (
     StockMovement,
 )
 from backend.inventory_lot_sync import ensure_lot_for_inventory_item, sync_lot_quantity_for_item
+from backend.security import require_min_role
 
 logger = logging.getLogger("api.items")
 router = APIRouter()
@@ -297,6 +299,12 @@ class StockReconciliationApplyOut(BaseModel):
     deterministic_rows_inserted: int
     synthetic_rows_inserted: int
     total_delta_applied: int
+
+
+class OpeningDeleteOut(BaseModel):
+    item: ItemOut
+    deleted_movement_id: int
+    removed_qty: int
 
 
 # ---------- Helpers ----------
@@ -1613,6 +1621,89 @@ def apply_stock_ledger_reconciliation(payload: StockReconciliationApplyIn) -> St
             synthetic_rows_inserted=synthetic_rows_inserted,
             total_delta_applied=total_delta_applied,
         )
+
+
+@router.delete("/ledger/opening/{movement_id}", response_model=OpeningDeleteOut)
+def delete_opening_stock_movement(
+    movement_id: int,
+    note: Optional[str] = Query(None, description="Optional audit note"),
+) -> OpeningDeleteOut:
+    require_min_role("MANAGER", context="Opening stock delete")
+    with get_session() as session:
+        movement = session.get(StockMovement, movement_id)
+        if not movement:
+            raise HTTPException(status_code=404, detail="Opening movement not found")
+
+        reason_key = str(movement.reason or "").upper()
+        ref_type_key = str(getattr(movement, "ref_type", "") or "").upper()
+        opening_qty = int(movement.delta or 0)
+        if reason_key != "OPENING" or ref_type_key != "ITEM_CREATE" or opening_qty <= 0:
+            raise HTTPException(status_code=400, detail="Only positive Opening / ITEM_CREATE rows can be removed")
+
+        item = session.get(Item, int(movement.item_id))
+        if not item:
+            raise HTTPException(status_code=404, detail="Inventory batch not found")
+
+        other_movements = session.exec(
+            select(StockMovement)
+            .where(StockMovement.item_id == int(item.id))
+            .where(StockMovement.id != int(movement.id))
+            .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+            .limit(3)
+        ).all()
+        if other_movements:
+            examples = ", ".join(
+                f"{row.reason}{f' #{row.ref_id}' if getattr(row, 'ref_id', None) else ''}"
+                for row in other_movements
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot remove opening for batch #{item.id} because it has other stock movements"
+                    f" ({examples}). Fix this with Stock Audit/Adjust Stock, or edit the related bills first."
+                ),
+            )
+
+        current_stock = int(item.stock or 0)
+        if current_stock != opening_qty:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot remove opening for batch #{item.id} because current stock is {current_stock}, "
+                    f"but opening quantity is {opening_qty}. Use Stock Audit/Adjust Stock instead."
+                ),
+            )
+
+        item.stock = 0
+        item.updated_at = now_ts()
+        session.add(item)
+        session.delete(movement)
+        apply_archive_rules(session, item)
+        lot = sync_lot_quantity_for_item(session, item, ts=item.updated_at)
+        if lot:
+            lot.is_active = False
+            session.add(lot)
+        log_audit(
+            session,
+            entity_type="ITEM",
+            entity_id=int(item.id),
+            action="OPENING_DELETE",
+            note=note or f"Removed opening stock movement #{movement_id}",
+            details={
+                "movement_id": int(movement_id),
+                "item_id": int(item.id),
+                "item_name": item.name,
+                "brand": item.brand,
+                "expiry_date": item.expiry_date,
+                "mrp": item.mrp,
+                "removed_qty": opening_qty,
+            },
+        )
+        session.commit()
+        session.refresh(item)
+        _attach_last_incoming(session, [item])
+        _attach_lot_metadata(session, [item])
+        return OpeningDeleteOut(item=item, deleted_movement_id=int(movement_id), removed_qty=opening_qty)
 
 
 @router.get("/{item_id}", response_model=ItemOut)

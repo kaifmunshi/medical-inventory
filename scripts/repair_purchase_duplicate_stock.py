@@ -111,6 +111,26 @@ def load_purchase_items(conn: sqlite3.Connection) -> list[dict]:
             COALESCE(pi.stock_source, 'CREATED') AS stock_source,
             target.stock AS target_stock,
             target.is_archived AS target_is_archived,
+            (
+                SELECT MIN(sm.ts)
+                FROM stockmovement sm
+                WHERE sm.item_id = pi.inventory_item_id
+                  AND sm.reason = 'OPENING'
+                  AND sm.ref_type = 'ITEM_CREATE'
+            ) AS target_opening_ts,
+            COALESCE((
+                SELECT SUM(sm.delta)
+                FROM stockmovement sm
+                WHERE sm.item_id = pi.inventory_item_id
+                  AND sm.reason = 'OPENING'
+                  AND sm.ref_type = 'ITEM_CREATE'
+            ), 0) AS target_opening_delta,
+            (
+                SELECT COUNT(*)
+                FROM stockmovement sm
+                WHERE sm.item_id = pi.inventory_item_id
+                  AND date(sm.ts) < date(p.invoice_date)
+            ) AS target_pre_invoice_movement_count,
             COALESCE((
                 SELECT SUM(sm.delta)
                 FROM stockmovement sm
@@ -208,16 +228,34 @@ def group_key(row: dict, qty: int) -> tuple:
     )
 
 
+def is_opening_purchase(row: dict, qty: int) -> bool:
+    opening_date = str(row.get("target_opening_ts") or "")[:10]
+    invoice_date = str(row.get("invoice_date") or "")[:10]
+    if not opening_date or not invoice_date or opening_date < invoice_date:
+        return False
+    if int(row.get("target_opening_delta") or 0) != int(qty or 0):
+        return False
+    return int(row.get("target_pre_invoice_movement_count") or 0) == 0
+
+
 def discover_pairs(conn: sqlite3.Connection) -> tuple[list[RepairPair], list[str]]:
     purchase_items_by_key: dict[tuple, list[dict]] = defaultdict(list)
+    same_day_opening_keys: set[tuple] = set()
     for item in load_purchase_items(conn):
         qty = int(item["qty"] or 0)
-        purchase_items_by_key[group_key(item, qty)].append(item)
+        key = group_key(item, qty)
+        if is_opening_purchase(item, qty):
+            same_day_opening_keys.add(key)
+            continue
+        purchase_items_by_key[key].append(item)
 
     duplicates_by_key: dict[tuple, list[dict]] = defaultdict(list)
     for dupe in load_duplicate_repairs(conn):
         qty = int(dupe["purchase_delta"] or 0)
-        duplicates_by_key[group_key(dupe, qty)].append(dupe)
+        key = group_key(dupe, qty)
+        if key in same_day_opening_keys:
+            continue
+        duplicates_by_key[key].append(dupe)
 
     cur = conn.cursor()
     link_ids_by_target: dict[tuple[int, int], deque[int]] = defaultdict(deque)

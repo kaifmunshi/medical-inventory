@@ -1,7 +1,9 @@
 from contextlib import contextmanager
 from datetime import datetime
+import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import sys
 from sqlmodel import create_engine, Session, SQLModel
@@ -345,6 +347,370 @@ def auto_repair_hidden_purchase_duplicate_stock() -> tuple[int, str | None, int]
         return len(pairs), str(backup_path), len(warnings)
     finally:
         conn.close()
+
+
+def create_data_repair_backup(label: str) -> str:
+    backup_dir = BASE_DIR / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_label = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(label or "repair"))
+    backup_path = backup_dir / f"{DB_FILE.stem}.{safe_label}_{stamp}{DB_FILE.suffix}"
+    shutil.copy2(DB_FILE, backup_path)
+    return str(backup_path)
+
+
+def _row_value(row, index: int = 0, default=None):
+    if row is None:
+        return default
+    try:
+        return row[index]
+    except Exception:
+        return default
+
+
+def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
+    """
+    Undo the broad purchase-stock restore for rows where the purchase had already
+    been represented by an OPENING/ITEM_CREATE batch created on/after the invoice date.
+
+    This keeps later sales on the opening batch intact and neutralizes only the
+    duplicate purchase-created batch revived by the earlier broad repair.
+    """
+    repair_logs = session.exec(
+        text("""
+            SELECT id, details_json
+            FROM auditlog
+            WHERE action = 'DATA_REPAIR'
+              AND note = 'Restored purchase-created batches hidden by duplicate-stock repair'
+            ORDER BY id
+        """),
+    ).all()
+    if not repair_logs:
+        return 0, None
+
+    raw_items = []
+    seen_keys = set()
+    for log_row in repair_logs:
+        try:
+            payload = json.loads(str(log_row[1] or "{}"))
+        except Exception:
+            continue
+        for entry in payload.get("items", []) if isinstance(payload, dict) else []:
+            try:
+                purchase_id = int(entry.get("purchase_id") or 0)
+                purchase_item_id = int(entry.get("purchase_item_id") or 0)
+                target_item_id = int(entry.get("target_item_id") or 0)
+                duplicate_item_id = int(entry.get("duplicate_item_id") or 0)
+                qty = int(entry.get("qty") or 0)
+            except Exception:
+                continue
+            key = (purchase_id, purchase_item_id, target_item_id, duplicate_item_id)
+            if not all(key) or qty <= 0 or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            raw_items.append(
+                {
+                    "purchase_id": purchase_id,
+                    "purchase_item_id": purchase_item_id,
+                    "target_item_id": target_item_id,
+                    "duplicate_item_id": duplicate_item_id,
+                    "qty": qty,
+                    "invoice_number": str(entry.get("invoice_number") or ""),
+                    "product_name": str(entry.get("product_name") or ""),
+                }
+            )
+
+    candidates = []
+    for item in raw_items:
+        base_params = {
+            "purchase_id": item["purchase_id"],
+            "purchase_item_id": item["purchase_item_id"],
+            "target_item_id": item["target_item_id"],
+            "duplicate_item_id": item["duplicate_item_id"],
+            "qty": item["qty"],
+        }
+        row = session.exec(
+            text("""
+                SELECT
+                    p.invoice_number,
+                    p.invoice_date,
+                    pi.product_id,
+                    pi.effective_cost_price,
+                    target_lot.id AS target_lot_id
+                FROM purchaseitem pi
+                JOIN purchase p ON p.id = pi.purchase_id
+                JOIN item target ON target.id = :target_item_id
+                JOIN item duplicate ON duplicate.id = :duplicate_item_id
+                LEFT JOIN inventorylot target_lot ON target_lot.legacy_item_id = target.id
+                WHERE pi.id = :purchase_item_id
+                  AND pi.purchase_id = :purchase_id
+                  AND COALESCE(p.is_deleted, 0) = 0
+                  AND pi.inventory_item_id = :duplicate_item_id
+                  AND COALESCE(pi.stock_source, 'CREATED') = 'CREATED'
+                  AND (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)) = :qty
+                  AND COALESCE(duplicate.stock, 0) = :qty
+                  AND COALESCE(duplicate.is_archived, 0) = 0
+                  AND lower(trim(COALESCE(target.name, ''))) = lower(trim(COALESCE(pi.product_name, '')))
+                  AND lower(trim(COALESCE(duplicate.name, ''))) = lower(trim(COALESCE(pi.product_name, '')))
+                  AND lower(trim(COALESCE(target.brand, ''))) = lower(trim(COALESCE(pi.brand, '')))
+                  AND lower(trim(COALESCE(duplicate.brand, ''))) = lower(trim(COALESCE(pi.brand, '')))
+                  AND COALESCE(target.expiry_date, '') = COALESCE(pi.expiry_date, '')
+                  AND COALESCE(duplicate.expiry_date, '') = COALESCE(pi.expiry_date, '')
+                  AND ABS(COALESCE(target.mrp, 0) - COALESCE(pi.mrp, 0)) < 0.001
+                  AND ABS(COALESCE(duplicate.mrp, 0) - COALESCE(pi.mrp, 0)) < 0.001
+                LIMIT 1
+            """).bindparams(**base_params),
+        ).first()
+        if not row or row[4] is None:
+            continue
+
+        invoice_date = str(row[1] or "")[:10]
+        if not invoice_date:
+            continue
+
+        opening_row = session.exec(
+            text("""
+                SELECT MIN(ts), COALESCE(SUM(delta), 0)
+                FROM stockmovement
+                WHERE item_id = :target_item_id
+                  AND reason = 'OPENING'
+                  AND ref_type = 'ITEM_CREATE'
+            """).bindparams(target_item_id=item["target_item_id"]),
+        ).first()
+        opening_ts = str(_row_value(opening_row, 0, "") or "")
+        opening_delta = int(_row_value(opening_row, 1, 0) or 0)
+        if opening_ts[:10] < invoice_date or opening_delta != int(item["qty"]):
+            continue
+
+        pre_invoice_count = int(
+            _row_value(
+                session.exec(
+                    text("""
+                        SELECT COUNT(*)
+                        FROM stockmovement
+                        WHERE item_id = :target_item_id
+                          AND date(ts) < date(:invoice_date)
+                    """).bindparams(target_item_id=item["target_item_id"], invoice_date=invoice_date),
+                ).first(),
+                0,
+                0,
+            )
+            or 0
+        )
+        if pre_invoice_count != 0:
+            continue
+
+        duplicate_purchase_count = int(
+            _row_value(
+                session.exec(
+                    text("""
+                        SELECT COUNT(*)
+                        FROM stockmovement
+                        WHERE item_id = :duplicate_item_id
+                          AND reason = 'PURCHASE'
+                          AND ref_type = 'PURCHASE'
+                          AND ref_id = :purchase_id
+                          AND delta = :qty
+                    """).bindparams(
+                        duplicate_item_id=item["duplicate_item_id"],
+                        purchase_id=item["purchase_id"],
+                        qty=item["qty"],
+                    ),
+                ).first(),
+                0,
+                0,
+            )
+            or 0
+        )
+        duplicate_other_count = int(
+            _row_value(
+                session.exec(
+                    text("""
+                        SELECT COUNT(*)
+                        FROM stockmovement
+                        WHERE item_id = :duplicate_item_id
+                          AND NOT (
+                              reason = 'PURCHASE'
+                              AND ref_type = 'PURCHASE'
+                              AND ref_id = :purchase_id
+                              AND delta = :qty
+                          )
+                    """).bindparams(
+                        duplicate_item_id=item["duplicate_item_id"],
+                        purchase_id=item["purchase_id"],
+                        qty=item["qty"],
+                    ),
+                ).first(),
+                0,
+                0,
+            )
+            or 0
+        )
+        duplicate_bill_count = int(
+            _row_value(
+                session.exec(
+                    text("SELECT COUNT(*) FROM billitem WHERE item_id = :duplicate_item_id").bindparams(
+                        duplicate_item_id=item["duplicate_item_id"],
+                    ),
+                ).first(),
+                0,
+                0,
+            )
+            or 0
+        )
+        if duplicate_purchase_count != 1 or duplicate_other_count != 0 or duplicate_bill_count != 0:
+            continue
+
+        candidates.append(
+            {
+                **item,
+                "invoice_number": str(row[0] or item["invoice_number"]),
+                "invoice_date": invoice_date,
+                "product_id": int(row[2] or 0) or None,
+                "effective_cost_price": float(row[3] or 0),
+                "target_lot_id": int(row[4]),
+            }
+        )
+
+    if not candidates:
+        return 0, None
+
+    session.commit()
+    backup_path = create_data_repair_backup("before_opening_purchase_restore_revert")
+    ts = _now_ts()
+    applied = []
+    for item in candidates:
+        purchase_ts = f"{item['invoice_date']}T00:00:00"
+        session.exec(
+            text("""
+                UPDATE purchaseitem
+                SET inventory_item_id = :target_item_id,
+                    lot_id = :target_lot_id,
+                    stock_source = 'ATTACHED'
+                WHERE id = :purchase_item_id
+                  AND purchase_id = :purchase_id
+                  AND inventory_item_id = :duplicate_item_id
+                  AND COALESCE(stock_source, 'CREATED') = 'CREATED'
+            """).bindparams(
+                target_item_id=item["target_item_id"],
+                target_lot_id=item["target_lot_id"],
+                purchase_item_id=item["purchase_item_id"],
+                purchase_id=item["purchase_id"],
+                duplicate_item_id=item["duplicate_item_id"],
+            ),
+        )
+        session.exec(
+            text("""
+                UPDATE item
+                SET stock = 0,
+                    is_archived = 1,
+                    archived_at = COALESCE(archived_at, :ts),
+                    cost_price = 0,
+                    updated_at = :ts
+                WHERE id = :duplicate_item_id
+            """).bindparams(ts=ts, duplicate_item_id=item["duplicate_item_id"]),
+        )
+        session.exec(
+            text("""
+                UPDATE inventorylot
+                SET sealed_qty = 0,
+                    loose_qty = 0,
+                    is_active = 0,
+                    cost_price = 0,
+                    updated_at = :ts
+                WHERE legacy_item_id = :duplicate_item_id
+            """).bindparams(ts=ts, duplicate_item_id=item["duplicate_item_id"]),
+        )
+        session.exec(
+            text("""
+                INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
+                SELECT
+                    :duplicate_item_id,
+                    :purchase_ts,
+                    -:qty,
+                    'PURCHASE_DUPLICATE_REPAIR',
+                    'PURCHASE',
+                    :purchase_id,
+                    'Safety repair: purchase stock already represented by opening item #' || :target_item_id,
+                    'migration'
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM stockmovement
+                    WHERE item_id = :duplicate_item_id
+                      AND reason = 'PURCHASE_DUPLICATE_REPAIR'
+                      AND ref_type = 'PURCHASE'
+                      AND ref_id = :purchase_id
+                )
+            """).bindparams(
+                purchase_ts=purchase_ts,
+                duplicate_item_id=item["duplicate_item_id"],
+                target_item_id=item["target_item_id"],
+                purchase_id=item["purchase_id"],
+                qty=item["qty"],
+            ),
+        )
+        session.exec(
+            text("""
+                INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
+                SELECT
+                    :target_item_id,
+                    :purchase_ts,
+                    0,
+                    'PURCHASE_LINK',
+                    'PURCHASE',
+                    :purchase_id,
+                    'Safety repair: linked existing opening stock to purchase ' || :invoice_number,
+                    'migration'
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM stockmovement
+                    WHERE item_id = :target_item_id
+                      AND reason = 'PURCHASE_LINK'
+                      AND ref_type = 'PURCHASE'
+                      AND ref_id = :purchase_id
+                )
+            """).bindparams(
+                purchase_ts=purchase_ts,
+                target_item_id=item["target_item_id"],
+                purchase_id=item["purchase_id"],
+                invoice_number=item["invoice_number"],
+            ),
+        )
+        applied.append(
+            {
+                "purchase_id": item["purchase_id"],
+                "purchase_item_id": item["purchase_item_id"],
+                "invoice_number": item["invoice_number"],
+                "product_name": item["product_name"],
+                "target_item_id": item["target_item_id"],
+                "duplicate_item_id": item["duplicate_item_id"],
+                "qty": item["qty"],
+            }
+        )
+
+    session.exec(
+        text("""
+            INSERT INTO auditlog (event_ts, entity_type, entity_id, action, note, details_json, actor)
+            VALUES (
+                :ts,
+                'PURCHASE',
+                NULL,
+                'DATA_REPAIR',
+                'Reverted unsafe opening purchase duplicate restores',
+                :details_json,
+                'migration'
+            )
+        """).bindparams(
+            ts=ts,
+            details_json=json.dumps(
+                {"backup": backup_path, "fixed_count": len(applied), "items": applied},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    session.commit()
+    return len(applied), backup_path
 
 
 def migrate_db():
@@ -1218,6 +1584,28 @@ def migrate_db():
                 """).bindparams(
                     k=hidden_purchase_stock_repair_key,
                     value=f"done:{repaired_count};warnings:{warning_count};backup:{backup_path or ''}",
+                    ts=ts_repair,
+                ),
+            )
+            session.commit()
+
+        # ---------- one-time data repair: undo unsafe purchase/opening duplicate restores ----------
+        unsafe_opening_restore_key = "revert_unsafe_opening_purchase_restore_v1"
+        unsafe_opening_restore_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=unsafe_opening_restore_key),
+        ).first()
+        if not unsafe_opening_restore_done:
+            session.commit()
+            ts_repair = _now_ts()
+            reverted_count, backup_path = revert_unsafe_opening_purchase_restores(session)
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=unsafe_opening_restore_key,
+                    value=f"done:{reverted_count};backup:{backup_path or ''}",
                     ts=ts_repair,
                 ),
             )

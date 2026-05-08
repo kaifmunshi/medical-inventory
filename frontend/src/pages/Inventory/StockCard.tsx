@@ -27,6 +27,7 @@ import {
 } from '@mui/material'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import CloseIcon from '@mui/icons-material/Close'
+import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
 import OpenInNewIcon from '@mui/icons-material/OpenInNew'
@@ -37,6 +38,7 @@ import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 import { getBill, type Bill } from '../../services/billing'
 import {
+  deleteOpeningStockMovement,
   getGroupLedger,
   getGroupLedgerSummary,
   getItemGroup,
@@ -170,13 +172,23 @@ function dateOnly(value: any) {
   return String(value || '').slice(0, 10)
 }
 
+function dayGap(fromValue: any, toValue: any) {
+  const from = new Date(dateOnly(fromValue))
+  const to = new Date(dateOnly(toValue))
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return null
+  return Math.round((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000))
+}
+
 function canMergePurchaseLinkSource(row: any, link: any) {
   const reasonKey = String(row?.reason || '').toUpperCase()
+  const gap = dayGap(link?.ts, row?.ts)
   return (
     Number(row?.item_id || 0) === Number(link?.item_id || 0) &&
     Number(row?.delta || 0) > 0 &&
     (reasonKey === 'OPENING' || reasonKey === 'INVENTORY_ADD') &&
-    dateOnly(row?.ts) === dateOnly(link?.ts)
+    gap !== null &&
+    gap >= 0 &&
+    gap <= 2
   )
 }
 
@@ -334,6 +346,16 @@ function findExactProduct(products: any[], name?: string, brand?: string) {
     String(product?.name || '').trim().toLowerCase() === nameKey
     && String(product?.brand || '').trim().toLowerCase() === brandKey
   )) || null
+}
+
+function canRemoveOpeningRow(row: any) {
+  return (
+    !row?.is_synthetic_opening &&
+    String(row?.reason || '').toUpperCase() === 'OPENING' &&
+    String(row?.ref_type || '').toUpperCase() === 'ITEM_CREATE' &&
+    Number(row?.delta || 0) > 0 &&
+    Number(row?.item_id || 0) > 0
+  )
 }
 
 export default function StockCardPage() {
@@ -711,6 +733,20 @@ export default function StockCardPage() {
     queryClient.invalidateQueries({ queryKey: ['inventory-dashboard-stats'] })
   }
 
+  const mDeleteOpening = useMutation({
+    mutationFn: (movementId: number) => deleteOpeningStockMovement(movementId),
+    onSuccess: (result) => {
+      setSelectedMovementId(null)
+      refreshLedgerAfterBillChange()
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      toast.push(`Removed opening stock ${Number(result?.removed_qty || 0)}`, 'success')
+    },
+    onError: (err: any) => {
+      toast.push(String(err?.message || 'Opening stock could not be removed'), 'error')
+    },
+  })
+
   function quickRange(days: number | 'all') {
     if (days === 'all') {
       setFrom('')
@@ -789,13 +825,14 @@ export default function StockCardPage() {
                 <th>Op Bal</th>
                 <th>Qty</th>
                 <th>Cl Bal</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 Array.from({ length: 8 }).map((_, index) => (
                   <tr key={`sk-${index}`}>
-                    <td colSpan={6}>
+                    <td colSpan={7}>
                       <Box py={0.75}>
                         <Skeleton variant="rounded" height={34} />
                       </Box>
@@ -804,7 +841,7 @@ export default function StockCardPage() {
                 ))
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={7}>
                     <Box p={2} color="text.secondary">
                       No ledger rows for the selected range.
                     </Box>
@@ -818,6 +855,7 @@ export default function StockCardPage() {
                   const sourceLink = ledgerSourceLink(row)
                   const delta = Number(row.delta || 0)
                   const tone = movementTone(delta)
+                  const removableOpening = canRemoveOpeningRow(row)
                   return (
                     <tr
                       key={`row-${row.id}`}
@@ -885,6 +923,28 @@ export default function StockCardPage() {
                         <Typography sx={{ color: tone, fontWeight: 800 }}>
                           {row.balance_after}
                         </Typography>
+                      </td>
+                      <td>
+                        {removableOpening ? (
+                          <Tooltip title="Remove opening only when this batch has no sales or other stock movements" arrow>
+                            <span>
+                              <IconButton
+                                size="small"
+                                color="error"
+                                disabled={mDeleteOpening.isPending}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  const ok = window.confirm(
+                                    `Remove opening stock ${delta} from batch #${row.item_id}? This is only allowed when the batch has no sales or other movements.`
+                                  )
+                                  if (ok) mDeleteOpening.mutate(Number(row.id))
+                                }}
+                              >
+                                <DeleteIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        ) : null}
                       </td>
                     </tr>
                   )

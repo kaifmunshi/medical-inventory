@@ -303,6 +303,27 @@ export async function deleteOpeningStockMovement(movementId: number): Promise<{ 
   return data
 }
 
+export async function clubPurchaseBatchToOpening(payload: {
+  source_item_id: number
+  target_item_id: number
+  purchase_item_id?: number
+  adopt_purchase_details?: boolean
+  note?: string
+}): Promise<{
+  source_item: Item
+  target_item: Item
+  purchase_id: number
+  purchase_item_id: number
+  source_item_id: number
+  target_item_id: number
+  target_stock: number
+  archived_source_id: number
+  moved_movement_count: number
+}> {
+  const { data } = await api.post('/inventory/ledger/club-opening', payload)
+  return data
+}
+
 export async function adjustStock(id: number, delta: number): Promise<Item> {
   const { data } = await api.post(`/inventory/${id}/adjust`, null, { params: { delta } })
   return data

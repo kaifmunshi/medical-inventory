@@ -26,6 +26,7 @@ import {
   Typography,
 } from '@mui/material'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
+import CallMergeIcon from '@mui/icons-material/CallMerge'
 import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
@@ -38,6 +39,7 @@ import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 import { getBill, type Bill } from '../../services/billing'
 import {
+  clubPurchaseBatchToOpening,
   deleteOpeningStockMovement,
   getGroupLedger,
   getGroupLedgerSummary,
@@ -389,6 +391,10 @@ export default function StockCardPage() {
   const [productCategoryOpen, setProductCategoryOpen] = useState(false)
   const [productBrandName, setProductBrandName] = useState('')
   const [productCategoryName, setProductCategoryName] = useState('')
+  const [clubOpen, setClubOpen] = useState(false)
+  const [clubSourceBatch, setClubSourceBatch] = useState<any | null>(null)
+  const [clubTargetBatchId, setClubTargetBatchId] = useState<number | ''>('')
+  const [clubAdoptPurchaseDetails, setClubAdoptPurchaseDetails] = useState(false)
   const [productForm, setProductForm] = useState<ProductPayload>({
     name: '',
     brand: '',
@@ -408,6 +414,10 @@ export default function StockCardPage() {
   })
 
   const batches = groupQ.data?.batches || []
+  const clubTargetOptions = useMemo(
+    () => batches.filter((batch) => Number(batch.id) !== Number(clubSourceBatch?.id || 0)),
+    [batches, clubSourceBatch?.id],
+  )
   const brandsQ = useQuery({ queryKey: ['stock-card-brands'], queryFn: () => fetchBrands({ active_only: true }) })
   const categoriesQ = useQuery({ queryKey: ['stock-card-categories'], queryFn: () => fetchCategories({ active_only: true }) })
   const productsQ = useQuery({
@@ -746,6 +756,41 @@ export default function StockCardPage() {
       toast.push(String(err?.message || 'Opening stock could not be removed'), 'error')
     },
   })
+
+  const mClubOpening = useMutation({
+    mutationFn: () => {
+      if (!clubSourceBatch || !clubTargetBatchId) throw new Error('Select the OP batch to keep')
+      return clubPurchaseBatchToOpening({
+        source_item_id: Number(clubSourceBatch.id),
+        target_item_id: Number(clubTargetBatchId),
+        adopt_purchase_details: clubAdoptPurchaseDetails,
+      })
+    },
+    onSuccess: (result) => {
+      setClubOpen(false)
+      setClubSourceBatch(null)
+      setClubTargetBatchId('')
+      setClubAdoptPurchaseDetails(false)
+      setSelectedBatchId(Number(result.target_item_id))
+      refreshLedgerAfterBillChange()
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['purchases'] })
+      toast.push(`Clubbed batch #${result.source_item_id} into #${result.target_item_id}`, 'success')
+    },
+    onError: (err: any) => {
+      const detail = err?.response?.data?.detail || err?.message || 'Batch could not be clubbed'
+      toast.push(String(detail), 'error')
+    },
+  })
+
+  function openClubDialog(batch: any) {
+    const fallbackTarget = batches.find((row) => Number(row.id) !== Number(batch.id))
+    setClubSourceBatch(batch)
+    setClubTargetBatchId(fallbackTarget?.id ? Number(fallbackTarget.id) : '')
+    setClubAdoptPurchaseDetails(false)
+    setClubOpen(true)
+  }
 
   function quickRange(days: number | 'all') {
     if (days === 'all') {
@@ -1264,9 +1309,18 @@ export default function StockCardPage() {
                         </Stack>
                       </td>
                       <td>
-                        <Stack direction="row" gap={1}>
+                        <Stack direction="row" gap={1} flexWrap="wrap">
                           <Button size="small" variant="outlined" onClick={() => openBatch(Number(batch.id))}>
                             Batch Ledger
+                          </Button>
+                          <Button
+                            size="small"
+                            color="warning"
+                            variant="outlined"
+                            startIcon={<CallMergeIcon fontSize="small" />}
+                            onClick={() => openClubDialog(batch)}
+                          >
+                            Club
                           </Button>
                           <Button size="small" onClick={openProductMaster}>
                             Edit Product
@@ -1282,6 +1336,73 @@ export default function StockCardPage() {
         </Paper>
       ) : null}
     </Stack>
+
+    <Dialog
+      open={clubOpen}
+      onClose={() => {
+        if (!mClubOpening.isPending) setClubOpen(false)
+      }}
+      fullWidth
+      maxWidth="sm"
+    >
+      <DialogTitle>Club Purchase Batch</DialogTitle>
+      <DialogContent dividers>
+        <Stack gap={2} sx={{ pt: 1 }}>
+          <Alert severity="warning">Validated repair. The selected batch becomes the purchase batch and the source batch is archived.</Alert>
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+            <TextField
+              label="Source batch"
+              value={clubSourceBatch ? `#${clubSourceBatch.id} | Stock ${Number(clubSourceBatch.stock || 0)} | MRP ${clubSourceBatch.mrp}` : ''}
+              fullWidth
+              InputProps={{ readOnly: true }}
+            />
+            <TextField
+              select
+              label="Batch to keep"
+              value={clubTargetBatchId}
+              onChange={(e) => setClubTargetBatchId(e.target.value ? Number(e.target.value) : '')}
+              fullWidth
+            >
+              <MenuItem value="">Select batch</MenuItem>
+              {clubTargetOptions.map((batch) => (
+                <MenuItem key={`club-target-${batch.id}`} value={Number(batch.id)}>
+                  #{batch.id} | Stock {Number(batch.stock || 0)} | MRP {batch.mrp} | Exp {formatExpiry(batch.expiry_date)}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Stack>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={clubAdoptPurchaseDetails}
+                onChange={(e) => setClubAdoptPurchaseDetails(e.target.checked)}
+              />
+            }
+            label="Use purchase expiry/MRP on kept batch"
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button
+          onClick={() => {
+            setClubOpen(false)
+            setClubSourceBatch(null)
+            setClubTargetBatchId('')
+          }}
+          disabled={mClubOpening.isPending}
+        >
+          Cancel
+        </Button>
+        <Button
+          color="warning"
+          variant="contained"
+          onClick={() => mClubOpening.mutate()}
+          disabled={!clubSourceBatch || !clubTargetBatchId || mClubOpening.isPending}
+        >
+          {mClubOpening.isPending ? 'Clubbing...' : 'Club & Archive Source'}
+        </Button>
+      </DialogActions>
+    </Dialog>
 
     <Dialog open={productOpen} onClose={() => setProductOpen(false)} fullWidth maxWidth="sm">
       <DialogTitle>{productId ? 'Edit Product' : 'Add Product Master'}</DialogTitle>

@@ -395,6 +395,106 @@ def add_stock_movement(
     )
 
 
+def date_key(value: Optional[str]) -> str:
+    return str(value or "")[:10]
+
+
+def find_opening_item_create_placeholder(
+    session,
+    *,
+    inventory_item_id: int,
+    total_qty: int,
+    invoice_date: str,
+) -> Optional[StockMovement]:
+    opening_rows = session.exec(
+        select(StockMovement)
+        .where(StockMovement.item_id == int(inventory_item_id))
+        .where(StockMovement.reason == "OPENING")
+        .where(StockMovement.ref_type == "ITEM_CREATE")
+        .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+    ).all()
+    positive_openings = [row for row in opening_rows if int(row.delta or 0) > 0]
+    if len(positive_openings) != 1:
+        return None
+    opening = positive_openings[0]
+    if int(opening.delta or 0) != int(total_qty or 0):
+        return None
+    opening_date = date_key(opening.ts)
+    purchase_date = date_key(invoice_date)
+    if not opening_date or not purchase_date or opening_date < purchase_date:
+        return None
+
+    pre_invoice_count = session.exec(
+        select(func.count(StockMovement.id))
+        .where(StockMovement.item_id == int(inventory_item_id))
+        .where(func.date(StockMovement.ts) < func.date(purchase_date))
+    ).first()
+    if int(pre_invoice_count or 0) != 0:
+        return None
+
+    existing_purchase_count = session.exec(
+        select(func.count(StockMovement.id))
+        .where(StockMovement.item_id == int(inventory_item_id))
+        .where(StockMovement.reason == "PURCHASE")
+        .where(StockMovement.ref_type == "PURCHASE")
+    ).first()
+    if int(existing_purchase_count or 0) != 0:
+        return None
+    return opening
+
+
+def convert_opening_placeholder_to_purchase(
+    session,
+    *,
+    inventory_item: Item,
+    opening_movement: StockMovement,
+    product: Product,
+    total_qty: int,
+    effective_cost_price: float,
+    mrp: float,
+    rack_number: int,
+    expiry_date: Optional[str],
+    purchase_id: int,
+    invoice_number: str,
+    purchase_stock_ts: str,
+    ts: str,
+) -> InventoryLot:
+    inventory_item.product_id = product.id
+    inventory_item.category_id = product.category_id
+    inventory_item.expiry_date = expiry_date or inventory_item.expiry_date
+    inventory_item.mrp = round2(mrp)
+    inventory_item.cost_price = round2(effective_cost_price)
+    inventory_item.rack_number = int(rack_number or 0)
+    inventory_item.updated_at = ts
+    session.add(inventory_item)
+
+    inventory_lot = get_or_create_lot_for_inventory_item(
+        session,
+        inventory_item=inventory_item,
+        product=product,
+        effective_cost_price=round2(effective_cost_price),
+        conversion_qty=product.default_conversion_qty,
+        ts=ts,
+    )
+    inventory_lot.expiry_date = inventory_item.expiry_date
+    inventory_lot.mrp = round2(mrp)
+    inventory_lot.rack_number = int(rack_number or 0)
+    inventory_lot.sealed_qty = max(0, int(inventory_item.stock or 0))
+    inventory_lot.loose_qty = 0
+    inventory_lot.is_active = not bool(getattr(inventory_item, "is_archived", False))
+    inventory_lot.updated_at = ts
+    session.add(inventory_lot)
+
+    opening_movement.ts = purchase_stock_ts
+    opening_movement.reason = "PURCHASE"
+    opening_movement.ref_type = "PURCHASE"
+    opening_movement.ref_id = int(purchase_id)
+    opening_movement.note = f"Purchase {invoice_number}"
+    opening_movement.actor = "SYSTEM"
+    session.add(opening_movement)
+    return inventory_lot
+
+
 def make_purchase_out(session, row: Purchase) -> PurchaseOut:
     items = session.exec(select(PurchaseItem).where(PurchaseItem.purchase_id == row.id).order_by(PurchaseItem.id.asc())).all()
     payments = session.exec(
@@ -588,11 +688,25 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
             total_qty = qty + free_qty
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
+            opening_placeholder_movement = None
+            convert_opening_to_purchase = False
+            if existing_inventory_item is not None:
+                opening_placeholder_movement = find_opening_item_create_placeholder(
+                    session,
+                    inventory_item_id=int(existing_inventory_item.id),
+                    total_qty=total_qty,
+                    invoice_date=invoice_date,
+                )
+                if opening_placeholder_movement is not None:
+                    stock_source = STOCK_SOURCE_CREATED
+                    convert_opening_to_purchase = True
             subtotal_amount = round2(subtotal_amount + line_total)
             prepared_items.append(
                 {
                     "product": product,
                     "existing_inventory_item": existing_inventory_item,
+                    "opening_placeholder_movement": opening_placeholder_movement,
+                    "convert_opening_to_purchase": convert_opening_to_purchase,
                     "stock_source": stock_source,
                     "expiry_date": clean_date(raw.expiry_date),
                     "rack_number": rack_number,
@@ -696,7 +810,27 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             product: Product = entry["product"]
             total_qty = int(entry["sealed_qty"]) + int(entry["free_qty"])
             stock_source = str(entry["stock_source"])
-            if stock_source == STOCK_SOURCE_ATTACHED:
+            if entry.get("convert_opening_to_purchase"):
+                inventory_item = entry["existing_inventory_item"]
+                opening_movement = entry["opening_placeholder_movement"]
+                if not inventory_item or not opening_movement:
+                    raise HTTPException(status_code=400, detail="Opening stock could not be converted to purchase stock")
+                inventory_lot = convert_opening_placeholder_to_purchase(
+                    session,
+                    inventory_item=inventory_item,
+                    opening_movement=opening_movement,
+                    product=product,
+                    total_qty=total_qty,
+                    effective_cost_price=entry["effective_cost_price"],
+                    mrp=entry["mrp"],
+                    rack_number=entry["rack_number"],
+                    expiry_date=entry["expiry_date"],
+                    purchase_id=int(purchase.id),
+                    invoice_number=invoice_number,
+                    purchase_stock_ts=purchase_stock_ts,
+                    ts=ts,
+                )
+            elif stock_source == STOCK_SOURCE_ATTACHED:
                 inventory_item = entry["existing_inventory_item"]
                 inventory_item.cost_price = entry["effective_cost_price"]
                 inventory_item.updated_at = ts
@@ -1837,11 +1971,25 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
             total_qty = qty + free_qty
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
+            opening_placeholder_movement = None
+            convert_opening_to_purchase = False
+            if existing_inventory_item is not None:
+                opening_placeholder_movement = find_opening_item_create_placeholder(
+                    session,
+                    inventory_item_id=int(existing_inventory_item.id),
+                    total_qty=total_qty,
+                    invoice_date=purchase.invoice_date,
+                )
+                if opening_placeholder_movement is not None:
+                    stock_source = STOCK_SOURCE_CREATED
+                    convert_opening_to_purchase = True
             subtotal_amount = round2(subtotal_amount + line_total)
             prepared_items.append(
                 {
                     "product": product,
                     "existing_inventory_item": existing_inventory_item,
+                    "opening_placeholder_movement": opening_placeholder_movement,
+                    "convert_opening_to_purchase": convert_opening_to_purchase,
                     "stock_source": stock_source,
                     "expiry_date": clean_date(raw.expiry_date),
                     "rack_number": rack_number,
@@ -1902,7 +2050,27 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             product: Product = entry["product"]
             total_qty = int(entry["sealed_qty"]) + int(entry["free_qty"])
             stock_source = str(entry["stock_source"])
-            if stock_source == STOCK_SOURCE_ATTACHED:
+            if entry.get("convert_opening_to_purchase"):
+                inventory_item = entry["existing_inventory_item"]
+                opening_movement = entry["opening_placeholder_movement"]
+                if not inventory_item or not opening_movement:
+                    raise HTTPException(status_code=400, detail="Opening stock could not be converted to purchase stock")
+                inventory_lot = convert_opening_placeholder_to_purchase(
+                    session,
+                    inventory_item=inventory_item,
+                    opening_movement=opening_movement,
+                    product=product,
+                    total_qty=total_qty,
+                    effective_cost_price=entry["effective_cost_price"],
+                    mrp=entry["mrp"],
+                    rack_number=entry["rack_number"],
+                    expiry_date=entry["expiry_date"],
+                    purchase_id=int(purchase.id),
+                    invoice_number=purchase.invoice_number,
+                    purchase_stock_ts=purchase_stock_ts,
+                    ts=ts,
+                )
+            elif stock_source == STOCK_SOURCE_ATTACHED:
                 inventory_item = entry["existing_inventory_item"]
                 inventory_item.cost_price = entry["effective_cost_price"]
                 inventory_item.updated_at = ts

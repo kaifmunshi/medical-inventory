@@ -421,6 +421,7 @@ def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
             )
 
     candidates = []
+    reserved_target_item_ids = set()
     for item in raw_items:
         base_params = {
             "purchase_id": item["purchase_id"],
@@ -436,6 +437,9 @@ def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
                     p.invoice_date,
                     pi.product_id,
                     pi.effective_cost_price,
+                    pi.expiry_date,
+                    pi.mrp,
+                    pi.rack_number,
                     target_lot.id AS target_lot_id
                 FROM purchaseitem pi
                 JOIN purchase p ON p.id = pi.purchase_id
@@ -461,7 +465,7 @@ def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
                 LIMIT 1
             """).bindparams(**base_params),
         ).first()
-        if not row or row[4] is None:
+        if not row or row[7] is None:
             continue
 
         invoice_date = str(row[1] or "")[:10]
@@ -560,6 +564,9 @@ def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
         )
         if duplicate_purchase_count != 1 or duplicate_other_count != 0 or duplicate_bill_count != 0:
             continue
+        if item["target_item_id"] in reserved_target_item_ids:
+            continue
+        reserved_target_item_ids.add(item["target_item_id"])
 
         candidates.append(
             {
@@ -568,7 +575,10 @@ def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
                 "invoice_date": invoice_date,
                 "product_id": int(row[2] or 0) or None,
                 "effective_cost_price": float(row[3] or 0),
-                "target_lot_id": int(row[4]),
+                "expiry_date": str(row[4] or ""),
+                "mrp": float(row[5] or 0),
+                "rack_number": int(row[6] or 0),
+                "target_lot_id": int(row[7]),
             }
         )
 
@@ -586,7 +596,7 @@ def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
                 UPDATE purchaseitem
                 SET inventory_item_id = :target_item_id,
                     lot_id = :target_lot_id,
-                    stock_source = 'ATTACHED'
+                    stock_source = 'CREATED'
                 WHERE id = :purchase_item_id
                   AND purchase_id = :purchase_id
                   AND inventory_item_id = :duplicate_item_id
@@ -597,6 +607,63 @@ def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
                 purchase_item_id=item["purchase_item_id"],
                 purchase_id=item["purchase_id"],
                 duplicate_item_id=item["duplicate_item_id"],
+            ),
+        )
+        session.exec(
+            text("""
+                UPDATE stockmovement
+                SET ts = :purchase_ts,
+                    reason = 'PURCHASE',
+                    ref_type = 'PURCHASE',
+                    ref_id = :purchase_id,
+                    note = 'Purchase ' || :invoice_number,
+                    actor = 'SYSTEM'
+                WHERE item_id = :target_item_id
+                  AND reason = 'OPENING'
+                  AND ref_type = 'ITEM_CREATE'
+                  AND delta = :qty
+            """).bindparams(
+                purchase_ts=purchase_ts,
+                target_item_id=item["target_item_id"],
+                purchase_id=item["purchase_id"],
+                invoice_number=item["invoice_number"],
+                qty=item["qty"],
+            ),
+        )
+        session.exec(
+            text("""
+                UPDATE item
+                SET mrp = :mrp,
+                    cost_price = :effective_cost_price,
+                    product_id = COALESCE(product_id, :product_id),
+                    rack_number = :rack_number,
+                    updated_at = :ts
+                WHERE id = :target_item_id
+            """).bindparams(
+                mrp=item["mrp"],
+                effective_cost_price=item["effective_cost_price"],
+                product_id=item["product_id"],
+                rack_number=item["rack_number"],
+                ts=ts,
+                target_item_id=item["target_item_id"],
+            ),
+        )
+        session.exec(
+            text("""
+                UPDATE inventorylot
+                SET mrp = :mrp,
+                    cost_price = :effective_cost_price,
+                    rack_number = :rack_number,
+                    updated_at = :ts
+                WHERE id = :target_lot_id
+                  AND legacy_item_id = :target_item_id
+            """).bindparams(
+                mrp=item["mrp"],
+                effective_cost_price=item["effective_cost_price"],
+                rack_number=item["rack_number"],
+                ts=ts,
+                target_lot_id=item["target_lot_id"],
+                target_item_id=item["target_item_id"],
             ),
         )
         session.exec(
@@ -623,57 +690,16 @@ def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
         )
         session.exec(
             text("""
-                INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
-                SELECT
-                    :duplicate_item_id,
-                    :purchase_ts,
-                    -:qty,
-                    'PURCHASE_DUPLICATE_REPAIR',
-                    'PURCHASE',
-                    :purchase_id,
-                    'Safety repair: purchase stock already represented by opening item #' || :target_item_id,
-                    'migration'
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM stockmovement
-                    WHERE item_id = :duplicate_item_id
-                      AND reason = 'PURCHASE_DUPLICATE_REPAIR'
-                      AND ref_type = 'PURCHASE'
-                      AND ref_id = :purchase_id
-                )
+                DELETE FROM stockmovement
+                WHERE item_id = :duplicate_item_id
+                  AND reason = 'PURCHASE'
+                  AND ref_type = 'PURCHASE'
+                  AND ref_id = :purchase_id
+                  AND delta = :qty
             """).bindparams(
-                purchase_ts=purchase_ts,
                 duplicate_item_id=item["duplicate_item_id"],
-                target_item_id=item["target_item_id"],
                 purchase_id=item["purchase_id"],
                 qty=item["qty"],
-            ),
-        )
-        session.exec(
-            text("""
-                INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
-                SELECT
-                    :target_item_id,
-                    :purchase_ts,
-                    0,
-                    'PURCHASE_LINK',
-                    'PURCHASE',
-                    :purchase_id,
-                    'Safety repair: linked existing opening stock to purchase ' || :invoice_number,
-                    'migration'
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM stockmovement
-                    WHERE item_id = :target_item_id
-                      AND reason = 'PURCHASE_LINK'
-                      AND ref_type = 'PURCHASE'
-                      AND ref_id = :purchase_id
-                )
-            """).bindparams(
-                purchase_ts=purchase_ts,
-                target_item_id=item["target_item_id"],
-                purchase_id=item["purchase_id"],
-                invoice_number=item["invoice_number"],
             ),
         )
         applied.append(
@@ -696,7 +722,625 @@ def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
                 'PURCHASE',
                 NULL,
                 'DATA_REPAIR',
-                'Reverted unsafe opening purchase duplicate restores',
+                'Converted opening purchase duplicate restores',
+                :details_json,
+                'migration'
+            )
+        """).bindparams(
+            ts=ts,
+            details_json=json.dumps(
+                {"backup": backup_path, "fixed_count": len(applied), "items": applied},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    session.commit()
+    return len(applied), backup_path
+
+
+def merge_opening_purchase_duplicate_batches(session) -> tuple[int, str | None]:
+    """Convert opening placeholders into purchase stock and merge duplicate purchase batches."""
+    attached_rows = session.exec(
+        text("""
+            SELECT
+                pi.id AS purchase_item_id,
+                p.id AS purchase_id,
+                p.invoice_number,
+                p.invoice_date,
+                pi.product_id,
+                pi.effective_cost_price,
+                pi.expiry_date,
+                pi.mrp,
+                pi.rack_number,
+                (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)) AS qty,
+                target.id AS target_item_id,
+                target_lot.id AS target_lot_id,
+                opening.id AS opening_movement_id
+            FROM purchaseitem pi
+            JOIN purchase p ON p.id = pi.purchase_id
+            JOIN item target ON target.id = pi.inventory_item_id
+            JOIN stockmovement opening
+              ON opening.item_id = target.id
+             AND opening.reason = 'OPENING'
+             AND opening.ref_type = 'ITEM_CREATE'
+             AND opening.delta = (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0))
+            LEFT JOIN inventorylot target_lot ON target_lot.legacy_item_id = target.id
+            WHERE COALESCE(p.is_deleted, 0) = 0
+              AND COALESCE(pi.stock_source, 'CREATED') = 'ATTACHED'
+              AND (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)) > 0
+              AND target_lot.id IS NOT NULL
+              AND date(opening.ts) >= date(p.invoice_date)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM stockmovement pre
+                  WHERE pre.item_id = target.id
+                    AND date(pre.ts) < date(p.invoice_date)
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM stockmovement existing_purchase
+                  WHERE existing_purchase.item_id = target.id
+                    AND existing_purchase.reason = 'PURCHASE'
+                    AND existing_purchase.ref_type = 'PURCHASE'
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM purchaseitem other_pi
+                  JOIN purchase other_p ON other_p.id = other_pi.purchase_id
+                  WHERE other_pi.inventory_item_id = target.id
+                    AND other_pi.id != pi.id
+                    AND COALESCE(other_p.is_deleted, 0) = 0
+              )
+        """),
+    ).all()
+
+    created_base_rows = session.exec(
+        text("""
+            SELECT
+                pi.id AS purchase_item_id,
+                p.id AS purchase_id,
+                p.invoice_number,
+                p.invoice_date,
+                pi.product_id,
+                pi.effective_cost_price,
+                pi.expiry_date,
+                pi.mrp,
+                pi.rack_number,
+                (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)) AS qty,
+                duplicate.id AS duplicate_item_id,
+                duplicate.stock AS duplicate_stock
+            FROM purchaseitem pi
+            JOIN purchase p ON p.id = pi.purchase_id
+            JOIN item duplicate ON duplicate.id = pi.inventory_item_id
+            WHERE COALESCE(p.is_deleted, 0) = 0
+              AND COALESCE(pi.stock_source, 'CREATED') = 'CREATED'
+              AND (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)) > 0
+              AND EXISTS (
+                  SELECT 1
+                  FROM stockmovement purchase_sm
+                  WHERE purchase_sm.item_id = duplicate.id
+                    AND purchase_sm.reason = 'PURCHASE'
+                    AND purchase_sm.ref_type = 'PURCHASE'
+                    AND purchase_sm.ref_id = p.id
+                    AND purchase_sm.delta = (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0))
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM stockmovement repair_sm
+                  WHERE repair_sm.item_id = duplicate.id
+                    AND repair_sm.reason = 'PURCHASE_DUPLICATE_REPAIR'
+                    AND repair_sm.ref_type = 'PURCHASE'
+                    AND repair_sm.ref_id = p.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM stockmovement pre
+                  WHERE pre.item_id = duplicate.id
+                    AND date(pre.ts) < date(p.invoice_date)
+              )
+        """),
+    ).all()
+
+    candidates = []
+    reserved_target_item_ids = set()
+    seen_purchase_items = set()
+    for row in attached_rows:
+        purchase_item_id = int(row[0])
+        seen_purchase_items.add(purchase_item_id)
+        target_item_id = int(row[10])
+        if target_item_id in reserved_target_item_ids:
+            continue
+        reserved_target_item_ids.add(target_item_id)
+        candidates.append(
+            {
+                "mode": "attached",
+                "purchase_item_id": purchase_item_id,
+                "purchase_id": int(row[1]),
+                "invoice_number": str(row[2] or ""),
+                "invoice_date": str(row[3] or "")[:10],
+                "product_id": int(row[4] or 0) or None,
+                "effective_cost_price": float(row[5] or 0),
+                "expiry_date": str(row[6] or ""),
+                "mrp": float(row[7] or 0),
+                "rack_number": int(row[8] or 0),
+                "qty": int(row[9] or 0),
+                "target_item_id": target_item_id,
+                "target_lot_id": int(row[11]),
+                "opening_movement_id": int(row[12]),
+                "duplicate_item_id": None,
+            }
+        )
+
+    for row in created_base_rows:
+        purchase_item_id = int(row[0])
+        if purchase_item_id in seen_purchase_items:
+            continue
+        params = {
+            "purchase_item_id": purchase_item_id,
+            "purchase_id": int(row[1]),
+            "invoice_number": str(row[2] or ""),
+            "invoice_date": str(row[3] or "")[:10],
+            "product_id": int(row[4] or 0) or None,
+            "effective_cost_price": float(row[5] or 0),
+            "expiry_date": str(row[6] or ""),
+            "mrp": float(row[7] or 0),
+            "rack_number": int(row[8] or 0),
+            "qty": int(row[9] or 0),
+            "duplicate_item_id": int(row[10]),
+        }
+        target_rows = session.exec(
+            text("""
+                SELECT target.id, target_lot.id, opening.id
+                FROM purchaseitem pi
+                JOIN item duplicate ON duplicate.id = :duplicate_item_id
+                JOIN item target
+                  ON target.id != duplicate.id
+                 AND lower(trim(COALESCE(target.name, ''))) = lower(trim(COALESCE(pi.product_name, '')))
+                 AND lower(trim(COALESCE(target.brand, ''))) = lower(trim(COALESCE(pi.brand, '')))
+                 AND COALESCE(target.expiry_date, '') = COALESCE(pi.expiry_date, '')
+                JOIN stockmovement opening
+                  ON opening.item_id = target.id
+                 AND opening.reason = 'OPENING'
+                 AND opening.ref_type = 'ITEM_CREATE'
+                 AND opening.delta = :qty
+                LEFT JOIN inventorylot target_lot ON target_lot.legacy_item_id = target.id
+                WHERE pi.id = :purchase_item_id
+                  AND target_lot.id IS NOT NULL
+                  AND date(opening.ts) >= date(:invoice_date)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM stockmovement pre
+                      WHERE pre.item_id = target.id
+                        AND date(pre.ts) < date(:invoice_date)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM stockmovement existing_purchase
+                      WHERE existing_purchase.item_id = target.id
+                        AND existing_purchase.reason = 'PURCHASE'
+                        AND existing_purchase.ref_type = 'PURCHASE'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM purchaseitem other_pi
+                      JOIN purchase other_p ON other_p.id = other_pi.purchase_id
+                      WHERE other_pi.inventory_item_id = target.id
+                        AND COALESCE(other_p.is_deleted, 0) = 0
+                  )
+                ORDER BY ABS(COALESCE(target.mrp, 0) - :mrp), target.id
+            """).bindparams(
+                duplicate_item_id=params["duplicate_item_id"],
+                qty=params["qty"],
+                purchase_item_id=params["purchase_item_id"],
+                invoice_date=params["invoice_date"],
+                mrp=params["mrp"],
+            ),
+        ).all()
+        target_rows = [target for target in target_rows if int(target[0]) not in reserved_target_item_ids]
+        if len(target_rows) != 1:
+            continue
+        target = target_rows[0]
+        reserved_target_item_ids.add(int(target[0]))
+        candidates.append(
+            {
+                "mode": "created_duplicate",
+                **params,
+                "target_item_id": int(target[0]),
+                "target_lot_id": int(target[1]),
+                "opening_movement_id": int(target[2]),
+            }
+        )
+
+    if not candidates:
+        return 0, None
+
+    session.commit()
+    backup_path = create_data_repair_backup("before_opening_purchase_batch_merge")
+    ts = _now_ts()
+    applied = []
+    for item in candidates:
+        purchase_ts = f"{item['invoice_date']}T00:00:00"
+        session.exec(
+            text("""
+                UPDATE purchaseitem
+                SET inventory_item_id = :target_item_id,
+                    lot_id = :target_lot_id,
+                    stock_source = 'CREATED'
+                WHERE id = :purchase_item_id
+                  AND purchase_id = :purchase_id
+            """).bindparams(
+                target_item_id=item["target_item_id"],
+                target_lot_id=item["target_lot_id"],
+                purchase_item_id=item["purchase_item_id"],
+                purchase_id=item["purchase_id"],
+            ),
+        )
+        session.exec(
+            text("""
+                UPDATE stockmovement
+                SET ts = :purchase_ts,
+                    reason = 'PURCHASE',
+                    ref_type = 'PURCHASE',
+                    ref_id = :purchase_id,
+                    note = 'Purchase ' || :invoice_number,
+                    actor = 'SYSTEM'
+                WHERE id = :opening_movement_id
+                  AND item_id = :target_item_id
+                  AND reason = 'OPENING'
+                  AND ref_type = 'ITEM_CREATE'
+                  AND delta = :qty
+            """).bindparams(
+                purchase_ts=purchase_ts,
+                invoice_number=item["invoice_number"],
+                purchase_id=item["purchase_id"],
+                opening_movement_id=item["opening_movement_id"],
+                target_item_id=item["target_item_id"],
+                qty=item["qty"],
+            ),
+        )
+        session.exec(
+            text("""
+                DELETE FROM stockmovement
+                WHERE item_id = :target_item_id
+                  AND reason = 'PURCHASE_LINK'
+                  AND ref_type = 'PURCHASE'
+                  AND ref_id = :purchase_id
+            """).bindparams(target_item_id=item["target_item_id"], purchase_id=item["purchase_id"]),
+        )
+
+        duplicate_item_id = item.get("duplicate_item_id")
+        if duplicate_item_id:
+            session.exec(
+                text("UPDATE billitem SET item_id = :target_item_id WHERE item_id = :duplicate_item_id").bindparams(
+                    target_item_id=item["target_item_id"],
+                    duplicate_item_id=duplicate_item_id,
+                ),
+            )
+            session.exec(
+                text("""
+                    UPDATE billitemallocation
+                    SET item_id = :target_item_id,
+                        lot_id = :target_lot_id
+                    WHERE item_id = :duplicate_item_id
+                """).bindparams(
+                    target_item_id=item["target_item_id"],
+                    target_lot_id=item["target_lot_id"],
+                    duplicate_item_id=duplicate_item_id,
+                ),
+            )
+            session.exec(
+                text("UPDATE returnitem SET item_id = :target_item_id WHERE item_id = :duplicate_item_id").bindparams(
+                    target_item_id=item["target_item_id"],
+                    duplicate_item_id=duplicate_item_id,
+                ),
+            )
+            session.exec(
+                text("UPDATE stockaudititem SET item_id = :target_item_id WHERE item_id = :duplicate_item_id").bindparams(
+                    target_item_id=item["target_item_id"],
+                    duplicate_item_id=duplicate_item_id,
+                ),
+            )
+            session.exec(
+                text("""
+                    UPDATE stockmovement
+                    SET item_id = :target_item_id
+                    WHERE item_id = :duplicate_item_id
+                      AND NOT (
+                          reason = 'PURCHASE'
+                          AND ref_type = 'PURCHASE'
+                          AND ref_id = :purchase_id
+                      )
+                      AND reason != 'PURCHASE_DUPLICATE_REPAIR'
+                """).bindparams(
+                    target_item_id=item["target_item_id"],
+                    duplicate_item_id=duplicate_item_id,
+                    purchase_id=item["purchase_id"],
+                ),
+            )
+            session.exec(
+                text("""
+                    DELETE FROM stockmovement
+                    WHERE item_id = :duplicate_item_id
+                      AND reason = 'PURCHASE'
+                      AND ref_type = 'PURCHASE'
+                      AND ref_id = :purchase_id
+                      AND delta = :qty
+                """).bindparams(
+                    duplicate_item_id=duplicate_item_id,
+                    qty=item["qty"],
+                    purchase_id=item["purchase_id"],
+                ),
+            )
+            session.exec(
+                text("""
+                    DELETE FROM stockmovement
+                    WHERE item_id = :duplicate_item_id
+                      AND reason = 'PURCHASE_DUPLICATE_REPAIR'
+                      AND ref_type = 'PURCHASE'
+                      AND ref_id = :purchase_id
+                """).bindparams(
+                    duplicate_item_id=duplicate_item_id,
+                    purchase_id=item["purchase_id"],
+                ),
+            )
+            session.exec(
+                text("""
+                    UPDATE item
+                    SET stock = 0,
+                        is_archived = 1,
+                        archived_at = COALESCE(archived_at, :ts),
+                        cost_price = 0,
+                        updated_at = :ts
+                    WHERE id = :duplicate_item_id
+                """).bindparams(ts=ts, duplicate_item_id=duplicate_item_id),
+            )
+            session.exec(
+                text("""
+                    UPDATE inventorylot
+                    SET sealed_qty = 0,
+                        loose_qty = 0,
+                        is_active = 0,
+                        cost_price = 0,
+                        updated_at = :ts
+                    WHERE legacy_item_id = :duplicate_item_id
+                """).bindparams(ts=ts, duplicate_item_id=duplicate_item_id),
+            )
+
+        target_stock_row = session.exec(
+            text("SELECT COALESCE(SUM(delta), 0) FROM stockmovement WHERE item_id = :target_item_id").bindparams(
+                target_item_id=item["target_item_id"],
+            ),
+        ).first()
+        target_stock = int(_row_value(target_stock_row, 0, 0) or 0)
+        if target_stock < 0:
+            raise RuntimeError(f"Opening purchase merge would make item #{item['target_item_id']} negative")
+
+        session.exec(
+            text("""
+                UPDATE item
+                SET stock = :target_stock,
+                    is_archived = CASE WHEN :target_stock > 0 THEN 0 ELSE 1 END,
+                    archived_at = CASE WHEN :target_stock > 0 THEN NULL ELSE COALESCE(archived_at, :ts) END,
+                    mrp = :mrp,
+                    cost_price = :effective_cost_price,
+                    product_id = COALESCE(product_id, :product_id),
+                    rack_number = :rack_number,
+                    updated_at = :ts
+                WHERE id = :target_item_id
+            """).bindparams(
+                target_stock=target_stock,
+                mrp=item["mrp"],
+                effective_cost_price=item["effective_cost_price"],
+                product_id=item["product_id"],
+                rack_number=item["rack_number"],
+                ts=ts,
+                target_item_id=item["target_item_id"],
+            ),
+        )
+        session.exec(
+            text("""
+                UPDATE inventorylot
+                SET sealed_qty = :target_stock,
+                    loose_qty = 0,
+                    is_active = CASE WHEN :target_stock > 0 THEN 1 ELSE 0 END,
+                    mrp = :mrp,
+                    cost_price = :effective_cost_price,
+                    rack_number = :rack_number,
+                    updated_at = :ts
+                WHERE id = :target_lot_id
+                  AND legacy_item_id = :target_item_id
+            """).bindparams(
+                target_stock=target_stock,
+                mrp=item["mrp"],
+                effective_cost_price=item["effective_cost_price"],
+                rack_number=item["rack_number"],
+                ts=ts,
+                target_lot_id=item["target_lot_id"],
+                target_item_id=item["target_item_id"],
+            ),
+        )
+        applied.append(
+            {
+                "mode": item["mode"],
+                "purchase_id": item["purchase_id"],
+                "purchase_item_id": item["purchase_item_id"],
+                "invoice_number": item["invoice_number"],
+                "target_item_id": item["target_item_id"],
+                "duplicate_item_id": duplicate_item_id,
+                "qty": item["qty"],
+                "target_stock": target_stock,
+            }
+        )
+
+    session.exec(
+        text("""
+            INSERT INTO auditlog (event_ts, entity_type, entity_id, action, note, details_json, actor)
+            VALUES (
+                :ts,
+                'PURCHASE',
+                NULL,
+                'DATA_REPAIR',
+                'Merged opening purchase duplicate batches',
+                :details_json,
+                'migration'
+            )
+        """).bindparams(
+            ts=ts,
+            details_json=json.dumps(
+                {"backup": backup_path, "fixed_count": len(applied), "items": applied},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    session.commit()
+    return len(applied), backup_path
+
+
+def cleanup_opening_purchase_duplicate_repair_pairs(session) -> tuple[int, str | None]:
+    """
+    Clean the visible source-side PURCHASE + PURCHASE_DUPLICATE_REPAIR pairs left
+    by earlier safe merges. The kept target batch already owns the purchase and
+    all transactional refs; these source rows only make product ledgers noisy.
+    """
+    rows = session.exec(
+        text("""
+            SELECT
+                src_purchase.id AS purchase_movement_id,
+                repair.id AS repair_movement_id,
+                src.id AS source_item_id,
+                target.id AS target_item_id,
+                p.id AS purchase_id,
+                pi.id AS purchase_item_id,
+                src_purchase.delta AS qty,
+                source_lot.id AS source_lot_id
+            FROM stockmovement src_purchase
+            JOIN stockmovement repair
+              ON repair.item_id = src_purchase.item_id
+             AND repair.reason = 'PURCHASE_DUPLICATE_REPAIR'
+             AND repair.ref_type = 'PURCHASE'
+             AND repair.ref_id = src_purchase.ref_id
+             AND repair.delta = -src_purchase.delta
+            JOIN purchase p
+              ON p.id = src_purchase.ref_id
+             AND COALESCE(p.is_deleted, 0) = 0
+            JOIN purchaseitem pi
+              ON pi.purchase_id = p.id
+             AND COALESCE(pi.stock_source, 'CREATED') = 'CREATED'
+             AND (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)) = src_purchase.delta
+             AND pi.inventory_item_id IS NOT NULL
+             AND pi.inventory_item_id != src_purchase.item_id
+             AND (
+                 COALESCE(repair.note, '') = ''
+                 OR repair.note LIKE '%' || '#' || pi.inventory_item_id || '%'
+             )
+            JOIN item src ON src.id = src_purchase.item_id
+            JOIN item target ON target.id = pi.inventory_item_id
+            JOIN stockmovement target_purchase
+              ON target_purchase.item_id = target.id
+             AND target_purchase.reason = 'PURCHASE'
+             AND target_purchase.ref_type = 'PURCHASE'
+             AND target_purchase.ref_id = p.id
+             AND target_purchase.delta = src_purchase.delta
+            LEFT JOIN inventorylot source_lot ON source_lot.legacy_item_id = src.id
+            WHERE src_purchase.reason = 'PURCHASE'
+              AND src_purchase.ref_type = 'PURCHASE'
+              AND src_purchase.delta > 0
+              AND COALESCE(src.stock, 0) = 0
+              AND COALESCE(src.is_archived, 0) = 1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM stockmovement other_sm
+                  WHERE other_sm.item_id = src.id
+                    AND other_sm.id NOT IN (src_purchase.id, repair.id)
+              )
+              AND NOT EXISTS (SELECT 1 FROM billitem WHERE item_id = src.id)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM billitemallocation alloc
+                  WHERE alloc.item_id = src.id
+                     OR (source_lot.id IS NOT NULL AND alloc.lot_id = source_lot.id)
+              )
+              AND NOT EXISTS (SELECT 1 FROM returnitem WHERE item_id = src.id)
+              AND NOT EXISTS (SELECT 1 FROM stockaudititem WHERE item_id = src.id)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM purchaseitem pi_src
+                  WHERE pi_src.inventory_item_id = src.id
+                     OR (source_lot.id IS NOT NULL AND pi_src.lot_id = source_lot.id)
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM packopenevent pe
+                  WHERE pe.source_item_id = src.id
+                     OR pe.loose_item_id = src.id
+                     OR (source_lot.id IS NOT NULL AND pe.source_lot_id = source_lot.id)
+                     OR (source_lot.id IS NOT NULL AND pe.loose_lot_id = source_lot.id)
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM inventorylot child_lot
+                  WHERE source_lot.id IS NOT NULL
+                    AND child_lot.opened_from_lot_id = source_lot.id
+              )
+            ORDER BY src.id, p.id
+        """)
+    ).all()
+    if not rows:
+        return 0, None
+
+    grouped: dict[tuple[int, int, int, int], list] = {}
+    for row in rows:
+        key = (int(row[2]), int(row[4]), int(row[0]), int(row[1]))
+        grouped.setdefault(key, []).append(row)
+
+    candidates = []
+    for key, matches in grouped.items():
+        if len(matches) != 1:
+            continue
+        row = matches[0]
+        candidates.append(
+            {
+                "purchase_movement_id": int(row[0]),
+                "repair_movement_id": int(row[1]),
+                "source_item_id": int(row[2]),
+                "target_item_id": int(row[3]),
+                "purchase_id": int(row[4]),
+                "purchase_item_id": int(row[5]),
+                "qty": int(row[6]),
+                "source_lot_id": int(row[7]) if row[7] is not None else None,
+            }
+        )
+
+    if not candidates:
+        return 0, None
+
+    session.commit()
+    backup_path = create_data_repair_backup("before_opening_purchase_repair_pair_cleanup")
+    ts = _now_ts()
+    applied = []
+    for item in candidates:
+        session.exec(
+            text("""
+                DELETE FROM stockmovement
+                WHERE id IN (:purchase_movement_id, :repair_movement_id)
+            """).bindparams(
+                purchase_movement_id=item["purchase_movement_id"],
+                repair_movement_id=item["repair_movement_id"],
+            ),
+        )
+        applied.append(item)
+
+    session.exec(
+        text("""
+            INSERT INTO auditlog (event_ts, entity_type, entity_id, action, note, details_json, actor)
+            VALUES (
+                :ts,
+                'PURCHASE',
+                NULL,
+                'DATA_REPAIR',
+                'Cleaned source-side duplicate purchase repair pairs after opening merge',
                 :details_json,
                 'migration'
             )
@@ -1589,6 +2233,28 @@ def migrate_db():
             )
             session.commit()
 
+        # ---------- one-time data repair: convert opening placeholders used by purchases ----------
+        opening_purchase_merge_key = "merge_opening_purchase_duplicate_batches_v1"
+        opening_purchase_merge_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=opening_purchase_merge_key),
+        ).first()
+        if not opening_purchase_merge_done:
+            session.commit()
+            ts_repair = _now_ts()
+            merged_count, backup_path = merge_opening_purchase_duplicate_batches(session)
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=opening_purchase_merge_key,
+                    value=f"done:{merged_count};backup:{backup_path or ''}",
+                    ts=ts_repair,
+                ),
+            )
+            session.commit()
+
         # ---------- one-time data repair: undo unsafe purchase/opening duplicate restores ----------
         unsafe_opening_restore_key = "revert_unsafe_opening_purchase_restore_v1"
         unsafe_opening_restore_done = session.exec(
@@ -1606,6 +2272,28 @@ def migrate_db():
                 """).bindparams(
                     k=unsafe_opening_restore_key,
                     value=f"done:{reverted_count};backup:{backup_path or ''}",
+                    ts=ts_repair,
+                ),
+            )
+            session.commit()
+
+        # ---------- one-time data repair: remove source-side repair noise after opening merge ----------
+        opening_purchase_cleanup_key = "cleanup_opening_purchase_duplicate_repair_pairs_v1"
+        opening_purchase_cleanup_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=opening_purchase_cleanup_key),
+        ).first()
+        if not opening_purchase_cleanup_done:
+            session.commit()
+            ts_repair = _now_ts()
+            cleaned_count, backup_path = cleanup_opening_purchase_duplicate_repair_pairs(session)
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=opening_purchase_cleanup_key,
+                    value=f"done:{cleaned_count};backup:{backup_path or ''}",
                     ts=ts_repair,
                 ),
             )

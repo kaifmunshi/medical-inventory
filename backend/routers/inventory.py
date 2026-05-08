@@ -16,6 +16,7 @@ from backend.db import get_session
 from backend.models import (
     Bill,
     BillItem,
+    BillItemAllocation,
     ExchangeRecord,
     InventoryLot,
     Item,
@@ -305,6 +306,26 @@ class OpeningDeleteOut(BaseModel):
     item: ItemOut
     deleted_movement_id: int
     removed_qty: int
+
+
+class OpeningClubIn(BaseModel):
+    source_item_id: int
+    target_item_id: int
+    purchase_item_id: Optional[int] = None
+    adopt_purchase_details: bool = False
+    note: Optional[str] = None
+
+
+class OpeningClubOut(BaseModel):
+    source_item: ItemOut
+    target_item: ItemOut
+    purchase_id: int
+    purchase_item_id: int
+    source_item_id: int
+    target_item_id: int
+    target_stock: int
+    archived_source_id: int
+    moved_movement_count: int
 
 
 # ---------- Helpers ----------
@@ -1704,6 +1725,398 @@ def delete_opening_stock_movement(
         _attach_last_incoming(session, [item])
         _attach_lot_metadata(session, [item])
         return OpeningDeleteOut(item=item, deleted_movement_id=int(movement_id), removed_qty=opening_qty)
+
+
+def _club_group_key(item: Item) -> Tuple[str, str]:
+    return ((item.name or "").strip().lower(), (item.brand or "").strip().lower())
+
+
+def _date_part(value: Optional[str]) -> str:
+    return str(value or "")[:10]
+
+
+@router.post("/ledger/club-opening", response_model=OpeningClubOut)
+def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
+    require_min_role("MANAGER", context="Club purchase batch")
+    if int(payload.source_item_id) == int(payload.target_item_id):
+        raise HTTPException(status_code=400, detail="Choose a different OP batch to keep")
+
+    with get_session() as session:
+        source = session.get(Item, int(payload.source_item_id))
+        target = session.get(Item, int(payload.target_item_id))
+        if not source or not target:
+            raise HTTPException(status_code=404, detail="Source or target batch not found")
+        if _club_group_key(source) != _club_group_key(target):
+            raise HTTPException(status_code=400, detail="Source and OP batch must be the same product and brand")
+
+        purchase_stmt = (
+            select(PurchaseItem, Purchase)
+            .join(Purchase, Purchase.id == PurchaseItem.purchase_id)
+            .where(
+                PurchaseItem.inventory_item_id == int(source.id),
+                Purchase.is_deleted == False,  # noqa: E712
+            )
+        )
+        if payload.purchase_item_id is not None:
+            purchase_stmt = purchase_stmt.where(PurchaseItem.id == int(payload.purchase_item_id))
+        purchase_refs = session.exec(purchase_stmt).all()
+        if len(purchase_refs) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Batch #{source.id} must be linked to exactly one active purchase line; "
+                    f"found {len(purchase_refs)}"
+                ),
+            )
+        purchase_item, purchase = purchase_refs[0]
+        if str(purchase_item.stock_source or "").upper() != "CREATED":
+            raise HTTPException(
+                status_code=400,
+                detail="Only purchase-created duplicate batches can be clubbed into an OP batch",
+            )
+
+        purchase_qty = int(purchase_item.sealed_qty or 0) + int(purchase_item.free_qty or 0)
+        if purchase_qty <= 0:
+            raise HTTPException(status_code=400, detail="Purchase line quantity must be positive")
+
+        if source.product_id and purchase_item.product_id and int(source.product_id) != int(purchase_item.product_id):
+            raise HTTPException(status_code=400, detail="Source batch product link does not match the purchase line")
+        if target.product_id and purchase_item.product_id and int(target.product_id) != int(purchase_item.product_id):
+            raise HTTPException(status_code=400, detail="OP batch product link does not match the purchase line")
+
+        target_purchase_refs = session.exec(
+            select(func.count(PurchaseItem.id))
+            .join(Purchase, Purchase.id == PurchaseItem.purchase_id)
+            .where(
+                PurchaseItem.inventory_item_id == int(target.id),
+                Purchase.is_deleted == False,  # noqa: E712
+            )
+        ).first()
+        if int(target_purchase_refs or 0) > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"OP batch #{target.id} is already linked to a purchase line",
+            )
+
+        source_other_purchase_refs = session.exec(
+            select(func.count(PurchaseItem.id)).where(
+                PurchaseItem.inventory_item_id == int(source.id),
+                PurchaseItem.id != int(purchase_item.id),
+            )
+        ).first()
+        if int(source_other_purchase_refs or 0) > 0:
+            raise HTTPException(status_code=400, detail="Source batch is linked to another purchase line")
+
+        source_movements = session.exec(
+            select(StockMovement)
+            .where(StockMovement.item_id == int(source.id))
+            .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+        ).all()
+        source_purchase_movements = [
+            row
+            for row in source_movements
+            if str(row.reason or "").upper() == "PURCHASE"
+            and str(row.ref_type or "").upper() == "PURCHASE"
+            and int(row.ref_id or 0) == int(purchase.id)
+            and int(row.delta or 0) == purchase_qty
+        ]
+        if len(source_purchase_movements) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Source batch #{source.id} must have exactly one purchase stock entry "
+                    f"for qty {purchase_qty}; found {len(source_purchase_movements)}"
+                ),
+            )
+        source_purchase_movement = source_purchase_movements[0]
+        if any(
+            str(row.reason or "").upper() == "PURCHASE_DUPLICATE_REPAIR"
+            and str(row.ref_type or "").upper() == "PURCHASE"
+            and int(row.ref_id or 0) == int(purchase.id)
+            for row in source_movements
+        ):
+            raise HTTPException(status_code=400, detail="This source batch already has a duplicate repair entry")
+
+        movable_reasons = {
+            "SALE",
+            "BILL_DELETE",
+            "BILL_EDIT",
+            "BILL_RECOVER",
+            "RETURN",
+            "EXCHANGE_IN",
+            "EXCHANGE_OUT",
+            "ADJUST",
+            "RECON_ADJUST",
+        }
+        movable_source_movements = [
+            row for row in source_movements if int(row.id or 0) != int(source_purchase_movement.id or 0)
+        ]
+        blocked_source_movements = [
+            row for row in movable_source_movements if str(row.reason or "").upper() not in movable_reasons
+        ]
+        if blocked_source_movements:
+            examples = ", ".join(
+                f"{row.reason}{f' #{row.ref_id}' if getattr(row, 'ref_id', None) else ''}"
+                for row in blocked_source_movements[:3]
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source batch has unsupported movement(s): {examples}",
+            )
+
+        target_movements = session.exec(
+            select(StockMovement)
+            .where(StockMovement.item_id == int(target.id))
+            .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+        ).all()
+        target_openings = [
+            row
+            for row in target_movements
+            if str(row.reason or "").upper() == "OPENING"
+            and str(row.ref_type or "").upper() == "ITEM_CREATE"
+            and int(row.delta or 0) == purchase_qty
+        ]
+        if len(target_openings) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"OP batch #{target.id} must have exactly one Opening / ITEM_CREATE entry "
+                    f"for qty {purchase_qty}; found {len(target_openings)}"
+                ),
+            )
+        target_opening = target_openings[0]
+        target_purchase_movements = [
+            row
+            for row in target_movements
+            if str(row.reason or "").upper() == "PURCHASE" or str(row.ref_type or "").upper() == "PURCHASE"
+        ]
+        if target_purchase_movements:
+            raise HTTPException(status_code=400, detail="OP batch already has purchase-linked movement history")
+
+        invoice_date = _date_part(purchase.invoice_date)
+        if not invoice_date:
+            raise HTTPException(status_code=400, detail="Purchase invoice date is missing")
+        if _date_part(target_opening.ts) < invoice_date:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"OP entry date {_date_part(target_opening.ts)} is before purchase invoice date {invoice_date}; "
+                    "manual audit is required"
+                ),
+            )
+        pre_invoice_movements = [
+            row for row in target_movements if int(row.id or 0) != int(target_opening.id or 0) and _date_part(row.ts) < invoice_date
+        ]
+        if pre_invoice_movements:
+            examples = ", ".join(
+                f"{_date_part(row.ts)} {row.reason}{f' #{row.ref_id}' if getattr(row, 'ref_id', None) else ''}"
+                for row in pre_invoice_movements[:3]
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"OP batch has movement before purchase date {invoice_date}: {examples}",
+            )
+
+        moved_delta = sum(int(row.delta or 0) for row in movable_source_movements)
+        target_delta_before = sum(int(row.delta or 0) for row in target_movements)
+        target_stock_after = target_delta_before + moved_delta
+        if target_stock_after < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Clubbing would make OP batch #{target.id} negative "
+                    f"({target_stock_after}). Check sales/returns first."
+                ),
+            )
+
+        source_product = session.get(Product, int(purchase_item.product_id)) if purchase_item.product_id else None
+        if not source_product:
+            raise HTTPException(status_code=400, detail="Purchase product link is missing")
+        if not source.product_id:
+            source.product_id = int(purchase_item.product_id)
+        if not target.product_id:
+            target.product_id = int(purchase_item.product_id)
+
+        target_lot = session.exec(
+            select(InventoryLot)
+            .where(InventoryLot.legacy_item_id == int(target.id))
+            .order_by(InventoryLot.id.asc())
+        ).first()
+        if not target_lot:
+            target_lot = ensure_lot_for_inventory_item(
+                session,
+                inventory_item=target,
+                product=source_product,
+                ts=now_ts(),
+            )
+        if not target_lot:
+            raise HTTPException(status_code=400, detail="Could not prepare inventory lot for selected OP batch")
+
+        source_lot = session.exec(
+            select(InventoryLot)
+            .where(InventoryLot.legacy_item_id == int(source.id))
+            .order_by(InventoryLot.id.asc())
+        ).first()
+        lot_ids = [
+            int(row.id)
+            for row in (source_lot, target_lot)
+            if row is not None and getattr(row, "id", None) is not None
+        ]
+        pack_open_filters = [
+            PackOpenEvent.source_item_id.in_([int(source.id), int(target.id)]),
+            PackOpenEvent.loose_item_id.in_([int(source.id), int(target.id)]),
+        ]
+        if lot_ids:
+            pack_open_filters.extend(
+                [
+                    PackOpenEvent.source_lot_id.in_(lot_ids),
+                    PackOpenEvent.loose_lot_id.in_(lot_ids),
+                ]
+            )
+        pack_open_refs = session.exec(select(func.count(PackOpenEvent.id)).where(or_(*pack_open_filters))).first()
+        child_lot_refs = (
+            session.exec(
+                select(func.count(InventoryLot.id)).where(InventoryLot.opened_from_lot_id.in_(lot_ids))
+            ).first()
+            if lot_ids
+            else 0
+        )
+        if int(pack_open_refs or 0) > 0 or int(child_lot_refs or 0) > 0:
+            raise HTTPException(status_code=400, detail="Loose/pack-open batches must be handled manually")
+
+        target_opening.reason = "PURCHASE"
+        target_opening.ref_type = "PURCHASE"
+        target_opening.ref_id = int(purchase.id)
+        target_opening.ts = f"{invoice_date}T00:00:00"
+        target_opening.note = (
+            f"Manual club: converted OP batch #{target.id} to purchase {purchase.invoice_number or purchase.id}"
+        )
+        target_opening.actor = "SYSTEM"
+        session.add(target_opening)
+
+        for row in movable_source_movements:
+            row.item_id = int(target.id)
+            session.add(row)
+
+        deleted_source_purchase_movement_id = int(source_purchase_movement.id or 0)
+        session.delete(source_purchase_movement)
+
+        purchase_item.inventory_item_id = int(target.id)
+        purchase_item.lot_id = int(target_lot.id) if target_lot.id is not None else None
+        purchase_item.stock_source = "CREATED"
+        session.add(purchase_item)
+
+        if payload.adopt_purchase_details:
+            target.expiry_date = purchase_item.expiry_date
+            target.mrp = float(purchase_item.mrp or target.mrp or 0)
+            target.rack_number = int(purchase_item.rack_number or target.rack_number or 0)
+        target.cost_price = float(purchase_item.effective_cost_price or purchase_item.cost_price or target.cost_price or 0)
+        target.stock = int(target_stock_after)
+        target.is_archived = bool(target_stock_after <= 0)
+        target.updated_at = now_ts()
+        session.add(target)
+
+        source.stock = 0
+        source.is_archived = True
+        source.updated_at = target.updated_at
+        session.add(source)
+
+        for row in session.exec(select(BillItem).where(BillItem.item_id == int(source.id))).all():
+            row.item_id = int(target.id)
+            session.add(row)
+        allocation_filter = BillItemAllocation.item_id == int(source.id)
+        if source_lot and source_lot.id is not None:
+            allocation_filter = or_(allocation_filter, BillItemAllocation.lot_id == int(source_lot.id))
+        for row in session.exec(select(BillItemAllocation).where(allocation_filter)).all():
+            row.item_id = int(target.id)
+            row.lot_id = int(target_lot.id) if target_lot.id is not None else None
+            session.add(row)
+        for row in session.exec(select(ReturnItem).where(ReturnItem.item_id == int(source.id))).all():
+            row.item_id = int(target.id)
+            session.add(row)
+        for row in session.exec(select(StockAuditItem).where(StockAuditItem.item_id == int(source.id))).all():
+            row.item_id = int(target.id)
+            session.add(row)
+
+        session.flush()
+        remaining_purchase_filter = PurchaseItem.inventory_item_id == int(source.id)
+        if source_lot and source_lot.id is not None:
+            remaining_purchase_filter = or_(remaining_purchase_filter, PurchaseItem.lot_id == int(source_lot.id))
+        remaining_allocation_filter = BillItemAllocation.item_id == int(source.id)
+        if source_lot and source_lot.id is not None:
+            remaining_allocation_filter = or_(remaining_allocation_filter, BillItemAllocation.lot_id == int(source_lot.id))
+        remaining_refs = {
+            "purchase_items": int(session.exec(select(func.count(PurchaseItem.id)).where(remaining_purchase_filter)).first() or 0),
+            "stock_movements": int(session.exec(select(func.count(StockMovement.id)).where(StockMovement.item_id == int(source.id))).first() or 0),
+            "bill_items": int(session.exec(select(func.count(BillItem.id)).where(BillItem.item_id == int(source.id))).first() or 0),
+            "bill_allocations": int(session.exec(select(func.count(BillItemAllocation.id)).where(remaining_allocation_filter)).first() or 0),
+            "return_items": int(session.exec(select(func.count(ReturnItem.id)).where(ReturnItem.item_id == int(source.id))).first() or 0),
+            "stock_audit_items": int(session.exec(select(func.count(StockAuditItem.id)).where(StockAuditItem.item_id == int(source.id))).first() or 0),
+            "pack_open_events": int(session.exec(select(func.count(PackOpenEvent.id)).where(or_(*pack_open_filters))).first() or 0),
+            "child_lots": int(
+                session.exec(select(func.count(InventoryLot.id)).where(InventoryLot.opened_from_lot_id.in_(lot_ids))).first() or 0
+            )
+            if lot_ids
+            else 0,
+        }
+        uncleared_refs = {key: value for key, value in remaining_refs.items() if value}
+        if uncleared_refs:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source batch still has references after club validation: {uncleared_refs}",
+            )
+        sync_lot_quantity_for_item(session, target, ts=target.updated_at)
+        if source_lot:
+            source_lot.sealed_qty = 0
+            source_lot.loose_qty = 0
+            source_lot.is_active = False
+            source_lot.updated_at = target.updated_at
+            session.add(source_lot)
+        sync_lot_quantity_for_item(session, source, ts=source.updated_at)
+        apply_archive_rules(session, target)
+
+        target_stock_check = session.exec(
+            select(func.coalesce(func.sum(StockMovement.delta), 0)).where(StockMovement.item_id == int(target.id))
+        ).first()
+        if int(target_stock_check or 0) < 0:
+            raise HTTPException(status_code=400, detail="Clubbed target batch would be negative after repair")
+
+        log_audit(
+            session,
+            entity_type="ITEM",
+            entity_id=int(target.id),
+            action="OPENING_CLUB",
+            note=payload.note
+            or f"Clubbed duplicate purchase batch #{source.id} into OP batch #{target.id}",
+            details={
+                "source_item_id": int(source.id),
+                "target_item_id": int(target.id),
+                "purchase_id": int(purchase.id),
+                "purchase_item_id": int(purchase_item.id),
+                "purchase_qty": int(purchase_qty),
+                "moved_movement_ids": [int(row.id) for row in movable_source_movements if row.id is not None],
+                "deleted_source_purchase_movement_id": deleted_source_purchase_movement_id,
+                "remaining_source_refs": remaining_refs,
+                "target_stock": int(target_stock_after),
+                "adopt_purchase_details": bool(payload.adopt_purchase_details),
+            },
+        )
+        session.commit()
+        session.refresh(source)
+        session.refresh(target)
+        _attach_last_incoming(session, [source, target])
+        _attach_lot_metadata(session, [source, target])
+        return OpeningClubOut(
+            source_item=source,
+            target_item=target,
+            purchase_id=int(purchase.id),
+            purchase_item_id=int(purchase_item.id),
+            source_item_id=int(source.id),
+            target_item_id=int(target.id),
+            target_stock=int(target_stock_after),
+            archived_source_id=int(source.id),
+            moved_movement_count=len(movable_source_movements),
+        )
 
 
 @router.get("/{item_id}", response_model=ItemOut)

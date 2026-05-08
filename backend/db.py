@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from datetime import datetime
 import os
 from pathlib import Path
+import sqlite3
 import sys
 from sqlmodel import create_engine, Session, SQLModel
 from sqlalchemy import text
@@ -327,6 +328,23 @@ def repair_purchase_duplicate_stock_links(session) -> int:
         )
 
     return len(applied)
+
+
+def auto_repair_hidden_purchase_duplicate_stock() -> tuple[int, str | None, int]:
+    """Run the broad duplicate-stock repair against the resolved SQLite DB file."""
+    from scripts.repair_purchase_duplicate_stock import apply_pairs, create_backup, discover_pairs
+
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    try:
+        pairs, warnings = discover_pairs(conn)
+        if not pairs:
+            return 0, None, len(warnings)
+        backup_path = create_backup(DB_FILE, BASE_DIR / "backups")
+        apply_pairs(conn, pairs, backup_path)
+        return len(pairs), str(backup_path), len(warnings)
+    finally:
+        conn.close()
 
 
 def migrate_db():
@@ -1178,6 +1196,28 @@ def migrate_db():
                 """).bindparams(
                     k=purchase_duplicate_repair_key,
                     value=f"done:{repaired_count}",
+                    ts=ts_repair,
+                ),
+            )
+            session.commit()
+
+        # ---------- one-time data repair: purchase-created stock hidden by duplicate repair ----------
+        hidden_purchase_stock_repair_key = "repair_hidden_purchase_duplicate_stock_v2"
+        hidden_purchase_stock_repair_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=hidden_purchase_stock_repair_key),
+        ).first()
+        if not hidden_purchase_stock_repair_done:
+            session.commit()
+            ts_repair = _now_ts()
+            repaired_count, backup_path, warning_count = auto_repair_hidden_purchase_duplicate_stock()
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=hidden_purchase_stock_repair_key,
+                    value=f"done:{repaired_count};warnings:{warning_count};backup:{backup_path or ''}",
                     ts=ts_repair,
                 ),
             )

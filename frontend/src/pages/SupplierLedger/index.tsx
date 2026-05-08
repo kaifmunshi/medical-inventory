@@ -988,7 +988,7 @@ export default function SupplierLedgerPage() {
                         size="small"
                         color="info"
                         icon={<Inventory2OutlinedIcon />}
-                        label={`Existing #${item.existing_inventory_item_id}${item.existing_stock_movement_id ? ` / In #${item.existing_stock_movement_id}` : ''}`}
+                        label={`Linked Stock #${item.existing_inventory_item_id}${item.existing_stock_movement_id ? ` / In #${item.existing_stock_movement_id}` : ''}`}
                         variant="outlined"
                       />
                     ) : null}
@@ -1049,8 +1049,8 @@ export default function SupplierLedgerPage() {
                       renderInput={(params) => (
                         <TextField
                           {...params}
-                          label="Attach Existing Batch"
-                          helperText="Incoming stock from 01 Apr 2026 onward"
+                          label="Link Existing Stock"
+                          helperText="Does not add stock. Use only for stock already entered."
                           fullWidth
                         />
                       )}
@@ -1718,7 +1718,7 @@ export default function SupplierLedgerPage() {
                     {(selectedPurchase.items || []).map((item) => (
                       <tr key={item.id}>
                         <td>{item.product_name}</td>
-                        <td>{item.stock_source === 'ATTACHED' ? `Existing #${item.inventory_item_id || '-'}` : 'New'}</td>
+                        <td>{item.stock_source === 'ATTACHED' ? `Linked Stock #${item.inventory_item_id || '-'}` : 'New'}</td>
                         <td>{item.brand || '-'}</td>
                         <td>{item.expiry_date || '-'}</td>
                         <td>{item.sealed_qty}</td>

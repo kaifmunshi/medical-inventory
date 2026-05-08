@@ -180,6 +180,40 @@ function canMergePurchaseLinkSource(row: any, link: any) {
   )
 }
 
+function visibleStockBalance(value: any, hiddenDelta: number) {
+  const adjusted = Number(value || 0) - hiddenDelta
+  return Object.is(adjusted, -0) ? 0 : adjusted
+}
+
+function stockMovementAsc(a: any, b: any) {
+  const at = String(a?.ts || '')
+  const bt = String(b?.ts || '')
+  if (at !== bt) return at.localeCompare(bt)
+  return Number(a?.id || 0) - Number(b?.id || 0)
+}
+
+function adjustVisibleBalances(rows: any[], visibleRows: any[], hiddenIds: Set<number>) {
+  if (!hiddenIds.size) return visibleRows
+
+  const adjustedById = new Map<number, any>()
+  let hiddenDelta = 0
+
+  ;[...rows].sort(stockMovementAsc).forEach((row) => {
+    const id = Number(row?.id || 0)
+    if (hiddenIds.has(id)) {
+      hiddenDelta += Number(row?.delta || 0)
+      return
+    }
+    adjustedById.set(id, {
+      ...row,
+      balance_before: visibleStockBalance(row?.balance_before, hiddenDelta),
+      balance_after: visibleStockBalance(row?.balance_after, hiddenDelta),
+    })
+  })
+
+  return visibleRows.map((row) => adjustedById.get(Number(row?.id || 0)) || row)
+}
+
 function visibleStockCardRows(rows: any[]) {
   const hiddenCorrectionKeys = new Set<string>()
 
@@ -207,22 +241,26 @@ function visibleStockCardRows(rows: any[]) {
     if (purchaseEditNet === 0) hiddenCorrectionKeys.add(key)
   })
 
+  const hiddenRowIds = new Set<number>()
   const correctionFilteredRows = hiddenCorrectionKeys.size ? rows.filter((row) => {
     const reasonKey = String(row?.reason || '').toUpperCase()
     const key = duplicateRepairKey(row)
     if (!key || !hiddenCorrectionKeys.has(key)) return true
-    return reasonKey !== 'PURCHASE' && reasonKey !== 'PURCHASE_DUPLICATE_REPAIR' && reasonKey !== 'PURCHASE_EDIT'
+    const shouldHide = reasonKey === 'PURCHASE' || reasonKey === 'PURCHASE_DUPLICATE_REPAIR' || reasonKey === 'PURCHASE_EDIT'
+    if (shouldHide) hiddenRowIds.add(Number(row?.id || 0))
+    return !shouldHide
   }) : rows
+  const balanceAdjustedRows = adjustVisibleBalances(rows, correctionFilteredRows, hiddenRowIds)
 
-  const purchaseLinks = correctionFilteredRows.filter(
+  const purchaseLinks = balanceAdjustedRows.filter(
     (row) => String(row?.reason || '').toUpperCase() === 'PURCHASE_LINK'
   )
-  if (!purchaseLinks.length) return correctionFilteredRows
+  if (!purchaseLinks.length) return balanceAdjustedRows
 
   const sourceById = new Map<number, any>()
   const mergedLinkIds = new Set<number>()
   purchaseLinks.forEach((link) => {
-    const source = correctionFilteredRows.find((row) => canMergePurchaseLinkSource(row, link))
+    const source = balanceAdjustedRows.find((row) => canMergePurchaseLinkSource(row, link))
     if (!source) return
     sourceById.set(Number(source.id), {
       ...source,
@@ -237,9 +275,9 @@ function visibleStockCardRows(rows: any[]) {
     mergedLinkIds.add(Number(link.id))
   })
 
-  if (!sourceById.size) return correctionFilteredRows
+  if (!sourceById.size) return balanceAdjustedRows
 
-  return correctionFilteredRows
+  return balanceAdjustedRows
     .filter((row) => !mergedLinkIds.has(Number(row.id)))
     .map((row) => sourceById.get(Number(row.id)) || row)
 }

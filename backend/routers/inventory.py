@@ -2019,6 +2019,7 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
             ]
             source_ledger_total = sum(int(row.delta or 0) for row in source_movements)
             move_balanced_source_history = False
+            preserve_current_stock_with_adjustment = False
             source_opening: Optional[StockMovement] = None
             replacement_openings = [
                 row
@@ -2042,13 +2043,18 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                     )
                 source_opening = replacement_openings[0]
                 move_balanced_source_history = True
+            elif len(replacement_openings) == 1:
+                source_opening = replacement_openings[0]
+                move_balanced_source_history = True
+                preserve_current_stock_with_adjustment = True
             else:
                 raise HTTPException(
                     status_code=400,
                     detail=(
                         f"Source OP batch #{source.id} must have exactly one Opening / ITEM_CREATE entry "
-                        f"for qty {purchase_qty}, or it must be a zero-balanced history batch; "
-                        f"found {len(source_openings)} matching opening rows"
+                        f"for qty {purchase_qty}, a zero-balanced history batch, or exactly one replacement OP "
+                        f"placeholder on/after purchase date {invoice_date or '-'}; found "
+                        f"{len(source_openings)} matching ITEM_CREATE rows and {len(replacement_openings)} replacement rows"
                     ),
                 )
 
@@ -2111,6 +2117,15 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
             moved_delta = sum(int(row.delta or 0) for row in movable_source_movements)
             target_delta_before = sum(int(row.delta or 0) for row in target_movements)
             target_stock_after = target_delta_before + moved_delta
+            target_stock_from_current_rows = (
+                int(target.stock or 0)
+                + int(source.stock or 0)
+                - int(source_opening.delta or 0)
+            )
+            balance_adjustment_delta = 0
+            if preserve_current_stock_with_adjustment and target_stock_after != target_stock_from_current_rows:
+                balance_adjustment_delta = int(target_stock_from_current_rows) - int(target_stock_after)
+                target_stock_after = int(target_stock_from_current_rows)
             if target_stock_after < 0:
                 raise HTTPException(
                     status_code=400,
@@ -2155,6 +2170,22 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                 row.item_id = int(target.id)
                 _retarget_moved_item_ref(row, source_item_id=int(source.id), target_item_id=int(target.id))
                 session.add(row)
+            if balance_adjustment_delta:
+                session.add(
+                    StockMovement(
+                        item_id=int(target.id),
+                        ts=now_ts(),
+                        delta=int(balance_adjustment_delta),
+                        reason="RECON_ADJUST",
+                        ref_type="ITEM",
+                        ref_id=int(target.id),
+                        note=(
+                            "Club balance: preserved current stock while replacing duplicate OP "
+                            f"batch #{source.id} with purchase batch #{target.id}"
+                        ),
+                        actor="SYSTEM",
+                    )
+                )
 
             purchase_item.inventory_item_id = int(target.id)
             purchase_item.lot_id = int(target_lot.id) if target_lot.id is not None else None
@@ -2236,6 +2267,14 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
             ).first()
             if int(target_stock_check or 0) < 0:
                 raise HTTPException(status_code=400, detail="Clubbed kept purchase batch would be negative after repair")
+            if int(target_stock_check or 0) != int(target_stock_after):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Clubbed kept purchase batch ledger would be {int(target_stock_check or 0)}, "
+                        f"expected {int(target_stock_after)}"
+                    ),
+                )
 
             log_audit(
                 session,
@@ -2252,6 +2291,8 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                     "purchase_item_id": int(purchase_item.id),
                     "purchase_qty": int(purchase_qty),
                     "move_balanced_source_history": bool(move_balanced_source_history),
+                    "preserve_current_stock_with_adjustment": bool(preserve_current_stock_with_adjustment),
+                    "balance_adjustment_delta": int(balance_adjustment_delta),
                     "moved_movement_ids": [int(row.id) for row in movable_source_movements if row.id is not None],
                     "deleted_source_opening_movement_id": deleted_source_opening_movement_id,
                     "remaining_source_refs": remaining_refs,

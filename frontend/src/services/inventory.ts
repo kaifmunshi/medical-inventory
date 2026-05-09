@@ -319,6 +319,7 @@ export async function clubPurchaseBatchToOpening(payload: {
   target_stock: number
   archived_source_id: number
   moved_movement_count: number
+  backup_path?: string | null
 }> {
   const { data } = await api.post('/inventory/ledger/club-opening', payload)
   return data

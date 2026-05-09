@@ -1847,6 +1847,169 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                 .where(StockMovement.item_id == int(source.id))
                 .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
             ).all()
+            invoice_date = _date_part(purchase.invoice_date)
+            if not source_movements and int(source.stock or 0) == 0:
+                target_movements_for_cleanup = session.exec(
+                    select(StockMovement)
+                    .where(StockMovement.item_id == int(target.id))
+                    .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+                ).all()
+                target_purchase_movements_for_cleanup = [
+                    row
+                    for row in target_movements_for_cleanup
+                    if str(row.reason or "").upper() == "PURCHASE"
+                    and str(row.ref_type or "").upper() == "PURCHASE"
+                    and int(row.ref_id or 0) == int(purchase.id)
+                    and int(row.delta or 0) == purchase_qty
+                ]
+                if len(target_purchase_movements_for_cleanup) != 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Kept batch #{target.id} must have exactly one purchase stock entry "
+                            f"for qty {purchase_qty}; found {len(target_purchase_movements_for_cleanup)}"
+                        ),
+                    )
+                target_replacement_openings = [
+                    row
+                    for row in target_movements_for_cleanup
+                    if str(row.reason or "").upper() in {"OPENING", "INVENTORY_ADD"}
+                    and str(row.ref_type or "").upper() in {"ITEM", "ITEM_CREATE", "ITEM_MERGE", "ITEM_COPY", "MANUAL"}
+                    and int(row.delta or 0) == purchase_qty
+                    and (not invoice_date or _date_part(row.ts) >= invoice_date)
+                ]
+                if len(target_replacement_openings) != 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Source batch #{source.id} is already empty, but kept batch #{target.id} does not have "
+                            f"exactly one replaceable OP placeholder of qty {purchase_qty} on/after {invoice_date or '-'}; "
+                            f"found {len(target_replacement_openings)}"
+                        ),
+                    )
+
+                lot_ids = [
+                    int(row.id)
+                    for row in (source_lot, target_lot)
+                    if row is not None and getattr(row, "id", None) is not None
+                ]
+                remaining_allocation_filter = BillItemAllocation.item_id == int(source.id)
+                if source_lot and source_lot.id is not None:
+                    remaining_allocation_filter = or_(remaining_allocation_filter, BillItemAllocation.lot_id == int(source_lot.id))
+                remaining_purchase_filter = PurchaseItem.inventory_item_id == int(source.id)
+                if source_lot and source_lot.id is not None:
+                    remaining_purchase_filter = or_(remaining_purchase_filter, PurchaseItem.lot_id == int(source_lot.id))
+                pack_open_filters = [
+                    PackOpenEvent.source_item_id == int(source.id),
+                    PackOpenEvent.loose_item_id == int(source.id),
+                ]
+                if source_lot and source_lot.id is not None:
+                    pack_open_filters.extend(
+                        [
+                            PackOpenEvent.source_lot_id == int(source_lot.id),
+                            PackOpenEvent.loose_lot_id == int(source_lot.id),
+                        ]
+                    )
+                remaining_refs = {
+                    "purchase_items": int(session.exec(select(func.count(PurchaseItem.id)).where(remaining_purchase_filter)).first() or 0),
+                    "stock_movements": 0,
+                    "bill_items": int(session.exec(select(func.count(BillItem.id)).where(BillItem.item_id == int(source.id))).first() or 0),
+                    "bill_allocations": int(session.exec(select(func.count(BillItemAllocation.id)).where(remaining_allocation_filter)).first() or 0),
+                    "return_items": int(session.exec(select(func.count(ReturnItem.id)).where(ReturnItem.item_id == int(source.id))).first() or 0),
+                    "stock_audit_items": int(session.exec(select(func.count(StockAuditItem.id)).where(StockAuditItem.item_id == int(source.id))).first() or 0),
+                    "pack_open_events": int(session.exec(select(func.count(PackOpenEvent.id)).where(or_(*pack_open_filters))).first() or 0),
+                    "child_lots": int(
+                        session.exec(select(func.count(InventoryLot.id)).where(InventoryLot.opened_from_lot_id.in_(lot_ids))).first() or 0
+                    )
+                    if lot_ids
+                    else 0,
+                }
+                uncleared_refs = {key: value for key, value in remaining_refs.items() if value}
+                if uncleared_refs:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Source batch still has references before OP cleanup: {uncleared_refs}",
+                    )
+
+                target_placeholder = target_replacement_openings[0]
+                target_stock_after = sum(int(row.delta or 0) for row in target_movements_for_cleanup) - int(target_placeholder.delta or 0)
+                if target_stock_after < 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Removing the replaced OP entry would make kept batch #{target.id} negative",
+                    )
+
+                backup_path = create_data_repair_backup("before_manual_op_placeholder_cleanup")
+                deleted_target_opening_movement_id = int(target_placeholder.id or 0)
+                session.delete(target_placeholder)
+                retargeted_item_ref_ids: List[int] = []
+                for row in target_movements_for_cleanup:
+                    if int(row.id or 0) == deleted_target_opening_movement_id:
+                        continue
+                    before_ref_id = int(row.ref_id or 0) if row.ref_id is not None else None
+                    _retarget_moved_item_ref(row, source_item_id=int(source.id), target_item_id=int(target.id))
+                    if before_ref_id is not None and int(row.ref_id or 0) != before_ref_id:
+                        retargeted_item_ref_ids.append(int(row.id or 0))
+                    session.add(row)
+
+                target.stock = int(target_stock_after)
+                target.is_archived = bool(target_stock_after <= 0)
+                target.updated_at = now_ts()
+                target.cost_price = float(purchase_item.effective_cost_price or purchase_item.cost_price or target.cost_price or 0)
+                session.add(target)
+                source.stock = 0
+                source.is_archived = True
+                source.updated_at = target.updated_at
+                session.add(source)
+                session.flush()
+                sync_lot_quantity_for_item(session, target, ts=target.updated_at)
+                if source_lot:
+                    source_lot.sealed_qty = 0
+                    source_lot.loose_qty = 0
+                    source_lot.is_active = False
+                    source_lot.updated_at = target.updated_at
+                    session.add(source_lot)
+                sync_lot_quantity_for_item(session, source, ts=source.updated_at)
+                apply_archive_rules(session, target)
+                log_audit(
+                    session,
+                    entity_type="ITEM",
+                    entity_id=int(target.id),
+                    action="OPENING_CLUB",
+                    note=payload.note
+                    or f"Cleaned replaced OP placeholder on purchase batch #{target.id}",
+                    details={
+                        "direction": "OPENING_TO_PURCHASE_CLEANUP",
+                        "source_item_id": int(source.id),
+                        "target_item_id": int(target.id),
+                        "purchase_id": int(purchase.id),
+                        "purchase_item_id": int(purchase_item.id),
+                        "purchase_qty": int(purchase_qty),
+                        "deleted_target_opening_movement_id": deleted_target_opening_movement_id,
+                        "retargeted_item_ref_ids": retargeted_item_ref_ids,
+                        "remaining_source_refs": remaining_refs,
+                        "target_stock": int(target_stock_after),
+                        "backup": backup_path,
+                    },
+                )
+                session.commit()
+                session.refresh(source)
+                session.refresh(target)
+                _attach_last_incoming(session, [source, target])
+                _attach_lot_metadata(session, [source, target])
+                return OpeningClubOut(
+                    source_item=source,
+                    target_item=target,
+                    purchase_id=int(purchase.id),
+                    purchase_item_id=int(purchase_item.id),
+                    source_item_id=int(source.id),
+                    target_item_id=int(target.id),
+                    target_stock=int(target_stock_after),
+                    archived_source_id=int(source.id),
+                    moved_movement_count=0,
+                    backup_path=backup_path,
+                )
+
             source_openings = [
                 row
                 for row in source_movements
@@ -1857,9 +2020,27 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
             source_ledger_total = sum(int(row.delta or 0) for row in source_movements)
             move_balanced_source_history = False
             source_opening: Optional[StockMovement] = None
+            replacement_openings = [
+                row
+                for row in source_movements
+                if str(row.reason or "").upper() in {"OPENING", "INVENTORY_ADD"}
+                and str(row.ref_type or "").upper() in {"ITEM", "ITEM_CREATE", "ITEM_MERGE", "ITEM_COPY", "MANUAL"}
+                and int(row.delta or 0) == purchase_qty
+                and (not invoice_date or _date_part(row.ts) >= invoice_date)
+            ]
             if len(source_openings) == 1:
                 source_opening = source_openings[0]
             elif int(source.stock or 0) == 0 and source_ledger_total == 0:
+                if len(replacement_openings) != 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Source history batch #{source.id} is balanced, but could not identify exactly one "
+                            f"OP placeholder of qty {purchase_qty} on/after purchase date {invoice_date or '-'}; "
+                            f"found {len(replacement_openings)}"
+                        ),
+                    )
+                source_opening = replacement_openings[0]
                 move_balanced_source_history = True
             else:
                 raise HTTPException(
@@ -1883,7 +2064,9 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                 "RECON_ADJUST",
             }
             if move_balanced_source_history:
-                movable_source_movements = list(source_movements)
+                movable_source_movements = [
+                    row for row in source_movements if int(row.id or 0) != int(source_opening.id or 0)
+                ]
                 allowed_source_reasons = set(movable_reasons) | {"OPENING", "INVENTORY_ADD"}
             else:
                 movable_source_movements = [

@@ -1782,6 +1782,249 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
 
         source_active_purchase_refs = _active_purchase_refs_for_item(session, int(source.id))
         target_active_purchase_refs = _active_purchase_refs_for_item(session, int(target.id))
+        if len(source_active_purchase_refs) == 1 and len(target_active_purchase_refs) == 1:
+            source_purchase_item, source_purchase = source_active_purchase_refs[0]
+            target_purchase_item, target_purchase = target_active_purchase_refs[0]
+            if int(source_purchase_item.id or 0) == int(target_purchase_item.id or 0):
+                raise HTTPException(status_code=400, detail="Source and target are linked to the same purchase line")
+            if str(source_purchase_item.stock_source or "").upper() != "CREATED":
+                raise HTTPException(status_code=400, detail="Source purchase batch must be purchase-created")
+            if str(target_purchase_item.stock_source or "").upper() != "CREATED":
+                raise HTTPException(status_code=400, detail="Target purchase batch must be purchase-created")
+
+            target_purchase_qty = _purchase_item_qty(target_purchase_item)
+            if target_purchase_qty <= 0:
+                raise HTTPException(status_code=400, detail="Target purchase line quantity must be positive")
+
+            source_lot = _lot_for_item(session, int(source.id))
+            target_lot = _lot_for_item(session, int(target.id))
+            if not target_lot:
+                target_product = session.get(Product, int(target_purchase_item.product_id)) if target_purchase_item.product_id else None
+                target_lot = ensure_lot_for_inventory_item(
+                    session,
+                    inventory_item=target,
+                    product=target_product,
+                    ts=now_ts(),
+                )
+            if not target_lot:
+                raise HTTPException(status_code=400, detail="Could not prepare target lot")
+
+            lot_ids = [
+                int(row.id)
+                for row in (source_lot, target_lot)
+                if row is not None and getattr(row, "id", None) is not None
+            ]
+            pack_filters = [
+                PackOpenEvent.source_item_id.in_([int(source.id), int(target.id)]),
+                PackOpenEvent.loose_item_id.in_([int(source.id), int(target.id)]),
+            ]
+            if lot_ids:
+                pack_filters.extend(
+                    [
+                        PackOpenEvent.source_lot_id.in_(lot_ids),
+                        PackOpenEvent.loose_lot_id.in_(lot_ids),
+                    ]
+                )
+            pack_open_refs = session.exec(select(func.count(PackOpenEvent.id)).where(or_(*pack_filters))).first()
+            child_lot_refs = (
+                session.exec(
+                    select(func.count(InventoryLot.id)).where(InventoryLot.opened_from_lot_id.in_(lot_ids))
+                ).first()
+                if lot_ids
+                else 0
+            )
+            if int(pack_open_refs or 0) > 0 or int(child_lot_refs or 0) > 0:
+                raise HTTPException(status_code=400, detail="Loose/pack-open batches must be handled manually")
+
+            source_movements = session.exec(
+                select(StockMovement)
+                .where(StockMovement.item_id == int(source.id))
+                .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+            ).all()
+            target_movements = session.exec(
+                select(StockMovement)
+                .where(StockMovement.item_id == int(target.id))
+                .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+            ).all()
+            target_purchase_movements = [
+                row
+                for row in target_movements
+                if str(row.reason or "").upper() == "PURCHASE"
+                and str(row.ref_type or "").upper() == "PURCHASE"
+                and int(row.ref_id or 0) == int(target_purchase.id)
+                and int(row.delta or 0) == target_purchase_qty
+            ]
+            if len(target_purchase_movements) != 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Target batch #{target.id} must have exactly one purchase stock entry "
+                        f"for qty {target_purchase_qty}; found {len(target_purchase_movements)}"
+                    ),
+                )
+
+            target_invoice_date = _date_part(target_purchase.invoice_date)
+            replacement_openings = [
+                row
+                for row in source_movements
+                if str(row.reason or "").upper() in {"OPENING", "INVENTORY_ADD"}
+                and str(row.ref_type or "").upper() in {"ITEM", "ITEM_CREATE", "ITEM_MERGE", "ITEM_COPY", "MANUAL"}
+                and int(row.delta or 0) == target_purchase_qty
+                and (not target_invoice_date or _date_part(row.ts) >= target_invoice_date)
+            ]
+            if len(replacement_openings) != 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Source purchase batch #{source.id} must have exactly one OP placeholder of qty "
+                        f"{target_purchase_qty} on/after target purchase date {target_invoice_date or '-'}; "
+                        f"found {len(replacement_openings)}"
+                    ),
+                )
+
+            replacement_opening = replacement_openings[0]
+            movable_reasons = {
+                "SALE",
+                "BILL_DELETE",
+                "BILL_EDIT",
+                "BILL_RECOVER",
+                "RETURN",
+                "EXCHANGE_IN",
+                "EXCHANGE_OUT",
+                "ADJUST",
+                "RECON_ADJUST",
+            }
+            replacement_key = (str(replacement_opening.ts or ""), int(replacement_opening.id or 0))
+            movable_source_movements = [
+                row
+                for row in source_movements
+                if (str(row.ts or ""), int(row.id or 0)) > replacement_key
+                and int(row.id or 0) != int(replacement_opening.id or 0)
+            ]
+            blocked_movements = [
+                row for row in movable_source_movements if str(row.reason or "").upper() not in movable_reasons
+            ]
+            if blocked_movements:
+                examples = ", ".join(
+                    f"{row.reason}{f' #{row.ref_id}' if getattr(row, 'ref_id', None) else ''}"
+                    for row in blocked_movements[:3]
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Source batch has unsupported movement(s) after the OP placeholder: {examples}",
+                )
+
+            moved_delta = sum(int(row.delta or 0) for row in movable_source_movements)
+            source_stock_after = (
+                sum(int(row.delta or 0) for row in source_movements)
+                - int(replacement_opening.delta or 0)
+                - moved_delta
+            )
+            target_stock_after = sum(int(row.delta or 0) for row in target_movements) + moved_delta
+            if source_stock_after < 0 or target_stock_after < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Placeholder move would make stock negative "
+                        f"(source {source_stock_after}, target {target_stock_after})"
+                    ),
+                )
+
+            backup_path = create_data_repair_backup("before_manual_purchase_placeholder_move")
+            deleted_source_opening_movement_id = int(replacement_opening.id or 0)
+            session.delete(replacement_opening)
+
+            bill_targets: Dict[int, int] = {}
+            return_targets: Dict[int, int] = {}
+            for row in movable_source_movements:
+                row.item_id = int(target.id)
+                _retarget_moved_item_ref(row, source_item_id=int(source.id), target_item_id=int(target.id))
+                if str(row.ref_type or "").upper() == "BILL" and row.ref_id is not None:
+                    bill_targets[int(row.ref_id)] = int(target.id)
+                if str(row.ref_type or "").upper() == "RETURN" and row.ref_id is not None:
+                    return_targets[int(row.ref_id)] = int(target.id)
+                session.add(row)
+
+            for bill_id, item_id in bill_targets.items():
+                for row in session.exec(
+                    select(BillItem).where(BillItem.item_id == int(source.id), BillItem.bill_id == int(bill_id))
+                ).all():
+                    row.item_id = int(item_id)
+                    session.add(row)
+                allocation_filter = and_(BillItemAllocation.item_id == int(source.id), BillItemAllocation.bill_id == int(bill_id))
+                if source_lot and source_lot.id is not None:
+                    allocation_filter = or_(
+                        allocation_filter,
+                        and_(BillItemAllocation.lot_id == int(source_lot.id), BillItemAllocation.bill_id == int(bill_id)),
+                    )
+                for row in session.exec(select(BillItemAllocation).where(allocation_filter)).all():
+                    row.item_id = int(item_id)
+                    row.lot_id = int(target_lot.id) if target_lot.id is not None else None
+                    session.add(row)
+
+            for return_id, item_id in return_targets.items():
+                for row in session.exec(
+                    select(ReturnItem).where(ReturnItem.item_id == int(source.id), ReturnItem.return_id == int(return_id))
+                ).all():
+                    row.item_id = int(item_id)
+                    session.add(row)
+
+            target.stock = int(target_stock_after)
+            target.is_archived = bool(target_stock_after <= 0)
+            target.updated_at = now_ts()
+            target.cost_price = float(target_purchase_item.effective_cost_price or target_purchase_item.cost_price or target.cost_price or 0)
+            session.add(target)
+            source.stock = int(source_stock_after)
+            source.is_archived = bool(source_stock_after <= 0)
+            source.updated_at = target.updated_at
+            session.add(source)
+            session.flush()
+
+            sync_lot_quantity_for_item(session, target, ts=target.updated_at)
+            sync_lot_quantity_for_item(session, source, ts=source.updated_at)
+            apply_archive_rules(session, target)
+            apply_archive_rules(session, source)
+
+            log_audit(
+                session,
+                entity_type="ITEM",
+                entity_id=int(target.id),
+                action="OPENING_CLUB",
+                note=payload.note
+                or f"Moved duplicate OP placeholder from purchase batch #{source.id} to purchase batch #{target.id}",
+                details={
+                    "direction": "PURCHASE_PLACEHOLDER_TO_PURCHASE",
+                    "source_item_id": int(source.id),
+                    "target_item_id": int(target.id),
+                    "source_purchase_id": int(source_purchase.id),
+                    "source_purchase_item_id": int(source_purchase_item.id),
+                    "target_purchase_id": int(target_purchase.id),
+                    "target_purchase_item_id": int(target_purchase_item.id),
+                    "deleted_source_opening_movement_id": deleted_source_opening_movement_id,
+                    "moved_movement_ids": [int(row.id) for row in movable_source_movements if row.id is not None],
+                    "source_stock": int(source_stock_after),
+                    "target_stock": int(target_stock_after),
+                    "backup": backup_path,
+                },
+            )
+            session.commit()
+            session.refresh(source)
+            session.refresh(target)
+            _attach_last_incoming(session, [source, target])
+            _attach_lot_metadata(session, [source, target])
+            return OpeningClubOut(
+                source_item=source,
+                target_item=target,
+                purchase_id=int(target_purchase.id),
+                purchase_item_id=int(target_purchase_item.id),
+                source_item_id=int(source.id),
+                target_item_id=int(target.id),
+                target_stock=int(target_stock_after),
+                archived_source_id=int(source.id) if source.is_archived else 0,
+                moved_movement_count=len(movable_source_movements),
+                backup_path=backup_path,
+            )
+
         if len(source_active_purchase_refs) == 0 and len(target_active_purchase_refs) == 1:
             purchase_item, purchase = target_active_purchase_refs[0]
             if str(purchase_item.stock_source or "").upper() != "CREATED":
@@ -2029,6 +2272,61 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                 and int(row.delta or 0) == purchase_qty
                 and (not invoice_date or _date_part(row.ts) >= invoice_date)
             ]
+            all_purchase_placeholders = []
+            same_purchase_refs = session.exec(
+                select(PurchaseItem, Purchase)
+                .join(Purchase, Purchase.id == PurchaseItem.purchase_id)
+                .where(
+                    Purchase.is_deleted == False,  # noqa: E712
+                    PurchaseItem.inventory_item_id.is_not(None),
+                    PurchaseItem.inventory_item_id != int(source.id),
+                    func.upper(func.coalesce(PurchaseItem.stock_source, "CREATED")) == "CREATED",
+                )
+                .order_by(Purchase.invoice_date.asc(), PurchaseItem.id.asc())
+            ).all()
+            for candidate_item, candidate_purchase in same_purchase_refs:
+                candidate_target = session.get(Item, int(candidate_item.inventory_item_id or 0))
+                if not candidate_target or _club_group_key(candidate_target) != _club_group_key(source):
+                    continue
+                if str(candidate_item.expiry_date or "") != str(source.expiry_date or ""):
+                    continue
+                if abs(float(candidate_item.mrp or 0) - float(source.mrp or 0)) > 0.001:
+                    continue
+                candidate_qty = _purchase_item_qty(candidate_item)
+                candidate_date = _date_part(candidate_purchase.invoice_date)
+                candidate_openings = [
+                    row
+                    for row in source_movements
+                    if str(row.reason or "").upper() in {"OPENING", "INVENTORY_ADD"}
+                    and str(row.ref_type or "").upper() in {"ITEM", "ITEM_CREATE", "ITEM_MERGE", "ITEM_COPY", "MANUAL"}
+                    and int(row.delta or 0) == candidate_qty
+                    and (not candidate_date or _date_part(row.ts) >= candidate_date)
+                ]
+                if len(candidate_openings) == 1:
+                    all_purchase_placeholders.append(
+                        {
+                            "purchase_item_id": int(candidate_item.id or 0),
+                            "target_item_id": int(candidate_target.id or 0),
+                            "invoice_number": str(candidate_purchase.invoice_number or candidate_purchase.id),
+                            "invoice_date": candidate_date,
+                            "qty": int(candidate_qty),
+                            "opening_movement_id": int(candidate_openings[0].id or 0),
+                        }
+                    )
+            unique_placeholder_ids = {row["opening_movement_id"] for row in all_purchase_placeholders}
+            unique_purchase_targets = {row["target_item_id"] for row in all_purchase_placeholders}
+            if len(unique_placeholder_ids) > 1 and int(target.id) in unique_purchase_targets:
+                plan = ", ".join(
+                    f"#{source.id}->#{row['target_item_id']} qty {row['qty']} ({row['invoice_number']})"
+                    for row in all_purchase_placeholders
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Batch #{source.id} has multiple OP placeholders tied to purchase batches. "
+                        f"One-to-one club would leave mixed OP/Purchase history. Split required: {plan}"
+                    ),
+                )
             if len(source_openings) == 1:
                 source_opening = source_openings[0]
             elif int(source.stock or 0) == 0 and source_ledger_total == 0:

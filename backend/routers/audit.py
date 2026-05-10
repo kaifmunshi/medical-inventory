@@ -12,6 +12,7 @@ from backend.models import (
     StockAuditCreate,
     StockAuditItem,
     StockAuditItemOut,
+    StockAuditRackOut,
     StockAuditOut,
     StockMovement,
 )
@@ -81,6 +82,40 @@ def get_stock_audit(audit_id: int):
         if not audit:
             raise HTTPException(status_code=404, detail="Audit not found")
         return audit
+
+
+@router.get("/{audit_id}/racks", response_model=List[StockAuditRackOut])
+def get_stock_audit_racks(audit_id: int):
+    with get_session() as session:
+        audit = session.get(StockAudit, audit_id)
+        if not audit:
+            raise HTTPException(status_code=404, detail="Audit not found")
+
+        rows = session.exec(
+            select(StockAuditItem, Item)
+            .join(Item, StockAuditItem.item_id == Item.id)
+            .where(StockAuditItem.audit_id == audit_id)
+        ).all()
+
+        rack_map: dict[Optional[int], dict[str, int]] = {}
+        for ai, item in rows:
+            rack = item.rack_number
+            summary = rack_map.setdefault(rack, {"item_count": 0, "counted_count": 0})
+            summary["item_count"] += 1
+            if ai.physical_stock is not None:
+                summary["counted_count"] += 1
+
+        def sort_key(row: tuple[Optional[int], dict[str, int]]) -> int:
+            return row[0] if row[0] is not None else 999999
+
+        return [
+            StockAuditRackOut(
+                rack_number=rack,
+                item_count=summary["item_count"],
+                counted_count=summary["counted_count"],
+            )
+            for rack, summary in sorted(rack_map.items(), key=sort_key)
+        ]
 
 
 @router.get("/{audit_id}/items", response_model=List[StockAuditItemOut])

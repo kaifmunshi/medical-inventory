@@ -152,7 +152,14 @@ export interface StockAuditItem {
   item_expiry?: string | null
 }
 
+export interface StockAuditRack {
+  rack_number?: number | null
+  item_count: number
+  counted_count: number
+}
+
 export interface PurchaseItemPayload {
+  purchase_item_id?: ID
   existing_inventory_item_id?: ID
   product_id?: ID
   product_name: string

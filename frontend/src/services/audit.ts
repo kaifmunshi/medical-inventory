@@ -1,5 +1,5 @@
 import api from './api'
-import type { StockAudit, StockAuditItem } from '../lib/types'
+import type { StockAudit, StockAuditItem, StockAuditRack } from '../lib/types'
 
 export type { StockAuditItem } from '../lib/types'
 
@@ -15,6 +15,11 @@ export async function listAudits(): Promise<StockAudit[]> {
 
 export async function getAudit(id: number): Promise<StockAudit> {
   const { data } = await api.get(`/audits/${id}`)
+  return data
+}
+
+export async function getAuditRacks(id: number): Promise<StockAuditRack[]> {
+  const { data } = await api.get(`/audits/${id}/racks`)
   return data
 }
 

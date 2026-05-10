@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 import logging
+import re
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from sqlmodel import select
 from datetime import date, datetime
@@ -366,6 +367,15 @@ def _norm_str(s: Optional[str]) -> Optional[str]:
     return v if v != "" else None
 
 
+def _item_name_key(value: Optional[str]) -> str:
+    text = " ".join(str(value or "").strip().split()).lower()
+    return re.sub(r"\b(\d+)\s+(g|gm|ml|tab|tabs|tablet|tablets|cap|caps|n)\b", r"\1\2", text)
+
+
+def _brand_key(value: Optional[str]) -> str:
+    return " ".join(str(value or "").strip().split()).lower()
+
+
 def _same_group_stmt(name: Optional[str], brand: Optional[str]):
     n = _norm_str(name) or ""
     b = _norm_str(brand)
@@ -378,7 +388,7 @@ def _same_group_stmt(name: Optional[str], brand: Optional[str]):
 
 
 def _group_key(name: Optional[str], brand: Optional[str]) -> str:
-    return f"{(_norm_str(name) or '').lower()}__{(_norm_str(brand) or '').lower()}"
+    return f"{_item_name_key(name)}__{_brand_key(brand)}"
 
 
 def _apply_default_visibility(stmt):
@@ -466,12 +476,21 @@ def _load_group_batches(session, *, name: Optional[str], brand: Optional[str]) -
         raise HTTPException(status_code=400, detail="name is required")
 
     b = _norm_str(brand)
-    stmt = _same_group_stmt(n, b).order_by(
-        func.coalesce(Item.expiry_date, "9999-12-31").asc(),
-        Item.mrp.asc(),
-        Item.id.asc(),
+    stmt = select(Item)
+    if b is None:
+        stmt = stmt.where(or_(Item.brand.is_(None), func.trim(Item.brand) == ""))
+    else:
+        stmt = stmt.where(func.lower(func.coalesce(Item.brand, "")) == b.lower())
+    candidates = session.exec(stmt).all()
+    wanted_key = _item_name_key(n)
+    batches = [row for row in candidates if _item_name_key(row.name) == wanted_key]
+    batches.sort(
+        key=lambda row: (
+            str(getattr(row, "expiry_date", None) or "9999-12-31"),
+            float(getattr(row, "mrp", 0) or 0),
+            int(getattr(row, "id", 0) or 0),
+        )
     )
-    batches = session.exec(stmt).all()
     if not batches:
         raise HTTPException(status_code=404, detail="No items found for this (name+brand)")
     return n, b, batches
@@ -1728,12 +1747,28 @@ def delete_opening_stock_movement(
         return OpeningDeleteOut(item=item, deleted_movement_id=int(movement_id), removed_qty=opening_qty)
 
 
+def _club_name_key(value: Optional[str]) -> str:
+    return _item_name_key(value)
+
+
+def _round2(value: Any) -> float:
+    return round(float(value or 0) + 1e-9, 2)
+
+
 def _club_group_key(item: Item) -> Tuple[str, str]:
-    return ((item.name or "").strip().lower(), (item.brand or "").strip().lower())
+    return (_club_name_key(item.name), _brand_key(item.brand))
 
 
 def _date_part(value: Optional[str]) -> str:
     return str(value or "")[:10]
+
+
+def _historical_opening_ts(movements: List[StockMovement]) -> str:
+    dated = sorted(str(row.ts or "") for row in movements if str(row.ts or ""))
+    if not dated:
+        return now_ts()
+    date = _date_part(dated[0])
+    return f"{date}T00:00:00" if date else dated[0]
 
 
 def _active_purchase_refs_for_item(session, item_id: int) -> List[Tuple[PurchaseItem, Purchase]]:
@@ -1895,11 +1930,28 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                 "RECON_ADJUST",
             }
             replacement_key = (str(replacement_opening.ts or ""), int(replacement_opening.id or 0))
+            source_purchase_movements = [
+                row
+                for row in source_movements
+                if str(row.reason or "").upper() == "PURCHASE"
+                and str(row.ref_type or "").upper() == "PURCHASE"
+                and int(row.ref_id or 0) == int(source_purchase.id)
+                and int(row.delta or 0) == _purchase_item_qty(source_purchase_item)
+            ]
+            stop_before_key: Optional[Tuple[str, int]] = None
+            if len(source_purchase_movements) == 1:
+                source_purchase_key = (
+                    str(source_purchase_movements[0].ts or ""),
+                    int(source_purchase_movements[0].id or 0),
+                )
+                if replacement_key < source_purchase_key:
+                    stop_before_key = source_purchase_key
             movable_source_movements = [
                 row
                 for row in source_movements
                 if (str(row.ts or ""), int(row.id or 0)) > replacement_key
                 and int(row.id or 0) != int(replacement_opening.id or 0)
+                and (stop_before_key is None or (str(row.ts or ""), int(row.id or 0)) < stop_before_key)
             ]
             blocked_movements = [
                 row for row in movable_source_movements if str(row.reason or "").upper() not in movable_reasons
@@ -2272,6 +2324,14 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                 and int(row.delta or 0) == purchase_qty
                 and (not invoice_date or _date_part(row.ts) >= invoice_date)
             ]
+            same_qty_openings = [
+                row
+                for row in source_movements
+                if str(row.reason or "").upper() in {"OPENING", "INVENTORY_ADD"}
+                and str(row.ref_type or "").upper() in {"ITEM", "ITEM_CREATE", "ITEM_MERGE", "ITEM_COPY", "MANUAL"}
+                and int(row.delta or 0) == purchase_qty
+            ]
+            same_qty_purchase_targets: List[Dict[str, Any]] = []
             all_purchase_placeholders = []
             same_purchase_refs = session.exec(
                 select(PurchaseItem, Purchase)
@@ -2284,6 +2344,7 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                 )
                 .order_by(Purchase.invoice_date.asc(), PurchaseItem.id.asc())
             ).all()
+            candidate_records: List[Dict[str, Any]] = []
             for candidate_item, candidate_purchase in same_purchase_refs:
                 candidate_target = session.get(Item, int(candidate_item.inventory_item_id or 0))
                 if not candidate_target or _club_group_key(candidate_target) != _club_group_key(source):
@@ -2294,6 +2355,37 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                     continue
                 candidate_qty = _purchase_item_qty(candidate_item)
                 candidate_date = _date_part(candidate_purchase.invoice_date)
+                if candidate_qty == purchase_qty:
+                    same_qty_purchase_targets.append(
+                        {
+                            "target_item_id": int(candidate_target.id or 0),
+                            "invoice_number": str(candidate_purchase.invoice_number or candidate_purchase.id),
+                            "invoice_date": candidate_date,
+                            "qty": int(candidate_qty),
+                        }
+                    )
+                candidate_records.append(
+                    {
+                        "purchase_item": candidate_item,
+                        "purchase": candidate_purchase,
+                        "target": candidate_target,
+                        "qty": int(candidate_qty),
+                        "invoice_date": candidate_date,
+                    }
+                )
+
+            for index, candidate in enumerate(candidate_records):
+                candidate_item = candidate["purchase_item"]
+                candidate_purchase = candidate["purchase"]
+                candidate_target = candidate["target"]
+                candidate_qty = int(candidate["qty"])
+                candidate_date = str(candidate["invoice_date"] or "")
+                next_candidate_date = ""
+                for later in candidate_records[index + 1 :]:
+                    later_date = str(later["invoice_date"] or "")
+                    if later_date and later_date != candidate_date:
+                        next_candidate_date = later_date
+                        break
                 candidate_openings = [
                     row
                     for row in source_movements
@@ -2301,6 +2393,7 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                     and str(row.ref_type or "").upper() in {"ITEM", "ITEM_CREATE", "ITEM_MERGE", "ITEM_COPY", "MANUAL"}
                     and int(row.delta or 0) == candidate_qty
                     and (not candidate_date or _date_part(row.ts) >= candidate_date)
+                    and (not next_candidate_date or _date_part(row.ts) < next_candidate_date)
                 ]
                 if len(candidate_openings) == 1:
                     all_purchase_placeholders.append(
@@ -2313,19 +2406,656 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                             "opening_movement_id": int(candidate_openings[0].id or 0),
                         }
                     )
+            if len(same_qty_openings) > 1 and len(same_qty_purchase_targets) > 1:
+                same_qty_target_ids = {int(row["target_item_id"]) for row in same_qty_purchase_targets}
+                same_qty_planned_target_ids = {
+                    int(row["target_item_id"])
+                    for row in all_purchase_placeholders
+                    if int(row["qty"]) == int(purchase_qty)
+                }
+                if same_qty_planned_target_ids != same_qty_target_ids:
+                    opening_plan = ", ".join(
+                        f"movement #{int(row.id or 0)} qty {int(row.delta or 0)} on {_date_part(row.ts) or '-'}"
+                        for row in same_qty_openings
+                    )
+                    target_plan = ", ".join(
+                        f"#{row['target_item_id']} qty {row['qty']} ({row['invoice_number']} {row['invoice_date'] or '-'})"
+                        for row in same_qty_purchase_targets
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Batch #{source.id} has multiple same-qty OP placeholders and multiple purchase batches. "
+                            f"Manual split required. OP rows: {opening_plan}. Purchase batches: {target_plan}"
+                        ),
+                    )
             unique_placeholder_ids = {row["opening_movement_id"] for row in all_purchase_placeholders}
             unique_purchase_targets = {row["target_item_id"] for row in all_purchase_placeholders}
-            if len(unique_placeholder_ids) > 1 and int(target.id) in unique_purchase_targets:
-                plan = ", ".join(
-                    f"#{source.id}->#{row['target_item_id']} qty {row['qty']} ({row['invoice_number']})"
-                    for row in all_purchase_placeholders
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Batch #{source.id} has multiple OP placeholders tied to purchase batches. "
-                        f"One-to-one club would leave mixed OP/Purchase history. Split required: {plan}"
+            if len(source_openings) == 1 and not replacement_openings and invoice_date:
+                source_opening_date = _date_part(source_openings[0].ts)
+                pre_invoice_activity = [
+                    row
+                    for row in source_movements
+                    if int(row.id or 0) != int(source_openings[0].id or 0)
+                    and int(row.delta or 0) != 0
+                    and _date_part(row.ts)
+                    and _date_part(row.ts) < invoice_date
+                ]
+                if source_opening_date and source_opening_date < invoice_date and pre_invoice_activity:
+                    examples = ", ".join(
+                        f"{row.reason}{f' #{row.ref_id}' if getattr(row, 'ref_id', None) else ''}"
+                        for row in pre_invoice_activity[:3]
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Source OP batch #{source.id} has stock movement before purchase date {invoice_date}. "
+                            f"Refusing to attach it to later purchase batch #{target.id}: {examples}"
+                        ),
+                    )
+            if all_purchase_placeholders and int(target.id) in unique_purchase_targets:
+                placeholder_ids = {int(row["opening_movement_id"]) for row in all_purchase_placeholders}
+                if len(placeholder_ids) != len(all_purchase_placeholders):
+                    raise HTTPException(status_code=400, detail="Duplicate OP placeholders are ambiguous; manual repair required")
+
+                placeholder_by_id = {
+                    int(row.id or 0): row
+                    for row in source_movements
+                    if int(row.id or 0) in placeholder_ids
+                }
+                if len(placeholder_by_id) != len(placeholder_ids):
+                    raise HTTPException(status_code=400, detail="Could not load every OP placeholder for split repair")
+
+                repair_targets: List[Dict[str, Any]] = []
+                for plan in sorted(
+                    all_purchase_placeholders,
+                    key=lambda row: (
+                        str(placeholder_by_id[int(row["opening_movement_id"])].ts or ""),
+                        int(row["opening_movement_id"]),
                     ),
+                ):
+                    repair_target = session.get(Item, int(plan["target_item_id"]))
+                    repair_purchase_item = session.get(PurchaseItem, int(plan["purchase_item_id"]))
+                    if not repair_target or not repair_purchase_item:
+                        raise HTTPException(status_code=400, detail="Could not load split repair purchase target")
+                    repair_purchase = session.get(Purchase, int(repair_purchase_item.purchase_id))
+                    if not repair_purchase or repair_purchase.is_deleted:
+                        raise HTTPException(status_code=400, detail="Split repair purchase is missing or deleted")
+                    if str(repair_purchase_item.stock_source or "").upper() != "CREATED":
+                        raise HTTPException(status_code=400, detail="Split repair requires purchase-created target batches")
+                    repair_qty = _purchase_item_qty(repair_purchase_item)
+                    target_movements_for_repair = session.exec(
+                        select(StockMovement)
+                        .where(StockMovement.item_id == int(repair_target.id))
+                        .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+                    ).all()
+                    repair_purchase_movements = [
+                        row
+                        for row in target_movements_for_repair
+                        if str(row.reason or "").upper() == "PURCHASE"
+                        and str(row.ref_type or "").upper() == "PURCHASE"
+                        and int(row.ref_id or 0) == int(repair_purchase.id)
+                        and int(row.delta or 0) == int(repair_qty)
+                    ]
+                    if len(repair_purchase_movements) != 1:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Kept batch #{repair_target.id} must have exactly one purchase stock entry "
+                                f"for qty {repair_qty}; found {len(repair_purchase_movements)}"
+                            ),
+                        )
+                    repair_lot = _lot_for_item(session, int(repair_target.id))
+                    if not repair_lot:
+                        repair_product = session.get(Product, int(repair_purchase_item.product_id)) if repair_purchase_item.product_id else None
+                        repair_lot = ensure_lot_for_inventory_item(
+                            session,
+                            inventory_item=repair_target,
+                            product=repair_product,
+                            ts=now_ts(),
+                        )
+                    if not repair_lot:
+                        raise HTTPException(status_code=400, detail=f"Could not prepare lot for batch #{repair_target.id}")
+                    repair_targets.append(
+                        {
+                            "item": repair_target,
+                            "purchase": repair_purchase,
+                            "purchase_item": repair_purchase_item,
+                            "lot": repair_lot,
+                            "placeholder": placeholder_by_id[int(plan["opening_movement_id"])],
+                            "remaining": int(repair_target.stock or 0),
+                            "moved_delta": 0,
+                            "allocations": [],
+                        }
+                    )
+
+                lot_ids = [
+                    int(row.id)
+                    for row in [source_lot, *[entry["lot"] for entry in repair_targets]]
+                    if row is not None and getattr(row, "id", None) is not None
+                ]
+                target_ids = [int(entry["item"].id) for entry in repair_targets]
+                pack_open_filters = [
+                    PackOpenEvent.source_item_id.in_([int(source.id), *target_ids]),
+                    PackOpenEvent.loose_item_id.in_([int(source.id), *target_ids]),
+                ]
+                if lot_ids:
+                    pack_open_filters.extend(
+                        [
+                            PackOpenEvent.source_lot_id.in_(lot_ids),
+                            PackOpenEvent.loose_lot_id.in_(lot_ids),
+                        ]
+                    )
+                pack_open_refs = session.exec(select(func.count(PackOpenEvent.id)).where(or_(*pack_open_filters))).first()
+                child_lot_refs = (
+                    session.exec(
+                        select(func.count(InventoryLot.id)).where(InventoryLot.opened_from_lot_id.in_(lot_ids))
+                    ).first()
+                    if lot_ids
+                    else 0
+                )
+                if int(pack_open_refs or 0) > 0 or int(child_lot_refs or 0) > 0:
+                    raise HTTPException(status_code=400, detail="Loose/pack-open batches must be handled manually")
+
+                movable_reasons = {
+                    "SALE",
+                    "BILL_DELETE",
+                    "BILL_RECOVER",
+                    "RETURN",
+                    "EXCHANGE_IN",
+                    "EXCHANGE_OUT",
+                    "ADJUST",
+                    "RECON_ADJUST",
+                }
+                placeholder_keys = [
+                    (str(entry["placeholder"].ts or ""), int(entry["placeholder"].id or 0))
+                    for entry in repair_targets
+                ]
+                first_placeholder_key = min(placeholder_keys)
+                post_placeholder_movements = [
+                    row
+                    for row in source_movements
+                    if (str(row.ts or ""), int(row.id or 0)) > first_placeholder_key
+                    and int(row.id or 0) not in placeholder_ids
+                ]
+                bill_edit_net: Dict[int, int] = {}
+                for row in post_placeholder_movements:
+                    reason_key = str(row.reason or "").upper()
+                    if reason_key == "BILL_EDIT" and str(row.ref_type or "").upper() == "BILL" and row.ref_id is not None:
+                        bill_edit_net[int(row.ref_id)] = bill_edit_net.get(int(row.ref_id), 0) + int(row.delta or 0)
+                        continue
+                    if reason_key not in movable_reasons:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Source OP batch has unsupported movement after split placeholder: {row.reason} #{row.ref_id or ''}",
+                        )
+                nonzero_bill_edits = {bill_id: delta for bill_id, delta in bill_edit_net.items() if delta != 0}
+                if nonzero_bill_edits:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Bill edit movements are not balanced for split repair: {nonzero_bill_edits}",
+                    )
+
+                def split_bill_item_for_allocations(
+                    movement: StockMovement,
+                    *,
+                    source_qty: int,
+                    target_allocations: List[Dict[str, Any]],
+                    original_qty: int,
+                ) -> None:
+                    if str(movement.ref_type or "").upper() != "BILL" or movement.ref_id is None:
+                        return
+                    bill_item = session.exec(
+                        select(BillItem)
+                        .where(BillItem.bill_id == int(movement.ref_id), BillItem.item_id == int(source.id))
+                        .order_by(BillItem.id.asc())
+                    ).first()
+                    if not bill_item:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Bill #{movement.ref_id} item row for split repair was not found",
+                        )
+                    if int(bill_item.quantity or 0) != int(original_qty):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Bill #{movement.ref_id} item quantity {bill_item.quantity} does not match "
+                                f"movement qty {original_qty}"
+                            ),
+                        )
+                    original_total = float(bill_item.line_total or 0)
+                    pieces: List[Dict[str, Any]] = []
+                    if source_qty > 0:
+                        pieces.append({"item": source, "qty": int(source_qty), "existing": True})
+                    for allocation in target_allocations:
+                        pieces.append({"item": allocation["bucket"]["item"], "qty": int(allocation["qty"]), "existing": False})
+                    if not pieces:
+                        raise HTTPException(status_code=400, detail="Split repair produced no bill pieces")
+                    allocated_total = 0.0
+                    for index, piece in enumerate(pieces):
+                        is_last = index == len(pieces) - 1
+                        line_total = _round2(original_total - allocated_total) if is_last else _round2(original_total * piece["qty"] / original_qty)
+                        allocated_total = _round2(allocated_total + line_total)
+                        item_for_piece: Item = piece["item"]
+                        if index == 0:
+                            bill_item.item_id = int(item_for_piece.id)
+                            bill_item.item_name = item_for_piece.name
+                            bill_item.mrp = float(item_for_piece.mrp or bill_item.mrp or 0)
+                            bill_item.quantity = int(piece["qty"])
+                            bill_item.line_total = line_total
+                            session.add(bill_item)
+                        else:
+                            session.add(
+                                BillItem(
+                                    bill_id=int(movement.ref_id),
+                                    item_id=int(item_for_piece.id),
+                                    item_name=item_for_piece.name,
+                                    mrp=float(item_for_piece.mrp or bill_item.mrp or 0),
+                                    quantity=int(piece["qty"]),
+                                    line_total=line_total,
+                                )
+                            )
+
+                def clone_movement_for_target(original: StockMovement, bucket: Dict[str, Any], delta: int) -> StockMovement:
+                    item_for_bucket: Item = bucket["item"]
+                    copy = StockMovement(
+                        item_id=int(item_for_bucket.id),
+                        ts=original.ts,
+                        delta=int(delta),
+                        reason=original.reason,
+                        ref_type=original.ref_type,
+                        ref_id=original.ref_id,
+                        note=original.note,
+                        actor=original.actor,
+                    )
+                    _retarget_moved_item_ref(copy, source_item_id=int(source.id), target_item_id=int(item_for_bucket.id))
+                    session.add(copy)
+                    return copy
+
+                backup_path = create_data_repair_backup("before_manual_split_op_placeholder_club")
+                deleted_placeholder_ids: List[int] = []
+                moved_movement_ids: List[int] = []
+                created_movement_ids: List[int] = []
+                source_placeholder_delta = sum(int(row.delta or 0) for row in placeholder_by_id.values())
+                moved_delta_total = 0
+
+                for row in placeholder_by_id.values():
+                    deleted_placeholder_ids.append(int(row.id or 0))
+                    session.delete(row)
+
+                for row in post_placeholder_movements:
+                    reason_key = str(row.reason or "").upper()
+                    if reason_key == "BILL_EDIT":
+                        continue
+                    delta = int(row.delta or 0)
+                    if delta == 0:
+                        continue
+                    target_allocations: List[Dict[str, Any]] = []
+                    source_qty = 0
+                    if delta < 0:
+                        qty_to_allocate = abs(delta)
+                        row_key = (str(row.ts or ""), int(row.id or 0))
+                        eligible_buckets = [
+                            bucket
+                            for bucket in repair_targets
+                            if (
+                                str(bucket["placeholder"].ts or ""),
+                                int(bucket["placeholder"].id or 0),
+                            )
+                            < row_key
+                        ]
+                        for bucket in reversed(eligible_buckets):
+                            if qty_to_allocate <= 0:
+                                break
+                            available = max(0, int(bucket["remaining"]))
+                            take = min(available, qty_to_allocate)
+                            if take <= 0:
+                                continue
+                            bucket["remaining"] = int(bucket["remaining"]) - take
+                            bucket["moved_delta"] = int(bucket["moved_delta"]) - take
+                            bucket["allocations"].append({"movement_id": int(row.id or 0), "qty": take, "delta": -take})
+                            target_allocations.append({"bucket": bucket, "qty": take})
+                            moved_delta_total -= take
+                            qty_to_allocate -= take
+                        source_qty = qty_to_allocate
+                        if target_allocations:
+                            if source_qty > 0:
+                                row.delta = -source_qty
+                                session.add(row)
+                                for allocation in target_allocations:
+                                    created = clone_movement_for_target(row, allocation["bucket"], -int(allocation["qty"]))
+                                    session.flush()
+                                    if created.id is not None:
+                                        created_movement_ids.append(int(created.id))
+                            else:
+                                first = target_allocations[0]
+                                first_item: Item = first["bucket"]["item"]
+                                row.item_id = int(first_item.id)
+                                row.delta = -int(first["qty"])
+                                _retarget_moved_item_ref(row, source_item_id=int(source.id), target_item_id=int(first_item.id))
+                                session.add(row)
+                                moved_movement_ids.append(int(row.id or 0))
+                                for allocation in target_allocations[1:]:
+                                    created = clone_movement_for_target(row, allocation["bucket"], -int(allocation["qty"]))
+                                    session.flush()
+                                    if created.id is not None:
+                                        created_movement_ids.append(int(created.id))
+                            if reason_key == "SALE":
+                                split_bill_item_for_allocations(
+                                    row,
+                                    source_qty=int(source_qty),
+                                    target_allocations=target_allocations,
+                                    original_qty=abs(delta),
+                                )
+                    else:
+                        eligible_buckets = [
+                            bucket
+                            for bucket in repair_targets
+                            if (str(bucket["placeholder"].ts or ""), int(bucket["placeholder"].id or 0))
+                            < (str(row.ts or ""), int(row.id or 0))
+                        ]
+                        bucket = eligible_buckets[-1] if eligible_buckets else repair_targets[-1]
+                        bucket["remaining"] = int(bucket["remaining"]) + delta
+                        bucket["moved_delta"] = int(bucket["moved_delta"]) + delta
+                        moved_delta_total += delta
+                        target_item_for_positive: Item = bucket["item"]
+                        row.item_id = int(target_item_for_positive.id)
+                        _retarget_moved_item_ref(row, source_item_id=int(source.id), target_item_id=int(target_item_for_positive.id))
+                        session.add(row)
+                        moved_movement_ids.append(int(row.id or 0))
+
+                source_stock_after = int(source.stock or 0) - int(source_placeholder_delta) - int(moved_delta_total)
+                if source_stock_after < 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Split placeholder repair would make source batch #{source.id} negative ({source_stock_after})",
+                    )
+                source.stock = int(source_stock_after)
+                source.is_archived = bool(source_stock_after <= 0)
+                source.updated_at = now_ts()
+                session.add(source)
+
+                for bucket in repair_targets:
+                    bucket_item: Item = bucket["item"]
+                    if int(bucket["remaining"]) < 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Split placeholder repair would make target batch #{bucket_item.id} negative",
+                        )
+                    bucket_item.stock = int(bucket["remaining"])
+                    bucket_item.is_archived = bool(int(bucket["remaining"]) <= 0)
+                    bucket_item.updated_at = source.updated_at
+                    bucket_item.cost_price = float(
+                        bucket["purchase_item"].effective_cost_price
+                        or bucket["purchase_item"].cost_price
+                        or bucket_item.cost_price
+                        or 0
+                    )
+                    session.add(bucket_item)
+
+                session.flush()
+                source_ledger_after = int(
+                    session.exec(
+                        select(func.coalesce(func.sum(StockMovement.delta), 0)).where(StockMovement.item_id == int(source.id))
+                    ).first()
+                    or 0
+                )
+                source_balance_adjustment = int(source_stock_after) - int(source_ledger_after)
+                if source_balance_adjustment:
+                    if source_balance_adjustment < 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Split placeholder repair would require a negative source balance correction "
+                                f"({source_balance_adjustment})"
+                            ),
+                        )
+                    session.add(
+                        StockMovement(
+                            item_id=int(source.id),
+                            ts=_historical_opening_ts(source_movements),
+                            delta=int(source_balance_adjustment),
+                            reason="OPENING",
+                            ref_type="ITEM",
+                            ref_id=int(source.id),
+                            note=(
+                                "Opening balance retained after duplicate OP placeholder(s) "
+                                "were replaced by purchase batch(es)"
+                            ),
+                            actor="SYSTEM",
+                        )
+                    )
+                    session.flush()
+
+                sync_lot_quantity_for_item(session, source, ts=source.updated_at)
+                apply_archive_rules(session, source)
+                for bucket in repair_targets:
+                    sync_lot_quantity_for_item(session, bucket["item"], ts=source.updated_at)
+                    apply_archive_rules(session, bucket["item"])
+
+                log_audit(
+                    session,
+                    entity_type="ITEM",
+                    entity_id=int(target.id),
+                    action="OPENING_CLUB",
+                    note=payload.note
+                    or f"Split-clubbed duplicate OP placeholder(s) from batch #{source.id}",
+                    details={
+                        "direction": "SPLIT_OPENING_PLACEHOLDERS_TO_PURCHASES",
+                        "source_item_id": int(source.id),
+                        "target_item_ids": target_ids,
+                        "deleted_source_opening_movement_ids": deleted_placeholder_ids,
+                        "moved_movement_ids": moved_movement_ids,
+                        "created_movement_ids": created_movement_ids,
+                        "source_stock": int(source_stock_after),
+                        "source_balance_adjustment": int(source_balance_adjustment),
+                        "target_stocks": {str(bucket["item"].id): int(bucket["item"].stock or 0) for bucket in repair_targets},
+                        "backup": backup_path,
+                    },
+                )
+                session.commit()
+                session.refresh(source)
+                session.refresh(target)
+                _attach_last_incoming(session, [source, target])
+                _attach_lot_metadata(session, [source, target])
+                return OpeningClubOut(
+                    source_item=source,
+                    target_item=target,
+                    purchase_id=int(target_active_purchase_refs[0][1].id),
+                    purchase_item_id=int(target_active_purchase_refs[0][0].id),
+                    source_item_id=int(source.id),
+                    target_item_id=int(target.id),
+                    target_stock=int(target.stock or 0),
+                    archived_source_id=int(source.id) if source.is_archived else 0,
+                    moved_movement_count=len(moved_movement_ids) + len(created_movement_ids),
+                    backup_path=backup_path,
+                )
+            if len(replacement_openings) == 1:
+                source_opening = replacement_openings[0]
+                target_movements = session.exec(
+                    select(StockMovement)
+                    .where(StockMovement.item_id == int(target.id))
+                    .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+                ).all()
+                target_purchase_movements = [
+                    row
+                    for row in target_movements
+                    if str(row.reason or "").upper() == "PURCHASE"
+                    and str(row.ref_type or "").upper() == "PURCHASE"
+                    and int(row.ref_id or 0) == int(purchase.id)
+                    and int(row.delta or 0) == purchase_qty
+                ]
+                if len(target_purchase_movements) != 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Kept batch #{target.id} must have exactly one purchase stock entry "
+                            f"for qty {purchase_qty}; found {len(target_purchase_movements)}"
+                        ),
+                    )
+
+                movable_reasons = {
+                    "SALE",
+                    "BILL_DELETE",
+                    "BILL_EDIT",
+                    "BILL_RECOVER",
+                    "RETURN",
+                    "EXCHANGE_IN",
+                    "EXCHANGE_OUT",
+                    "ADJUST",
+                    "RECON_ADJUST",
+                }
+                source_opening_key = (str(source_opening.ts or ""), int(source_opening.id or 0))
+                movable_source_movements = [
+                    row
+                    for row in source_movements
+                    if (str(row.ts or ""), int(row.id or 0)) > source_opening_key
+                    and int(row.id or 0) != int(source_opening.id or 0)
+                ]
+                blocked_source_movements = [
+                    row for row in movable_source_movements if str(row.reason or "").upper() not in movable_reasons
+                ]
+                if blocked_source_movements:
+                    examples = ", ".join(
+                        f"{row.reason}{f' #{row.ref_id}' if getattr(row, 'ref_id', None) else ''}"
+                        for row in blocked_source_movements[:3]
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Source OP batch has unsupported movement(s) after replacement OP: {examples}",
+                    )
+
+                moved_delta = sum(int(row.delta or 0) for row in movable_source_movements)
+                source_stock_after = int(source.stock or 0) - int(source_opening.delta or 0) - int(moved_delta)
+                target_stock_after = int(target.stock or 0) + int(moved_delta)
+                if source_stock_after < 0 or target_stock_after < 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Replacement OP cleanup would make stock negative "
+                            f"(source {source_stock_after}, target {target_stock_after})"
+                        ),
+                    )
+
+                lot_ids = [
+                    int(row.id)
+                    for row in (source_lot, target_lot)
+                    if row is not None and getattr(row, "id", None) is not None
+                ]
+                pack_open_filters = [
+                    PackOpenEvent.source_item_id.in_([int(source.id), int(target.id)]),
+                    PackOpenEvent.loose_item_id.in_([int(source.id), int(target.id)]),
+                ]
+                if lot_ids:
+                    pack_open_filters.extend(
+                        [
+                            PackOpenEvent.source_lot_id.in_(lot_ids),
+                            PackOpenEvent.loose_lot_id.in_(lot_ids),
+                        ]
+                    )
+                pack_open_refs = session.exec(select(func.count(PackOpenEvent.id)).where(or_(*pack_open_filters))).first()
+                child_lot_refs = (
+                    session.exec(
+                        select(func.count(InventoryLot.id)).where(InventoryLot.opened_from_lot_id.in_(lot_ids))
+                    ).first()
+                    if lot_ids
+                    else 0
+                )
+                if int(pack_open_refs or 0) > 0 or int(child_lot_refs or 0) > 0:
+                    raise HTTPException(status_code=400, detail="Loose/pack-open batches must be handled manually")
+
+                backup_path = create_data_repair_backup("before_manual_op_placeholder_to_purchase")
+                deleted_source_opening_movement_id = int(source_opening.id or 0)
+                session.delete(source_opening)
+
+                bill_targets: Dict[int, int] = {}
+                return_targets: Dict[int, int] = {}
+                for row in movable_source_movements:
+                    row.item_id = int(target.id)
+                    _retarget_moved_item_ref(row, source_item_id=int(source.id), target_item_id=int(target.id))
+                    if str(row.ref_type or "").upper() == "BILL" and row.ref_id is not None:
+                        bill_targets[int(row.ref_id)] = int(target.id)
+                    if str(row.ref_type or "").upper() == "RETURN" and row.ref_id is not None:
+                        return_targets[int(row.ref_id)] = int(target.id)
+                    session.add(row)
+
+                for bill_id, item_id in bill_targets.items():
+                    for row in session.exec(
+                        select(BillItem).where(BillItem.item_id == int(source.id), BillItem.bill_id == int(bill_id))
+                    ).all():
+                        row.item_id = int(item_id)
+                        session.add(row)
+                    allocation_filter = and_(BillItemAllocation.item_id == int(source.id), BillItemAllocation.bill_id == int(bill_id))
+                    if source_lot and source_lot.id is not None:
+                        allocation_filter = or_(
+                            allocation_filter,
+                            and_(BillItemAllocation.lot_id == int(source_lot.id), BillItemAllocation.bill_id == int(bill_id)),
+                        )
+                    for row in session.exec(select(BillItemAllocation).where(allocation_filter)).all():
+                        row.item_id = int(item_id)
+                        row.lot_id = int(target_lot.id) if target_lot.id is not None else None
+                        session.add(row)
+
+                for return_id, item_id in return_targets.items():
+                    for row in session.exec(
+                        select(ReturnItem).where(ReturnItem.item_id == int(source.id), ReturnItem.return_id == int(return_id))
+                    ).all():
+                        row.item_id = int(item_id)
+                        session.add(row)
+
+                target.stock = int(target_stock_after)
+                target.is_archived = bool(target_stock_after <= 0)
+                target.updated_at = now_ts()
+                target.cost_price = float(purchase_item.effective_cost_price or purchase_item.cost_price or target.cost_price or 0)
+                session.add(target)
+                source.stock = int(source_stock_after)
+                source.is_archived = bool(source_stock_after <= 0)
+                source.updated_at = target.updated_at
+                session.add(source)
+                session.flush()
+
+                sync_lot_quantity_for_item(session, target, ts=target.updated_at)
+                sync_lot_quantity_for_item(session, source, ts=source.updated_at)
+                apply_archive_rules(session, target)
+                apply_archive_rules(session, source)
+
+                log_audit(
+                    session,
+                    entity_type="ITEM",
+                    entity_id=int(target.id),
+                    action="OPENING_CLUB",
+                    note=payload.note
+                    or f"Removed duplicate OP placeholder from batch #{source.id} and kept purchase batch #{target.id}",
+                    details={
+                        "direction": "OPENING_PLACEHOLDER_TO_PURCHASE",
+                        "source_item_id": int(source.id),
+                        "target_item_id": int(target.id),
+                        "purchase_id": int(purchase.id),
+                        "purchase_item_id": int(purchase_item.id),
+                        "purchase_qty": int(purchase_qty),
+                        "deleted_source_opening_movement_id": deleted_source_opening_movement_id,
+                        "moved_movement_ids": [int(row.id) for row in movable_source_movements if row.id is not None],
+                        "source_stock": int(source_stock_after),
+                        "target_stock": int(target_stock_after),
+                        "backup": backup_path,
+                    },
+                )
+                session.commit()
+                session.refresh(source)
+                session.refresh(target)
+                _attach_last_incoming(session, [source, target])
+                _attach_lot_metadata(session, [source, target])
+                return OpeningClubOut(
+                    source_item=source,
+                    target_item=target,
+                    purchase_id=int(purchase.id),
+                    purchase_item_id=int(purchase_item.id),
+                    source_item_id=int(source.id),
+                    target_item_id=int(target.id),
+                    target_stock=int(target_stock_after),
+                    archived_source_id=int(source.id) if source.is_archived else 0,
+                    moved_movement_count=len(movable_source_movements),
+                    backup_path=backup_path,
                 )
             if len(source_openings) == 1:
                 source_opening = source_openings[0]
@@ -2469,16 +3199,24 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                 _retarget_moved_item_ref(row, source_item_id=int(source.id), target_item_id=int(target.id))
                 session.add(row)
             if balance_adjustment_delta:
+                if balance_adjustment_delta < 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Clubbing would require a negative balance correction "
+                            f"({balance_adjustment_delta}) on kept batch #{target.id}"
+                        ),
+                    )
                 session.add(
                     StockMovement(
                         item_id=int(target.id),
-                        ts=now_ts(),
+                        ts=_historical_opening_ts(source_movements),
                         delta=int(balance_adjustment_delta),
-                        reason="RECON_ADJUST",
+                        reason="OPENING",
                         ref_type="ITEM",
                         ref_id=int(target.id),
                         note=(
-                            "Club balance: preserved current stock while replacing duplicate OP "
+                            "Opening balance retained while replacing duplicate OP "
                             f"batch #{source.id} with purchase batch #{target.id}"
                         ),
                         actor="SYSTEM",

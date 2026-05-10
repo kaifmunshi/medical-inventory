@@ -954,7 +954,14 @@ class StockAuditItemOut(SQLModel):
     item_expiry: Optional[str] = None
 
 
+class StockAuditRackOut(SQLModel):
+    rack_number: Optional[int] = None
+    item_count: int
+    counted_count: int
+
+
 class PurchaseItemIn(SQLModel):
+    purchase_item_id: Optional[int] = None
     existing_inventory_item_id: Optional[int] = None
     product_id: Optional[int] = None
     product_name: str

@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -36,6 +37,14 @@ router = APIRouter()
 
 
 class PurchaseItemsReplace(SQLModel):
+    items: List[PurchaseItemIn]
+
+
+class FreeStockCreate(SQLModel):
+    party_id: Optional[int] = None
+    invoice_number: Optional[str] = None
+    invoice_date: str
+    notes: Optional[str] = None
     items: List[PurchaseItemIn]
 
 
@@ -81,6 +90,7 @@ class PurchasePaymentBookRow(SQLModel):
 STOCK_SOURCE_CREATED = "CREATED"
 STOCK_SOURCE_ATTACHED = "ATTACHED"
 VALID_BANK_MODES = {"UPI", "NEFT", "RTGS", "IMPS"}
+FREE_STOCK_NO_SUPPLIER_NAME = "Free Stock / No Supplier"
 
 
 def now_ts() -> str:
@@ -92,6 +102,11 @@ def clean_text(v: Optional[str]) -> Optional[str]:
         return None
     text = " ".join(str(v).strip().split())
     return text or None
+
+
+def product_name_key(v: Optional[str]) -> str:
+    text = (clean_text(v) or "").lower()
+    return re.sub(r"\b(\d+)\s+(g|gm|ml|tab|tabs|tablet|tablets|cap|caps|n)\b", r"\1\2", text)
 
 
 def clean_date(v: Optional[str]) -> Optional[str]:
@@ -176,6 +191,39 @@ def ensure_supplier(session, party_id: int) -> Party:
     return row
 
 
+def ensure_free_stock_supplier(session) -> Party:
+    row = session.exec(
+        select(Party).where(
+            Party.party_group == "SUNDRY_CREDITOR",
+            func.lower(Party.name) == FREE_STOCK_NO_SUPPLIER_NAME.lower(),
+        )
+    ).first()
+    ts = now_ts()
+    if row:
+        if not row.is_active:
+            row.is_active = True
+            row.updated_at = ts
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+        return row
+
+    row = Party(
+        name=FREE_STOCK_NO_SUPPLIER_NAME,
+        party_group="SUNDRY_CREDITOR",
+        notes="System supplier used only when free stock is added without an actual supplier.",
+        opening_balance=0.0,
+        opening_balance_type="CR",
+        is_active=True,
+        created_at=ts,
+        updated_at=ts,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
 def ensure_category(session, category_id: Optional[int]) -> Optional[int]:
     if category_id is None:
         return None
@@ -226,14 +274,15 @@ def ensure_product(
         raise HTTPException(status_code=400, detail="product_name is required")
     normalized_brand = clean_text(brand)
     ensure_brand_row(session, normalized_brand)
-    existing = session.exec(
-        select(Product).where(
-            func.lower(Product.name) == name.lower(),
-            func.lower(func.coalesce(Product.brand, "")) == (normalized_brand or "").lower(),
-        )
-    ).first()
-    if existing:
-        return existing
+    name_key = product_name_key(name)
+    existing_products = session.exec(
+        select(Product)
+        .where(func.lower(func.coalesce(Product.brand, "")) == (normalized_brand or "").lower())
+        .order_by(Product.id.asc())
+    ).all()
+    for existing in existing_products:
+        if product_name_key(existing.name) == name_key:
+            return existing
 
     ts = now_ts()
     row = Product(
@@ -533,6 +582,19 @@ def purchase_item_total_qty(item: PurchaseItem) -> int:
     return int(item.sealed_qty or 0) + int(item.free_qty or 0)
 
 
+def validate_purchase_line_quantities(raw: PurchaseItemIn) -> tuple[int, int, int]:
+    qty = int(raw.sealed_qty or 0)
+    free_qty = int(raw.free_qty or 0)
+    if qty < 0:
+        raise HTTPException(status_code=400, detail="sealed_qty cannot be negative")
+    if free_qty < 0:
+        raise HTTPException(status_code=400, detail="free_qty cannot be negative")
+    total_qty = qty + free_qty
+    if total_qty <= 0:
+        raise HTTPException(status_code=400, detail="Enter paid qty or free qty greater than 0")
+    return qty, free_qty, total_qty
+
+
 def get_purchase_items(session, purchase_id: int) -> List[PurchaseItem]:
     return session.exec(
         select(PurchaseItem).where(PurchaseItem.purchase_id == purchase_id).order_by(PurchaseItem.id.asc())
@@ -552,6 +614,174 @@ def assert_purchase_item_untouched(session, purchase_item: PurchaseItem) -> Item
             detail=f"Purchase item #{purchase_item.id} cannot be edited because stock has already changed",
         )
     return inventory_item
+
+
+def _purchase_item_edit_id(raw: PurchaseItemIn) -> Optional[int]:
+    value = getattr(raw, "purchase_item_id", None)
+    return int(value) if value is not None else None
+
+
+def can_update_purchase_items_in_place(existing_items: List[PurchaseItem], raw_items: List[PurchaseItemIn]) -> bool:
+    raw_ids = [_purchase_item_edit_id(raw) for raw in raw_items]
+    if any(raw_id is None for raw_id in raw_ids):
+        return False
+    existing_ids = {int(item.id or 0) for item in existing_items}
+    return len(raw_ids) == len(existing_ids) and set(int(raw_id or 0) for raw_id in raw_ids) == existing_ids
+
+
+def _purchase_line_identity_changed(raw: PurchaseItemIn, item: PurchaseItem) -> bool:
+    raw_product_id = int(raw.product_id or 0)
+    if raw_product_id and raw_product_id != int(item.product_id or 0):
+        return True
+    if (clean_text(raw.product_name) or "") != (clean_text(item.product_name) or ""):
+        return True
+    if (clean_text(raw.brand) or "") != (clean_text(item.brand) or ""):
+        return True
+    if (clean_date(raw.expiry_date) or "") != (clean_date(item.expiry_date) or ""):
+        return True
+    if int(raw.rack_number if raw.rack_number is not None else item.rack_number or 0) != int(item.rack_number or 0):
+        return True
+    if abs(round2(raw.mrp) - round2(item.mrp)) > 0.001:
+        return True
+    return False
+
+
+def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[PurchaseItemIn]) -> PurchaseOut:
+    """Safely adjust existing purchase lines without recreating sold batches."""
+    existing_items = get_purchase_items(session, int(purchase.id))
+    existing_by_id = {int(item.id or 0): item for item in existing_items}
+    subtotal_amount = 0.0
+    purchase_stock_ts = f"{purchase.invoice_date}T00:00:00"
+    ts = now_ts()
+    changed_lines: List[Dict[str, Any]] = []
+
+    for raw in raw_items:
+        purchase_item_id = _purchase_item_edit_id(raw)
+        if purchase_item_id is None or purchase_item_id not in existing_by_id:
+            raise HTTPException(status_code=400, detail="Purchase item identity is missing for in-place edit")
+        item = existing_by_id[purchase_item_id]
+        if purchase_item_stock_source(item) != STOCK_SOURCE_CREATED:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Purchase item #{item.id} is linked to existing stock; use full item replacement",
+            )
+        if not item.inventory_item_id:
+            raise HTTPException(status_code=400, detail=f"Purchase item #{item.id} is missing stock linkage")
+        inventory_item = session.get(Item, int(item.inventory_item_id))
+        if not inventory_item:
+            raise HTTPException(status_code=400, detail=f"Inventory item #{item.inventory_item_id} not found")
+
+        qty, free_qty, new_qty = validate_purchase_line_quantities(raw)
+        if round2(raw.cost_price) < 0:
+            raise HTTPException(status_code=400, detail="rate cannot be negative")
+
+        old_qty = purchase_item_total_qty(item)
+        delta = int(new_qty - old_qty)
+        identity_changed = _purchase_line_identity_changed(raw, item)
+        stock_changed = int(inventory_item.stock or 0) != old_qty
+
+        if identity_changed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Purchase item #{item.id} cannot change product/batch identity here. "
+                    "Only qty, free, rate, discount, and rounding can be edited in place."
+                ),
+            )
+
+        next_stock = int(inventory_item.stock or 0) + delta
+        if next_stock < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Purchase item #{item.id} cannot reduce stock below 0",
+            )
+
+        line_rounding = round2(raw.rounding_adjustment)
+        financial_inputs_changed = (
+            qty != int(item.sealed_qty or 0)
+            or abs(round2(raw.cost_price) - round2(item.cost_price)) > 0.001
+            or abs(round2(raw.discount_amount) - round2(item.discount_amount)) > 0.001
+            or abs(line_rounding - round2(item.rounding_adjustment)) > 0.001
+        )
+        line_total = (
+            round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
+            if financial_inputs_changed
+            else round2(item.line_total)
+        )
+        effective_cost = round2(line_total / new_qty) if new_qty > 0 else round2(raw.cost_price)
+        subtotal_amount = round2(subtotal_amount + line_total)
+
+        if delta:
+            inventory_item.stock = next_stock
+            inventory_item.is_archived = bool(next_stock <= 0)
+            inventory_item.updated_at = ts
+            inventory_item.cost_price = effective_cost
+            session.add(inventory_item)
+            if item.lot_id:
+                lot = session.get(InventoryLot, int(item.lot_id))
+                if lot:
+                    next_lot_qty = int(lot.sealed_qty or 0) + delta
+                    if next_lot_qty < 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Purchase item #{item.id} cannot reduce lot stock below 0",
+                        )
+                    lot.sealed_qty = next_lot_qty
+                    lot.loose_qty = int(lot.loose_qty or 0)
+                    lot.cost_price = effective_cost
+                    lot.is_active = bool(next_lot_qty > 0 or int(lot.loose_qty or 0) > 0)
+                    lot.updated_at = ts
+                    session.add(lot)
+            add_stock_movement(
+                session,
+                item_id=int(inventory_item.id),
+                delta=delta,
+                reason="PURCHASE_EDIT",
+                ref_type="PURCHASE",
+                ref_id=int(purchase.id),
+                note=f"Edited purchase {purchase.invoice_number}: qty {old_qty} -> {new_qty}",
+                ts=purchase_stock_ts,
+            )
+            changed_lines.append({"purchase_item_id": int(item.id), "old_qty": old_qty, "new_qty": new_qty, "delta": delta})
+
+        item.sealed_qty = qty
+        item.free_qty = free_qty
+        item.cost_price = round2(raw.cost_price)
+        item.effective_cost_price = effective_cost
+        item.gst_percent = 0.0
+        item.discount_amount = round2(raw.discount_amount)
+        item.rounding_adjustment = line_rounding
+        item.line_total = line_total
+        session.add(item)
+
+    purchase.subtotal_amount = subtotal_amount
+    purchase.gst_amount = 0.0
+    purchase.total_amount = round2(
+        float(subtotal_amount or 0)
+        - float(purchase.discount_amount or 0)
+        + float(purchase.gst_amount or 0)
+        + float(purchase.rounding_adjustment or 0)
+    )
+    if float(purchase.paid_amount or 0) + float(purchase.writeoff_amount or 0) > float(purchase.total_amount or 0) + 0.0001:
+        raise HTTPException(status_code=400, detail="Edited items reduce total below received amount")
+
+    purchase.updated_at = ts
+    session.add(purchase)
+    log_audit(
+        session,
+        entity_type="PURCHASE",
+        entity_id=int(purchase.id),
+        action="UPDATE_ITEMS",
+        note=f"Updated purchase item quantities on purchase #{purchase.id}",
+        details={"total_amount": purchase.total_amount, "item_count": len(raw_items), "changed_lines": changed_lines},
+    )
+    session.commit()
+    recompute_purchase_payment_state(session, purchase)
+    supplier = ensure_supplier(session, purchase.party_id)
+    sync_purchase_vouchers(session, purchase, supplier)
+    session.commit()
+    session.refresh(purchase)
+    return make_purchase_out(session, purchase)
 
 
 def create_inventory_lot(
@@ -600,9 +830,12 @@ def recompute_purchase_payment_state(session, purchase: Purchase) -> None:
     purchase.writeoff_amount = writeoff_amount
 
     covered = round2(paid_amount + writeoff_amount)
-    if covered <= 0:
+    total_amount = round2(purchase.total_amount or 0)
+    if total_amount <= 0:
+        purchase.payment_status = "PAID"
+    elif covered <= 0:
         purchase.payment_status = "UNPAID"
-    elif covered + 0.0001 < float(purchase.total_amount or 0):
+    elif covered + 0.0001 < total_amount:
         purchase.payment_status = "PARTIAL"
     else:
         purchase.payment_status = "PAID"
@@ -643,12 +876,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
         subtotal_amount = 0.0
         prepared_items: List[Dict[str, Any]] = []
         for raw in payload.items:
-            qty = int(raw.sealed_qty or 0)
-            if qty <= 0:
-                raise HTTPException(status_code=400, detail="sealed_qty must be greater than 0")
-            free_qty = int(raw.free_qty or 0)
-            if free_qty < 0:
-                raise HTTPException(status_code=400, detail="free_qty cannot be negative")
+            qty, free_qty, total_qty = validate_purchase_line_quantities(raw)
             if round2(raw.cost_price) < 0:
                 raise HTTPException(status_code=400, detail="rate cannot be negative")
             if round2(raw.mrp) < 0:
@@ -686,7 +914,6 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
             line_rounding = round2(raw.rounding_adjustment)
             line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
-            total_qty = qty + free_qty
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
             opening_placeholder_movement = None
             convert_opening_to_purchase = False
@@ -776,7 +1003,9 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
         if paid_amount + writeoff_amount > total_amount + 0.0001:
             raise HTTPException(status_code=400, detail="Payments and write-offs exceed purchase total")
 
-        if paid_amount + writeoff_amount <= 0:
+        if total_amount <= 0:
+            payment_status = "PAID"
+        elif paid_amount + writeoff_amount <= 0:
             payment_status = "UNPAID"
         elif paid_amount + writeoff_amount + 0.0001 < total_amount:
             payment_status = "PARTIAL"
@@ -965,6 +1194,72 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             )
         session.commit()
         return make_purchase_out(session, purchase)
+
+
+@router.post("/free-stock", response_model=PurchaseOut, status_code=201)
+def create_free_stock(payload: FreeStockCreate) -> PurchaseOut:
+    invoice_date = clean_date(payload.invoice_date)
+    if not invoice_date:
+        raise HTTPException(status_code=400, detail="invoice_date is required")
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="At least one free stock item is required")
+
+    sanitized_items: List[PurchaseItemIn] = []
+    for raw in payload.items:
+        paid_qty = int(raw.sealed_qty or 0)
+        _qty, free_qty, _total_qty = validate_purchase_line_quantities(raw)
+        if paid_qty != 0:
+            raise HTTPException(status_code=400, detail="Free stock cannot have paid qty")
+        if free_qty <= 0:
+            raise HTTPException(status_code=400, detail="Free stock qty must be greater than 0")
+        if round2(raw.cost_price) != 0:
+            raise HTTPException(status_code=400, detail="Free stock rate must be 0")
+        if round2(raw.discount_amount) != 0 or round2(raw.rounding_adjustment) != 0:
+            raise HTTPException(status_code=400, detail="Free stock cannot have discount or round off")
+        if raw.existing_inventory_item_id is not None:
+            raise HTTPException(status_code=400, detail="Free stock must create a new stock batch")
+
+        data = raw.dict()
+        data.update(
+            {
+                "purchase_item_id": None,
+                "existing_inventory_item_id": None,
+                "sealed_qty": 0,
+                "free_qty": free_qty,
+                "cost_price": 0.0,
+                "gst_percent": 0.0,
+                "discount_amount": 0.0,
+                "rounding_adjustment": 0.0,
+            }
+        )
+        sanitized_items.append(PurchaseItemIn(**data))
+
+    if payload.party_id is None:
+        with get_session() as session:
+            supplier = ensure_free_stock_supplier(session)
+            party_id = int(supplier.id or 0)
+    else:
+        with get_session() as session:
+            supplier = ensure_supplier(session, int(payload.party_id))
+            party_id = int(supplier.id or 0)
+
+    invoice_number = clean_text(payload.invoice_number)
+    if not invoice_number:
+        invoice_number = f"FREE-{invoice_date.replace('-', '')}-{datetime.now().strftime('%H%M%S%f')[:10]}"
+
+    return create_purchase(
+        PurchaseCreate(
+            party_id=party_id,
+            invoice_number=invoice_number,
+            invoice_date=invoice_date,
+            notes=clean_text(payload.notes),
+            discount_amount=0.0,
+            gst_amount=0.0,
+            rounding_adjustment=0.0,
+            items=sanitized_items,
+            payments=[],
+        )
+    )
 
 
 @router.get("/", response_model=List[PurchaseOut])
@@ -1910,6 +2205,9 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
         assert_financial_year_unlocked(session, purchase.invoice_date, context="Purchase item replacement")
 
         existing_items = get_purchase_items(session, purchase_id)
+        if can_update_purchase_items_in_place(existing_items, payload.items):
+            return update_purchase_items_in_place(session, purchase, payload.items)
+
         touched: List[tuple[PurchaseItem, Item]] = []
         for item in existing_items:
             if purchase_item_stock_source(item) == STOCK_SOURCE_ATTACHED:
@@ -1925,12 +2223,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
         subtotal_amount = 0.0
         prepared_items: List[Dict[str, Any]] = []
         for raw in payload.items:
-            qty = int(raw.sealed_qty or 0)
-            if qty <= 0:
-                raise HTTPException(status_code=400, detail="sealed_qty must be greater than 0")
-            free_qty = int(raw.free_qty or 0)
-            if free_qty < 0:
-                raise HTTPException(status_code=400, detail="free_qty cannot be negative")
+            qty, free_qty, total_qty = validate_purchase_line_quantities(raw)
             if round2(raw.cost_price) < 0:
                 raise HTTPException(status_code=400, detail="rate cannot be negative")
 
@@ -1969,7 +2262,6 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
             line_rounding = round2(raw.rounding_adjustment)
             line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
-            total_qty = qty + free_qty
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
             opening_placeholder_movement = None
             convert_opening_to_purchase = False

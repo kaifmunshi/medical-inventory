@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Box,
   Typography,
@@ -28,6 +28,7 @@ import {
   listAudits,
   createAudit,
   getAudit,
+  getAuditRacks,
   getAuditItems,
   updatePhysicalStock,
   finalizeAudit,
@@ -49,33 +50,36 @@ function rackLabel(rack?: number | null) {
 function AuditDetail({ id, onBack }: { id: number; onBack: () => void }) {
   const qc = useQueryClient()
   const toast = useToast()
-  const [rackFilter, setRackFilter] = useState<'ALL' | number>('ALL')
+  const [rackFilter, setRackFilter] = useState<'ALL' | number | null>(null)
 
   const qAudit = useQuery({
     queryKey: ['audit', id],
     queryFn: () => getAudit(id),
   })
 
-  const qItems = useQuery({
-    queryKey: ['audit-items', id, rackFilter],
-    queryFn: () => getAuditItems(id, rackFilter === 'ALL' ? null : rackFilter),
+  const qRacks = useQuery({
+    queryKey: ['audit-racks', id],
+    queryFn: () => getAuditRacks(id),
   })
 
-  const allItems = qc.getQueryData<StockAuditItem[]>(['audit-items', id, 'ALL']) || qItems.data || []
-  const rackOptions = useMemo(() => {
-    const seen = new Set<number>()
-    for (const item of allItems) {
-      if (item.item_rack !== null && item.item_rack !== undefined) {
-        seen.add(item.item_rack)
-      }
-    }
-    return Array.from(seen).sort((a, b) => a - b)
-  }, [allItems])
+  useEffect(() => {
+    if (rackFilter !== null || !qRacks.data) return
+
+    const firstRack = qRacks.data.find((rack) => rack.rack_number !== null && rack.rack_number !== undefined)
+    setRackFilter(firstRack?.rack_number ?? 'ALL')
+  }, [qRacks.data, rackFilter])
+
+  const qItems = useQuery({
+    queryKey: ['audit-items', id, rackFilter ?? 'PENDING'],
+    queryFn: () => getAuditItems(id, rackFilter === 'ALL' || rackFilter === null ? null : rackFilter),
+    enabled: rackFilter !== null,
+  })
 
   const mUpdateStock = useMutation({
     mutationFn: ({ itemId, val }: { itemId: number; val: number }) => updatePhysicalStock(id, itemId, val),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['audit-items', id] })
+      qc.invalidateQueries({ queryKey: ['audit-racks', id] })
     },
     onError: () => toast.push('Failed to update physical stock', 'error'),
   })
@@ -86,6 +90,7 @@ function AuditDetail({ id, onBack }: { id: number; onBack: () => void }) {
       qc.invalidateQueries({ queryKey: ['audit', id] })
       qc.invalidateQueries({ queryKey: ['audits'] })
       qc.invalidateQueries({ queryKey: ['audit-items', id] })
+      qc.invalidateQueries({ queryKey: ['audit-racks', id] })
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['inventory-stats'] })
       qc.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
@@ -98,10 +103,9 @@ function AuditDetail({ id, onBack }: { id: number; onBack: () => void }) {
     },
   })
 
-  if (qAudit.isLoading || qItems.isLoading) return <Loading />
-
   const audit = qAudit.data
   const items = qItems.data || []
+  const rackOptions = qRacks.data || []
   const isDraft = audit?.status === 'DRAFT'
 
   const groupedItems = useMemo(() => {
@@ -126,6 +130,8 @@ function AuditDetail({ id, onBack }: { id: number; onBack: () => void }) {
     return sum + (item.physical_stock - item.system_stock)
   }, 0)
 
+  if (qAudit.isLoading || qRacks.isLoading || rackFilter === null || qItems.isLoading) return <Loading />
+
   return (
     <Stack gap={2}>
       <Stack direction="row" gap={2} alignItems="center">
@@ -146,13 +152,13 @@ function AuditDetail({ id, onBack }: { id: number; onBack: () => void }) {
             variant="contained"
             color="success"
             onClick={() => {
-              if (window.confirm('Are you sure? This will generate stock adjustments for discrepancies and disable further edits.')) {
+              if (window.confirm('Finalize the full audit? This will generate stock adjustments for every counted discrepancy and lock all racks in this audit.')) {
                 mFinalize.mutate()
               }
             }}
             disabled={mFinalize.isPending}
           >
-            Finalize Actions
+            Finalize Full Audit
           </Button>
         )}
       </Stack>
@@ -168,16 +174,25 @@ function AuditDetail({ id, onBack }: { id: number; onBack: () => void }) {
             select
             size="small"
             label="Rack"
-            value={rackFilter}
-            onChange={(e) => setRackFilter(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))}
+            value={rackFilter ?? ''}
+            onChange={(e) => {
+              const value = e.target.value
+              if (value === 'ALL') {
+                setRackFilter('ALL')
+                return
+              }
+              if (value === '') return
+              setRackFilter(Number(value))
+            }}
             sx={{ minWidth: 180, ml: { md: 'auto' } }}
           >
-            <MenuItem value="ALL">All racks</MenuItem>
+            {rackFilter === null && <MenuItem value="">Loading racks</MenuItem>}
             {rackOptions.map((rack) => (
-              <MenuItem key={rack} value={rack}>
-                {rackLabel(rack)}
+              <MenuItem key={rack.rack_number ?? 'unassigned'} value={rack.rack_number ?? ''}>
+                {rackLabel(rack.rack_number)} ({rack.counted_count}/{rack.item_count})
               </MenuItem>
             ))}
+            <MenuItem value="ALL">All racks</MenuItem>
           </TextField>
         </Stack>
       </Paper>

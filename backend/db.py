@@ -3,6 +3,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import sys
@@ -366,6 +367,11 @@ def _row_value(row, index: int = 0, default=None):
         return row[index]
     except Exception:
         return default
+
+
+def _clean_text_key(value) -> str:
+    text = " ".join(str(value or "").strip().split()).lower()
+    return re.sub(r"\b(\d+)\s+(g|gm|ml|tab|tabs|tablet|tablets|cap|caps|n)\b", r"\1\2", text)
 
 
 def revert_unsafe_opening_purchase_restores(session) -> tuple[int, str | None]:
@@ -1357,6 +1363,242 @@ def cleanup_opening_purchase_duplicate_repair_pairs(session) -> tuple[int, str |
     return len(applied), backup_path
 
 
+def convert_positive_club_recon_to_opening(session) -> tuple[int, str | None]:
+    """
+    Older clubbing code preserved leftover source stock with a current-dated
+    RECON_ADJUST row. Convert positive balances to historical opening rows so
+    stock ledgers read as old balance + real purchases, not as a new adjustment.
+    """
+    rows = session.exec(
+        text("""
+            SELECT
+                repair.id,
+                repair.item_id,
+                repair.delta,
+                COALESCE(
+                    (
+                        SELECT MIN(other.ts)
+                        FROM stockmovement other
+                        WHERE other.item_id = repair.item_id
+                          AND other.id != repair.id
+                          AND COALESCE(other.ts, '') != ''
+                    ),
+                    repair.ts
+                ) AS first_ts
+            FROM stockmovement repair
+            WHERE repair.reason = 'RECON_ADJUST'
+              AND repair.delta > 0
+              AND COALESCE(repair.note, '') LIKE 'Club balance:%'
+        """)
+    ).all()
+    if not rows:
+        return 0, None
+
+    session.commit()
+    backup_path = create_data_repair_backup("before_club_recon_opening_cleanup")
+    ts = _now_ts()
+    applied = []
+    for row in rows:
+        movement_id = int(row[0])
+        item_id = int(row[1])
+        delta = int(row[2])
+        first_date = str(row[3] or "")[:10]
+        opening_ts = f"{first_date}T00:00:00" if first_date else ts
+        session.exec(
+            text("""
+                UPDATE stockmovement
+                SET ts = :opening_ts,
+                    reason = 'OPENING',
+                    ref_type = 'ITEM',
+                    ref_id = :item_id,
+                    note = 'Opening balance retained after duplicate OP placeholder(s) were replaced by purchase batch(es)',
+                    actor = COALESCE(actor, 'migration')
+                WHERE id = :movement_id
+            """).bindparams(
+                opening_ts=opening_ts,
+                item_id=item_id,
+                movement_id=movement_id,
+            ),
+        )
+        applied.append(
+            {
+                "movement_id": movement_id,
+                "item_id": item_id,
+                "qty": delta,
+                "opening_ts": opening_ts,
+            }
+        )
+
+    session.exec(
+        text("""
+            INSERT INTO auditlog (event_ts, entity_type, entity_id, action, note, details_json, actor)
+            VALUES (
+                :ts,
+                'STOCK',
+                NULL,
+                'DATA_REPAIR',
+                'Converted club balance recon rows to historical opening rows',
+                :details_json,
+                'migration'
+            )
+        """).bindparams(
+            ts=ts,
+            details_json=json.dumps(
+                {"backup": backup_path, "fixed_count": len(applied), "items": applied},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    session.commit()
+    return len(applied), backup_path
+
+
+def merge_safe_duplicate_products(session) -> tuple[int, str | None]:
+    """
+    Merge product master rows that differ only by spacing/unit formatting, such
+    as "150 g" vs "150g". Only merges rows with the same brand, printed price,
+    rack, and unit settings; price/category conflicts are left alone.
+    """
+    rows = session.exec(
+        text("""
+            SELECT
+                id,
+                name,
+                COALESCE(brand, '') AS brand,
+                category_id,
+                COALESCE(default_rack_number, 0) AS default_rack_number,
+                COALESCE(printed_price, 0) AS printed_price,
+                COALESCE(parent_unit_name, '') AS parent_unit_name,
+                COALESCE(child_unit_name, '') AS child_unit_name,
+                COALESCE(loose_sale_enabled, 0) AS loose_sale_enabled,
+                COALESCE(default_conversion_qty, -1) AS default_conversion_qty,
+                COALESCE(is_active, 1) AS is_active,
+                created_at,
+                updated_at
+            FROM product
+            ORDER BY id
+        """)
+    ).all()
+    groups: dict[tuple, list] = {}
+    for row in rows:
+        key = (
+            _clean_text_key(row[1]),
+            _clean_text_key(row[2]),
+            round(float(row[5] or 0), 2),
+            int(row[4] or 0),
+            _clean_text_key(row[6]),
+            _clean_text_key(row[7]),
+            int(row[8] or 0),
+            int(row[9] or -1),
+        )
+        groups.setdefault(key, []).append(row)
+
+    candidates = []
+    for key, matches in groups.items():
+        if len(matches) < 2:
+            continue
+        category_ids = {int(row[3]) for row in matches if row[3] is not None}
+        if len(category_ids) > 1:
+            continue
+
+        def ref_count(row) -> int:
+            product_id = int(row[0])
+            counts = session.exec(
+                text("""
+                    SELECT
+                        (SELECT COUNT(*) FROM item WHERE product_id = :product_id),
+                        (SELECT COUNT(*) FROM purchaseitem WHERE product_id = :product_id),
+                        (SELECT COUNT(*) FROM inventorylot WHERE product_id = :product_id)
+                """).bindparams(product_id=product_id)
+            ).one()
+            return int(counts[0] or 0) + int(counts[1] or 0) + int(counts[2] or 0)
+
+        keeper = sorted(matches, key=lambda row: (-ref_count(row), int(row[0])))[0]
+        duplicates = [row for row in matches if int(row[0]) != int(keeper[0])]
+        if duplicates:
+            candidates.append((keeper, duplicates))
+
+    if not candidates:
+        return 0, None
+
+    session.commit()
+    backup_path = create_data_repair_backup("before_safe_duplicate_product_merge")
+    ts = _now_ts()
+    applied = []
+    for keeper, duplicates in candidates:
+        keeper_id = int(keeper[0])
+        canonical_name = " ".join(str(keeper[1] or "").strip().split())
+        category_id = keeper[3]
+        for duplicate in duplicates:
+            duplicate_id = int(duplicate[0])
+            if category_id is None and duplicate[3] is not None:
+                category_id = int(duplicate[3])
+            for table_name in ("item", "purchaseitem", "inventorylot"):
+                session.exec(
+                    text(f"UPDATE {table_name} SET product_id = :keeper_id WHERE product_id = :duplicate_id").bindparams(
+                        keeper_id=keeper_id,
+                        duplicate_id=duplicate_id,
+                    )
+                )
+            session.exec(
+                text("""
+                    UPDATE product
+                    SET is_active = 0,
+                        updated_at = :ts
+                    WHERE id = :duplicate_id
+                """).bindparams(ts=ts, duplicate_id=duplicate_id)
+            )
+            applied.append(
+                {
+                    "keeper_product_id": keeper_id,
+                    "duplicate_product_id": duplicate_id,
+                    "duplicate_name": duplicate[1],
+                    "brand": duplicate[2],
+                }
+            )
+
+        session.exec(
+            text("""
+                UPDATE product
+                SET name = :name,
+                    category_id = COALESCE(category_id, :category_id),
+                    is_active = 1,
+                    updated_at = :ts
+                WHERE id = :keeper_id
+            """).bindparams(
+                name=canonical_name,
+                category_id=category_id,
+                ts=ts,
+                keeper_id=keeper_id,
+            )
+        )
+
+    session.exec(
+        text("""
+            INSERT INTO auditlog (event_ts, entity_type, entity_id, action, note, details_json, actor)
+            VALUES (
+                :ts,
+                'PRODUCT',
+                NULL,
+                'DATA_REPAIR',
+                'Merged safe duplicate product master rows',
+                :details_json,
+                'migration'
+            )
+        """).bindparams(
+            ts=ts,
+            details_json=json.dumps(
+                {"backup": backup_path, "fixed_count": len(applied), "items": applied},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    session.commit()
+    return len(applied), backup_path
+
+
 def migrate_db():
     with Session(engine) as session:
         # ---------- item table migration ----------
@@ -2294,6 +2536,50 @@ def migrate_db():
                 """).bindparams(
                     k=opening_purchase_cleanup_key,
                     value=f"done:{cleaned_count};backup:{backup_path or ''}",
+                    ts=ts_repair,
+                ),
+            )
+            session.commit()
+
+        # ---------- one-time data repair: make old club balance rows ledger-friendly ----------
+        club_recon_opening_cleanup_key = "convert_positive_club_recon_to_opening_v1"
+        club_recon_opening_cleanup_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=club_recon_opening_cleanup_key),
+        ).first()
+        if not club_recon_opening_cleanup_done:
+            session.commit()
+            ts_repair = _now_ts()
+            converted_count, backup_path = convert_positive_club_recon_to_opening(session)
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=club_recon_opening_cleanup_key,
+                    value=f"done:{converted_count};backup:{backup_path or ''}",
+                    ts=ts_repair,
+                ),
+            )
+            session.commit()
+
+        # ---------- one-time data repair: collapse safe product master duplicates ----------
+        duplicate_product_merge_key = "merge_safe_duplicate_products_v1"
+        duplicate_product_merge_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=duplicate_product_merge_key),
+        ).first()
+        if not duplicate_product_merge_done:
+            session.commit()
+            ts_repair = _now_ts()
+            merged_count, backup_path = merge_safe_duplicate_products(session)
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=duplicate_product_merge_key,
+                    value=f"done:{merged_count};backup:{backup_path or ''}",
                     ts=ts_repair,
                 ),
             )

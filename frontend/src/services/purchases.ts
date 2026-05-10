@@ -15,6 +15,14 @@ export interface PurchaseCreatePayload {
   payments?: PurchasePaymentPayload[]
 }
 
+export interface FreeStockCreatePayload {
+  party_id?: number
+  invoice_number?: string
+  invoice_date: string
+  notes?: string
+  items: PurchaseItemPayload[]
+}
+
 export interface PurchaseUpdatePayload {
   party_id?: number
   invoice_number?: string
@@ -76,6 +84,11 @@ export interface SupplierPaymentCreatePayload {
 
 export async function createPurchase(payload: PurchaseCreatePayload): Promise<Purchase> {
   const res = await api.post<Purchase>('/purchases', payload)
+  return res.data
+}
+
+export async function createFreeStock(payload: FreeStockCreatePayload): Promise<Purchase> {
+  const res = await api.post<Purchase>('/purchases/free-stock', payload)
   return res.data
 }
 

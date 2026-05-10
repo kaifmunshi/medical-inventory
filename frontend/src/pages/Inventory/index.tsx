@@ -69,17 +69,25 @@ function toIsoDateOnly(exp?: string | null) {
 }
 
 function buildGroupKey(it: any) {
-  const name = String(it?.name ?? '').trim().toLowerCase()
-  const brand = String(it?.brand ?? '').trim().toLowerCase()
+  const name = productNameKey(it?.name)
+  const brand = String(it?.brand ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
   return `${name}__${brand}`
 }
 
+function productNameKey(value?: string | null) {
+  return String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .replace(/\b(\d+)\s+(g|gm|ml|tab|tabs|tablet|tablets|cap|caps|n)\b/g, '$1$2')
+}
+
 function findExactProduct(products: any[], name?: string, brand?: string) {
-  const nameKey = String(name || '').trim().toLowerCase()
-  const brandKey = String(brand || '').trim().toLowerCase()
+  const nameKey = productNameKey(name)
+  const brandKey = String(brand || '').trim().replace(/\s+/g, ' ').toLowerCase()
   return products.find((product) => (
-    String(product?.name || '').trim().toLowerCase() === nameKey
-    && String(product?.brand || '').trim().toLowerCase() === brandKey
+    productNameKey(product?.name) === nameKey
+    && String(product?.brand || '').trim().replace(/\s+/g, ' ').toLowerCase() === brandKey
   )) || null
 }
 

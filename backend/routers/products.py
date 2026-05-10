@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -31,6 +32,11 @@ def _clean(v: Optional[str]) -> Optional[str]:
         return None
     text = " ".join(str(v).strip().split())
     return text or None
+
+
+def _product_name_key(v: Optional[str]) -> str:
+    text = (_clean(v) or "").lower()
+    return re.sub(r"\b(\d+)\s+(g|gm|ml|tab|tabs|tablet|tablets|cap|caps|n)\b", r"\1\2", text)
 
 
 def _now() -> str:
@@ -273,12 +279,10 @@ def create_product(payload: ProductCreate) -> ProductOut:
         if payload.category_id is not None and not session.get(Category, payload.category_id):
             raise HTTPException(status_code=400, detail="Category not found")
 
-        existing = session.exec(
-            select(Product).where(
-                func.lower(Product.name) == name.lower(),
-                func.lower(func.coalesce(Product.brand, "")) == (brand or "").lower(),
-            )
-        ).first()
+        existing_rows = session.exec(
+            select(Product).where(func.lower(func.coalesce(Product.brand, "")) == (brand or "").lower())
+        ).all()
+        existing = next((row for row in existing_rows if _product_name_key(row.name) == _product_name_key(name)), None)
         if existing:
             raise HTTPException(status_code=400, detail="Product already exists for this name and brand")
 
@@ -357,13 +361,16 @@ def update_product(product_id: int, payload: ProductUpdate) -> ProductOut:
         if "is_active" in data:
             row.is_active = bool(data["is_active"])
 
-        duplicate = session.exec(
+        duplicate_rows = session.exec(
             select(Product).where(
-                func.lower(Product.name) == func.lower(row.name),
                 func.lower(func.coalesce(Product.brand, "")) == func.lower(row.brand or ""),
                 Product.id != product_id,
             )
-        ).first()
+        ).all()
+        duplicate = next(
+            (candidate for candidate in duplicate_rows if _product_name_key(candidate.name) == _product_name_key(row.name)),
+            None,
+        )
         if duplicate:
             raise HTTPException(status_code=400, detail="Product already exists for this name and brand")
 

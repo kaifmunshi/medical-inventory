@@ -106,6 +106,7 @@ export type InventoryGroupBatch = {
   id: number
   name: string
   brand?: string | null
+  product_id?: number | null
   expiry_date?: string | null
   mrp: number
   stock: number
@@ -113,6 +114,7 @@ export type InventoryGroupBatch = {
   created_at?: string | null
   updated_at?: string | null
   is_archived: boolean
+  loose_sale_enabled?: boolean
   is_loose_stock?: boolean
   stock_unit_label?: string | null
   parent_unit_name?: string | null

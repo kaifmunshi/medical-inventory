@@ -422,6 +422,11 @@ function findExactProduct(products: any[], name?: string, brand?: string) {
   )) || null
 }
 
+function inventoryReturnPath(raw?: string | null) {
+  const value = String(raw || '').trim()
+  return value.startsWith('/inventory') && !value.startsWith('//') ? value : '/inventory'
+}
+
 function canRemoveOpeningRow(row: any) {
   return (
     !row?.is_synthetic_opening &&
@@ -451,6 +456,7 @@ export default function StockCardPage() {
   const brand = (searchParams.get('brand') || '').trim()
   const requestedBatchId = Number(searchParams.get('batchId') || 0) || null
   const requestedTab = (searchParams.get('tab') || '').trim()
+  const returnTo = inventoryReturnPath(searchParams.get('returnTo'))
 
   const [tab, setTab] = useState<StockCardTab>(
     requestedTab === 'batches' ? 'batches' : 'ledger'
@@ -500,12 +506,20 @@ export default function StockCardPage() {
     () => batches.filter((batch) => Number(batch.id) !== Number(clubSourceBatch?.id || 0)),
     [batches, clubSourceBatch?.id],
   )
-  const brandsQ = useQuery({ queryKey: ['stock-card-brands'], queryFn: () => fetchBrands({ active_only: true }) })
-  const categoriesQ = useQuery({ queryKey: ['stock-card-categories'], queryFn: () => fetchCategories({ active_only: true }) })
+  const brandsQ = useQuery({
+    queryKey: ['stock-card-brands'],
+    queryFn: () => fetchBrands({ active_only: true }),
+    enabled: productOpen,
+  })
+  const categoriesQ = useQuery({
+    queryKey: ['stock-card-categories'],
+    queryFn: () => fetchCategories({ active_only: true }),
+    enabled: productOpen,
+  })
   const productsQ = useQuery({
     queryKey: ['stock-card-products', name],
     queryFn: () => fetchProducts({ q: name, active_only: true, limit: 2000 }),
-    enabled: !!name,
+    enabled: false,
   })
   const productMatch = useMemo(() => {
     const nameKey = name.trim().toLowerCase()
@@ -519,6 +533,11 @@ export default function StockCardPage() {
     () => stockBreakdownForUnits(batches, Number(groupQ.data?.total_stock || 0)),
     [batches, groupQ.data?.total_stock],
   )
+  const stockCardProductId = useMemo(() => {
+    const batchProductId = batches.find((batch) => Number(batch.product_id || 0) > 0)?.product_id
+    if (batchProductId) return Number(batchProductId)
+    return productMatch?.id ? Number(productMatch.id) : null
+  }, [batches, productMatch?.id])
   const currentBatch = useMemo(() => {
     if (!batches.length) return null
     const byParam = selectedBatchId ? batches.find((batch) => Number(batch.id) === Number(selectedBatchId)) : null
@@ -690,6 +709,19 @@ export default function StockCardPage() {
     reason,
     openLedger: true,
   })
+  const looseStockEnabled = Boolean(
+    productMatch?.loose_sale_enabled ||
+    stockBreakdown.hasLoose ||
+    batches.some((batch) => Boolean(batch.loose_sale_enabled))
+  )
+
+  function openLooseStockPage() {
+    const params = new URLSearchParams()
+    if (stockCardProductId) params.set('product_id', String(stockCardProductId))
+    if (name) params.set('q', name)
+    params.set('filter', 'all')
+    navigate(`/loose-stock?${params.toString()}`)
+  }
 
   const mSaveProduct = useMutation({
     mutationFn: async () => {
@@ -1220,12 +1252,17 @@ export default function StockCardPage() {
             </Box>
 
             <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-start">
-              <Button size="small" startIcon={<ArrowBackIcon />} variant="outlined" onClick={() => navigate('/inventory')}>
+              <Button size="small" startIcon={<ArrowBackIcon />} variant="outlined" onClick={() => navigate(returnTo)}>
                 Inventory
               </Button>
               <Button size="small" startIcon={<Inventory2OutlinedIcon />} variant="outlined" onClick={openProductMaster}>
                 Edit Product
               </Button>
+              {looseStockEnabled ? (
+                <Button size="small" startIcon={<Inventory2OutlinedIcon />} variant="outlined" onClick={openLooseStockPage}>
+                  Loose Stock
+                </Button>
+              ) : null}
               <Button size="small" startIcon={<OpenInNewIcon />} variant="outlined" onClick={() => navigate(stockReportLink)}>
                 Stock Report
               </Button>

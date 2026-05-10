@@ -39,6 +39,7 @@ import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'
 import CloseIcon from '@mui/icons-material/Close'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
+import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 
 import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
@@ -138,7 +139,8 @@ function findExactProduct(products: any[], name?: string, brand?: string) {
 export default function Inventory() {
   const toast = useToast()
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const currentSearchParams = searchParams.toString()
   const isSm = useMediaQuery('(max-width:900px)')
 
   const [q, setQ] = useState(searchParams.get('q') || '')
@@ -170,6 +172,7 @@ export default function Inventory() {
   const [adjustId, setAdjustId] = useState<number | null>(null)
   const [adjustName, setAdjustName] = useState<string>('')
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
+  const inventoryUrlSyncRef = useRef<string | null>(null)
 
   // ✅ Debounce typing to avoid calling API on every keystroke
   useEffect(() => {
@@ -181,11 +184,28 @@ export default function Inventory() {
     return () => clearTimeout(t)
   }, [rackQ])
   useEffect(() => {
+    if (inventoryUrlSyncRef.current === currentSearchParams) {
+      inventoryUrlSyncRef.current = null
+      return
+    }
     setQ(searchParams.get('q') || '')
     setRackQ(searchParams.get('rack') || '')
     setBrandFilter(searchParams.get('brand') || '')
     setCategoryFilter(searchParams.get('category') || '')
-  }, [searchParams])
+  }, [currentSearchParams])
+
+  useEffect(() => {
+    const next = new URLSearchParams()
+    if (debouncedQ) next.set('q', debouncedQ)
+    if (debouncedRackQ) next.set('rack', debouncedRackQ)
+    if (brandFilter) next.set('brand', brandFilter)
+    if (categoryFilter) next.set('category', categoryFilter)
+    const nextSearch = next.toString()
+    if (nextSearch !== currentSearchParams) {
+      inventoryUrlSyncRef.current = nextSearch
+      setSearchParams(next, { replace: true })
+    }
+  }, [brandFilter, categoryFilter, currentSearchParams, debouncedQ, debouncedRackQ, setSearchParams])
 
   const qc = useQueryClient()
   const LIMIT = 50
@@ -228,6 +248,7 @@ export default function Inventory() {
   const productsQ = useQuery({
     queryKey: ['inventory-products-master'],
     queryFn: () => fetchProducts({ active_only: true, limit: 2000 }),
+    enabled: false,
   })
   const categoryNameById = useMemo(() => {
     const map = new Map<number, string>()
@@ -510,21 +531,41 @@ export default function Inventory() {
     setProductOpen(true)
   }
 
-  function openStockCardForGroup(group: any) {
+  function currentInventoryPath() {
+    const params = new URLSearchParams()
+    if (q.trim()) params.set('q', q.trim())
+    if (rackQ.trim()) params.set('rack', rackQ.trim())
+    if (brandFilter) params.set('brand', brandFilter)
+    if (categoryFilter) params.set('category', categoryFilter)
+    const qs = params.toString()
+    return qs ? `/inventory?${qs}` : '/inventory'
+  }
+
+  function stockCardPathForGroup(group: any) {
     const params = new URLSearchParams()
     params.set('name', String(group?.name || ''))
     if (group?.brand) params.set('brand', String(group.brand))
     params.set('tab', 'summary')
-    navigate(`/inventory/stock-card?${params.toString()}`)
+    params.set('returnTo', currentInventoryPath())
+    return `/inventory/stock-card?${params.toString()}`
   }
 
-  function openStockCardForBatch(group: any, item: any) {
+  function stockCardPathForBatch(group: any, item: any) {
     const params = new URLSearchParams()
     params.set('name', String(group?.name || ''))
     if (group?.brand) params.set('brand', String(group.brand))
     if (item?.id) params.set('batchId', String(item.id))
     params.set('tab', 'batch')
-    navigate(`/inventory/stock-card?${params.toString()}`)
+    params.set('returnTo', currentInventoryPath())
+    return `/inventory/stock-card?${params.toString()}`
+  }
+
+  function openStockCardForGroup(group: any) {
+    navigate(stockCardPathForGroup(group))
+  }
+
+  function openStockCardForBatch(group: any, item: any) {
+    navigate(stockCardPathForBatch(group, item))
   }
 
   return (
@@ -834,7 +875,16 @@ export default function Inventory() {
                               </Button>
                             </Tooltip>
                             <Tooltip title="Open Stock Card">
-                              <Button size="small" variant="outlined" onClick={() => openStockCardForGroup(g)}>
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                component="a"
+                                href={stockCardPathForGroup(g)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                endIcon={<OpenInNewIcon fontSize="small" />}
+                                onClick={(event) => event.stopPropagation()}
+                              >
                                 Stock Card
                               </Button>
                             </Tooltip>
@@ -896,7 +946,16 @@ export default function Inventory() {
                                 <td>
                                   <Stack direction="row" gap={1}>
                                     <Tooltip title="Open Batch Stock Card">
-                                      <Button size="small" variant="outlined" onClick={() => openStockCardForBatch(g, it)}>
+                                      <Button
+                                        size="small"
+                                        variant="outlined"
+                                        component="a"
+                                        href={stockCardPathForBatch(g, it)}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        endIcon={<OpenInNewIcon fontSize="small" />}
+                                        onClick={(event) => event.stopPropagation()}
+                                      >
                                         Stock Card
                                       </Button>
                                     </Tooltip>

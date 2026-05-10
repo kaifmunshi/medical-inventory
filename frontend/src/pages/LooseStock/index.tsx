@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Box,
   Button,
@@ -13,6 +13,7 @@ import {
   Typography,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { closePack, fetchLots, fetchPackOpenEvents, openPack } from '../../services/lots'
 import type { InventoryLotBrowse, PackOpenEvent } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
@@ -45,24 +46,43 @@ function childUnit(lot?: InventoryLotBrowse | null) {
   return lot?.child_unit_name || 'Unit'
 }
 
+function filterFromParam(value?: string | null): 'openable' | 'loose' | 'all' {
+  return value === 'openable' || value === 'loose' || value === 'all' ? value : 'all'
+}
+
+function productIdFromParam(value?: string | null) {
+  const id = Number(value || 0)
+  return Number.isFinite(id) && id > 0 ? id : undefined
+}
+
 export default function LooseStockPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [q, setQ] = useState('')
+  const [searchParams] = useSearchParams()
+  const urlParams = searchParams.toString()
+  const [q, setQ] = useState(() => (searchParams.get('q') || '').trim())
   const [rack, setRack] = useState('')
+  const [productIdFilter, setProductIdFilter] = useState<number | undefined>(() => productIdFromParam(searchParams.get('product_id')))
   const [selectedLot, setSelectedLot] = useState<InventoryLotBrowse | null>(null)
   const [selectedCloseLot, setSelectedCloseLot] = useState<InventoryLotBrowse | null>(null)
   const [packsToOpen, setPacksToOpen] = useState('1')
   const [packsToClose, setPacksToClose] = useState('1')
   const [note, setNote] = useState('')
   const [closeNote, setCloseNote] = useState('')
-  const [filter, setFilter] = useState<'openable' | 'loose' | 'all'>('all')
+  const [filter, setFilter] = useState<'openable' | 'loose' | 'all'>(() => filterFromParam(searchParams.get('filter')))
+
+  useEffect(() => {
+    setQ((searchParams.get('q') || '').trim())
+    setProductIdFilter(productIdFromParam(searchParams.get('product_id')))
+    setFilter(filterFromParam(searchParams.get('filter')))
+  }, [urlParams])
 
   const lotsQ = useQuery<InventoryLotBrowse[], Error>({
-    queryKey: ['lots', q, rack, filter],
+    queryKey: ['lots', q, rack, filter, productIdFilter],
     queryFn: () =>
       fetchLots({
         q: q.trim() || undefined,
+        product_id: productIdFilter,
         rack_number: rack.trim() ? Number(rack) : undefined,
         openable_only: filter === 'openable',
         loose_only: filter === 'loose',
@@ -108,7 +128,9 @@ export default function LooseStockPage() {
     onError: (err: any) => toast.push(String(err?.message || 'Failed to close pack'), 'error'),
   })
 
-  const lots = lotsQ.data || []
+  const lots = (lotsQ.data || []).filter((lot) => (
+    !lot.opened_from_lot_id || Number(lot.loose_qty || 0) > 0
+  ))
   const events = eventsQ.data || []
 
   const selectedPreview = useMemo(() => {
@@ -177,7 +199,10 @@ export default function LooseStockPage() {
           <TextField
             label="Search product / alias / brand / rack"
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              setQ(e.target.value)
+              setProductIdFilter(undefined)
+            }}
             fullWidth
           />
           <TextField

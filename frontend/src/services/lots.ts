@@ -3,6 +3,7 @@ import type { InventoryLotBrowse, PackOpenEvent } from '../lib/types'
 
 export async function fetchLots(params?: {
   q?: string
+  product_id?: number
   rack_number?: number
   loose_only?: boolean
   openable_only?: boolean

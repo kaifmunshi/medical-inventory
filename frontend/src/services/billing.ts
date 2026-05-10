@@ -121,6 +121,11 @@ export async function listAllBills(params: {
   return out
 }
 
+export async function getCreditPendingTotal(): Promise<number> {
+  const { data } = await api.get<{ pending: number }>('/billing/credit-pending-total')
+  return Number(data?.pending || 0)
+}
+
 export async function softDeleteBill(billId: number) {
   const { data } = await api.delete(`/billing/${billId}`)
   return data as { bill_id: number; is_deleted: boolean; deleted_at: string | null }

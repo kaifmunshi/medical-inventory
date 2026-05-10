@@ -208,6 +208,7 @@ class ItemGroupBatchOut(BaseModel):
     id: int
     name: str
     brand: Optional[str] = None
+    product_id: Optional[int] = None
     expiry_date: Optional[str] = None
     mrp: float
     stock: int
@@ -215,6 +216,7 @@ class ItemGroupBatchOut(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     is_archived: bool = False
+    loose_sale_enabled: bool = False
     is_loose_stock: bool = False
     stock_unit_label: Optional[str] = None
     parent_unit_name: Optional[str] = None
@@ -1205,10 +1207,34 @@ def list_items(
                     or_(*movement_search_terms),
                 )
             )
+            matching_product_exists = exists(
+                select(Product.id).where(
+                    Product.id == Item.product_id,
+                    or_(
+                        Product.name.ilike(like),
+                        Product.alias.ilike(like),
+                        Product.brand.ilike(like),
+                    ),
+                )
+            )
+            matching_lot_product_exists = exists(
+                select(InventoryLot.id)
+                .join(Product, Product.id == InventoryLot.product_id)
+                .where(
+                    InventoryLot.legacy_item_id == Item.id,
+                    or_(
+                        Product.name.ilike(like),
+                        Product.alias.ilike(like),
+                        Product.brand.ilike(like),
+                    ),
+                )
+            )
             item_search_terms = [
                 Item.name.ilike(like),
                 Item.brand.ilike(like),
                 matching_movement_exists,
+                matching_product_exists,
+                matching_lot_product_exists,
             ]
             if numeric_search_id is not None:
                 item_search_terms.append(Item.id == numeric_search_id)
@@ -1468,6 +1494,7 @@ def get_item_group(
                     id=int(batch.id),
                     name=str(batch.name),
                     brand=getattr(batch, "brand", None),
+                    product_id=getattr(batch, "product_id", None),
                     expiry_date=getattr(batch, "expiry_date", None),
                     mrp=float(batch.mrp or 0),
                     stock=int(batch.stock or 0),
@@ -1475,6 +1502,7 @@ def get_item_group(
                     created_at=getattr(batch, "created_at", None),
                     updated_at=getattr(batch, "updated_at", None),
                     is_archived=bool(getattr(batch, "is_archived", False)),
+                    loose_sale_enabled=bool(getattr(batch, "loose_sale_enabled", False)),
                     is_loose_stock=bool(getattr(batch, "is_loose_stock", False)),
                     stock_unit_label=getattr(batch, "stock_unit_label", None),
                     parent_unit_name=getattr(batch, "parent_unit_name", None),

@@ -361,6 +361,24 @@ def list_bills_paged(
         next_offset = (offset + limit) if has_more else None
         return {"items": out, "next_offset": next_offset}
 
+
+@router.get("/credit-pending-total")
+def credit_pending_total():
+    with get_session() as session:
+        outstanding_expr = (
+            func.coalesce(Bill.total_amount, 0)
+            - func.coalesce(Bill.paid_amount, 0)
+            - func.coalesce(Bill.writeoff_amount, 0)
+        )
+        total = session.exec(
+            select(func.coalesce(func.sum(outstanding_expr), 0))
+            .where(Bill.is_deleted == False)  # noqa: E712
+            .where(Bill.payment_status != "PAID")
+            .where(outstanding_expr > 0)
+        ).first()
+        return {"pending": round2(float(total or 0))}
+
+
 @router.get("/reports/item-sales", response_model=ItemSalesPageOut)
 def report_item_sales(
     from_date: str = Query(..., description="YYYY-MM-DD"),

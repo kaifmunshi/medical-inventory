@@ -22,7 +22,7 @@ import {
   TablePagination,
 } from '@mui/material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { listBills, listAllBills, getPaymentsSummary } from '../services/billing'
+import { listBills, getCreditPendingTotal, getPaymentsSummary } from '../services/billing'
 import { listReturns } from '../services/returns'
 import { getInventoryDashboardStats, listItemsPage } from '../services/inventory'
 import { todayRange } from '../lib/date'
@@ -152,6 +152,7 @@ export default function Dashboard() {
  const qInv = useQuery({
   queryKey: ['dash-inventory'],
   queryFn: () => fetchAllInventoryRows(),
+  enabled: openZeroStock || openLow || openExp || openExpired,
   placeholderData: (previousData) => previousData,
   staleTime: 0,                 // ✅ always treat as stale
   refetchOnMount: 'always',     // ✅ when you go to dashboard, always refresh
@@ -308,24 +309,12 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
     return to2(collectedTodayTotal - returnsTodayTotal - cashOutTodayTotal)
   }, [collectedTodayTotal, returnsTodayTotal, cashOutTodayTotal])
 
-  // -------- Credit Pending (ALL dates) --------
-  const qAllBillsForPending = useQuery({
-    queryKey: ['dash-credit-pending-all'],
-    queryFn: () => listAllBills(),
+  const qCreditPending = useQuery({
+    queryKey: ['dash-credit-pending-total'],
+    queryFn: getCreditPendingTotal,
   })
 
-  const creditPendingAllDates = useMemo(() => {
-    const bills = (qAllBillsForPending.data || []) as any[]
-    let pending = 0
-    for (const b of bills) {
-      const status = String(b.payment_status || '').toUpperCase()
-      if (status === 'PAID') continue
-      const total = Number(b.total_amount || 0)
-      const paid = Number(b.paid_amount || 0)
-      pending += Math.max(0, total - paid)
-    }
-    return to2(pending)
-  }, [qAllBillsForPending.data])
+  const creditPendingAllDates = to2(qCreditPending.data || 0)
 
   // ---- Low Stock ----
   const { lowStockItems, lowStockCount } = useMemo(() => {
@@ -974,7 +963,11 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       <Dialog open={openLow} onClose={() => setOpenLow(false)} fullWidth maxWidth="sm">
         <DialogTitle>Low Stock Items (≤ {LOW_STOCK_THRESH})</DialogTitle>
         <DialogContent>
-          {lowStockItems.length === 0 ? (
+          {!Array.isArray(qInv.data) ? (
+            <Typography color="text.secondary" p={1}>
+              Fetching low stock list...
+            </Typography>
+          ) : lowStockItems.length === 0 ? (
             <Typography color="text.secondary" p={1}>
               All items are sufficiently stocked.
             </Typography>
@@ -1010,7 +1003,11 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       <Dialog open={openExp} onClose={() => setOpenExp(false)} fullWidth maxWidth="md">
         <DialogTitle>Expiring Soon (≤ {EXPIRY_WINDOW_DAYS} days)</DialogTitle>
         <DialogContent>
-          {expiringSoonItems.length === 0 ? (
+          {!Array.isArray(qInv.data) ? (
+            <Typography color="text.secondary" p={1}>
+              Fetching expiry list...
+            </Typography>
+          ) : expiringSoonItems.length === 0 ? (
             <Typography color="text.secondary" p={1}>
               No items expiring soon.
             </Typography>
@@ -1050,7 +1047,11 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       <Dialog open={openExpired} onClose={() => setOpenExpired(false)} fullWidth maxWidth="md">
         <DialogTitle>Expired Items</DialogTitle>
         <DialogContent>
-          {expiredItems.length === 0 ? (
+          {!Array.isArray(qInv.data) ? (
+            <Typography color="text.secondary" p={1}>
+              Fetching expired items...
+            </Typography>
+          ) : expiredItems.length === 0 ? (
             <Typography color="text.secondary" p={1}>
               No expired items.
             </Typography>

@@ -96,6 +96,7 @@ def lot_to_out(lot: InventoryLot, product: Product, item: Optional[Item] = None)
 @router.get("/", response_model=List[InventoryLotBrowseOut])
 def list_lots(
     q: Optional[str] = Query(None),
+    product_id: Optional[int] = Query(None),
     rack_number: Optional[int] = Query(None),
     loose_only: bool = Query(False),
     openable_only: bool = Query(False),
@@ -112,6 +113,9 @@ def list_lots(
 
         if rack_number is not None:
             stmt = stmt.where(InventoryLot.rack_number == rack_number)
+
+        if product_id is not None:
+            stmt = stmt.where(InventoryLot.product_id == product_id)
 
         if loose_only:
             stmt = stmt.where(InventoryLot.opened_from_lot_id.is_not(None))

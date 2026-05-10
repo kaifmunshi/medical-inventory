@@ -181,6 +181,11 @@ class StockMovementGroupOut(BaseModel):
     expiry_date: Optional[str] = None
     mrp: Optional[float] = None
     rack_number: Optional[int] = None
+    is_loose_stock: bool = False
+    stock_unit_label: Optional[str] = None
+    parent_unit_name: Optional[str] = None
+    child_unit_name: Optional[str] = None
+    conversion_qty: int = 0
 
     balance_after: int
     balance_before: int
@@ -210,6 +215,11 @@ class ItemGroupBatchOut(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     is_archived: bool = False
+    is_loose_stock: bool = False
+    stock_unit_label: Optional[str] = None
+    parent_unit_name: Optional[str] = None
+    child_unit_name: Optional[str] = None
+    conversion_qty: Optional[int] = None
 
 
 class ItemGroupOut(BaseModel):
@@ -1435,6 +1445,7 @@ def get_item_group(
 ):
     with get_session() as session:
         n, b, batches = _load_group_batches(session, name=name, brand=brand)
+        _attach_lot_metadata(session, batches)
         expiry_dates = [str(batch.expiry_date) for batch in batches if getattr(batch, "expiry_date", None)]
         mrp_values = [float(batch.mrp or 0) for batch in batches]
         rack_numbers = sorted({int(batch.rack_number or 0) for batch in batches})
@@ -1464,6 +1475,11 @@ def get_item_group(
                     created_at=getattr(batch, "created_at", None),
                     updated_at=getattr(batch, "updated_at", None),
                     is_archived=bool(getattr(batch, "is_archived", False)),
+                    is_loose_stock=bool(getattr(batch, "is_loose_stock", False)),
+                    stock_unit_label=getattr(batch, "stock_unit_label", None),
+                    parent_unit_name=getattr(batch, "parent_unit_name", None),
+                    child_unit_name=getattr(batch, "child_unit_name", None),
+                    conversion_qty=getattr(batch, "conversion_qty", None),
                 )
                 for batch in batches
             ],
@@ -1507,6 +1523,7 @@ def group_ledger(
             raise HTTPException(status_code=404, detail="Batch does not belong to this product group")
 
         ledger_batches = [x for x in batches if item_id is None or int(x.id) == int(item_id)]
+        _attach_lot_metadata(session, ledger_batches)
         item_ids = [int(x.id) for x in ledger_batches]
         items_by_id = {int(x.id): x for x in ledger_batches}
 
@@ -1562,6 +1579,11 @@ def group_ledger(
                         expiry_date=getattr(it, "expiry_date", None) if it else None,
                         mrp=float(getattr(it, "mrp", 0) or 0) if it else None,
                         rack_number=int(getattr(it, "rack_number", 0) or 0) if it else None,
+                        is_loose_stock=bool(getattr(it, "is_loose_stock", False)) if it else False,
+                        stock_unit_label=getattr(it, "stock_unit_label", None) if it else None,
+                        parent_unit_name=getattr(it, "parent_unit_name", None) if it else None,
+                        child_unit_name=getattr(it, "child_unit_name", None) if it else None,
+                        conversion_qty=int(getattr(it, "conversion_qty", 0) or 0) if it else 0,
                         balance_after=after,
                         balance_before=before,
                     )

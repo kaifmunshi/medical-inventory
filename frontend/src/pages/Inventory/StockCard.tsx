@@ -102,6 +102,56 @@ function formatSigned(value: number) {
   return `${value > 0 ? '+' : ''}${value}`
 }
 
+function unitStockLabel(qty: number, unit?: string | null) {
+  return `${Number(qty || 0)} ${String(unit || 'Unit').trim() || 'Unit'}`
+}
+
+function movementUnitLabel(row: any, fallbackUnit?: string | null) {
+  const direct = row?.stock_unit_label
+  const inferred = row?.is_loose_stock ? row?.child_unit_name : row?.parent_unit_name
+  return String(direct || inferred || fallbackUnit || 'Unit').trim() || 'Unit'
+}
+
+function stockBreakdownForUnits(batches: any[], fallbackTotal: number) {
+  const visibleBatches = batches.filter((batch) => !batch.is_archived)
+  const activeBatches = visibleBatches.filter((batch) => Number(batch.stock || 0) !== 0)
+  const hasLoose = visibleBatches.some((batch) => Boolean(batch.is_loose_stock))
+  if (!hasLoose) {
+    return {
+      hasLoose: false,
+      fallbackTotal,
+      packQty: fallbackTotal,
+      looseQty: 0,
+      packUnit: 'Stock',
+      looseUnit: 'Unit',
+      conversionQty: 0,
+      equivalentQty: fallbackTotal,
+    }
+  }
+
+  const packQty = activeBatches
+    .filter((batch) => !batch.is_loose_stock)
+    .reduce((sum, batch) => sum + Number(batch.stock || 0), 0)
+  const looseQty = activeBatches
+    .filter((batch) => batch.is_loose_stock)
+    .reduce((sum, batch) => sum + Number(batch.stock || 0), 0)
+  const firstPack = visibleBatches.find((batch) => !batch.is_loose_stock)
+  const firstLoose = visibleBatches.find((batch) => batch.is_loose_stock)
+  const packUnit = firstPack?.stock_unit_label || firstPack?.parent_unit_name || 'Pack'
+  const looseUnit = firstLoose?.stock_unit_label || firstLoose?.child_unit_name || 'Unit'
+  const conversionQty = Number(firstLoose?.conversion_qty || firstPack?.conversion_qty || 0)
+  return {
+    hasLoose: true,
+    fallbackTotal,
+    packQty,
+    looseQty,
+    packUnit,
+    looseUnit,
+    conversionQty,
+    equivalentQty: conversionQty > 0 ? packQty * conversionQty + looseQty : fallbackTotal,
+  }
+}
+
 function movementTone(delta: number) {
   if (delta > 0) return 'success.main'
   if (delta < 0) return 'error.main'
@@ -317,6 +367,27 @@ function deltaChip(delta: number) {
   )
 }
 
+function unitDeltaChip(delta: number, unit?: string | null) {
+  const labelUnit = String(unit || 'Unit').trim() || 'Unit'
+  const isPos = delta > 0
+  const isNeg = delta < 0
+  return (
+    <Chip
+      size="small"
+      label={`${formatSigned(delta)} ${labelUnit}`}
+      sx={{
+        borderRadius: 999,
+        fontWeight: 900,
+        ...(isPos
+          ? { bgcolor: 'rgba(46,125,50,0.14)', color: movementTone(delta) }
+          : isNeg
+            ? { bgcolor: 'rgba(211,47,47,0.14)', color: movementTone(delta) }
+            : { bgcolor: 'rgba(0,0,0,0.08)' }),
+      }}
+    />
+  )
+}
+
 function statusChip(label: string, tone: 'success' | 'warning' | 'error' | 'default' | 'info' = 'default') {
   const palette =
     tone === 'success'
@@ -444,6 +515,10 @@ export default function StockCardPage() {
       && String(product.brand || '').trim().toLowerCase() === brandKey
     )) || null
   }, [brand, name, productsQ.data])
+  const stockBreakdown = useMemo(
+    () => stockBreakdownForUnits(batches, Number(groupQ.data?.total_stock || 0)),
+    [batches, groupQ.data?.total_stock],
+  )
   const currentBatch = useMemo(() => {
     if (!batches.length) return null
     const byParam = selectedBatchId ? batches.find((batch) => Number(batch.id) === Number(selectedBatchId)) : null
@@ -883,6 +958,27 @@ export default function StockCardPage() {
   }
 
   function renderLedgerTable(rows: any[], loading: boolean, hasMore: boolean, onLoadMore: () => void, loadingMore: boolean) {
+    const mixedProductUnits = ledgerScope === 'product' && stockBreakdown.hasLoose
+
+    const balanceCell = (row: any, value: number, tone: string) => {
+      if (mixedProductUnits) {
+        return (
+          <Tooltip title="Product view mixes pack and loose stock; use Batch view for exact running balance." arrow>
+            <Typography sx={{ color: 'text.secondary', fontWeight: 800, display: 'inline-flex' }}>
+              Mixed
+            </Typography>
+          </Tooltip>
+        )
+      }
+
+      const unit = ledgerScope === 'batch' ? movementUnitLabel(row, currentBatch?.stock_unit_label) : null
+      return (
+        <Typography sx={{ color: tone, fontWeight: 800 }}>
+          {unit ? unitStockLabel(value, unit) : Number(value || 0)}
+        </Typography>
+      )
+    }
+
     return (
       <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: 'hidden' }}>
         <Box sx={{ overflowX: 'auto' }}>
@@ -927,6 +1023,7 @@ export default function StockCardPage() {
                   const tone = movementTone(delta)
                   const removableOpening = canRemoveOpeningRow(row)
                   const removableManualAdjust = canRemoveManualAdjustRow(row)
+                  const rowUnit = movementUnitLabel(row, currentBatch?.stock_unit_label)
                   return (
                     <tr
                       key={`row-${row.id}`}
@@ -943,9 +1040,19 @@ export default function StockCardPage() {
                       </td>
                       <td>
                         <Stack gap={0.2}>
-                          <Typography sx={{ fontWeight: 800 }}>
-                            {Number(row.item_id || 0) > 0 ? `#${row.item_id}` : 'Product'}
-                          </Typography>
+                          <Stack direction="row" gap={0.6} alignItems="center" flexWrap="wrap">
+                            <Typography sx={{ fontWeight: 800 }}>
+                              {Number(row.item_id || 0) > 0 ? `#${row.item_id}` : 'Product'}
+                            </Typography>
+                            {stockBreakdown.hasLoose && Number(row.item_id || 0) > 0 ? (
+                              <Chip
+                                size="small"
+                                label={row.is_loose_stock ? 'Loose' : 'Pack'}
+                                variant="outlined"
+                                sx={{ height: 20, fontSize: 11, fontWeight: 800 }}
+                              />
+                            ) : null}
+                          </Stack>
                           <Typography variant="caption" color="text.secondary">
                             Exp {formatExpiry(row.expiry_date)} • MRP {row.mrp ?? '-'}
                           </Typography>
@@ -984,17 +1091,9 @@ export default function StockCardPage() {
                           ) : null}
                         </Stack>
                       </td>
-                      <td>
-                        <Typography sx={{ color: tone, fontWeight: 800 }}>
-                          {row.balance_before}
-                        </Typography>
-                      </td>
-                      <td>{deltaChip(delta)}</td>
-                      <td>
-                        <Typography sx={{ color: tone, fontWeight: 800 }}>
-                          {row.balance_after}
-                        </Typography>
-                      </td>
+                      <td>{balanceCell(row, Number(row.balance_before || 0), tone)}</td>
+                      <td>{mixedProductUnits || ledgerScope === 'batch' ? unitDeltaChip(delta, rowUnit) : deltaChip(delta)}</td>
+                      <td>{balanceCell(row, Number(row.balance_after || 0), tone)}</td>
                       <td>
                         {removableOpening ? (
                           <Tooltip title="Remove opening only when this batch has no sales or other stock movements" arrow>
@@ -1087,6 +1186,12 @@ export default function StockCardPage() {
   const ledgerHasMore = ledgerScope === 'batch' ? Boolean(batchLedgerQ.hasNextPage) : Boolean(productLedgerQ.hasNextPage)
   const ledgerLoadingMore = ledgerScope === 'batch' ? batchLedgerQ.isFetchingNextPage : productLedgerQ.isFetchingNextPage
   const loadMoreLedger = ledgerScope === 'batch' ? () => batchLedgerQ.fetchNextPage() : () => productLedgerQ.fetchNextPage()
+  const mixedLedgerSummary = ledgerScope === 'product' && stockBreakdown.hasLoose
+  const ledgerSummaryUnit = ledgerScope === 'batch' && currentBatch ? movementUnitLabel(currentBatch, currentBatch.stock_unit_label) : null
+  const ledgerSummaryQty = (value?: number | null) => {
+    if (value == null) return '-'
+    return ledgerSummaryUnit ? unitStockLabel(Number(value || 0), ledgerSummaryUnit) : Number(value || 0)
+  }
 
   return (
     <>
@@ -1137,7 +1242,27 @@ export default function StockCardPage() {
           </Stack>
 
           <Stack direction="row" gap={1} flexWrap="wrap">
-            {summaryMetric('Stock', String(groupQ.data.total_stock))}
+            {stockBreakdown.hasLoose ? (
+              <>
+                {summaryMetric(
+                  `${stockBreakdown.packUnit} Stock`,
+                  String(stockBreakdown.packQty),
+                  unitStockLabel(stockBreakdown.packQty, stockBreakdown.packUnit)
+                )}
+                {summaryMetric(
+                  `${stockBreakdown.looseUnit} Stock`,
+                  String(stockBreakdown.looseQty),
+                  unitStockLabel(stockBreakdown.looseQty, stockBreakdown.looseUnit)
+                )}
+                {stockBreakdown.conversionQty > 0 ? summaryMetric(
+                  'Equivalent',
+                  unitStockLabel(stockBreakdown.equivalentQty, stockBreakdown.looseUnit),
+                  `${stockBreakdown.packQty} ${stockBreakdown.packUnit} x ${stockBreakdown.conversionQty} + ${stockBreakdown.looseQty} ${stockBreakdown.looseUnit}`
+                ) : null}
+              </>
+            ) : (
+              summaryMetric('Stock', String(groupQ.data.total_stock))
+            )}
             {summaryMetric('MRP', mrpRange)}
             {summaryMetric(
               'Expiry',
@@ -1259,7 +1384,7 @@ export default function StockCardPage() {
                     >
                       {batches.map((batch) => (
                         <MenuItem key={batch.id} value={batch.id}>
-                          #{batch.id} • Exp {formatExpiry(batch.expiry_date)} • MRP {batch.mrp} • Stock {batch.stock}
+                          #{batch.id} • Exp {formatExpiry(batch.expiry_date)} • MRP {batch.mrp} • Stock {unitStockLabel(Number(batch.stock || 0), batch.stock_unit_label)}
                         </MenuItem>
                       ))}
                     </TextField>
@@ -1272,18 +1397,22 @@ export default function StockCardPage() {
                   Array.from({ length: 5 }).map((_, index) => <Skeleton key={`ls-${index}`} variant="rounded" height={24} width={96} />)
                 ) : (
                   <>
-                    <Chip size="small" label={`Opening ${ledgerSummary?.opening_stock ?? '-'}`} />
-                    <Chip size="small" label={`Inward ${ledgerSummary?.inward_qty ?? '-'}`} variant="outlined" />
-                    <Chip size="small" label={`Outward ${ledgerSummary?.outward_qty ?? '-'}`} variant="outlined" />
-                    <Chip size="small" label={`Closing ${ledgerSummary?.closing_stock ?? '-'}`} color="primary" />
+                    <Chip size="small" label={`Opening ${mixedLedgerSummary ? 'Mixed' : ledgerSummaryQty(ledgerSummary?.opening_stock)}`} />
+                    <Chip size="small" label={`Inward ${mixedLedgerSummary ? 'Mixed' : ledgerSummaryQty(ledgerSummary?.inward_qty)}`} variant="outlined" />
+                    <Chip size="small" label={`Outward ${mixedLedgerSummary ? 'Mixed' : ledgerSummaryQty(ledgerSummary?.outward_qty)}`} variant="outlined" />
+                    <Chip size="small" label={`Closing ${mixedLedgerSummary ? 'Mixed' : ledgerSummaryQty(ledgerSummary?.closing_stock)}`} color="primary" />
                     <Chip size="small" label={`Movements ${ledgerSummary?.movement_count ?? 0}`} variant="outlined" />
                   </>
                 )}
                 <Tooltip
-                  title={`Gap = current stock (${ledgerSummary?.current_stock ?? '-'}) - total ledger movement balance.`}
+                  title={
+                    mixedLedgerSummary
+                      ? 'Gap is hidden here because product view mixes pack and loose stock.'
+                      : `Gap = current stock (${ledgerSummary?.current_stock ?? '-'}) - total ledger movement balance.`
+                  }
                   arrow
                 >
-                  <Chip size="small" label={`Gap ${formatSigned(ledgerSummary?.ledger_balance_gap ?? 0)}`} variant="outlined" />
+                  <Chip size="small" label={mixedLedgerSummary ? 'Gap Mixed' : `Gap ${formatSigned(ledgerSummary?.ledger_balance_gap ?? 0)}`} variant="outlined" />
                 </Tooltip>
               </Stack>
             </Paper>
@@ -1345,10 +1474,18 @@ export default function StockCardPage() {
                         </Stack>
                       </td>
                       <td>{batch.mrp}</td>
-                      <td>{deltaChip(Number(batch.stock || 0))}</td>
+                      <td>
+                        <Chip
+                          size="small"
+                          label={unitStockLabel(Number(batch.stock || 0), batch.stock_unit_label)}
+                          color={Number(batch.stock || 0) > 0 ? 'success' : 'default'}
+                          variant="outlined"
+                        />
+                      </td>
                       <td>{batch.rack_number || 0}</td>
                       <td>
                         <Stack direction="row" gap={1} flexWrap="wrap">
+                          {statusChip(batch.is_loose_stock ? 'Loose' : 'Pack', batch.is_loose_stock ? 'info' : 'default')}
                           {statusChip(Number(batch.stock || 0) > 0 ? 'In Stock' : 'Zero Stock', Number(batch.stock || 0) > 0 ? 'success' : 'default')}
                           {days != null && days <= 90 ? statusChip('Near Expiry', 'warning') : null}
                         </Stack>

@@ -68,6 +68,50 @@ function toIsoDateOnly(exp?: string | null) {
   return s.length > 10 ? s.slice(0, 10) : s
 }
 
+function unitStockLabel(qty: number, unit?: string | null) {
+  return `${Number(qty || 0)} ${String(unit || 'Unit').trim() || 'Unit'}`
+}
+
+function stockBreakdownForUnits(items: any[], fallbackTotal: number) {
+  const visibleItems = items.filter((item) => !item.is_archived)
+  const activeItems = visibleItems.filter((item) => Number(item.stock || 0) !== 0)
+  const hasLoose = visibleItems.some((item) => Boolean(item.is_loose_stock))
+  if (!hasLoose) {
+    return {
+      hasLoose: false,
+      fallbackTotal,
+      packQty: fallbackTotal,
+      looseQty: 0,
+      packUnit: 'Stock',
+      looseUnit: 'Unit',
+      conversionQty: 0,
+      equivalentQty: fallbackTotal,
+    }
+  }
+
+  const packQty = activeItems
+    .filter((item) => !item.is_loose_stock)
+    .reduce((sum, item) => sum + Number(item.stock || 0), 0)
+  const looseQty = activeItems
+    .filter((item) => item.is_loose_stock)
+    .reduce((sum, item) => sum + Number(item.stock || 0), 0)
+  const firstPack = visibleItems.find((item) => !item.is_loose_stock)
+  const firstLoose = visibleItems.find((item) => item.is_loose_stock)
+  const packUnit = firstPack?.stock_unit_label || firstPack?.parent_unit_name || 'Pack'
+  const looseUnit = firstLoose?.stock_unit_label || firstLoose?.child_unit_name || 'Unit'
+  const conversionQty = Number(firstLoose?.conversion_qty || firstPack?.conversion_qty || 0)
+  return {
+    hasLoose: true,
+    fallbackTotal,
+    packQty,
+    looseQty,
+    packUnit,
+    looseUnit,
+    conversionQty,
+    equivalentQty: conversionQty > 0 ? packQty * conversionQty + looseQty : fallbackTotal,
+  }
+}
+
 function buildGroupKey(it: any) {
   const name = productNameKey(it?.name)
   const brand = String(it?.brand ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
@@ -230,6 +274,7 @@ export default function Inventory() {
       })
 
       const totalStock = sorted.reduce((sum, x) => sum + (Number(x.stock) || 0), 0)
+      const stockBreakdown = stockBreakdownForUnits(sorted, totalStock)
       const inStock = sorted.filter((x) => Number(x?.stock ?? 0) > 0)
       // UI rule:
       // - if any in-stock batch exists, hide zero-stock batches in table rows
@@ -268,6 +313,7 @@ export default function Inventory() {
         mrpLabel,
         hasMrpVariance, // ✅ NEW
         totalStock,
+        stockBreakdown,
         count: displayItems.length, // visible batch rows only
         totalBatchCount: sorted.length, // all batches
         items: sorted, // all batches (ledger)
@@ -643,7 +689,7 @@ export default function Inventory() {
                 '& .inventory-grid th:nth-of-type(4), & .inventory-grid td:nth-of-type(4)': { width: 140 },
                 '& .inventory-grid th:nth-of-type(5), & .inventory-grid td:nth-of-type(5)': { width: 130 },
                 '& .inventory-grid th:nth-of-type(6), & .inventory-grid td:nth-of-type(6)': { width: 92 },
-                '& .inventory-grid th:nth-of-type(7), & .inventory-grid td:nth-of-type(7)': { width: 72 },
+                '& .inventory-grid th:nth-of-type(7), & .inventory-grid td:nth-of-type(7)': { width: 172 },
                 '& .inventory-grid th:nth-of-type(8), & .inventory-grid td:nth-of-type(8)': { width: 260 },
                 '& .inventory-grid thead th': {
                   borderBottom: '1px solid rgba(0,0,0,0.14)',
@@ -745,11 +791,34 @@ export default function Inventory() {
                         <td>{g.mrpLabel}</td>
 
                         <td>
-                          <Chip
-                            size="small"
-                            label={String(g.totalStock)}
-                            sx={{ fontWeight: 900, borderRadius: 999 }}
-                          />
+                          {g.stockBreakdown?.hasLoose ? (
+                            <Stack gap={0.5} alignItems="flex-start">
+                              <Stack direction="row" gap={0.5} flexWrap="wrap">
+                                <Chip
+                                  size="small"
+                                  label={unitStockLabel(g.stockBreakdown.packQty, g.stockBreakdown.packUnit)}
+                                  sx={{ fontWeight: 900, borderRadius: 999 }}
+                                />
+                                <Chip
+                                  size="small"
+                                  label={unitStockLabel(g.stockBreakdown.looseQty, g.stockBreakdown.looseUnit)}
+                                  variant="outlined"
+                                  sx={{ fontWeight: 900, borderRadius: 999 }}
+                                />
+                              </Stack>
+                              {g.stockBreakdown.conversionQty > 0 ? (
+                                <Typography variant="caption" color="text.secondary">
+                                  Eq {unitStockLabel(g.stockBreakdown.equivalentQty, g.stockBreakdown.looseUnit)}
+                                </Typography>
+                              ) : null}
+                            </Stack>
+                          ) : (
+                            <Chip
+                              size="small"
+                              label={String(g.totalStock)}
+                              sx={{ fontWeight: 900, borderRadius: 999 }}
+                            />
+                          )}
                         </td>
 
                         <td>
@@ -801,6 +870,12 @@ export default function Inventory() {
                                     <span style={{ fontWeight: 600 }}>
                                       Batch #{it.id}
                                     </span>
+                                    <Chip
+                                      size="small"
+                                      label={it.is_loose_stock ? 'Loose' : 'Pack'}
+                                      variant="outlined"
+                                      sx={{ borderRadius: 999 }}
+                                    />
                                     {batchOut && (
                                       <Chip size="small" label="Out of stock" variant="outlined" sx={{ borderRadius: 999 }} />
                                     )}
@@ -814,7 +889,7 @@ export default function Inventory() {
                                 <td>
                                   <Chip
                                     size="small"
-                                    label={String(Number(it.stock || 0))}
+                                    label={unitStockLabel(Number(it.stock || 0), it.stock_unit_label)}
                                     sx={{ fontWeight: 900, borderRadius: 999 }}
                                   />
                                 </td>

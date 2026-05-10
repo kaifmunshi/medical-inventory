@@ -82,6 +82,11 @@ export type StockMovementGroupRow = {
   expiry_date?: string | null
   mrp?: number | null
   rack_number?: number | null
+  is_loose_stock?: boolean
+  stock_unit_label?: string | null
+  parent_unit_name?: string | null
+  child_unit_name?: string | null
+  conversion_qty?: number
 
   balance_after: number
   balance_before: number
@@ -108,6 +113,11 @@ export type InventoryGroupBatch = {
   created_at?: string | null
   updated_at?: string | null
   is_archived: boolean
+  is_loose_stock?: boolean
+  stock_unit_label?: string | null
+  parent_unit_name?: string | null
+  child_unit_name?: string | null
+  conversion_qty?: number | null
 }
 
 export type InventoryGroupDetail = {

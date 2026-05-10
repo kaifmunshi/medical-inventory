@@ -13,7 +13,7 @@ import {
   Typography,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchLots, fetchPackOpenEvents, openPack } from '../../services/lots'
+import { closePack, fetchLots, fetchPackOpenEvents, openPack } from '../../services/lots'
 import type { InventoryLotBrowse, PackOpenEvent } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 
@@ -51,9 +51,12 @@ export default function LooseStockPage() {
   const [q, setQ] = useState('')
   const [rack, setRack] = useState('')
   const [selectedLot, setSelectedLot] = useState<InventoryLotBrowse | null>(null)
+  const [selectedCloseLot, setSelectedCloseLot] = useState<InventoryLotBrowse | null>(null)
   const [packsToOpen, setPacksToOpen] = useState('1')
+  const [packsToClose, setPacksToClose] = useState('1')
   const [note, setNote] = useState('')
-  const [filter, setFilter] = useState<'openable' | 'loose' | 'all'>('openable')
+  const [closeNote, setCloseNote] = useState('')
+  const [filter, setFilter] = useState<'openable' | 'loose' | 'all'>('all')
 
   const lotsQ = useQuery<InventoryLotBrowse[], Error>({
     queryKey: ['lots', q, rack, filter],
@@ -88,6 +91,23 @@ export default function LooseStockPage() {
     onError: (err: any) => toast.push(String(err?.message || 'Failed to open pack'), 'error'),
   })
 
+  const closeM = useMutation({
+    mutationFn: closePack,
+    onSuccess: () => {
+      toast.push('Loose stock closed back into parent unit', 'success')
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['pack-open-events'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-inventory'] })
+      setSelectedCloseLot(null)
+      setPacksToClose('1')
+      setCloseNote('')
+    },
+    onError: (err: any) => toast.push(String(err?.message || 'Failed to close pack'), 'error'),
+  })
+
   const lots = lotsQ.data || []
   const events = eventsQ.data || []
 
@@ -97,6 +117,19 @@ export default function LooseStockPage() {
     const conversion = Number(selectedLot.conversion_qty || 0)
     return packs > 0 && conversion > 0 ? packs * conversion : 0
   }, [selectedLot, packsToOpen])
+
+  const selectedClosePreview = useMemo(() => {
+    if (!selectedCloseLot) return null
+    const packs = Math.floor(Number(packsToClose || 0))
+    const conversion = Number(selectedCloseLot.conversion_qty || 0)
+    return packs > 0 && conversion > 0 ? packs * conversion : 0
+  }, [selectedCloseLot, packsToClose])
+
+  function maxClosable(lot?: InventoryLotBrowse | null) {
+    const conversion = Number(lot?.conversion_qty || 0)
+    if (!lot?.opened_from_lot_id || conversion <= 0) return 0
+    return Math.floor(Number(lot.loose_qty || 0) / conversion)
+  }
 
   function submitOpen() {
     if (!selectedLot) return
@@ -113,6 +146,25 @@ export default function LooseStockPage() {
       lot_id: Number(selectedLot.id),
       packs_opened: packs,
       note: note.trim() || undefined,
+    })
+  }
+
+  function submitClose() {
+    if (!selectedCloseLot) return
+    const packs = Math.floor(Number(packsToClose || 0))
+    const available = maxClosable(selectedCloseLot)
+    if (!Number.isFinite(packs) || packs <= 0) {
+      toast.push(`Enter a valid ${parentUnit(selectedCloseLot)} count`, 'error')
+      return
+    }
+    if (packs > available) {
+      toast.push(`Only ${available} ${parentUnit(selectedCloseLot)} can be closed from loose stock.`, 'error')
+      return
+    }
+    closeM.mutate({
+      lot_id: Number(selectedCloseLot.id),
+      packs_closed: packs,
+      note: closeNote.trim() || undefined,
     })
   }
 
@@ -166,34 +218,49 @@ export default function LooseStockPage() {
               </tr>
             </thead>
             <tbody>
-              {lots.map((lot) => (
-                <tr key={lot.id}>
-                  <td>
-                    <strong>{lot.product_name}</strong>
-                    {lot.alias ? <div style={{ color: '#667085' }}>Alias: {lot.alias}</div> : null}
-                  </td>
-                  <td>{lot.brand || '-'}</td>
-                  <td>{lot.rack_number}</td>
-                  <td>{lot.expiry_date || '-'}</td>
-                  <td>{money(lot.mrp)}</td>
-                  <td>{lot.sealed_qty}</td>
-                  <td>{lot.loose_qty}</td>
-                  <td>{lot.conversion_qty || '-'}</td>
-                  <td>
-                    {lot.parent_unit_name || '-'}
-                    {lot.child_unit_name ? ` -> ${lot.child_unit_name}` : ''}
-                  </td>
-                  <td>
-                    {lot.loose_sale_enabled && !lot.opened_from_lot_id && lot.sealed_qty > 0 ? (
-                      <Button variant="contained" size="small" onClick={() => setSelectedLot(lot)}>
-                        Open {parentUnit(lot)}
-                      </Button>
-                    ) : (
-                      '-'
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {lots.map((lot) => {
+                const closable = maxClosable(lot)
+                return (
+                  <tr key={lot.id}>
+                    <td>
+                      <strong>{lot.product_name}</strong>
+                      {lot.alias ? <div style={{ color: '#667085' }}>Alias: {lot.alias}</div> : null}
+                    </td>
+                    <td>{lot.brand || '-'}</td>
+                    <td>{lot.rack_number}</td>
+                    <td>{lot.expiry_date || '-'}</td>
+                    <td>{money(lot.mrp)}</td>
+                    <td>{lot.sealed_qty}</td>
+                    <td>{lot.loose_qty}</td>
+                    <td>{lot.conversion_qty || '-'}</td>
+                    <td>
+                      {lot.parent_unit_name || '-'}
+                      {lot.child_unit_name ? ` -> ${lot.child_unit_name}` : ''}
+                    </td>
+                    <td>
+                      {lot.loose_sale_enabled && !lot.opened_from_lot_id && lot.sealed_qty > 0 ? (
+                        <Button variant="contained" size="small" onClick={() => setSelectedLot(lot)}>
+                          Open {parentUnit(lot)}
+                        </Button>
+                      ) : closable > 0 ? (
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          onClick={() => {
+                            setSelectedCloseLot(lot)
+                            setPacksToClose('1')
+                            setCloseNote('')
+                          }}
+                        >
+                          Close {parentUnit(lot)}
+                        </Button>
+                      ) : (
+                        '-'
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
               {lots.length === 0 && (
                 <tr>
                   <td colSpan={10}>
@@ -207,34 +274,39 @@ export default function LooseStockPage() {
       </Paper>
 
       <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>Recent Pack Open Events</Typography>
+        <Typography variant="h6" sx={{ mb: 2 }}>Recent Pack Events</Typography>
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
             <thead>
               <tr>
                 <th>When</th>
+                <th>Action</th>
                 <th>Source Lot</th>
                 <th>Loose Lot</th>
-                <th>Packs Opened</th>
+                <th>Parent Units</th>
                 <th>Loose Units</th>
                 <th>Note</th>
               </tr>
             </thead>
             <tbody>
-              {events.map((event) => (
-                <tr key={event.id}>
-                  <td>{formatDate(event.created_at)}</td>
-                  <td>{event.source_lot_id}</td>
-                  <td>{event.loose_lot_id}</td>
-                  <td>{event.packs_opened}</td>
-                  <td>{event.loose_units_created}</td>
-                  <td>{event.note || '-'}</td>
-                </tr>
-              ))}
+              {events.map((event) => {
+                const isClose = event.packs_opened < 0 || event.loose_units_created < 0
+                return (
+                  <tr key={event.id}>
+                    <td>{formatDate(event.created_at)}</td>
+                    <td>{isClose ? 'Closed' : 'Opened'}</td>
+                    <td>{event.source_lot_id}</td>
+                    <td>{event.loose_lot_id}</td>
+                    <td>{Math.abs(event.packs_opened)}</td>
+                    <td>{Math.abs(event.loose_units_created)}</td>
+                    <td>{event.note || '-'}</td>
+                  </tr>
+                )
+              })}
               {events.length === 0 && (
                 <tr>
-                  <td colSpan={6}>
-                    <Box p={2} color="text.secondary">No pack-open events yet.</Box>
+                  <td colSpan={7}>
+                    <Box p={2} color="text.secondary">No pack events yet.</Box>
                   </td>
                 </tr>
               )}
@@ -282,6 +354,50 @@ export default function LooseStockPage() {
         <DialogActions>
           <Button onClick={() => setSelectedLot(null)}>Cancel</Button>
           <Button variant="contained" onClick={submitOpen} disabled={openM.isPending}>Open</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(selectedCloseLot)} onClose={() => setSelectedCloseLot(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Close {parentUnit(selectedCloseLot)}</DialogTitle>
+        <DialogContent dividers>
+          {selectedCloseLot && (
+            <Stack gap={2} mt={1}>
+              <Typography fontWeight={700}>
+                {selectedCloseLot.product_name}{selectedCloseLot.brand ? ` | ${selectedCloseLot.brand}` : ''}
+              </Typography>
+              <Typography color="text.secondary">
+                Available loose stock: {selectedCloseLot.loose_qty} {childUnit(selectedCloseLot)}
+              </Typography>
+              <Typography color="text.secondary">
+                Conversion: {selectedCloseLot.conversion_qty || 0} {childUnit(selectedCloseLot)} = 1 {parentUnit(selectedCloseLot)}
+              </Typography>
+              <TextField
+                label={`How many ${parentUnit(selectedCloseLot)} to close?`}
+                type="number"
+                value={packsToClose}
+                onChange={(e) => setPacksToClose(e.target.value)}
+                fullWidth
+                inputProps={{ min: 1, max: maxClosable(selectedCloseLot), step: 1 }}
+                helperText={
+                  selectedClosePreview
+                    ? `Uses ${selectedClosePreview} ${childUnit(selectedCloseLot)}. Maximum: ${maxClosable(selectedCloseLot)} ${parentUnit(selectedCloseLot)}.`
+                    : `Maximum: ${maxClosable(selectedCloseLot)} ${parentUnit(selectedCloseLot)}.`
+                }
+              />
+              <TextField
+                label="Note"
+                value={closeNote}
+                onChange={(e) => setCloseNote(e.target.value)}
+                fullWidth
+                multiline
+                minRows={2}
+              />
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSelectedCloseLot(null)}>Cancel</Button>
+          <Button variant="contained" onClick={submitClose} disabled={closeM.isPending}>Close</Button>
         </DialogActions>
       </Dialog>
     </Stack>

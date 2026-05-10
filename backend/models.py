@@ -1193,6 +1193,13 @@ class LotOpenCreate(SQLModel):
     note: Optional[str] = None
 
 
+class LotCloseCreate(SQLModel):
+    lot_id: Optional[int] = None
+    item_id: Optional[int] = None
+    packs_closed: int
+    note: Optional[str] = None
+
+
 class InventoryLotBrowseOut(SQLModel):
     id: int
     product_id: int

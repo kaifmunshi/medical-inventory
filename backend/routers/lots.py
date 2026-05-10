@@ -10,6 +10,7 @@ from backend.models import (
     InventoryLot,
     InventoryLotBrowseOut,
     Item,
+    LotCloseCreate,
     LotOpenCreate,
     PackOpenEvent,
     PackOpenEventOut,
@@ -310,6 +311,101 @@ def open_pack(payload: LotOpenCreate) -> PackOpenEventOut:
             reason="PACK_OPEN_IN",
             ref_type="PACK_OPEN",
             note=note or f"Created {loose_units_created} loose unit(s)",
+            actor="system",
+        )
+        session.commit()
+        session.refresh(event)
+        return PackOpenEventOut(**event.dict())
+
+
+@router.post("/close-pack", response_model=PackOpenEventOut, status_code=201)
+def close_pack(payload: LotCloseCreate) -> PackOpenEventOut:
+    packs_closed = int(payload.packs_closed or 0)
+    if packs_closed <= 0:
+        raise HTTPException(status_code=400, detail="packs_closed must be greater than 0")
+
+    with get_session() as session:
+        loose_lot = session.get(InventoryLot, payload.lot_id) if payload.lot_id else None
+        if not loose_lot and payload.item_id:
+            loose_lot = session.exec(
+                select(InventoryLot).where(InventoryLot.legacy_item_id == int(payload.item_id))
+            ).first()
+        if not loose_lot or not loose_lot.is_active:
+            raise HTTPException(status_code=404, detail="Loose lot not found")
+        if loose_lot.opened_from_lot_id is None:
+            raise HTTPException(status_code=400, detail="You can only close stock from loose lots")
+
+        source_lot = session.get(InventoryLot, loose_lot.opened_from_lot_id)
+        if not source_lot or not source_lot.is_active:
+            raise HTTPException(status_code=400, detail="Source parent lot not found")
+
+        product = session.get(Product, loose_lot.product_id)
+        if not product or not product.is_active:
+            raise HTTPException(status_code=400, detail="Product not found")
+
+        conversion_qty = int(loose_lot.conversion_qty or source_lot.conversion_qty or product.default_conversion_qty or 0)
+        if conversion_qty <= 0:
+            raise HTTPException(status_code=400, detail="Conversion quantity is missing for this lot")
+
+        source_item = session.get(Item, source_lot.legacy_item_id) if source_lot.legacy_item_id else None
+        loose_item = session.get(Item, loose_lot.legacy_item_id) if loose_lot.legacy_item_id else None
+        if not source_item:
+            raise HTTPException(status_code=400, detail="Source parent stock item is missing")
+        if not loose_item:
+            raise HTTPException(status_code=400, detail="Loose stock item is missing")
+
+        loose_units_used = packs_closed * conversion_qty
+        if int(loose_item.stock or 0) < loose_units_used:
+            raise HTTPException(status_code=400, detail="Not enough loose stock to close into parent units")
+
+        ts = now_ts()
+        note = clean_text(payload.note)
+        close_note = note or f"Closed {loose_units_used} loose unit(s) into {packs_closed} pack(s)"
+
+        source_item.stock = int(source_item.stock or 0) + packs_closed
+        source_item.updated_at = ts
+        loose_item.stock = int(loose_item.stock or 0) - loose_units_used
+        loose_item.updated_at = ts
+        apply_archive_rules(session, source_item)
+        apply_archive_rules(session, loose_item)
+
+        source_lot.sealed_qty = max(0, int(source_item.stock or 0))
+        source_lot.updated_at = ts
+        loose_lot.loose_qty = max(0, int(loose_item.stock or 0))
+        loose_lot.updated_at = ts
+
+        session.add(source_item)
+        session.add(loose_item)
+        session.add(source_lot)
+        session.add(loose_lot)
+
+        event = PackOpenEvent(
+            source_lot_id=source_lot.id,
+            loose_lot_id=loose_lot.id,
+            source_item_id=source_item.id,
+            loose_item_id=loose_item.id,
+            packs_opened=-packs_closed,
+            loose_units_created=-loose_units_used,
+            note=note,
+            created_at=ts,
+        )
+        session.add(event)
+        add_movement(
+            session,
+            item_id=source_item.id,
+            delta=packs_closed,
+            reason="PACK_OPEN_OUT",
+            ref_type="PACK_OPEN",
+            note=close_note,
+            actor="system",
+        )
+        add_movement(
+            session,
+            item_id=loose_item.id,
+            delta=-loose_units_used,
+            reason="PACK_OPEN_IN",
+            ref_type="PACK_OPEN",
+            note=close_note,
             actor="system",
         )
         session.commit()

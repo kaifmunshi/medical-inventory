@@ -40,6 +40,7 @@ import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 import { getBill, type Bill } from '../../services/billing'
 import {
   clubPurchaseBatchToOpening,
+  deleteManualStockAdjustment,
   deleteOpeningStockMovement,
   getGroupLedger,
   getGroupLedgerSummary,
@@ -356,6 +357,16 @@ function canRemoveOpeningRow(row: any) {
     String(row?.reason || '').toUpperCase() === 'OPENING' &&
     String(row?.ref_type || '').toUpperCase() === 'ITEM_CREATE' &&
     Number(row?.delta || 0) > 0 &&
+    Number(row?.item_id || 0) > 0
+  )
+}
+
+function canRemoveManualAdjustRow(row: any) {
+  return (
+    !row?.is_synthetic_opening &&
+    String(row?.reason || '').toUpperCase() === 'ADJUST' &&
+    String(row?.ref_type || '').toUpperCase() === 'MANUAL' &&
+    Number(row?.delta || 0) !== 0 &&
     Number(row?.item_id || 0) > 0
   )
 }
@@ -757,6 +768,20 @@ export default function StockCardPage() {
     },
   })
 
+  const mDeleteManualAdjust = useMutation({
+    mutationFn: (movementId: number) => deleteManualStockAdjustment(movementId),
+    onSuccess: (result) => {
+      setSelectedMovementId(null)
+      refreshLedgerAfterBillChange()
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      toast.push(`Deleted manual adjustment ${formatSigned(Number(result?.reversed_delta || 0))}`, 'success')
+    },
+    onError: (err: any) => {
+      toast.push(String(err?.message || 'Manual stock adjustment could not be deleted'), 'error')
+    },
+  })
+
   const mClubOpening = useMutation({
     mutationFn: () => {
       if (!clubSourceBatch || !clubTargetBatchId) throw new Error('Select the OP batch to keep')
@@ -901,6 +926,7 @@ export default function StockCardPage() {
                   const delta = Number(row.delta || 0)
                   const tone = movementTone(delta)
                   const removableOpening = canRemoveOpeningRow(row)
+                  const removableManualAdjust = canRemoveManualAdjustRow(row)
                   return (
                     <tr
                       key={`row-${row.id}`}
@@ -983,6 +1009,25 @@ export default function StockCardPage() {
                                     `Remove opening stock ${delta} from batch #${row.item_id}? This is only allowed when the batch has no sales or other movements.`
                                   )
                                   if (ok) mDeleteOpening.mutate(Number(row.id))
+                                }}
+                              >
+                                <DeleteIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        ) : removableManualAdjust ? (
+                          <Tooltip title="Delete this manual stock adjustment" arrow>
+                            <span>
+                              <IconButton
+                                size="small"
+                                color="error"
+                                disabled={mDeleteManualAdjust.isPending}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  const ok = window.confirm(
+                                    `Delete manual stock adjustment ${formatSigned(delta)} from batch #${row.item_id}? Stock will be reversed by ${formatSigned(-delta)}.`
+                                  )
+                                  if (ok) mDeleteManualAdjust.mutate(Number(row.id))
                                 }}
                               >
                                 <DeleteIcon fontSize="small" />

@@ -309,6 +309,12 @@ class OpeningDeleteOut(BaseModel):
     removed_qty: int
 
 
+class ManualAdjustmentDeleteOut(BaseModel):
+    item: ItemOut
+    deleted_movement_id: int
+    reversed_delta: int
+
+
 class OpeningClubIn(BaseModel):
     source_item_id: int
     target_item_id: int
@@ -1745,6 +1751,89 @@ def delete_opening_stock_movement(
         _attach_last_incoming(session, [item])
         _attach_lot_metadata(session, [item])
         return OpeningDeleteOut(item=item, deleted_movement_id=int(movement_id), removed_qty=opening_qty)
+
+
+@router.delete("/ledger/adjust/{movement_id}", response_model=ManualAdjustmentDeleteOut)
+def delete_manual_stock_adjustment(
+    movement_id: int,
+    note: Optional[str] = Query(None, description="Optional audit note"),
+) -> ManualAdjustmentDeleteOut:
+    require_min_role("MANAGER", context="Manual stock adjustment delete")
+    with get_session() as session:
+        movement = session.get(StockMovement, movement_id)
+        if not movement:
+            raise HTTPException(status_code=404, detail="Manual stock adjustment not found")
+
+        reason_key = str(movement.reason or "").upper()
+        ref_type_key = str(getattr(movement, "ref_type", "") or "").upper()
+        adjust_delta = int(movement.delta or 0)
+        if reason_key != "ADJUST" or ref_type_key != "MANUAL" or adjust_delta == 0:
+            raise HTTPException(status_code=400, detail="Only manual stock adjust rows can be deleted")
+
+        item = session.get(Item, int(movement.item_id))
+        if not item:
+            raise HTTPException(status_code=404, detail="Inventory batch not found")
+
+        new_stock = int(item.stock or 0) - adjust_delta
+        if new_stock < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Deleting this adjustment would make batch #{item.id} stock negative "
+                    f"({new_stock}). Add/correct stock first if this adjustment is still needed historically."
+                ),
+            )
+
+        running_stock = 0
+        replay_rows = session.exec(
+            select(StockMovement)
+            .where(StockMovement.item_id == int(item.id))
+            .where(StockMovement.id != int(movement.id))
+            .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+        ).all()
+        for row in replay_rows:
+            running_stock += int(row.delta or 0)
+            if running_stock < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Deleting this adjustment would make batch #{item.id} ledger negative "
+                        f"after {row.reason} #{row.ref_id or row.id}."
+                    ),
+                )
+
+        item.stock = int(new_stock)
+        item.updated_at = now_ts()
+        session.add(item)
+        session.delete(movement)
+        apply_archive_rules(session, item)
+        sync_lot_quantity_for_item(session, item, ts=item.updated_at)
+        log_audit(
+            session,
+            entity_type="ITEM",
+            entity_id=int(item.id),
+            action="ADJUST_DELETE",
+            note=note or f"Deleted manual stock adjustment #{movement_id}",
+            details={
+                "movement_id": int(movement_id),
+                "item_id": int(item.id),
+                "item_name": item.name,
+                "brand": item.brand,
+                "expiry_date": item.expiry_date,
+                "mrp": item.mrp,
+                "deleted_delta": int(adjust_delta),
+                "new_stock": int(new_stock),
+            },
+        )
+        session.commit()
+        session.refresh(item)
+        _attach_last_incoming(session, [item])
+        _attach_lot_metadata(session, [item])
+        return ManualAdjustmentDeleteOut(
+            item=item,
+            deleted_movement_id=int(movement_id),
+            reversed_delta=int(-adjust_delta),
+        )
 
 
 def _club_name_key(value: Optional[str]) -> str:

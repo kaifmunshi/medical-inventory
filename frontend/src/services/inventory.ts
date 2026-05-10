@@ -303,6 +303,11 @@ export async function deleteOpeningStockMovement(movementId: number): Promise<{ 
   return data
 }
 
+export async function deleteManualStockAdjustment(movementId: number): Promise<{ deleted_movement_id: number; reversed_delta: number; item: Item }> {
+  const { data } = await api.delete(`/inventory/ledger/adjust/${movementId}`)
+  return data
+}
+
 export async function clubPurchaseBatchToOpening(payload: {
   source_item_id: number
   target_item_id: number

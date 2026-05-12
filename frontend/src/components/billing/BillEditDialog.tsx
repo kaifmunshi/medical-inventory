@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Autocomplete,
   Box,
@@ -7,6 +7,7 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Divider,
   IconButton,
   MenuItem,
   Paper,
@@ -23,6 +24,7 @@ import { updateBill } from '../../services/billing'
 import { openPack } from '../../services/lots'
 import type { Customer } from '../../lib/types'
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
+import BillPaymentsPanel from './BillPaymentsPanel'
 
 type EditMode = 'cash' | 'online' | 'split' | 'credit'
 type EditLine = {
@@ -276,6 +278,8 @@ export default function BillEditDialog({
   const queryClient = useQueryClient()
 
   const [editBillId, setEditBillId] = useState<number | null>(null)
+  const [paymentPanelBill, setPaymentPanelBill] = useState<any | null>(null)
+  const skipEditHydrateBillIdRef = useRef<number | null>(null)
   const [editItems, setEditItems] = useState<EditLine[]>([])
   const [editPaymentMode, setEditPaymentMode] = useState<EditMode>('cash')
   const [editOriginalPaymentMode, setEditOriginalPaymentMode] = useState<EditMode>('cash')
@@ -302,7 +306,15 @@ export default function BillEditDialog({
   const canSearchEditItems = editItemSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
 
   useEffect(() => {
-    if (!open || !bill?.id) return
+    if (!open) {
+      skipEditHydrateBillIdRef.current = null
+      return
+    }
+    if (!bill?.id) return
+    const nextBillId = Number(bill.id)
+    setPaymentPanelBill(bill)
+    if (skipEditHydrateBillIdRef.current === nextBillId) return
+    skipEditHydrateBillIdRef.current = null
     const lines: EditLine[] = (bill.items || []).map((it: any) => {
       const mrp = Number(it.mrp || 0)
       const qty = Number(it.quantity || 0)
@@ -859,6 +871,12 @@ export default function BillEditDialog({
     },
   } as const
 
+  async function handlePaymentBillUpdated(updated: any) {
+    setPaymentPanelBill(updated)
+    skipEditHydrateBillIdRef.current = Number(updated?.id || 0) || null
+    await Promise.resolve(onSaved?.(updated))
+  }
+
   return (
     <>
       <Dialog open={open} onClose={onClose} fullWidth maxWidth="xl" PaperProps={{ sx: { minHeight: '82vh' } }}>
@@ -1189,6 +1207,26 @@ export default function BillEditDialog({
               required={editPaymentMode === 'credit'}
               error={editPaymentMode === 'credit' && editEffectiveNotes.trim().length === 0}
             />
+
+            {paymentPanelBill?.id ? (
+              <Paper sx={{ p: 2 }}>
+                <Stack gap={1.5}>
+                  <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
+                    <Box>
+                      <Typography variant="subtitle1">Bill Payments</Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Paid Rs.{money(paymentPanelBill.paid_amount)} of Rs.{money(paymentPanelBill.total_amount)}
+                      </Typography>
+                    </Box>
+                    <Typography variant="body2" color="text.secondary">
+                      Status: <b>{paymentPanelBill.payment_status || (paymentPanelBill.is_credit ? 'UNPAID' : 'PAID')}</b>
+                    </Typography>
+                  </Stack>
+                  <Divider />
+                  <BillPaymentsPanel bill={paymentPanelBill} onBillUpdated={handlePaymentBillUpdated} />
+                </Stack>
+              </Paper>
+            ) : null}
           </Stack>
         </DialogContent>
         <DialogActions>

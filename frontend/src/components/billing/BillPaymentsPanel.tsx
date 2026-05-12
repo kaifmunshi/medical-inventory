@@ -7,6 +7,7 @@ import {
   DialogTitle,
   IconButton,
   MenuItem,
+  Tooltip,
   Stack,
   TextField,
   Typography,
@@ -14,12 +15,14 @@ import {
 import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
+import RestoreIcon from '@mui/icons-material/Restore'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   editBillPayment,
   getBill,
   listBillPayments,
   receivePayment,
+  recoverBillPayment,
   undoBillPayment,
   type BillPaymentRow,
 } from '../../services/billing'
@@ -48,6 +51,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   const [paymentDate, setPaymentDate] = useState(todayFrom)
   const [editPaymentRow, setEditPaymentRow] = useState<BillPaymentRow | null>(null)
   const [deletePaymentRow, setDeletePaymentRow] = useState<BillPaymentRow | null>(null)
+  const [recoverPaymentRow, setRecoverPaymentRow] = useState<BillPaymentRow | null>(null)
 
   const qPayments = useQuery({
     queryKey: ['bill-payments-panel', bill?.id],
@@ -62,6 +66,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
 
   const payments = Array.isArray(qPayments.data) ? qPayments.data : []
   const activePayments = useMemo(() => payments.filter((p) => !p?.is_deleted), [payments])
+  const deletedPayments = useMemo(() => payments.filter((p) => p?.is_deleted), [payments])
 
   async function syncBillAndPayments() {
     if (!bill?.id) return
@@ -195,6 +200,17 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
     },
   })
 
+  const mRecoverPay = useMutation({
+    mutationFn: async () => {
+      if (!bill?.id || !recoverPaymentRow?.id) throw new Error('Payment missing')
+      return recoverBillPayment(Number(bill.id), Number(recoverPaymentRow.id))
+    },
+    onSuccess: async () => {
+      setRecoverPaymentRow(null)
+      await syncBillAndPayments()
+    },
+  })
+
   return (
     <>
       {!bill?.is_deleted ? (
@@ -223,8 +239,9 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                 <th>Mode</th>
                 <th>Cash</th>
                 <th>Online</th>
+                <th>Status</th>
                 <th style={{ minWidth: 220 }}>Note</th>
-                <th style={{ width: 64 }}></th>
+                <th style={{ width: 92 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -238,6 +255,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                     <td>{p.mode || '-'}</td>
                     <td>{money(p.cash_amount)}</td>
                     <td>{money(p.online_amount)}</td>
+                    <td>Active</td>
                     <td style={{ minWidth: 220 }}>{p.note || ''}</td>
                     <td align="right">
                       {!managedByReceipt ? (
@@ -250,23 +268,59 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                             whiteSpace: 'nowrap',
                           }}
                         >
-                          <IconButton size="small" onClick={() => openEditPayment(p)} disabled={mEditPay.isPending || mDeletePay.isPending} color="primary" sx={{ p: 0.25 }}>
-                            <EditOutlinedIcon fontSize="small" />
-                          </IconButton>
-                          <IconButton size="small" onClick={() => setDeletePaymentRow(p)} disabled={mEditPay.isPending || mDeletePay.isPending} color="error" sx={{ p: 0.25 }}>
-                            <DeleteIcon fontSize="small" />
-                          </IconButton>
+                          <Tooltip title="Edit payment" arrow>
+                            <span>
+                              <IconButton size="small" onClick={() => openEditPayment(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
+                                <EditOutlinedIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                          <Tooltip title="Delete payment" arrow>
+                            <span>
+                              <IconButton size="small" onClick={() => setDeletePaymentRow(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="error" sx={{ p: 0.25 }}>
+                                <DeleteIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
                         </Box>
                       ) : null}
                     </td>
                   </tr>
                 )
               })}
-              {activePayments.length === 0 && (
+              {deletedPayments.map((p) => {
+                const managedByReceipt = isPartyReceiptPayment(p)
+                return (
+                  <tr key={p.id} style={{ opacity: 0.72 }}>
+                    <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {p.received_at ? String(p.received_at).slice(0, 10) : '-'}
+                    </td>
+                    <td>{p.mode || '-'}</td>
+                    <td>{money(p.cash_amount)}</td>
+                    <td>{money(p.online_amount)}</td>
+                    <td>
+                      Deleted{p.deleted_at ? ` ${String(p.deleted_at).slice(0, 10)}` : ''}
+                    </td>
+                    <td style={{ minWidth: 220 }}>{p.note || ''}</td>
+                    <td align="right">
+                      {!managedByReceipt ? (
+                        <Tooltip title="Recover payment" arrow>
+                          <span>
+                            <IconButton size="small" onClick={() => setRecoverPaymentRow(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
+                              <RestoreIcon fontSize="small" />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      ) : null}
+                    </td>
+                  </tr>
+                )
+              })}
+              {payments.length === 0 && (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={7}>
                     <Box p={2} color="text.secondary">
-                      No active payments.
+                      No payments yet.
                     </Box>
                   </td>
                 </tr>
@@ -343,6 +397,33 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
             </Box>
             {mDeletePay.isError ? (
               <Typography color="error">{(mDeletePay.error as any)?.message || 'Delete failed'}</Typography>
+            ) : null}
+          </Stack>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(recoverPaymentRow)} onClose={() => !mRecoverPay.isPending && setRecoverPaymentRow(null)} fullWidth maxWidth="xs">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Recover Payment
+          <IconButton onClick={() => !mRecoverPay.isPending && setRecoverPaymentRow(null)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Typography>
+              Payment #{recoverPaymentRow?.id} for Rs.{money(Number(recoverPaymentRow?.cash_amount || 0) + Number(recoverPaymentRow?.online_amount || 0))}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              The bill payment status will be recalculated.
+            </Typography>
+            <Box textAlign="right">
+              <Button variant="contained" onClick={() => mRecoverPay.mutate()} disabled={mRecoverPay.isPending || bill?.is_deleted}>
+                Recover Payment
+              </Button>
+            </Box>
+            {mRecoverPay.isError ? (
+              <Typography color="error">{(mRecoverPay.error as any)?.message || 'Recover failed'}</Typography>
             ) : null}
           </Stack>
         </DialogContent>

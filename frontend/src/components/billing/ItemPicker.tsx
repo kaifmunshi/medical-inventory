@@ -12,9 +12,10 @@ import {
   ListItemText,
   DialogActions,
   Button,
+  Stack,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { listItems } from '../../services/inventory'
+import { listItemsPage } from '../../services/inventory'
 import { openPack } from '../../services/lots'
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../ui/Toaster'
@@ -112,13 +113,19 @@ export default function ItemPicker({
   const [openDraftQty, setOpenDraftQty] = useState('1')
   const searchTerm = q.trim()
   const canSearchItems = searchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const ITEM_PAGE_SIZE = 50
+  const [pageOffset, setPageOffset] = useState(0)
+
+  useEffect(() => {
+    setPageOffset(0)
+  }, [searchTerm, open])
 
   const { data, isFetching } = useQuery({
-    queryKey: ['billing-items', searchTerm],
+    queryKey: ['billing-items', searchTerm, pageOffset],
     enabled: open && canSearchItems,
     queryFn: async () => {
       try {
-        return await listItems(searchTerm)
+        return await listItemsPage(searchTerm, ITEM_PAGE_SIZE, pageOffset)
       } catch (err: any) {
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load items'
         toast.push(String(msg), 'error')
@@ -126,9 +133,15 @@ export default function ItemPicker({
       }
     },
   })
+  const rawItems = canSearchItems ? ((data?.items || []) as PickerItem[]) : []
+  const totalItems = Number(data?.total || 0)
+  const pageStart = rawItems.length > 0 ? pageOffset + 1 : 0
+  const pageEnd = rawItems.length > 0 ? pageOffset + rawItems.length : 0
+  const hasPrevPage = pageOffset > 0
+  const hasNextPage = data?.next_offset != null
 
   const items = ((() => {
-    const all = canSearchItems ? (data || []) as PickerItem[] : []
+    const all = rawItems
     const byGroup = new Map<string, PickerItem[]>()
 
     for (const it of all) {
@@ -199,11 +212,11 @@ export default function ItemPicker({
         packs_opened: packs,
         note: 'Opened from billing for loose sale',
       })
-      const freshRows = await listItems(String(item.name || ''))
+      const freshPage = await listItemsPage(String(item.name || ''), ITEM_PAGE_SIZE, 0)
       return {
         packs,
         parent: item,
-        loose: findOpenedLooseItem(freshRows as any[], item, event.loose_item_id),
+        loose: findOpenedLooseItem(freshPage.items as any[], item, event.loose_item_id),
       }
     },
     onSuccess: ({ loose, packs }) => {
@@ -244,6 +257,35 @@ export default function ItemPicker({
     mOpenParentPacks.mutate({ item: openDraftItem, packs })
   }
 
+  function renderPageControls() {
+    if (!canSearchItems || totalItems <= ITEM_PAGE_SIZE) return null
+    return (
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ py: 0.75 }}>
+        <Box color="text.secondary" sx={{ fontSize: 13 }}>
+          Showing {pageStart}-{pageEnd} of {totalItems}
+        </Box>
+        <Stack direction="row" gap={1}>
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={!hasPrevPage || isFetching}
+            onClick={() => setPageOffset((prev) => Math.max(0, prev - ITEM_PAGE_SIZE))}
+          >
+            Prev
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={!hasNextPage || isFetching}
+            onClick={() => setPageOffset(data?.next_offset ?? pageOffset + ITEM_PAGE_SIZE)}
+          >
+            Next
+          </Button>
+        </Stack>
+      </Stack>
+    )
+  }
+
   return (
     <>
       <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
@@ -255,10 +297,14 @@ export default function ItemPicker({
               autoFocus
               placeholder="Search (name/brand)"
               value={q}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={(e) => {
+                setQ(e.target.value)
+                setPageOffset(0)
+              }}
             />
           </Box>
 
+          {renderPageControls()}
           <List>
             {items.map((it) => (
               <ListItemButton
@@ -310,6 +356,7 @@ export default function ItemPicker({
               </Box>
             )}
           </List>
+          {renderPageControls()}
         </DialogContent>
         <DialogActions>
           <Button onClick={onClose}>Close</Button>

@@ -17,7 +17,7 @@ import {
 import CloseIcon from '@mui/icons-material/Close'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useToast } from '../ui/Toaster'
-import { listItems } from '../../services/inventory'
+import { listItemsPage } from '../../services/inventory'
 import { createCustomer, fetchCustomers } from '../../services/customers'
 import { updateBill } from '../../services/billing'
 import { openPack } from '../../services/lots'
@@ -357,10 +357,11 @@ export default function BillEditDialog({
     setEditOpenLooseQty('1')
   }, [open, bill])
 
+  const EDIT_SUGGESTIONS_PAGE_SIZE = 50
   const qEditItems = useQuery({
-    queryKey: ['edit-bill-items', editItemSearchTerm],
+    queryKey: ['edit-bill-items', editItemSearchTerm, editSuggestionPage],
     enabled: open && canSearchEditItems,
-    queryFn: () => listItems(editItemSearchTerm),
+    queryFn: () => listItemsPage(editItemSearchTerm, EDIT_SUGGESTIONS_PAGE_SIZE, editSuggestionPage * EDIT_SUGGESTIONS_PAGE_SIZE),
   })
   const { data: editCustomerOptions = [] } = useQuery({
     queryKey: ['edit-billing-customers', editCustomerQ],
@@ -428,10 +429,10 @@ export default function BillEditDialog({
         packs_opened: packs,
         note: 'Opened from bill edit for loose sale',
       })
-      const freshRows = await listItems(String(item.name || ''))
+      const freshPage = await listItemsPage(String(item.name || ''), EDIT_SUGGESTIONS_PAGE_SIZE, 0)
       return {
         packs,
-        loose: findOpenedLooseItem(freshRows as any[], item, event.loose_item_id),
+        loose: findOpenedLooseItem(freshPage.items as any[], item, event.loose_item_id),
       }
     },
     onSuccess: ({ loose, packs }) => {
@@ -472,10 +473,9 @@ export default function BillEditDialog({
     mEditOpenParentPacks.mutate({ item: editOpenLooseDraft, packs })
   }
 
-  const EDIT_SUGGESTIONS_PAGE_SIZE = 8
   const editSuggestionItems = useMemo(() => {
     if (!canSearchEditItems) return []
-    const out = [...(((qEditItems.data as any[]) || []) as any[])]
+    const out = [...(((qEditItems.data as any)?.items || []) as any[])]
     out.sort((a: any, b: any) => {
       const an = String(a?.name ?? '').toLowerCase()
       const bn = String(b?.name ?? '').toLowerCase()
@@ -492,14 +492,17 @@ export default function BillEditDialog({
     })
     return out
   }, [canSearchEditItems, qEditItems.data])
-  const editSuggestionTotalPages = Math.max(1, Math.ceil(editSuggestionItems.length / EDIT_SUGGESTIONS_PAGE_SIZE))
-  const editSuggestionPageClamped = Math.min(editSuggestionPage, editSuggestionTotalPages - 1)
-  const editSuggestionStart = editSuggestionPageClamped * EDIT_SUGGESTIONS_PAGE_SIZE
-  const editSuggestionVisible = editSuggestionItems.slice(editSuggestionStart, editSuggestionStart + EDIT_SUGGESTIONS_PAGE_SIZE)
+  const editSuggestionTotal = Number((qEditItems.data as any)?.total || 0)
+  const editSuggestionStart = editSuggestionItems.length > 0 ? editSuggestionPage * EDIT_SUGGESTIONS_PAGE_SIZE + 1 : 0
+  const editSuggestionEnd = editSuggestionItems.length > 0 ? editSuggestionPage * EDIT_SUGGESTIONS_PAGE_SIZE + editSuggestionItems.length : 0
+  const editSuggestionHasPrev = editSuggestionPage > 0
+  const editSuggestionHasNext = (qEditItems.data as any)?.next_offset != null
+  const editSuggestionVisible = editSuggestionItems
+  const showEditSuggestionPager = canSearchEditItems && (editSuggestionHasPrev || editSuggestionHasNext || editSuggestionTotal > EDIT_SUGGESTIONS_PAGE_SIZE)
 
   useEffect(() => {
     setEditSuggestionPage(0)
-  }, [editItemQuery, open])
+  }, [editItemSearchTerm, open])
 
   useEffect(() => {
     if (!open) return
@@ -533,6 +536,7 @@ export default function BillEditDialog({
     const itemId = Number(it.id)
     if (!itemId) return
     setEditPriceDraftByRow({})
+    setEditFinalManuallyEdited(false)
     setEditItems((prev) => {
       const ix = prev.findIndex((x) => Number(x.item_id) === itemId)
       if (ix >= 0) {
@@ -572,11 +576,13 @@ export default function BillEditDialog({
     }
     setEditPriceDraftByRow({})
     setEditDiscountDraftByRow({})
+    setEditFinalManuallyEdited(false)
     setEditItems((prev) => prev.filter((_, i) => i !== idx))
   }
 
   function setEditUnitPrice(idx: number, v: number) {
     const n = Math.max(0, Number(v) || 0)
+    setEditFinalManuallyEdited(false)
     setEditItems((prev) =>
       prev.map((x, i) => {
         if (i !== idx) return x
@@ -625,6 +631,7 @@ export default function BillEditDialog({
   }
 
   function setEditItemDiscountPercent(idx: number, v: number) {
+    setEditFinalManuallyEdited(false)
     setEditItems((prev) =>
       prev.map((x, i) => {
         if (i !== idx) return x
@@ -675,9 +682,12 @@ export default function BillEditDialog({
   const editFinalByRows = useMemo(() => round2(editItems.reduce((s, it) => s + Number(it.custom_unit_price || 0) * Number(it.quantity || 0), 0)), [editItems])
 
   function applyEditFinalAmountToRows(targetFinal: number) {
+    const safeTarget = round2(Math.max(0, Number(targetFinal || 0)))
     setEditPriceDraftByRow({})
     setEditDiscountDraftByRow({})
-    setEditItems((prev) => distributeEditLinesByFinal(prev, targetFinal))
+    setEditFinalAmount(safeTarget)
+    setEditFinalManuallyEdited(false)
+    setEditItems((prev) => distributeEditLinesByFinal(prev, safeTarget))
   }
 
   useEffect(() => {
@@ -775,8 +785,14 @@ export default function BillEditDialog({
       if (editPaymentMode === 'credit' && editEffectiveNotes.trim().length === 0) {
         throw new Error('Notes required for credit')
       }
-      const adjustedItems = distributeEditLinesByFinal(editItems, editChosenFinal)
-      const cleanedItems = adjustedItems
+      const itemsForSubmit =
+        editFinalManuallyEdited && Math.abs(round2(editChosenFinal - editFinalByRows)) > 0.009
+          ? distributeEditLinesByFinal(editItems, editChosenFinal)
+          : editItems
+      const finalForSubmit = round2(
+        itemsForSubmit.reduce((s, it) => s + Number(it.custom_unit_price || 0) * Number(it.quantity || 0), 0)
+      )
+      const cleanedItems = itemsForSubmit
         .map((it) => ({
           item_id: Number(it.item_id),
           quantity: Number(it.quantity || 0),
@@ -792,7 +808,7 @@ export default function BillEditDialog({
         payment_mode: editPaymentMode,
         payment_cash: Number(editCash || 0),
         payment_online: Number(editOnline || 0),
-        final_amount: editChosenFinal,
+        final_amount: finalForSubmit,
         notes: editEffectiveNotes || undefined,
       }
 
@@ -800,23 +816,23 @@ export default function BillEditDialog({
         payload.payment_cash = 0
         payload.payment_online = 0
       } else if (editPaymentMode === 'cash') {
-        payload.payment_cash = editChosenFinal
+        payload.payment_cash = finalForSubmit
         payload.payment_online = 0
       } else if (editPaymentMode === 'online') {
         payload.payment_cash = 0
-        payload.payment_online = editChosenFinal
+        payload.payment_online = finalForSubmit
       } else if (editSplitCombination === 'cash-online') {
         const sum = round2(Number(payload.payment_cash || 0) + Number(payload.payment_online || 0))
-        if (sum !== editChosenFinal) {
-          throw new Error(`Cash + Online must equal Final Amount (₹${money(editChosenFinal)})`)
+        if (sum !== finalForSubmit) {
+          throw new Error(`Cash + Online must equal Final Amount (₹${money(finalForSubmit)})`)
         }
       } else if (editSplitCombination === 'cash-credit') {
         payload.payment_online = 0
-        payload.payment_credit = round2(editChosenFinal - Number(payload.payment_cash || 0))
+        payload.payment_credit = round2(finalForSubmit - Number(payload.payment_cash || 0))
         if (payload.payment_credit < 0) throw new Error('Cash amount cannot be greater than final amount')
       } else {
         payload.payment_cash = 0
-        payload.payment_credit = round2(editChosenFinal - Number(payload.payment_online || 0))
+        payload.payment_credit = round2(finalForSubmit - Number(payload.payment_online || 0))
         if (payload.payment_credit < 0) throw new Error('Online amount cannot be greater than final amount')
       }
 
@@ -907,7 +923,15 @@ export default function BillEditDialog({
 
             <Paper sx={{ p: 2 }}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
-                <TextField label="Add item (name/brand)" value={editItemQuery} onChange={(e) => setEditItemQuery(e.target.value)} fullWidth />
+                <TextField
+                  label="Add item (name/brand)"
+                  value={editItemQuery}
+                  onChange={(e) => {
+                    setEditItemQuery(e.target.value)
+                    setEditSuggestionPage(0)
+                  }}
+                  fullWidth
+                />
                 <Stack gap={0.5} sx={{ minWidth: 240 }}>
                   <Typography variant="body2" color="text.secondary">Subtotal: ₹{money(editSubtotal)}</Typography>
                   <Typography variant="body2" color="text.secondary">Discount: ₹{money(editDiscountAmount)}</Typography>
@@ -916,6 +940,17 @@ export default function BillEditDialog({
                 </Stack>
               </Stack>
 
+              {showEditSuggestionPager && (
+                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 1 }}>
+                  <Typography variant="caption" color="text.secondary">
+                    Showing {editSuggestionStart}-{editSuggestionEnd} of {editSuggestionTotal}
+                  </Typography>
+                  <Stack direction="row" gap={1}>
+                    <Button size="small" variant="outlined" onClick={() => setEditSuggestionPage((p) => Math.max(0, p - 1))} disabled={!editSuggestionHasPrev || qEditItems.isFetching}>Prev</Button>
+                    <Button size="small" variant="outlined" onClick={() => setEditSuggestionPage((p) => p + 1)} disabled={!editSuggestionHasNext || qEditItems.isFetching}>Next</Button>
+                  </Stack>
+                </Stack>
+              )}
               <Box sx={{ mt: 1, maxHeight: 220, overflowY: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
                 {editSuggestionVisible.map((it: any) => (
                   <Stack 
@@ -973,12 +1008,12 @@ export default function BillEditDialog({
                   </Box>
                 ) : null}
               </Box>
-              {editSuggestionItems.length > EDIT_SUGGESTIONS_PAGE_SIZE && (
+              {showEditSuggestionPager && (
                 <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 1 }}>
-                  <Typography variant="caption" color="text.secondary">Showing {editSuggestionStart + 1}-{Math.min(editSuggestionStart + EDIT_SUGGESTIONS_PAGE_SIZE, editSuggestionItems.length)} of {editSuggestionItems.length}</Typography>
+                  <Typography variant="caption" color="text.secondary">Showing {editSuggestionStart}-{editSuggestionEnd} of {editSuggestionTotal}</Typography>
                   <Stack direction="row" gap={1}>
-                    <Button size="small" variant="outlined" onClick={() => setEditSuggestionPage((p) => Math.max(0, p - 1))} disabled={editSuggestionPageClamped <= 0}>Prev</Button>
-                    <Button size="small" variant="outlined" onClick={() => setEditSuggestionPage((p) => Math.min(editSuggestionTotalPages - 1, p + 1))} disabled={editSuggestionPageClamped >= editSuggestionTotalPages - 1}>Next</Button>
+                    <Button size="small" variant="outlined" onClick={() => setEditSuggestionPage((p) => Math.max(0, p - 1))} disabled={!editSuggestionHasPrev || qEditItems.isFetching}>Prev</Button>
+                    <Button size="small" variant="outlined" onClick={() => setEditSuggestionPage((p) => p + 1)} disabled={!editSuggestionHasNext || qEditItems.isFetching}>Next</Button>
                   </Stack>
                 </Stack>
               )}
@@ -1017,6 +1052,7 @@ export default function BillEditDialog({
                             value={it.quantity}
                             onChange={(e) => {
                               const qty = Number(e.target.value || 0)
+                              setEditFinalManuallyEdited(false)
                               setEditItems((prev) => prev.map((x, i) => (i === idx ? { ...x, quantity: qty } : x)))
                             }}
                             onWheel={blurOnWheel}

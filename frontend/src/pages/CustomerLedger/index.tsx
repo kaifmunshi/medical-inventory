@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import {
   Box,
   Button,
@@ -13,12 +13,15 @@ import {
   MenuItem,
   Paper,
   Stack,
+  TableSortLabel,
   TextField,
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
+import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchCustomers } from '../../services/customers'
@@ -37,9 +40,114 @@ import { useToast } from '../../components/ui/Toaster'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 
-function money(n: number) {
+function money(n: number | string | undefined | null) {
   return Number(n || 0).toFixed(2)
 }
+
+function billStatusClass(status: string) {
+  const normalized = String(status || 'UNPAID').toUpperCase()
+  if (normalized === 'PAID') return 'status-paid'
+  if (normalized === 'PARTIAL') return 'status-partial'
+  return 'status-unpaid'
+}
+
+type SortDirection = 'asc' | 'desc'
+type SortState<Key extends string> = { key: Key; direction: SortDirection }
+type BillSortKey = 'bill_id' | 'bill_date' | 'total_amount' | 'paid_amount' | 'writeoff_amount' | 'outstanding_amount' | 'payment_status'
+type ReceiptSortKey = 'receiptId' | 'when' | 'mode' | 'cash' | 'online' | 'total' | 'adjusted' | 'onAccount'
+
+function compareSortValues(a: string | number, b: string | number) {
+  if (typeof a === 'number' && typeof b === 'number') return a - b
+  return String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' })
+}
+
+function SortableHeader<Key extends string>({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  className,
+}: {
+  label: string
+  sortKey: Key
+  sort: SortState<Key>
+  onSort: (key: Key) => void
+  className?: string
+}) {
+  return (
+    <th className={className}>
+      <TableSortLabel
+        active={sort.key === sortKey}
+        direction={sort.key === sortKey ? sort.direction : 'asc'}
+        onClick={() => onSort(sortKey)}
+      >
+        {label}
+      </TableSortLabel>
+    </th>
+  )
+}
+
+function MoneyCell({
+  value,
+  strong = false,
+}: {
+  value: number | string | undefined | null
+  tone?: 'neutral' | 'total' | 'paid' | 'writeoff' | 'pending'
+  strong?: boolean
+}) {
+  const amount = Number(value || 0)
+  return (
+    <Typography variant="body2" sx={{ fontWeight: strong ? 800 : 500 }}>
+      {money(amount)}
+    </Typography>
+  )
+}
+
+const billGridSx = {
+  overflowX: 'auto',
+  '& .customer-ledger-grid': {
+    minWidth: 960,
+    tableLayout: 'fixed',
+  },
+  '& .customer-ledger-grid th': {
+    bgcolor: 'rgba(255,255,255,0.98)',
+  },
+  '& .customer-ledger-grid th .MuiTableSortLabel-root': {
+    fontWeight: 700,
+  },
+  '& .customer-ledger-grid th .MuiTableSortLabel-root.Mui-active': {
+    color: '#145c3b',
+  },
+  '& .customer-ledger-grid tbody tr.detail-row > td': {
+    bgcolor: '#f7f8fb',
+  },
+  '& .expand-col': { width: 42, textAlign: 'center', px: 0.25 },
+  '& .bill-col': { width: 100 },
+  '& .date-col': { width: 118 },
+  '& .amount-col': { width: 96, textAlign: 'right' },
+  '& .status-col': { width: 100 },
+  '& .notes-col': { width: 220, whiteSpace: 'normal', wordBreak: 'break-word' },
+  '& .clip-text': {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    display: 'block',
+  },
+} as const
+
+const receiptGridSx = {
+  ...billGridSx,
+  '& .customer-ledger-grid': {
+    minWidth: 1040,
+    tableLayout: 'fixed',
+  },
+  '& .receipt-col': { width: 126 },
+  '& .date-col': { width: 118 },
+  '& .mode-col': { width: 88 },
+  '& .amount-col': { width: 92, textAlign: 'right' },
+  '& .allocation-col': { width: 188, whiteSpace: 'normal', wordBreak: 'break-word' },
+  '& .action-col': { width: 58, textAlign: 'right' },
+} as const
 
 type ReceiptHistoryRow = {
   id: string
@@ -78,6 +186,12 @@ export default function CustomerLedgerPage() {
   const [billDetail, setBillDetail] = useState<any | null>(null)
   const [billEditOpen, setBillEditOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<ReceiptHistoryRow | null>(null)
+  const [openBillSort, setOpenBillSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
+  const [ledgerSort, setLedgerSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
+  const [receiptSort, setReceiptSort] = useState<SortState<ReceiptSortKey>>({ key: 'when', direction: 'desc' })
+  const [expandedOpenBills, setExpandedOpenBills] = useState<Record<number, boolean>>({})
+  const [expandedLedgerRows, setExpandedLedgerRows] = useState<Record<number, boolean>>({})
+  const [expandedReceipts, setExpandedReceipts] = useState<Record<string, boolean>>({})
 
   const customersQ = useQuery<Customer[], Error>({
     queryKey: ['customer-ledger-customers'],
@@ -313,6 +427,51 @@ export default function CustomerLedgerPage() {
   }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receipts])
   const receiptHistoryTotal = receiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
 
+  function billSortValue(row: DebtorLedgerRow | OpenBill, key: BillSortKey): string | number {
+    if (key === 'payment_status') {
+      const normalized = String(row.payment_status || 'UNPAID').toUpperCase()
+      if (normalized === 'UNPAID') return 0
+      if (normalized === 'PARTIAL') return 1
+      if (normalized === 'PAID') return 2
+      return normalized
+    }
+    return key === 'bill_date' ? String(row.bill_date || '') : Number(row[key] || 0)
+  }
+
+  function receiptSortValue(row: ReceiptHistoryRow, key: ReceiptSortKey): string | number {
+    if (key === 'when' || key === 'mode') return String(row[key] || '')
+    return Number(row[key] || 0)
+  }
+
+  function sortBills<T extends DebtorLedgerRow | OpenBill>(rows: T[], sort: SortState<BillSortKey>) {
+    const dir = sort.direction === 'asc' ? 1 : -1
+    return [...rows].sort((a, b) => {
+      const primary = compareSortValues(billSortValue(a, sort.key), billSortValue(b, sort.key))
+      if (primary !== 0) return primary * dir
+      return (Number(b.bill_id || 0) - Number(a.bill_id || 0))
+    })
+  }
+
+  function sortReceipts(rows: ReceiptHistoryRow[], sort: SortState<ReceiptSortKey>) {
+    const dir = sort.direction === 'asc' ? 1 : -1
+    return [...rows].sort((a, b) => {
+      const primary = compareSortValues(receiptSortValue(a, sort.key), receiptSortValue(b, sort.key))
+      if (primary !== 0) return primary * dir
+      return String(b.id || '').localeCompare(String(a.id || ''), undefined, { numeric: true })
+    })
+  }
+
+  function nextSort<Key extends string>(current: SortState<Key>, key: Key): SortState<Key> {
+    return {
+      key,
+      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+    }
+  }
+
+  const sortedOpenBills = useMemo(() => sortBills(openBills, openBillSort), [openBills, openBillSort])
+  const sortedLedgerRows = useMemo(() => sortBills(ledgerRows, ledgerSort), [ledgerRows, ledgerSort])
+  const sortedReceiptHistory = useMemo(() => sortReceipts(receiptHistory, receiptSort), [receiptHistory, receiptSort])
+
   function openReceiptDialog() {
     setAdjustmentDrafts(
       Object.fromEntries(openBills.map((bill) => [Number(bill.bill_id), '0'])),
@@ -525,49 +684,84 @@ export default function CustomerLedgerPage() {
 
       <Paper sx={{ p: 2 }}>
         <Typography variant="h6" sx={{ mb: 2 }}>Open Bills</Typography>
-        <Box sx={{ overflowX: 'auto' }}>
-          <table className="table">
+        <Box sx={billGridSx}>
+          <table className="table customer-ledger-grid">
             <thead>
               <tr>
-                <th>Bill</th>
-                <th>Amount</th>
-                <th>Outstanding</th>
-                <th>Status</th>
-                <th>Notes</th>
+                <th className="expand-col"></th>
+                <SortableHeader label="Bill" sortKey="bill_id" sort={openBillSort} onSort={(key) => setOpenBillSort((prev) => nextSort(prev, key))} className="bill-col" />
+                <SortableHeader label="Date" sortKey="bill_date" sort={openBillSort} onSort={(key) => setOpenBillSort((prev) => nextSort(prev, key))} className="date-col" />
+                <SortableHeader label="Total" sortKey="total_amount" sort={openBillSort} onSort={(key) => setOpenBillSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Paid" sortKey="paid_amount" sort={openBillSort} onSort={(key) => setOpenBillSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Write-off" sortKey="writeoff_amount" sort={openBillSort} onSort={(key) => setOpenBillSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Pending" sortKey="outstanding_amount" sort={openBillSort} onSort={(key) => setOpenBillSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Status" sortKey="payment_status" sort={openBillSort} onSort={(key) => setOpenBillSort((prev) => nextSort(prev, key))} className="status-col" />
+                <th className="notes-col">Notes</th>
               </tr>
             </thead>
             <tbody>
-              {openBills.map((row) => (
-                <tr key={row.bill_id} style={{ background: Number(row.outstanding_amount || 0) > 0 ? '#fff8e1' : undefined }}>
-                  <td>
-                    <Stack gap={0.25}>
-                      <Link
-                        component="button"
-                        underline="hover"
-                        onClick={() => openBillDetail(Number(row.bill_id))}
-                        sx={{ fontWeight: 800 }}
-                      >
-                        Bill #{row.bill_id}
-                      </Link>
-                      <Typography variant="caption" color="text.secondary">{row.bill_date}</Typography>
-                    </Stack>
-                  </td>
-                  <td>
-                    <Stack gap={0.25}>
-                      <Typography variant="body2" fontWeight={800}>Rs {money(row.total_amount)}</Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Paid Rs {money(row.paid_amount)}{Number(row.writeoff_amount || 0) > 0 ? ` | Write-off Rs ${money(row.writeoff_amount)}` : ''}
-                      </Typography>
-                    </Stack>
-                  </td>
-                  <td><Typography fontWeight={900}>Rs {money(row.outstanding_amount)}</Typography></td>
-                  <td>{statusChip(row.payment_status)}</td>
-                  <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{row.notes || '-'}</td>
-                </tr>
-              ))}
+              {sortedOpenBills.map((row) => {
+                const billId = Number(row.bill_id)
+                const isExpanded = Boolean(expandedOpenBills[billId])
+                return (
+                  <Fragment key={row.bill_id}>
+                    <tr className={billStatusClass(row.payment_status)}>
+                      <td className="expand-col">
+                        <IconButton
+                          size="small"
+                          onClick={() => setExpandedOpenBills((prev) => ({ ...prev, [billId]: !prev[billId] }))}
+                        >
+                          {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
+                        </IconButton>
+                      </td>
+                      <td>
+                        <Stack gap={0.25}>
+                          <Link
+                            component="button"
+                            underline="hover"
+                            onClick={() => openBillDetail(billId)}
+                            sx={{ fontWeight: 800 }}
+                          >
+                            Bill #{row.bill_id}
+                          </Link>
+                        </Stack>
+                      </td>
+                      <td className="date-col">
+                        <Typography variant="body2">{row.bill_date || '-'}</Typography>
+                      </td>
+                      <td className="amount-col"><MoneyCell value={row.total_amount} tone="total" /></td>
+                      <td className="amount-col"><MoneyCell value={row.paid_amount} tone="paid" /></td>
+                      <td className="amount-col"><MoneyCell value={row.writeoff_amount} tone="writeoff" /></td>
+                      <td className="amount-col"><MoneyCell value={row.outstanding_amount} tone="pending" strong /></td>
+                      <td>{statusChip(row.payment_status)}</td>
+                      <td className="notes-col">
+                        <Typography variant="body2" className="clip-text">{row.notes || '-'}</Typography>
+                      </td>
+                    </tr>
+                    {isExpanded ? (
+                      <tr className="detail-row">
+                        <td colSpan={9}>
+                          <Stack gap={1}>
+                            <Typography variant="body2" sx={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
+                              <b>Notes:</b> {row.notes || '-'}
+                            </Typography>
+                            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap" useFlexGap>
+                              <Typography variant="caption">Bill date: <b>{row.bill_date || '-'}</b></Typography>
+                              <Typography variant="caption">Total: <b>Rs {money(row.total_amount)}</b></Typography>
+                              <Typography variant="caption">Paid: <b>Rs {money(row.paid_amount)}</b></Typography>
+                              <Typography variant="caption">Write-off: <b>Rs {money(row.writeoff_amount)}</b></Typography>
+                              <Typography variant="caption">Pending: <b>Rs {money(row.outstanding_amount)}</b></Typography>
+                            </Stack>
+                          </Stack>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
+                )
+              })}
               {openBills.length === 0 && (
                 <tr>
-                  <td colSpan={5}>
+                  <td colSpan={9}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No open bills for this customer.' : 'Select a customer to view open bills.'}
                     </Box>
@@ -581,51 +775,85 @@ export default function CustomerLedgerPage() {
 
       <Paper sx={{ p: 2 }}>
         <Typography variant="h6" sx={{ mb: 2 }}>Bill Ledger</Typography>
-        <Box sx={{ overflowX: 'auto' }}>
-          <table className="table">
+        <Box sx={billGridSx}>
+          <table className="table customer-ledger-grid">
             <thead>
               <tr>
-                <th>Bill</th>
-                <th>Bill Value</th>
-                <th>Settled</th>
-                <th>Balance</th>
-                <th>Status</th>
-                <th>Notes</th>
+                <th className="expand-col"></th>
+                <SortableHeader label="Bill" sortKey="bill_id" sort={ledgerSort} onSort={(key) => setLedgerSort((prev) => nextSort(prev, key))} className="bill-col" />
+                <SortableHeader label="Date" sortKey="bill_date" sort={ledgerSort} onSort={(key) => setLedgerSort((prev) => nextSort(prev, key))} className="date-col" />
+                <SortableHeader label="Total" sortKey="total_amount" sort={ledgerSort} onSort={(key) => setLedgerSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Paid" sortKey="paid_amount" sort={ledgerSort} onSort={(key) => setLedgerSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Write-off" sortKey="writeoff_amount" sort={ledgerSort} onSort={(key) => setLedgerSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Pending" sortKey="outstanding_amount" sort={ledgerSort} onSort={(key) => setLedgerSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Status" sortKey="payment_status" sort={ledgerSort} onSort={(key) => setLedgerSort((prev) => nextSort(prev, key))} className="status-col" />
+                <th className="notes-col">Notes</th>
               </tr>
             </thead>
             <tbody>
-              {ledgerRows.map((row) => (
-                <tr key={row.bill_id} style={{ background: row.payment_status === 'PAID' ? '#f1f8e9' : row.payment_status === 'PARTIAL' ? '#fff8e1' : '#ffebee' }}>
-                  <td>
-                    <Stack gap={0.25}>
-                      <Link
-                        component="button"
-                        underline="hover"
-                        onClick={() => openBillDetail(Number(row.bill_id))}
-                        sx={{ fontWeight: 800 }}
-                      >
-                        Bill #{row.bill_id}
-                      </Link>
-                      <Typography variant="caption" color="text.secondary">{row.bill_date}</Typography>
-                    </Stack>
-                  </td>
-                  <td><Typography fontWeight={800}>Rs {money(row.total_amount)}</Typography></td>
-                  <td>
-                    <Stack gap={0.25}>
-                      <Typography variant="body2">Paid Rs {money(row.paid_amount)}</Typography>
-                      {Number(row.writeoff_amount || 0) > 0 ? (
-                        <Typography variant="caption" color="text.secondary">Write-off Rs {money(row.writeoff_amount)}</Typography>
-                      ) : null}
-                    </Stack>
-                  </td>
-                  <td><Typography fontWeight={900}>Rs {money(row.outstanding_amount)}</Typography></td>
-                  <td>{statusChip(row.payment_status)}</td>
-                  <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{row.notes || '-'}</td>
-                </tr>
-              ))}
+              {sortedLedgerRows.map((row) => {
+                const billId = Number(row.bill_id)
+                const isExpanded = Boolean(expandedLedgerRows[billId])
+                return (
+                  <Fragment key={row.bill_id}>
+                    <tr className={billStatusClass(row.payment_status)}>
+                      <td className="expand-col">
+                        <IconButton
+                          size="small"
+                          onClick={() => setExpandedLedgerRows((prev) => ({ ...prev, [billId]: !prev[billId] }))}
+                        >
+                          {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
+                        </IconButton>
+                      </td>
+                      <td>
+                        <Stack gap={0.25}>
+                          <Link
+                            component="button"
+                            underline="hover"
+                            onClick={() => openBillDetail(billId)}
+                            sx={{ fontWeight: 800 }}
+                          >
+                            Bill #{row.bill_id}
+                          </Link>
+                        </Stack>
+                      </td>
+                      <td className="date-col">
+                        <Typography variant="body2">{row.bill_date || '-'}</Typography>
+                      </td>
+                      <td className="amount-col"><MoneyCell value={row.total_amount} tone="total" /></td>
+                      <td className="amount-col"><MoneyCell value={row.paid_amount} tone="paid" /></td>
+                      <td className="amount-col"><MoneyCell value={row.writeoff_amount} tone="writeoff" /></td>
+                      <td className="amount-col"><MoneyCell value={row.outstanding_amount} tone="pending" strong /></td>
+                      <td>{statusChip(row.payment_status)}</td>
+                      <td className="notes-col">
+                        <Typography variant="body2" className="clip-text">{row.notes || '-'}</Typography>
+                      </td>
+                    </tr>
+                    {isExpanded ? (
+                      <tr className="detail-row">
+                        <td colSpan={9}>
+                          <Stack gap={1}>
+                            <Typography variant="body2" sx={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
+                              <b>Notes:</b> {row.notes || '-'}
+                            </Typography>
+                            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap" useFlexGap>
+                              <Typography variant="caption">Customer: <b>{row.customer_name || '-'}</b></Typography>
+                              <Typography variant="caption">Bill date: <b>{row.bill_date || '-'}</b></Typography>
+                              <Typography variant="caption">Total: <b>Rs {money(row.total_amount)}</b></Typography>
+                              <Typography variant="caption">Paid: <b>Rs {money(row.paid_amount)}</b></Typography>
+                              <Typography variant="caption">Write-off: <b>Rs {money(row.writeoff_amount)}</b></Typography>
+                              <Typography variant="caption">Pending: <b>Rs {money(row.outstanding_amount)}</b></Typography>
+                            </Stack>
+                          </Stack>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
+                )
+              })}
               {ledgerRows.length === 0 && (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={9}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No debtor ledger rows for this customer yet.' : 'Select a customer to view the ledger.'}
                     </Box>
@@ -639,67 +867,95 @@ export default function CustomerLedgerPage() {
 
       <Paper sx={{ p: 2 }}>
         <Typography variant="h6" sx={{ mb: 2 }}>Receipt History</Typography>
-        <Box sx={{ overflowX: 'auto' }}>
-          <table className="table">
+        <Box sx={receiptGridSx}>
+          <table className="table customer-ledger-grid">
             <thead>
               <tr>
-                <th>Receipt</th>
-                <th>Mode</th>
-                <th>Total</th>
-                <th>Applied</th>
-                <th>Allocation</th>
-                <th style={{ width: 72 }}></th>
+                <th className="expand-col"></th>
+                <SortableHeader label="Receipt" sortKey="receiptId" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="receipt-col" />
+                <SortableHeader label="Date" sortKey="when" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="date-col" />
+                <SortableHeader label="Mode" sortKey="mode" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="mode-col" />
+                <SortableHeader label="Cash" sortKey="cash" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Online" sortKey="online" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Total" sortKey="total" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Applied" sortKey="adjusted" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="On acct" sortKey="onAccount" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <th className="allocation-col">Allocation</th>
+                <th className="action-col"></th>
               </tr>
             </thead>
             <tbody>
-              {receiptHistory.map((receipt) => {
+              {sortedReceiptHistory.map((receipt) => {
+                const isExpanded = Boolean(expandedReceipts[receipt.id])
                 return (
-                  <tr key={receipt.id} style={{ background: Number(receipt.onAccount || 0) > 0 ? '#e3f2fd' : '#f1f8e9' }}>
-                    <td>
-                      <Stack gap={0.25}>
-                        <Typography fontWeight={800}>{receipt.source} #{receipt.receiptId}</Typography>
-                        <Typography variant="caption" color="text.secondary">{receipt.when}</Typography>
-                      </Stack>
-                    </td>
-                    <td>
-                      <Stack gap={0.5}>
+                  <Fragment key={receipt.id}>
+                    <tr className={Number(receipt.onAccount || 0) > 0 ? 'receipt-on-account' : 'receipt-applied'}>
+                      <td className="expand-col">
+                        <IconButton
+                          size="small"
+                          onClick={() => setExpandedReceipts((prev) => ({ ...prev, [receipt.id]: !prev[receipt.id] }))}
+                        >
+                          {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
+                        </IconButton>
+                      </td>
+                      <td>
+                        <Stack gap={0.25}>
+                          <Typography fontWeight={800}>{receipt.source} #{receipt.receiptId}</Typography>
+                        </Stack>
+                      </td>
+                      <td className="date-col">
+                        <Typography variant="body2">{receipt.when || '-'}</Typography>
+                      </td>
+                      <td>
                         {modeChip(receipt.mode)}
-                        <Typography variant="caption" color="text.secondary">
-                          Cash Rs {money(receipt.cash)} | Online Rs {money(receipt.online)}
-                        </Typography>
-                      </Stack>
-                    </td>
-                    <td><Typography fontWeight={900}>Rs {money(receipt.total)}</Typography></td>
-                    <td>
-                      <Stack gap={0.25}>
-                        <Typography fontWeight={800}>Rs {money(receipt.adjusted)}</Typography>
-                        {Number(receipt.onAccount || 0) > 0 ? (
-                          <Chip size="small" color="info" variant="outlined" label={`On account Rs ${money(receipt.onAccount)}`} sx={{ fontWeight: 700, alignSelf: 'flex-start' }} />
-                        ) : null}
-                      </Stack>
-                    </td>
-                    <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
-                      <Stack gap={0.5}>
-                        <Typography variant="body2">{renderBillRefs(receipt.allocation)}</Typography>
-                        {receipt.note ? <Typography variant="caption" color="text.secondary">{receipt.note}</Typography> : null}
-                      </Stack>
-                    </td>
-                    <td align="right">
-                      <IconButton
-                        size="small"
-                        color="error"
-                        onClick={() => setDeleteTarget(receipt)}
-                        disabled={deleteReceiptM.isPending}
-                      >
-                        <DeleteIcon fontSize="small" />
-                      </IconButton>
-                    </td>
-                  </tr>
+                      </td>
+                      <td className="amount-col"><MoneyCell value={receipt.cash} /></td>
+                      <td className="amount-col"><MoneyCell value={receipt.online} /></td>
+                      <td className="amount-col"><MoneyCell value={receipt.total} tone="total" strong /></td>
+                      <td className="amount-col"><MoneyCell value={receipt.adjusted} tone="paid" /></td>
+                      <td className="amount-col"><MoneyCell value={receipt.onAccount} tone={Number(receipt.onAccount || 0) > 0 ? 'total' : 'paid'} /></td>
+                      <td className="allocation-col">
+                        <Typography variant="body2" className="clip-text">{receipt.allocation}</Typography>
+                      </td>
+                      <td align="right">
+                        <IconButton
+                          size="small"
+                          color="error"
+                          onClick={() => setDeleteTarget(receipt)}
+                          disabled={deleteReceiptM.isPending}
+                        >
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      </td>
+                    </tr>
+                    {isExpanded ? (
+                      <tr className="detail-row">
+                        <td colSpan={11}>
+                          <Stack gap={1}>
+                            <Typography variant="body2" sx={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
+                              <b>Allocation:</b> {renderBillRefs(receipt.allocation)}
+                            </Typography>
+                            {receipt.note ? (
+                              <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
+                                <b>Note:</b> {receipt.note}
+                              </Typography>
+                            ) : null}
+                            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap" useFlexGap>
+                              <Typography variant="caption">Cash: <b>Rs {money(receipt.cash)}</b></Typography>
+                              <Typography variant="caption">Online: <b>Rs {money(receipt.online)}</b></Typography>
+                              <Typography variant="caption">Applied: <b>Rs {money(receipt.adjusted)}</b></Typography>
+                              <Typography variant="caption">On account: <b>Rs {money(receipt.onAccount)}</b></Typography>
+                            </Stack>
+                          </Stack>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
                 )
               })}
               {receiptHistory.length === 0 && (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={11}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No receipts recorded for this customer yet.' : 'Select a customer to view receipts.'}
                     </Box>
@@ -941,6 +1197,9 @@ export default function CustomerLedgerPage() {
                   Paid Amount: <b>{money(billDetail.paid_amount || 0)}</b>
                 </Typography>
                 <Typography>
+                  Write-off Amount: <b>{money(billDetail.writeoff_amount || 0)}</b>
+                </Typography>
+                <Typography>
                   Pending Amount:{' '}
                   <b>{money(Math.max(0, Number(billDetail.total_amount || 0) - Number(billDetail.paid_amount || 0) - Number(billDetail.writeoff_amount || 0)))}</b>
                 </Typography>
@@ -986,8 +1245,13 @@ export default function CustomerLedgerPage() {
 
   function statusChip(status: string) {
     const normalized = String(status || 'UNPAID').toUpperCase()
-    const color = normalized === 'PAID' ? 'success' : normalized === 'PARTIAL' ? 'warning' : 'error'
-    return <Chip size="small" color={color as any} variant={normalized === 'PAID' ? 'filled' : 'outlined'} label={normalized} sx={{ fontWeight: 800 }} />
+    const sx =
+      normalized === 'PAID'
+        ? { bgcolor: 'success.main', color: '#fff' }
+        : normalized === 'PARTIAL'
+          ? { bgcolor: 'warning.main', color: '#fff' }
+          : { bgcolor: 'error.main', color: '#fff' }
+    return <Chip size="small" label={normalized} sx={{ ...sx, fontWeight: 800 }} />
   }
 
   function modeChip(receiptMode: string) {

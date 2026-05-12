@@ -21,7 +21,7 @@ import {
   useMediaQuery,
 } from '@mui/material'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery, useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import {
@@ -43,6 +43,7 @@ import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 
 import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
+import { PRODUCT_SEARCH_MIN_CHARS } from '../../lib/constants'
 import {
   createBrand,
   createCategory,
@@ -171,7 +172,6 @@ export default function Inventory() {
   })
   const [adjustId, setAdjustId] = useState<number | null>(null)
   const [adjustName, setAdjustName] = useState<string>('')
-  const loadMoreRef = useRef<HTMLDivElement | null>(null)
   const inventoryUrlSyncRef = useRef<string | null>(null)
 
   // ✅ Debounce typing to avoid calling API on every keystroke
@@ -196,7 +196,7 @@ export default function Inventory() {
 
   useEffect(() => {
     const next = new URLSearchParams()
-    if (debouncedQ) next.set('q', debouncedQ)
+    if (debouncedQ.length >= PRODUCT_SEARCH_MIN_CHARS) next.set('q', debouncedQ)
     if (debouncedRackQ) next.set('rack', debouncedRackQ)
     if (brandFilter) next.set('brand', brandFilter)
     if (categoryFilter) next.set('category', categoryFilter)
@@ -209,25 +209,27 @@ export default function Inventory() {
 
   const qc = useQueryClient()
   const LIMIT = 50
+  const [pageOffset, setPageOffset] = useState(0)
+  const effectiveInventorySearch = debouncedQ.length >= PRODUCT_SEARCH_MIN_CHARS ? debouncedQ : ''
 
-  // ✅ Infinite inventory query (loads 50 at a time)
+  useEffect(() => {
+    setPageOffset(0)
+  }, [brandFilter, categoryFilter, debouncedRackQ, effectiveInventorySearch])
+
+  // ✅ Paged inventory query (keeps each fetch to 50 rows)
   const {
     data,
     isLoading,
     isFetching,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery({
-    queryKey: ['inventory-items', debouncedQ, debouncedRackQ, brandFilter, categoryFilter],
-    initialPageParam: 0,
-    queryFn: async ({ pageParam }) => {
+  } = useQuery({
+    queryKey: ['inventory-items', effectiveInventorySearch, debouncedRackQ, brandFilter, categoryFilter, pageOffset],
+    queryFn: async () => {
       try {
         const rackFilter =
           debouncedRackQ !== '' && /^\d+$/.test(debouncedRackQ)
             ? Number(debouncedRackQ)
             : undefined
-        return await listItemsPage(debouncedQ, LIMIT, pageParam, rackFilter, {
+        return await listItemsPage(effectiveInventorySearch, LIMIT, pageOffset, rackFilter, {
           brand: brandFilter || undefined,
           category_id: categoryFilter ? Number(categoryFilter) : undefined,
         })
@@ -237,10 +239,14 @@ export default function Inventory() {
         throw err
       }
     },
-    getNextPageParam: (lastPage) => lastPage.next_offset ?? undefined,
   })
 
-  const rows = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data])
+  const rows = useMemo(() => data?.items ?? [], [data])
+  const totalRows = Number(data?.total || 0)
+  const hasPrevPage = pageOffset > 0
+  const hasNextPage = data?.next_offset != null
+  const pageStart = rows.length > 0 ? pageOffset + 1 : 0
+  const pageEnd = rows.length > 0 ? pageOffset + rows.length : 0
   const hasFilters = q.trim() !== '' || rackQ.trim() !== '' || brandFilter !== '' || categoryFilter !== ''
 
   const brandsQ = useQuery({ queryKey: ['inventory-brands'], queryFn: () => fetchBrands({ active_only: true }) })
@@ -257,21 +263,10 @@ export default function Inventory() {
   }, [categoriesQ.data])
 
   useEffect(() => {
-    const el = loadMoreRef.current
-    if (!el) return
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (!entries[0]?.isIntersecting) return
-        if (!hasNextPage || isFetchingNextPage) return
-        void fetchNextPage()
-      },
-      { root: null, rootMargin: '0px 0px 120px 0px', threshold: 0 }
-    )
-
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage])
+    if (!data || isFetching || pageOffset === 0) return
+    if (totalRows === 0 || pageOffset < totalRows) return
+    setPageOffset(Math.max(0, Math.floor((totalRows - 1) / LIMIT) * LIMIT))
+  }, [data, isFetching, pageOffset, totalRows])
 
   // ✅ Group rows by (name + brand) ALWAYS (includes stock=0 batches)
   const groups = useMemo(() => {
@@ -533,7 +528,7 @@ export default function Inventory() {
 
   function currentInventoryPath() {
     const params = new URLSearchParams()
-    if (q.trim()) params.set('q', q.trim())
+    if (q.trim().length >= PRODUCT_SEARCH_MIN_CHARS) params.set('q', q.trim())
     if (rackQ.trim()) params.set('rack', rackQ.trim())
     if (brandFilter) params.set('brand', brandFilter)
     if (categoryFilter) params.set('category', categoryFilter)
@@ -566,6 +561,41 @@ export default function Inventory() {
 
   function openStockCardForBatch(group: any, item: any) {
     navigate(stockCardPathForBatch(group, item))
+  }
+
+  function renderPageControls() {
+    return (
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        justifyContent="space-between"
+        alignItems={{ xs: 'stretch', sm: 'center' }}
+        gap={1}
+        sx={{ py: 1 }}
+      >
+        <Typography variant="body2" color="text.secondary">
+          Showing {pageStart}-{pageEnd} of {totalRows}
+          {isFetching && !isLoading ? ' • Refreshing...' : ''}
+        </Typography>
+        <Stack direction="row" gap={1} justifyContent={{ xs: 'space-between', sm: 'flex-end' }}>
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={!hasPrevPage || isFetching}
+            onClick={() => setPageOffset((prev) => Math.max(0, prev - LIMIT))}
+          >
+            Previous
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={!hasNextPage || isFetching}
+            onClick={() => setPageOffset(data?.next_offset ?? pageOffset + LIMIT)}
+          >
+            Next
+          </Button>
+        </Stack>
+      </Stack>
+    )
   }
 
   return (
@@ -710,6 +740,7 @@ export default function Inventory() {
           <Loading />
         ) : (
           <>
+            {renderPageControls()}
             <Box
               component="div"
               sx={{
@@ -991,12 +1022,7 @@ export default function Inventory() {
                 </Typography>
               </Box>
             )}
-            <Box ref={loadMoreRef} sx={{ height: 1 }} />
-            {isFetchingNextPage && (
-              <Typography variant="body2" color="text.secondary" sx={{ pt: 1, textAlign: 'center' }}>
-                Loading more...
-              </Typography>
-            )}
+            {renderPageControls()}
           </>
         )}
       </Paper>

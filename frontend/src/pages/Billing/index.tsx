@@ -29,7 +29,7 @@ import ItemPicker from '../../components/billing/ItemPicker'
 import { createBill } from '../../services/billing'
 import { createCustomer, fetchCustomers } from '../../services/customers'
 import type { Customer } from '../../lib/types'
-import { listItems } from '../../services/inventory'
+import { listItemsPage } from '../../services/inventory'
 import { openPack } from '../../services/lots'
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
@@ -227,11 +227,13 @@ export default function Billing() {
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
   const gridSearchTerm = gridSearch.trim()
   const canSearchGridItems = gridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
-  const { data: inventoryItems = [], isFetching: isFetchingGridItems } = useQuery({
+  const BILLING_ITEM_PAGE_SIZE = 50
+  const { data: inventoryItemsPage, isFetching: isFetchingGridItems } = useQuery({
     queryKey: ['billing-grid-items', gridSearchTerm],
-    queryFn: () => listItems(gridSearchTerm),
+    queryFn: () => listItemsPage(gridSearchTerm, BILLING_ITEM_PAGE_SIZE, 0),
     enabled: canSearchGridItems,
   })
+  const inventoryItems = canSearchGridItems ? inventoryItemsPage?.items || [] : []
   const { data: customerOptions = [] } = useQuery({
     queryKey: ['billing-customers', customerQ],
     queryFn: () => fetchCustomers({ q: customerQ }),
@@ -311,11 +313,11 @@ export default function Billing() {
         packs_opened: packs,
         note: 'Opened from billing for loose sale',
       })
-      const freshRows = await listItems(String(item.name || ''))
+      const freshPage = await listItemsPage(String(item.name || ''), BILLING_ITEM_PAGE_SIZE, 0)
       return {
         rowIndex,
         packs,
-        loose: findOpenedLooseItem(freshRows as any[], item, event.loose_item_id),
+        loose: findOpenedLooseItem(freshPage.items as any[], item, event.loose_item_id),
       }
     },
     onSuccess: ({ loose, rowIndex, packs }) => {

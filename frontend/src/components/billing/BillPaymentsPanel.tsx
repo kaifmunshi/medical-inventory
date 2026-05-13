@@ -94,7 +94,6 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   }
 
   function openEditPayment(payment: BillPaymentRow) {
-    if (isPartyReceiptPayment(payment)) return
     setEditPaymentRow(payment)
     setPayMode((payment?.mode as any) || 'cash')
     setCash(Number(payment?.cash_amount || 0) || '')
@@ -104,7 +103,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   }
 
   function isPartyReceiptPayment(payment: BillPaymentRow) {
-    return /^party receipt #/i.test(String(payment?.note || '').trim())
+    return Boolean(payment?.is_receipt_managed) || /^party receipt #/i.test(String(payment?.note || '').trim())
   }
 
   function handleSplitCash(raw: string) {
@@ -255,41 +254,38 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                     <td>{p.mode || '-'}</td>
                     <td>{money(p.cash_amount)}</td>
                     <td>{money(p.online_amount)}</td>
-                    <td>Active</td>
+                    <td>{managedByReceipt ? 'Receipt' : 'Active'}</td>
                     <td style={{ minWidth: 220 }}>{p.note || ''}</td>
                     <td align="right">
-                      {!managedByReceipt ? (
-                        <Box
-                          sx={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'flex-end',
-                            gap: 0.25,
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          <Tooltip title="Edit payment" arrow>
-                            <span>
-                              <IconButton size="small" onClick={() => openEditPayment(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
-                                <EditOutlinedIcon fontSize="small" />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Tooltip title="Delete payment" arrow>
-                            <span>
-                              <IconButton size="small" onClick={() => setDeletePaymentRow(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="error" sx={{ p: 0.25 }}>
-                                <DeleteIcon fontSize="small" />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                        </Box>
-                      ) : null}
+                      <Box
+                        sx={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'flex-end',
+                          gap: 0.25,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        <Tooltip title="Edit payment" arrow>
+                          <span>
+                            <IconButton size="small" onClick={() => openEditPayment(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
+                              <EditOutlinedIcon fontSize="small" />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                        <Tooltip title="Delete payment" arrow>
+                          <span>
+                            <IconButton size="small" onClick={() => setDeletePaymentRow(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="error" sx={{ p: 0.25 }}>
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      </Box>
                     </td>
                   </tr>
                 )
               })}
               {deletedPayments.map((p) => {
-                const managedByReceipt = isPartyReceiptPayment(p)
                 return (
                   <tr key={p.id} style={{ opacity: 0.72 }}>
                     <td style={{ maxWidth: 120, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -303,15 +299,13 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                     </td>
                     <td style={{ minWidth: 220 }}>{p.note || ''}</td>
                     <td align="right">
-                      {!managedByReceipt ? (
-                        <Tooltip title="Recover payment" arrow>
-                          <span>
-                            <IconButton size="small" onClick={() => setRecoverPaymentRow(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
-                              <RestoreIcon fontSize="small" />
-                            </IconButton>
-                          </span>
-                        </Tooltip>
-                      ) : null}
+                      <Tooltip title="Recover payment" arrow>
+                        <span>
+                          <IconButton size="small" onClick={() => setRecoverPaymentRow(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
+                            <RestoreIcon fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
                     </td>
                   </tr>
                 )

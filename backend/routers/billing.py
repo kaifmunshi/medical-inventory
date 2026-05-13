@@ -14,7 +14,7 @@ from backend.db import get_session
 from backend.models import (
     Item, Bill, BillItem, BillPayment,
     BillCreate, BillOut, BillItemOut,
-    ReceiptBillAdjustment,
+    PartyReceipt, ReceiptBillAdjustment,
     StockMovement,  # ✅ NEW
 )
 from backend.inventory_lot_sync import item_stock_kind, item_stock_meta, sync_lot_quantity_for_item
@@ -150,12 +150,61 @@ def recalculate_bill_payment_state(session, bill: Bill) -> Dict[str, Any]:
     }
 
 
-def is_party_receipt_payment(session, payment_id: int) -> bool:
+def receipt_adjustment_for_payment(session, payment_id: int) -> Optional[ReceiptBillAdjustment]:
     return session.exec(
-        select(ReceiptBillAdjustment.id)
+        select(ReceiptBillAdjustment)
         .where(ReceiptBillAdjustment.bill_payment_id == int(payment_id))
         .limit(1)
-    ).first() is not None
+    ).first()
+
+
+def active_receipt_adjusted_total(session, receipt_id: int, *, exclude_adjustment_id: Optional[int] = None) -> float:
+    adjustments = session.exec(
+        select(ReceiptBillAdjustment).where(ReceiptBillAdjustment.receipt_id == int(receipt_id))
+    ).all()
+    total = 0.0
+    for adjustment in adjustments:
+        if exclude_adjustment_id is not None and int(adjustment.id or 0) == int(exclude_adjustment_id):
+            continue
+        if adjustment.bill_payment_id is not None:
+            payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+            if payment and bool(getattr(payment, "is_deleted", False)):
+                continue
+        total += as_f(adjustment.adjusted_amount)
+    return round2(total)
+
+
+def sync_party_receipt_unallocated(session, receipt_id: int) -> None:
+    receipt = session.get(PartyReceipt, int(receipt_id))
+    if not receipt:
+        return
+    adjusted = active_receipt_adjusted_total(session, int(receipt.id))
+    receipt.unallocated_amount = round2(max(0.0, as_f(receipt.total_amount) - adjusted))
+    session.add(receipt)
+
+
+def sync_receipt_adjustment_for_payment(session, payment: BillPayment, amount: float, *, restore_receipt: bool = False) -> None:
+    adjustment = receipt_adjustment_for_payment(session, int(payment.id or 0))
+    if not adjustment:
+        return
+    receipt = session.get(PartyReceipt, int(adjustment.receipt_id))
+    if not receipt:
+        return
+    proposed = round2(amount)
+    other_adjusted = active_receipt_adjusted_total(
+        session,
+        int(receipt.id),
+        exclude_adjustment_id=int(adjustment.id or 0),
+    )
+    if proposed > 0 and other_adjusted + proposed > round2(as_f(receipt.total_amount)) + 0.0001:
+        raise HTTPException(status_code=400, detail="Amount exceeds available amount on customer receipt")
+    adjustment.adjusted_amount = proposed
+    session.add(adjustment)
+    if restore_receipt and bool(getattr(receipt, "is_deleted", False)):
+        receipt.is_deleted = False
+        receipt.deleted_at = None
+        session.add(receipt)
+    sync_party_receipt_unallocated(session, int(receipt.id))
 
 
 def add_movement(
@@ -1340,8 +1389,6 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
         p = session.get(BillPayment, payment_id)
         if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Payment not found")
-        if is_party_receipt_payment(session, int(p.id)):
-            raise HTTPException(status_code=400, detail="This payment is managed by a customer receipt. Delete the receipt from Customer Ledger.")
 
         other_active_total = round2(
             sum(
@@ -1362,6 +1409,7 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
         p.note = payload.note
         p.is_writeoff = is_writeoff
         session.add(p)
+        sync_receipt_adjustment_for_payment(session, p, round2(cash + online + writeoff))
 
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
@@ -1396,8 +1444,10 @@ def list_bill_payments(bill_id: int):
             .order_by(BillPayment.id.desc())
         ).all()
 
-        return [
-            {
+        out = []
+        for p in pays:
+            adjustment = receipt_adjustment_for_payment(session, int(p.id or 0))
+            out.append({
                 "id": p.id,
                 "bill_id": p.bill_id,
                 "received_at": p.received_at,
@@ -1409,9 +1459,11 @@ def list_bill_payments(bill_id: int):
                 "is_writeoff": bool(getattr(p, "is_writeoff", False)),
                 "is_deleted": bool(getattr(p, "is_deleted", False)),
                 "deleted_at": getattr(p, "deleted_at", None),
-            }
-            for p in pays
-        ]
+                "is_receipt_managed": adjustment is not None,
+                "receipt_id": getattr(adjustment, "receipt_id", None) if adjustment else None,
+                "receipt_adjustment_id": getattr(adjustment, "id", None) if adjustment else None,
+            })
+        return out
 
 
 @router.delete("/{bill_id}/payments/{payment_id}")
@@ -1427,13 +1479,12 @@ def undo_bill_payment(bill_id: int, payment_id: int):
         p = session.get(BillPayment, payment_id)
         if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Payment not found")
-        if is_party_receipt_payment(session, int(p.id)):
-            raise HTTPException(status_code=400, detail="This payment is managed by a customer receipt. Delete the receipt from Customer Ledger.")
         assert_financial_year_unlocked(session, p.received_at, context="Bill payment delete")
 
         p.is_deleted = True
         p.deleted_at = now_ts()
         session.add(p)
+        sync_receipt_adjustment_for_payment(session, p, 0.0)
 
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
@@ -1456,13 +1507,17 @@ def recover_bill_payment(bill_id: int, payment_id: int):
         p = session.get(BillPayment, payment_id)
         if not p or int(p.bill_id) != int(bill_id) or not bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Deleted payment not found")
-        if is_party_receipt_payment(session, int(p.id)):
-            raise HTTPException(status_code=400, detail="This payment is managed by a customer receipt and cannot be recovered directly.")
         assert_financial_year_unlocked(session, p.received_at, context="Bill payment recover")
 
         p.is_deleted = False
         p.deleted_at = None
         session.add(p)
+        sync_receipt_adjustment_for_payment(
+            session,
+            p,
+            round2(as_f(p.cash_amount) + as_f(p.online_amount) + as_f(getattr(p, "writeoff_amount", 0.0))),
+            restore_receipt=True,
+        )
 
         result = recalculate_bill_payment_state(session, b)
         session.add(b)

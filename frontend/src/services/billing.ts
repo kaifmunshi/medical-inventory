@@ -174,6 +174,9 @@ export interface BillPaymentRow {
   is_writeoff: boolean
   is_deleted: boolean
   deleted_at?: string | null
+  is_receipt_managed?: boolean
+  receipt_id?: number | null
+  receipt_adjustment_id?: number | null
 }
 
 export async function listBillPayments(billId: number) {

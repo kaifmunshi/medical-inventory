@@ -196,6 +196,7 @@ export default function Billing() {
   const [discountDraftByRow, setDiscountDraftByRow] = useState<Record<number, string>>({})
   const [stockErrorByRow, setStockErrorByRow] = useState<Record<number, string>>({})
   const [gridSearch, setGridSearch] = useState('')
+  const [activeGridSearchRow, setActiveGridSearchRow] = useState<number | null>(null)
   const [pendingQtyFocusRow, setPendingQtyFocusRow] = useState<number | null>(null)
   const qtyInputRefs = useRef<Record<number, HTMLInputElement | null>>({})
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -226,7 +227,7 @@ export default function Billing() {
   // ✅ Beautiful confirm dialog for CASH
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
   const gridSearchTerm = gridSearch.trim()
-  const canSearchGridItems = gridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const canSearchGridItems = activeGridSearchRow !== null && gridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
   const BILLING_ITEM_PAGE_SIZE = 50
   const { data: inventoryItemsPage, isFetching: isFetchingGridItems } = useQuery({
     queryKey: ['billing-grid-items', gridSearchTerm],
@@ -808,6 +809,26 @@ export default function Billing() {
     })
   }
 
+  function rowSelectedOption(row: CartRow) {
+    if (Number(row.item_id) <= 0) return null
+    return {
+      id: row.item_id,
+      name: row.name,
+      brand: row.brand ?? '',
+      mrp: row.mrp,
+      stock: row.stock ?? 0,
+      expiry_date: row.expiry_date ?? null,
+      inventory_lot_id: row.inventory_lot_id ?? null,
+      opened_from_lot_id: row.opened_from_lot_id ?? null,
+      is_loose_stock: Boolean(row.is_loose_stock),
+      stock_unit_label: row.stock_unit_label ?? null,
+      parent_unit_name: row.parent_unit_name ?? null,
+      child_unit_name: row.child_unit_name ?? null,
+      conversion_qty: row.conversion_qty ?? null,
+      loose_sale_enabled: Boolean(row.loose_sale_enabled),
+    }
+  }
+
   function setQty(i: number, q: number) {
     setRows((prev) =>
       normalizeRows(
@@ -1166,50 +1187,50 @@ export default function Billing() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
+              {rows.map((r, i) => {
+                const selectedOption = rowSelectedOption(r)
+                const activeOptions = activeGridSearchRow === i ? inventoryItemsSorted : []
+                const rowOptions = selectedOption
+                  ? [
+                      selectedOption,
+                      ...activeOptions.filter((it: any) => Number(it.id) !== Number(selectedOption.id)),
+                    ]
+                  : activeOptions
+                return (
                 <tr key={i}>
                   <td>
                     <Autocomplete
                       size="small"
-                      options={inventoryItemsSorted}
-                      loading={canSearchGridItems && isFetchingGridItems}
+                      options={rowOptions}
+                      loading={activeGridSearchRow === i && canSearchGridItems && isFetchingGridItems}
                       value={
-                        inventoryItemsSorted.find((it: any) => Number(it.id) === Number(r.item_id)) ||
-                        (Number(r.item_id) > 0
-                          ? {
-                              id: r.item_id,
-                              name: r.name,
-                              brand: r.brand ?? '',
-                              mrp: r.mrp,
-                              stock: r.stock ?? 0,
-                              expiry_date: r.expiry_date ?? null,
-                              inventory_lot_id: r.inventory_lot_id ?? null,
-                              opened_from_lot_id: r.opened_from_lot_id ?? null,
-                              is_loose_stock: Boolean(r.is_loose_stock),
-                              stock_unit_label: r.stock_unit_label ?? null,
-                              parent_unit_name: r.parent_unit_name ?? null,
-                              child_unit_name: r.child_unit_name ?? null,
-                              conversion_qty: r.conversion_qty ?? null,
-                              loose_sale_enabled: Boolean(r.loose_sale_enabled),
-                            }
-                          : null)
+                        rowOptions.find((it: any) => Number(it.id) === Number(r.item_id)) ||
+                        selectedOption
                       }
                       getOptionLabel={(it: any) => `${it?.name || ''}`}
                       isOptionEqualToValue={(a: any, b: any) => Number(a?.id) === Number(b?.id)}
                       filterOptions={(options) => options}
+                      onOpen={() => setActiveGridSearchRow(i)}
                       onInputChange={(_e, val, reason) => {
                         if (reason === 'clear' || reason === 'reset') {
                           setGridSearch('')
                           return
                         }
-                        if (reason === 'input') setGridSearch(val || '')
+                        if (reason === 'input') {
+                          setActiveGridSearchRow(i)
+                          setGridSearch(val || '')
+                        }
                       }}
                       onChange={(_e, val) => {
                         selectItemAtRow(i, val)
+                        setActiveGridSearchRow(null)
                         setGridSearch('')
                       }}
-                      onClose={() => setGridSearch('')}
-                      noOptionsText={canSearchGridItems ? 'No items found' : PRODUCT_SEARCH_PROMPT}
+                      onClose={() => {
+                        setActiveGridSearchRow((prev) => (prev === i ? null : prev))
+                        setGridSearch('')
+                      }}
+                      noOptionsText={activeGridSearchRow === i && canSearchGridItems ? 'No products found' : PRODUCT_SEARCH_PROMPT}
                       ListboxProps={{ style: { maxHeight: 300 } }}
                       renderOption={(props, option: any) => (
                         <li
@@ -1264,7 +1285,8 @@ export default function Billing() {
                         <TextField
                           {...params}
                           size="small"
-                          placeholder="Search medicine..."
+                          label="Pick Product"
+                          placeholder="Type to search..."
                           sx={GRID_INPUT_SX}
                           helperText={
                             Number(r.item_id) > 0
@@ -1359,7 +1381,8 @@ export default function Billing() {
                     </IconButton>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
 
               {filledRowCount === 0 && (
                 <tr>

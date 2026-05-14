@@ -128,6 +128,35 @@ def _recalculate_bill_payment_state(session, bill: Bill) -> None:
         bill.is_credit = False
 
 
+def _sync_bill_payment_states(session, bills: List[Bill]) -> None:
+    changed = False
+    for bill in bills:
+        before = (
+            _round2(_as_float(getattr(bill, "payment_cash", 0.0))),
+            _round2(_as_float(getattr(bill, "payment_online", 0.0))),
+            _round2(_as_float(getattr(bill, "paid_amount", 0.0))),
+            _round2(_as_float(getattr(bill, "writeoff_amount", 0.0))),
+            str(getattr(bill, "payment_status", "") or ""),
+            bool(getattr(bill, "is_credit", False)),
+            getattr(bill, "paid_at", None),
+        )
+        _recalculate_bill_payment_state(session, bill)
+        after = (
+            _round2(_as_float(getattr(bill, "payment_cash", 0.0))),
+            _round2(_as_float(getattr(bill, "payment_online", 0.0))),
+            _round2(_as_float(getattr(bill, "paid_amount", 0.0))),
+            _round2(_as_float(getattr(bill, "writeoff_amount", 0.0))),
+            str(getattr(bill, "payment_status", "") or ""),
+            bool(getattr(bill, "is_credit", False)),
+            getattr(bill, "paid_at", None),
+        )
+        if after != before:
+            session.add(bill)
+            changed = True
+    if changed:
+        session.commit()
+
+
 def _sync_customer_debtor_parties(session) -> None:
     customers = session.exec(select(Customer).order_by(Customer.id.asc())).all()
     dirty = False
@@ -385,6 +414,7 @@ def debtor_ledger(party_id: int) -> List[DebtorLedgerRow]:
             .order_by(Bill.date_time.desc(), Bill.id.desc())
         )
         rows = session.exec(stmt).all()
+        _sync_bill_payment_states(session, rows)
         out: List[DebtorLedgerRow] = []
         for bill in rows:
             total = float(bill.total_amount or 0)
@@ -422,6 +452,7 @@ def debtor_open_bills(party_id: int) -> List[OpenBillOut]:
             .where(_customer_note_matches_expr(customer_name))
             .order_by(Bill.date_time.desc(), Bill.id.desc())
         ).all()
+        _sync_bill_payment_states(session, rows)
         out: List[OpenBillOut] = []
         for bill in rows:
             total = float(bill.total_amount or 0)

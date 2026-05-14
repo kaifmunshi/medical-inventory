@@ -343,6 +343,7 @@ class ReturnOut(SQLModel):
     date_time: str
     source_bill_id: Optional[int]
     subtotal_return: float
+    refund_mode: str = "cash"
     refund_cash: float
     refund_online: float
     notes: Optional[str] = None

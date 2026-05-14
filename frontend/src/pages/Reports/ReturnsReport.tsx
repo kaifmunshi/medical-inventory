@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Box,
+  Button,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -12,9 +13,10 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 
-import { listReturns, getReturn, getExchangeByReturn } from '../../services/returns'
+import { listReturns, getReturn, getExchangeByReturn, updateReturnRefundMode } from '../../services/returns'
+import { useToast } from '../../components/ui/Toaster'
 
 function toCSV(rows: string[][]) {
   return rows
@@ -58,6 +60,17 @@ function itemDisplayName(it: any) {
   return `${name} - ${itemKindLabel(it)}`
 }
 
+function inferReturnRefundMode(row: any) {
+  const explicit = String(row?.refund_mode || '').trim().toLowerCase()
+  if (explicit) return explicit
+  const cash = Number(row?.refund_cash || 0)
+  const online = Number(row?.refund_online || 0)
+  if (cash > 0 && online > 0) return 'split'
+  if (cash > 0) return 'cash'
+  if (online > 0) return 'online'
+  return 'credit'
+}
+
 export default function ReturnsReport(props: {
   from: string
   to: string
@@ -65,6 +78,8 @@ export default function ReturnsReport(props: {
   setExportDisabled: (v: boolean) => void
 }) {
   const { from, to, setExportFn, setExportDisabled } = props
+  const toast = useToast()
+  const queryClient = useQueryClient()
 
   // dialog
   const [open, setOpen] = useState(false)
@@ -102,6 +117,7 @@ export default function ReturnsReport(props: {
         linesCount: (r.items || []).length,
         itemsPreview: itemsPreview(r.items || []),
         refund: money(refund),
+        refundMode: inferReturnRefundMode(r),
         notes: r.notes || '',
       }
     })
@@ -125,12 +141,35 @@ export default function ReturnsReport(props: {
     setOpen(true)
   }
 
+  const mMoveRefundToCredit = useMutation({
+    mutationFn: async (returnId: number) =>
+      updateReturnRefundMode(returnId, {
+        refund_mode: 'credit',
+        refund_cash: 0,
+        refund_online: 0,
+      }),
+    onSuccess: async (updated) => {
+      setDetail({ kind: 'return', ...updated })
+      await qRets.refetch()
+      queryClient.invalidateQueries({ queryKey: ['rpt-sales'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-day'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-day'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
+      toast.push('Return refund moved to credit', 'success')
+    },
+    onError: (err: any) => {
+      toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to move refund to credit'), 'error')
+    },
+  })
+
   // export
   useEffect(() => {
     setExportDisabled(detailRows.length === 0)
     setExportFn(() => () => {
-      const header = ['Return ID', 'Date/Time', 'Lines', 'Refund', 'Notes']
-      const body = detailRows.map((r: any) => [r.id, r.date, r.linesCount, r.refund, r.notes])
+      const header = ['Return ID', 'Date/Time', 'Lines', 'Refund', 'Refund Mode', 'Notes']
+      const body = detailRows.map((r: any) => [r.id, r.date, r.linesCount, r.refund, r.refundMode, r.notes])
 
       const csv = toCSV([header, ...body])
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
@@ -153,6 +192,7 @@ export default function ReturnsReport(props: {
               <th>Date/Time</th>
               <th>Lines</th>
               <th>Refund</th>
+              <th>Refund Mode</th>
               <th>Notes</th>
             </tr>
           </thead>
@@ -170,13 +210,14 @@ export default function ReturnsReport(props: {
                 <td>{r.date}</td>
                 <td>{r.linesCount}</td>
                 <td>{r.refund}</td>
+                <td>{String(r.refundMode || '').toUpperCase()}</td>
                 <td>{r.notes}</td>
               </tr>
             ))}
 
             {detailRows.length === 0 && !qRets.isLoading && (
               <tr>
-                <td colSpan={5}>
+                <td colSpan={6}>
                   <Box p={2} color="text.secondary">
                     No data.
                   </Box>
@@ -315,6 +356,22 @@ export default function ReturnsReport(props: {
                 <Typography variant="subtitle1">
                   Date/Time: <b>{detail.date_time || detail.created_at || '-'}</b>
                 </Typography>
+              </Stack>
+
+              <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
+                <Typography>
+                  Refund Mode: <b>{String(inferReturnRefundMode(detail)).toUpperCase()}</b>
+                </Typography>
+                {inferReturnRefundMode(detail) !== 'credit' && detail.source_bill_id ? (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={() => mMoveRefundToCredit.mutate(Number(detail.id))}
+                    disabled={mMoveRefundToCredit.isPending}
+                  >
+                    Move Refund To Credit
+                  </Button>
+                ) : null}
               </Stack>
 
               <Divider />

@@ -16,7 +16,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import RestoreIcon from '@mui/icons-material/Restore'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   editBillPayment,
   getBill,
@@ -43,6 +43,7 @@ type Props = {
 
 export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   const { from: todayFrom } = todayRange()
+  const queryClient = useQueryClient()
   const [openPayDlg, setOpenPayDlg] = useState(false)
   const [payMode, setPayMode] = useState<'cash' | 'online' | 'split'>('cash')
   const [cash, setCash] = useState<number | ''>('')
@@ -68,11 +69,33 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   const activePayments = useMemo(() => payments.filter((p) => !p?.is_deleted), [payments])
   const deletedPayments = useMemo(() => payments.filter((p) => p?.is_deleted), [payments])
 
+  function invalidatePaymentConsumers() {
+    queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-day'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-payments-day'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-all-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-day'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
+    queryClient.invalidateQueries({ queryKey: ['dash-credit-pending-total'] })
+    queryClient.invalidateQueries({ queryKey: ['rpt-sales'] })
+  }
+
   async function syncBillAndPayments() {
     if (!bill?.id) return
     const nextBill = await getBill(Number(bill.id))
     await qPayments.refetch()
     await onBillUpdated?.(nextBill)
+    invalidatePaymentConsumers()
   }
 
   function resetPayForm() {

@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional, Dict
+from pydantic import BaseModel
 from sqlmodel import select
 from datetime import datetime
 from backend.controls import assert_financial_year_unlocked
@@ -28,6 +29,12 @@ def round2(x: float) -> float:
 ROUND_TOLERANCE = 5.0  # e.g., 104.35 → any refund between ~99.35 and ~109.35 is OK
 MONEY_EPSILON = 0.01   # allow 1 paisa drift between FE/BE rounding paths
 EXCHANGE_SETTLE_EPSILON = 0.05  # absorb small FE/BE rounding drift in exchange settlement
+
+
+class ReturnRefundUpdate(BaseModel):
+    refund_mode: str
+    refund_cash: float = 0.0
+    refund_online: float = 0.0
 
 
 def now_ts() -> str:
@@ -73,6 +80,69 @@ def return_item_to_out(session, row: ReturnItem) -> ReturnItemOut:
         quantity=row.quantity,
         line_total=row.line_total,
         **item_stock_meta(session, int(row.item_id or 0)),
+    )
+
+
+def infer_refund_mode(r: Return) -> str:
+    cash = round2(float(getattr(r, "refund_cash", 0.0) or 0.0))
+    online = round2(float(getattr(r, "refund_online", 0.0) or 0.0))
+    if cash > 0 and online > 0:
+        return "split"
+    if cash > 0:
+        return "cash"
+    if online > 0:
+        return "online"
+    return "credit"
+
+
+def apply_return_credit_to_bill(session, r: Return, old_credit_amount: float, new_credit_amount: float) -> None:
+    bill_id = int(getattr(r, "source_bill_id", 0) or 0)
+    delta = round2(float(new_credit_amount or 0.0) - float(old_credit_amount or 0.0))
+    if not bill_id or abs(delta) <= MONEY_EPSILON:
+        return
+
+    bill = session.get(Bill, bill_id)
+    if not bill:
+        raise HTTPException(status_code=404, detail="Source bill not found")
+    if is_deleted_bill(bill):
+        raise HTTPException(status_code=400, detail="Cannot adjust credit on deleted source bill")
+
+    next_total = round2(float(getattr(bill, "total_amount", 0.0) or 0.0) - delta)
+    if next_total < -MONEY_EPSILON:
+        raise HTTPException(status_code=400, detail="Credit adjustment exceeds bill total")
+    bill.total_amount = max(0.0, next_total)
+
+    covered = round2(
+        float(getattr(bill, "paid_amount", 0.0) or 0.0)
+        + float(getattr(bill, "writeoff_amount", 0.0) or 0.0)
+    )
+    if bill.total_amount <= 0 or covered >= bill.total_amount - MONEY_EPSILON:
+        bill.payment_status = "PAID"
+        bill.is_credit = False
+    elif covered > MONEY_EPSILON:
+        bill.payment_status = "PARTIAL"
+        bill.is_credit = True
+        bill.paid_at = None
+    else:
+        bill.payment_status = "UNPAID"
+        bill.is_credit = True
+        bill.paid_at = None
+    session.add(bill)
+
+
+def return_to_out(session, r: Return) -> ReturnOut:
+    items = session.exec(select(ReturnItem).where(ReturnItem.return_id == r.id)).all()
+    return ReturnOut(
+        id=r.id,
+        date_time=r.date_time,
+        source_bill_id=r.source_bill_id,
+        subtotal_return=r.subtotal_return,
+        refund_mode=infer_refund_mode(r),
+        refund_cash=r.refund_cash,
+        refund_online=r.refund_online,
+        notes=r.notes,
+        rounding_adjustment=getattr(r, "rounding_adjustment", 0.0),
+        items=[return_item_to_out(session, i) for i in items],
     )
 
 
@@ -138,20 +208,7 @@ def list_returns(
 
         out: List[ReturnOut] = []
         for r in rows:
-            items = session.exec(select(ReturnItem).where(ReturnItem.return_id == r.id)).all()
-            out.append(
-                ReturnOut(
-                    id=r.id,
-                    date_time=r.date_time,
-                    source_bill_id=r.source_bill_id,
-                    subtotal_return=r.subtotal_return,
-                    refund_cash=r.refund_cash,
-                    refund_online=r.refund_online,
-                    notes=r.notes,
-                    rounding_adjustment=getattr(r, "rounding_adjustment", 0.0),
-                    items=[return_item_to_out(session, i) for i in items],
-                )
-            )
+            out.append(return_to_out(session, r))
         return out
 
 
@@ -230,18 +287,58 @@ def get_return(return_id: int):
         r = session.get(Return, return_id)
         if not r:
             raise HTTPException(status_code=404, detail="Return not found")
-        items = session.exec(select(ReturnItem).where(ReturnItem.return_id == r.id)).all()
-        return ReturnOut(
-            id=r.id,
-            date_time=r.date_time,
-            source_bill_id=r.source_bill_id,
-            subtotal_return=r.subtotal_return,
-            refund_cash=r.refund_cash,
-            refund_online=r.refund_online,
-            notes=r.notes,
-            rounding_adjustment=getattr(r, "rounding_adjustment", 0.0),
-            items=[return_item_to_out(session, i) for i in items],
-        )
+        return return_to_out(session, r)
+
+
+@router.patch("/{return_id}/refund", response_model=ReturnOut)
+def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
+    mode = str(payload.refund_mode or "").strip().lower()
+    if mode not in {"cash", "online", "split", "credit"}:
+        raise HTTPException(status_code=400, detail="Invalid refund_mode")
+    if payload.refund_cash < 0 or payload.refund_online < 0:
+        raise HTTPException(status_code=400, detail="Refund amounts cannot be negative")
+
+    with get_session() as session:
+        r = session.get(Return, return_id)
+        if not r:
+            raise HTTPException(status_code=404, detail="Return not found")
+        assert_financial_year_unlocked(session, r.date_time, context="Return refund edit")
+
+        ex = session.exec(select(ExchangeRecord).where(ExchangeRecord.return_id == return_id)).first()
+        if ex:
+            raise HTTPException(status_code=400, detail="Exchange return refunds cannot be edited here")
+
+        subtotal = round2(float(getattr(r, "subtotal_return", 0.0) or 0.0))
+        old_credit_amount = subtotal if infer_refund_mode(r) == "credit" else 0.0
+
+        if mode == "credit":
+            rc, ro = 0.0, 0.0
+            new_credit_amount = subtotal
+            if not r.source_bill_id:
+                raise HTTPException(status_code=400, detail="Credit refund requires a source bill")
+        elif mode == "cash":
+            rc, ro = round2(payload.refund_cash or subtotal), 0.0
+            new_credit_amount = 0.0
+            if abs(rc - subtotal) > ROUND_TOLERANCE:
+                raise HTTPException(status_code=400, detail="refund_cash deviates from return subtotal")
+        elif mode == "online":
+            rc, ro = 0.0, round2(payload.refund_online or subtotal)
+            new_credit_amount = 0.0
+            if abs(ro - subtotal) > ROUND_TOLERANCE:
+                raise HTTPException(status_code=400, detail="refund_online deviates from return subtotal")
+        else:
+            rc, ro = round2(payload.refund_cash), round2(payload.refund_online)
+            new_credit_amount = 0.0
+            if abs(round2(rc + ro) - subtotal) > ROUND_TOLERANCE:
+                raise HTTPException(status_code=400, detail="cash+online deviates from return subtotal")
+
+        apply_return_credit_to_bill(session, r, old_credit_amount, new_credit_amount)
+        r.refund_cash = rc
+        r.refund_online = ro
+        session.add(r)
+        session.commit()
+        session.refresh(r)
+        return return_to_out(session, r)
 
 
 @router.get("/{return_id}/exchange", response_model=dict)
@@ -278,6 +375,7 @@ def get_exchange_by_return(return_id: int):
                 "id": ret.id,
                 "date_time": ret.date_time,
                 "subtotal_return": ret.subtotal_return,
+                "refund_mode": infer_refund_mode(ret),
                 "refund_cash": ret.refund_cash,
                 "refund_online": ret.refund_online,
                 "items": [
@@ -504,42 +602,11 @@ def create_return(payload: ReturnCreate):
             session.rollback()
             raise HTTPException(status_code=500, detail=f"Failed to create return: {e}")
 
-        items = session.exec(select(ReturnItem).where(ReturnItem.return_id == r.id)).all()
-        # If refund was credited to the source bill (bill on credit), adjust that bill's outstanding
-        try:
-            if payload.refund_mode == "credit" and payload.source_bill_id:
-                bill = session.get(Bill, payload.source_bill_id)
-                if bill:
-                    # reduce total_amount by returned subtotal
-                    new_total = round2(float(getattr(bill, "total_amount", 0.0)) - float(subtotal_return))
-                    if new_total < 0:
-                        new_total = 0.0
-                    bill.total_amount = new_total
-
-                    # recompute payment_status based on paid_amount
-                    paid = float(getattr(bill, "paid_amount", 0.0) or 0.0)
-                    if paid >= bill.total_amount:
-                        bill.payment_status = "PAID"
-                    elif paid > 0:
-                        bill.payment_status = "PARTIAL"
-                    else:
-                        bill.payment_status = "UNPAID"
-
-                    session.add(bill)
-                    session.commit()
-        except Exception:
-            session.rollback()
-        return ReturnOut(
-            id=r.id,
-            date_time=r.date_time,
-            source_bill_id=r.source_bill_id,
-            subtotal_return=r.subtotal_return,
-            refund_cash=r.refund_cash,
-            refund_online=r.refund_online,
-            notes=r.notes,
-            rounding_adjustment=getattr(r, "rounding_adjustment", 0.0),
-            items=[return_item_to_out(session, i) for i in items],
-        )
+        # If refund was credited to the source bill, adjust that bill's outstanding.
+        if payload.refund_mode == "credit" and payload.source_bill_id:
+            apply_return_credit_to_bill(session, r, 0.0, subtotal_return)
+            session.commit()
+        return return_to_out(session, r)
 
 
 # -------------------- EXCHANGE --------------------
@@ -869,6 +936,7 @@ def create_exchange(payload: ExchangeCreate):
                 date_time=ret.date_time,
                 source_bill_id=ret.source_bill_id,
                 subtotal_return=ret.subtotal_return,
+                refund_mode=infer_refund_mode(ret),
                 refund_cash=ret.refund_cash,
                 refund_online=ret.refund_online,
                 notes=ret.notes,

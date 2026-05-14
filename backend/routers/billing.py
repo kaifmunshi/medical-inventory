@@ -567,7 +567,11 @@ def list_payments(
                 "mode": p.mode,
                 "cash_amount": round2(as_f(p.cash_amount)),
                 "online_amount": round2(as_f(p.online_amount)),
+                "writeoff_amount": round2(as_f(getattr(p, "writeoff_amount", 0.0))),
                 "note": p.note,
+                "is_writeoff": bool(getattr(p, "is_writeoff", False)),
+                "is_deleted": bool(getattr(p, "is_deleted", False)),
+                "deleted_at": getattr(p, "deleted_at", None),
             })
         return out
 

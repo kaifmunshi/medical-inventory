@@ -19,7 +19,7 @@ import {
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   editBillPayment,
   getBill,
@@ -148,6 +148,7 @@ function StatusChip({ status }: { status: any }) {
 
 export default function CreditBills() {
   const { from: todayFrom, to: todayTo } = todayRange()
+  const queryClient = useQueryClient()
 
   // ✅ UI inputs (user changes freely)
   const [uiFrom, setUiFrom] = useState(todayFrom)
@@ -188,6 +189,27 @@ export default function CreditBills() {
       ),
     [payBill]
   )
+
+  function invalidatePaymentConsumers() {
+    queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['bill-payments-panel'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-day'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-payments-day'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-all-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-day'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
+    queryClient.invalidateQueries({ queryKey: ['dash-credit-pending-total'] })
+    queryClient.invalidateQueries({ queryKey: ['rpt-sales'] })
+  }
 
   const qBills = useQuery({
     queryKey: ['credit-bills', appliedFrom, appliedTo],
@@ -511,6 +533,7 @@ export default function CreditBills() {
       setPayBill(null)
       await qBills.refetch()
       if (billId) await refreshDetailIfOpen(billId)
+      invalidatePaymentConsumers()
     },
   })
 
@@ -547,6 +570,7 @@ export default function CreditBills() {
       setEditPaymentRow(null)
       await qBills.refetch()
       if (billId) await refreshDetailIfOpen(billId)
+      invalidatePaymentConsumers()
     },
   })
 

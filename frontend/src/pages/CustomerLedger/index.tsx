@@ -400,6 +400,7 @@ export default function CustomerLedgerPage() {
 
     const directPaymentRows = ((allPaymentsQ.data || []) as any[])
       .filter((payment) => billIds.has(Number(payment.bill_id)))
+      .filter((payment) => !payment.is_writeoff && Number(payment.writeoff_amount || 0) <= 0)
       .filter((payment) => !/^party receipt #/i.test(String(payment.note || '').trim()))
       .map((payment) => {
         const cash = Number(payment.cash_amount || 0)

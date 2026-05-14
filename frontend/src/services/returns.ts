@@ -125,6 +125,18 @@ export async function getReturn(id: number) {
   return data as ReturnRecord
 }
 
+export async function updateReturnRefundMode(
+  id: number,
+  body: {
+    refund_mode: 'cash' | 'online' | 'credit' | 'split'
+    refund_cash?: number
+    refund_online?: number
+  },
+) {
+  const { data } = await api.patch(`/returns/${id}/refund`, body)
+  return data as ReturnRecord
+}
+
 export async function getExchangeByReturn(returnId: number) {
   const { data } = await api.get(`/returns/${returnId}/exchange`)
   return data as any

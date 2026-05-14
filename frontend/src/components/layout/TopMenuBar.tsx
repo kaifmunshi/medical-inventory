@@ -14,6 +14,7 @@ import {
 import {
   KeyboardDoubleArrowLeft,
   KeyboardDoubleArrowRight,
+  LockOutlined,
   Logout,
   Menu as MenuIcon,
   Settings as SettingsIcon,
@@ -73,7 +74,7 @@ export default function TopMenuBar({
 }: TopMenuBarProps) {
   const location = useLocation()
   const navigate = useNavigate()
-  const { currentUser, shortcuts, signOut, promptSwitchUser } = useUserSession()
+  const { currentUser, isLocked, shortcuts, signOut, promptSwitchUser } = useUserSession()
   const [userMenuAnchor, setUserMenuAnchor] = useState<HTMLElement | null>(null)
   const yearsQ = useQuery({
     queryKey: ['topbar-financial-years'],
@@ -90,8 +91,9 @@ export default function TopMenuBar({
   )
   const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
   const shortcutLinks = useMemo(
-    () =>
-      shortcuts
+    () => {
+      if (isLocked) return []
+      return shortcuts
         .map((shortcut) => {
           const item = allMenuItems.find((entry) => entry.to === shortcut.to)
           return item ? { ...shortcut, item } : null
@@ -104,12 +106,14 @@ export default function TopMenuBar({
             hotkey?: string | null
             item: (typeof allMenuItems)[number]
           } => Boolean(entry),
-        ),
-    [shortcuts],
+        )
+    },
+    [shortcuts, isLocked],
   )
 
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
+      if (isLocked) return
       if (isTypingTarget(event.target)) return
 
       const customMatch = shortcutLinks.find((entry) => hotkeyMatches(event, entry.hotkey))
@@ -127,7 +131,7 @@ export default function TopMenuBar({
 
     window.addEventListener('keydown', handleKeydown)
     return () => window.removeEventListener('keydown', handleKeydown)
-  }, [navigate, shortcutLinks])
+  }, [navigate, shortcutLinks, isLocked])
 
   function openUserMenu(event: MouseEvent<HTMLElement>) {
     setUserMenuAnchor(event.currentTarget)
@@ -199,6 +203,7 @@ export default function TopMenuBar({
             <Button
               onClick={openUserMenu}
               variant="text"
+              startIcon={isLocked ? <LockOutlined fontSize="small" /> : undefined}
               sx={{
                 px: 1,
                 minWidth: 0,
@@ -208,7 +213,7 @@ export default function TopMenuBar({
                 fontWeight: 700,
               }}
             >
-              {currentUser.name}
+              {isLocked ? `${currentUser.name} • Locked` : currentUser.name}
             </Button>
           ) : null}
         </Stack>
@@ -290,28 +295,32 @@ export default function TopMenuBar({
             </Typography>
           </Box>
         ) : null}
-        <MenuItem
-          dense
-          onClick={() => {
-            closeUserMenu()
-            promptSwitchUser()
-          }}
-          sx={{ gap: 1, py: 0.75 }}
-        >
-          <SwapHoriz fontSize="small" />
-          Switch User
-        </MenuItem>
-        <MenuItem
-          dense
-          onClick={() => {
-            closeUserMenu()
-            navigate('/settings')
-          }}
-          sx={{ gap: 1, py: 0.75 }}
-        >
-          <SettingsIcon fontSize="small" />
-          Settings
-        </MenuItem>
+        {!isLocked ? (
+          <MenuItem
+            dense
+            onClick={() => {
+              closeUserMenu()
+              promptSwitchUser()
+            }}
+            sx={{ gap: 1, py: 0.75 }}
+          >
+            <SwapHoriz fontSize="small" />
+            Switch User
+          </MenuItem>
+        ) : null}
+        {!isLocked ? (
+          <MenuItem
+            dense
+            onClick={() => {
+              closeUserMenu()
+              navigate('/settings')
+            }}
+            sx={{ gap: 1, py: 0.75 }}
+          >
+            <SettingsIcon fontSize="small" />
+            Settings
+          </MenuItem>
+        ) : null}
         <MenuItem
           dense
           onClick={() => {

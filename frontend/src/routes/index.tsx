@@ -1,6 +1,9 @@
 // frontend/src/routes/index.tsx
-import { Route, Routes, Navigate } from 'react-router-dom'
+import type { ReactNode } from 'react'
+import { Route, Routes, Navigate, useLocation } from 'react-router-dom'
 import AppLayout from '../components/layout/AppLayout'
+import { useUserSession } from '../components/session/UserSessionProvider'
+import { isLockAllowedPath } from '../lib/sessionLock'
 import Dashboard from '../pages/Dashboard'
 import Inventory from '../pages/Inventory'
 import StockCardPage from '../pages/Inventory/StockCard'
@@ -27,10 +30,28 @@ import LooseStockPage from '../pages/LooseStock'
 import SupplierLedgerPage from '../pages/SupplierLedger'
 import CustomerLedgerPage from '../pages/CustomerLedger'
 
+function SessionLockRoute({ children }: { children: ReactNode }) {
+  const location = useLocation()
+  const { isLocked } = useUserSession()
+
+  if (isLocked && !isLockAllowedPath(location.pathname)) {
+    return <Navigate to="/inventory" replace />
+  }
+
+  return <>{children}</>
+}
+
 export default function AppRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<AppLayout />}>
+      <Route
+        path="/"
+        element={(
+          <SessionLockRoute>
+            <AppLayout />
+          </SessionLockRoute>
+        )}
+      >
         <Route index element={<Dashboard />} />
         <Route path="inventory" element={<Inventory />} />
         <Route path="inventory/stock-card" element={<StockCardPage />} />

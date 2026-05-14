@@ -15,6 +15,8 @@ import {
 import { ExpandLess, ExpandMore } from '@mui/icons-material'
 import { NavLink, useLocation } from 'react-router-dom'
 import { appMenuGroups } from './menuConfig'
+import { useUserSession } from '../session/UserSessionProvider'
+import { isLockAllowedPath } from '../../lib/sessionLock'
 
 type SidebarProps = {
   mobileOpen?: boolean
@@ -30,6 +32,7 @@ function defaultExpanded() {
 
 export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed = false }: SidebarProps) {
   const { pathname } = useLocation()
+  const { isLocked } = useUserSession()
   const year = new Date().getFullYear()
   const [expanded, setExpanded] = useState<Record<string, boolean>>(defaultExpanded)
 
@@ -48,12 +51,25 @@ export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed =
     localStorage.setItem(STORAGE_KEY, JSON.stringify(expanded))
   }, [expanded])
 
+  const visibleMenuGroups = useMemo(() => {
+    if (!isLocked) return appMenuGroups
+    return appMenuGroups
+      .map((group) => {
+        const items = group.items.filter((item) => isLockAllowedPath(item.to))
+        if (items.length === 1) {
+          return { ...group, label: items[0].label, icon: items[0].icon, items }
+        }
+        return { ...group, items }
+      })
+      .filter((group) => group.items.length > 0)
+  }, [isLocked])
+
   const activeGroupKey = useMemo(() => {
-    const group = appMenuGroups.find((entry) =>
+    const group = visibleMenuGroups.find((entry) =>
       entry.items.some((item) => item.to === pathname || (item.to !== '/' && pathname.startsWith(item.to))),
     )
     return group?.key || ''
-  }, [pathname])
+  }, [pathname, visibleMenuGroups])
 
   useEffect(() => {
     if (activeGroupKey) {
@@ -105,7 +121,7 @@ export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed =
         </Box>
 
         <Box sx={{ overflowY: 'auto', pr: 0.5, mr: -0.5, flex: 1, minHeight: 0 }}>
-          {appMenuGroups.map((group, index) => {
+          {visibleMenuGroups.map((group, index) => {
             const isActiveGroup = activeGroupKey === group.key
             const isOpen = Boolean(expanded[group.key])
 

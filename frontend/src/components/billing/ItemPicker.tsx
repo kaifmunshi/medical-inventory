@@ -60,16 +60,27 @@ function buildGroupKey(it: any) {
   return `${name}__${brand}__${kind}`
 }
 
+function usesUnitSplit(it: any) {
+  return Boolean(it?.loose_sale_enabled || it?.is_loose_stock)
+}
+
 function itemKindLabel(it: any) {
+  if (!usesUnitSplit(it)) return ''
   return it?.is_loose_stock ? 'Loose' : 'Pack'
 }
 
 function itemUnitLabel(it: any) {
+  if (!usesUnitSplit(it)) return ''
   return String(
     it?.stock_unit_label ||
     (it?.is_loose_stock ? it?.child_unit_name : it?.parent_unit_name) ||
     (it?.is_loose_stock ? 'Unit' : 'Pack')
   )
+}
+
+function itemStockText(it: any) {
+  const unit = itemUnitLabel(it)
+  return `${Number(it?.stock || 0)}${unit ? ` ${unit}` : ''}`
 }
 
 function canOpenForLoose(it: any) {
@@ -141,6 +152,13 @@ export default function ItemPicker({
     queryKey: ['billing-items', debouncedSearchTerm, pageOffset],
     enabled: canSearchItems,
     queryFn: async ({ signal }) => {
+      if (
+        !open ||
+        debouncedSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS ||
+        searchTerm !== debouncedSearchTerm
+      ) {
+        return { items: [], total: 0, next_offset: null }
+      }
       try {
         return await listItemsPage(debouncedSearchTerm, ITEM_PAGE_SIZE, pageOffset, undefined, undefined, { signal })
       } catch (err: any) {
@@ -273,7 +291,7 @@ export default function ItemPicker({
       return
     }
     if (packs > stock) {
-      toast.push(`Only ${stock} ${itemUnitLabel(openDraftItem)} available to open.`, 'warning')
+      toast.push(`Only ${stock} ${itemUnitLabel(openDraftItem) || 'unit(s)'} available to open.`, 'warning')
       return
     }
     mOpenParentPacks.mutate({ item: openDraftItem, packs })
@@ -339,8 +357,8 @@ export default function ItemPicker({
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, width: '100%' }}>
                   <ListItemText
-                    primary={`${it.name} — ${itemKindLabel(it)} — ₹${it.mrp}`}
-                    secondary={`#${it.id} • Stock: ${it.stock} ${itemUnitLabel(it)}${it.brand ? ` • ${it.brand}` : ''} • Exp: ${formatExpiry(
+                    primary={`${it.name}${itemKindLabel(it) ? ` — ${itemKindLabel(it)}` : ''} — ₹${it.mrp}`}
+                    secondary={`#${it.id} • Stock: ${itemStockText(it)}${it.brand ? ` • ${it.brand}` : ''} • Exp: ${formatExpiry(
                       it.expiry_date
                     )}${Number(it.stock ?? 0) <= 0 ? ' • Out of stock' : ''}`}
                   />
@@ -386,20 +404,20 @@ export default function ItemPicker({
       </Dialog>
 
       <Dialog open={Boolean(openDraftItem)} onClose={() => setOpenDraftItem(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>Open {openDraftItem ? itemUnitLabel(openDraftItem) : 'Parent Unit'}</DialogTitle>
+        <DialogTitle>Open {openDraftItem ? itemUnitLabel(openDraftItem) || 'Parent Unit' : 'Parent Unit'}</DialogTitle>
         <DialogContent>
           <Box sx={{ pt: 1 }}>
             <TextField
               autoFocus
               fullWidth
-              label={`How many ${openDraftItem ? itemUnitLabel(openDraftItem) : 'parent units'}?`}
+              label={`How many ${openDraftItem ? itemUnitLabel(openDraftItem) || 'parent units' : 'parent units'}?`}
               type="number"
               value={openDraftQty}
               onChange={(e) => setOpenDraftQty(e.target.value)}
               inputProps={{ min: 1, max: Number(openDraftItem?.stock || 0), step: 1 }}
               helperText={
                 openDraftItem
-                  ? `Available ${itemUnitLabel(openDraftItem)}: ${Number(openDraftItem.stock || 0)}`
+                  ? `Available ${itemUnitLabel(openDraftItem) || 'unit(s)'}: ${Number(openDraftItem.stock || 0)}`
                   : ''
               }
             />

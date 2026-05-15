@@ -67,11 +67,17 @@ function toIsoDateOnly(exp?: string | null) {
   return s.length > 10 ? s.slice(0, 10) : s
 }
 
+function usesUnitSplit(it: any) {
+  return Boolean(it?.loose_sale_enabled || it?.is_loose_stock)
+}
+
 function itemKindLabel(it: any) {
+  if (!usesUnitSplit(it)) return ''
   return it?.is_loose_stock ? 'Loose' : 'Pack'
 }
 
 function itemUnitLabel(it: any) {
+  if (!usesUnitSplit(it)) return ''
   return String(
     it?.stock_unit_label ||
     (it?.is_loose_stock ? it?.child_unit_name : it?.parent_unit_name) ||
@@ -80,7 +86,8 @@ function itemUnitLabel(it: any) {
 }
 
 function itemStockText(it: any) {
-  return `${Number(it?.stock || 0)} ${itemUnitLabel(it)}`
+  const unit = itemUnitLabel(it)
+  return `${Number(it?.stock || 0)}${unit ? ` ${unit}` : ''}`
 }
 
 function canOpenForLoose(it: any) {
@@ -392,14 +399,30 @@ export default function BillEditDialog({
   const qEditItems = useQuery({
     queryKey: ['edit-bill-items', debouncedEditItemSearchTerm, editSuggestionPage],
     enabled: canSearchEditItems,
-    queryFn: ({ signal }) => listItemsPage(
-      debouncedEditItemSearchTerm,
-      EDIT_SUGGESTIONS_PAGE_SIZE,
-      editSuggestionPage * EDIT_SUGGESTIONS_PAGE_SIZE,
-      undefined,
-      undefined,
-      { signal },
-    ),
+    queryFn: async ({ signal }) => {
+      if (
+        !open ||
+        debouncedEditItemSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS ||
+        editItemSearchTerm !== debouncedEditItemSearchTerm
+      ) {
+        return { items: [], total: 0, next_offset: null }
+      }
+      try {
+        return await listItemsPage(
+          debouncedEditItemSearchTerm,
+          EDIT_SUGGESTIONS_PAGE_SIZE,
+          editSuggestionPage * EDIT_SUGGESTIONS_PAGE_SIZE,
+          undefined,
+          undefined,
+          { signal },
+        )
+      } catch (err: any) {
+        if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') throw err
+        const msg = err?.response?.data?.detail || err?.message || 'Failed to load products'
+        toast.push(String(msg), 'error')
+        throw err
+      }
+    },
     staleTime: 60_000,
     gcTime: 5 * 60_000,
     refetchOnWindowFocus: false,
@@ -509,7 +532,7 @@ export default function BillEditDialog({
       return
     }
     if (packs > stock) {
-      toast.push(`Only ${stock} ${itemUnitLabel(editOpenLooseDraft)} available to open.`, 'warning')
+      toast.push(`Only ${stock} ${itemUnitLabel(editOpenLooseDraft) || 'unit(s)'} available to open.`, 'warning')
       return
     }
     mEditOpenParentPacks.mutate({ item: editOpenLooseDraft, packs })
@@ -1019,7 +1042,7 @@ export default function BillEditDialog({
                   >
                     <Box sx={{ flex: 1, pr: 2 }}>
                       <Typography variant="body1" fontWeight={500} sx={{ mb: 0.25 }}>
-                        {it.name} - {itemKindLabel(it)}
+                        {it.name}{itemKindLabel(it) ? ` - ${itemKindLabel(it)}` : ''}
                       </Typography>
                       <Stack direction="row" gap={1.5} flexWrap="wrap" alignItems="center">
                         <Typography variant="caption" color="text.secondary">ID: <b>#{it.id}</b></Typography>
@@ -1088,7 +1111,10 @@ export default function BillEditDialog({
                           <Stack gap={0.25}>
                             <Typography variant="body2">{it.item_name}</Typography>
                             <Typography variant="caption" color="text.secondary">
-                              {[String(it.brand || '').trim(), `${itemKindLabel(it)}${it.stock !== undefined ? ` stock: ${itemStockText(it)}` : ''}`].filter(Boolean).join(' | ')}
+                              {[
+                                String(it.brand || '').trim(),
+                                `${itemKindLabel(it) ? `${itemKindLabel(it)} ` : ''}${it.stock !== undefined ? `stock: ${itemStockText(it)}` : ''}`,
+                              ].filter(Boolean).join(' | ')}
                             </Typography>
                           </Stack>
                         </td>
@@ -1266,20 +1292,20 @@ export default function BillEditDialog({
       </Dialog>
 
       <Dialog open={Boolean(editOpenLooseDraft)} onClose={() => setEditOpenLooseDraft(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>Open {editOpenLooseDraft ? itemUnitLabel(editOpenLooseDraft) : 'Parent Unit'}</DialogTitle>
+        <DialogTitle>Open {editOpenLooseDraft ? itemUnitLabel(editOpenLooseDraft) || 'Parent Unit' : 'Parent Unit'}</DialogTitle>
         <DialogContent>
           <Box sx={{ pt: 1 }}>
             <TextField
               autoFocus
               fullWidth
-              label={`How many ${editOpenLooseDraft ? itemUnitLabel(editOpenLooseDraft) : 'parent units'}?`}
+              label={`How many ${editOpenLooseDraft ? itemUnitLabel(editOpenLooseDraft) || 'parent units' : 'parent units'}?`}
               type="number"
               value={editOpenLooseQty}
               onChange={(e) => setEditOpenLooseQty(e.target.value)}
               inputProps={{ min: 1, max: Number(editOpenLooseDraft?.stock || 0), step: 1 }}
               helperText={
                 editOpenLooseDraft
-                  ? `Available ${itemUnitLabel(editOpenLooseDraft)}: ${Number(editOpenLooseDraft.stock || 0)}`
+                  ? `Available ${itemUnitLabel(editOpenLooseDraft) || 'unit(s)'}: ${Number(editOpenLooseDraft.stock || 0)}`
                   : ''
               }
             />

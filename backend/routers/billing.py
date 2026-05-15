@@ -1551,6 +1551,19 @@ def recover_bill_payment(bill_id: int, payment_id: int):
 
 # ------------------ Dashboard helper: Payments Summary (Collected Today) ------------------
 
+def _receipt_adjustment_payment_ids(session) -> set[int]:
+    return {
+        int(row.bill_payment_id)
+        for row in session.exec(
+            select(ReceiptBillAdjustment)
+            .join(PartyReceipt, PartyReceipt.id == ReceiptBillAdjustment.receipt_id)
+            .where(ReceiptBillAdjustment.bill_payment_id.is_not(None))
+            .where(PartyReceipt.is_deleted == False)  # noqa: E712
+        ).all()
+        if row.bill_payment_id is not None
+    }
+
+
 @router.get("/payments/summary")
 def payments_summary(
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
@@ -1564,6 +1577,7 @@ def payments_summary(
     So we aggregate from BillPayment.received_at (NOT from Bill rows).
     """
     with get_session() as session:
+        receipt_adjustment_payment_ids = _receipt_adjustment_payment_ids(session)
         stmt = (
             select(BillPayment)
             .join(Bill, Bill.id == BillPayment.bill_id)
@@ -1575,7 +1589,11 @@ def payments_summary(
         elif deleted_filter == "deleted":
             stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
 
-        pays = [p for p in session.exec(stmt).all() if not bool(getattr(p, "is_writeoff", False))]
+        pays = [
+            p for p in session.exec(stmt).all()
+            if not bool(getattr(p, "is_writeoff", False))
+            and int(getattr(p, "id", 0) or 0) not in receipt_adjustment_payment_ids
+        ]
 
         if from_date:
             pays = [p for p in pays if iso_date(p.received_at) >= from_date]
@@ -1584,13 +1602,23 @@ def payments_summary(
 
         cash = round2(sum(as_f(p.cash_amount) for p in pays))
         online = round2(sum(as_f(p.online_amount) for p in pays))
+        receipt_rows: List[PartyReceipt] = []
+        if deleted_filter != "deleted":
+            receipt_stmt = select(PartyReceipt).where(PartyReceipt.is_deleted == False)  # noqa: E712
+            if from_date:
+                receipt_stmt = receipt_stmt.where(PartyReceipt.received_at >= f"{from_date}T00:00:00")
+            if to_date:
+                receipt_stmt = receipt_stmt.where(PartyReceipt.received_at <= f"{to_date}T23:59:59")
+            receipt_rows = session.exec(receipt_stmt).all()
+        cash = round2(cash + sum(as_f(row.cash_amount) for row in receipt_rows))
+        online = round2(online + sum(as_f(row.online_amount) for row in receipt_rows))
         total = round2(cash + online)
 
         return {
             "cash_collected": cash,
             "online_collected": online,
             "total_collected": total,
-            "count": len(pays),
+            "count": len(pays) + len(receipt_rows),
         }
 
 
@@ -1617,8 +1645,12 @@ def payments_aggregate(
     with get_session() as session:
         if group_by == "month":
             period_expr = func.substr(BillPayment.received_at, 1, 7)  # YYYY-MM
+            receipt_period_expr = func.substr(PartyReceipt.received_at, 1, 7)
         else:
             period_expr = func.substr(BillPayment.received_at, 1, 10)  # YYYY-MM-DD
+            receipt_period_expr = func.substr(PartyReceipt.received_at, 1, 10)
+
+        receipt_adjustment_payment_ids = _receipt_adjustment_payment_ids(session)
 
         stmt = (
             select(
@@ -1636,6 +1668,8 @@ def payments_aggregate(
             .group_by(period_expr)
             .order_by(period_expr.asc())
         )
+        if receipt_adjustment_payment_ids:
+            stmt = stmt.where(BillPayment.id.notin_(receipt_adjustment_payment_ids))
 
         if deleted_filter == "active":
             stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
@@ -1644,18 +1678,53 @@ def payments_aggregate(
 
         rows = session.exec(stmt).all()
 
-        out: List[Dict[str, Any]] = []
+        period_map: Dict[str, Dict[str, Any]] = {}
         for r in rows:
             cash = round2(as_f(r.cash_total))
             online = round2(as_f(r.online_total))
-            total = round2(cash + online)
+            bucket = period_map.setdefault(
+                r.period,
+                {"period": r.period, "payments_count": 0, "cash_total": 0.0, "online_total": 0.0},
+            )
+            bucket["payments_count"] += int(r.payments_count or 0)
+            bucket["cash_total"] = round2(bucket["cash_total"] + cash)
+            bucket["online_total"] = round2(bucket["online_total"] + online)
 
+        if deleted_filter != "deleted":
+            receipt_stmt = (
+                select(
+                    receipt_period_expr.label("period"),
+                    func.count(PartyReceipt.id).label("payments_count"),
+                    func.coalesce(func.sum(PartyReceipt.cash_amount), 0).label("cash_total"),
+                    func.coalesce(func.sum(PartyReceipt.online_amount), 0).label("online_total"),
+                )
+                .select_from(PartyReceipt)
+                .where(PartyReceipt.is_deleted == False)  # noqa: E712
+                .where(PartyReceipt.received_at >= start_ts)
+                .where(PartyReceipt.received_at <= end_ts)
+                .group_by(receipt_period_expr)
+                .order_by(receipt_period_expr.asc())
+            )
+            for r in session.exec(receipt_stmt).all():
+                bucket = period_map.setdefault(
+                    r.period,
+                    {"period": r.period, "payments_count": 0, "cash_total": 0.0, "online_total": 0.0},
+                )
+                bucket["payments_count"] += int(r.payments_count or 0)
+                bucket["cash_total"] = round2(bucket["cash_total"] + as_f(r.cash_total))
+                bucket["online_total"] = round2(bucket["online_total"] + as_f(r.online_total))
+
+        out: List[Dict[str, Any]] = []
+        for period in sorted(period_map):
+            bucket = period_map[period]
+            cash = round2(bucket["cash_total"])
+            online = round2(bucket["online_total"])
             out.append({
-                "period": r.period,
-                "payments_count": int(r.payments_count or 0),
+                "period": period,
+                "payments_count": int(bucket["payments_count"] or 0),
                 "cash_total": cash,
                 "online_total": online,
-                "total_collected": total,
+                "total_collected": round2(cash + online),
             })
 
         return out

@@ -302,7 +302,7 @@ export default function CustomerLedgerPage() {
       }
     }) => createPartyReceipt(partyId, payload),
     onSuccess: () => {
-      toast.push('Receipt recorded and bill adjustments posted', 'success')
+      toast.push('Receipt recorded', 'success')
       queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
       queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] })
       queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
@@ -397,7 +397,7 @@ export default function CustomerLedgerPage() {
         lines.length > 0
           ? lines.map((line) => `Bill #${line.bill_id}: ${money(line.adjusted_amount)}`).join(', ')
           : Number(receipt.unallocated_amount || 0) > 0
-            ? 'On account'
+            ? 'Plain receipt'
             : '-'
       return {
         id: `party-${receipt.id}`,
@@ -445,6 +445,7 @@ export default function CustomerLedgerPage() {
     return [...partyReceiptRows, ...directPaymentRows].sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')))
   }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receipts])
   const receiptHistoryTotal = receiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
+  const receiptHistoryOnAccountTotal = receiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
 
   function billSortValue(row: DebtorLedgerRow | OpenBill, key: BillSortKey): string | number {
     if (key === 'payment_status') {
@@ -699,6 +700,7 @@ export default function CustomerLedgerPage() {
               <Chip color="warning" variant="outlined" label={`Return Credit Rs ${money(totalReturnCredit)}`} sx={{ fontWeight: 800 }} />
               <Chip color="secondary" variant="outlined" label={`Return Refund Rs ${money(totalReturnRefund)}`} sx={{ fontWeight: 800 }} />
               <Chip color="success" variant="outlined" label={`Receipts Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
+              <Chip color="info" variant="outlined" label={`Plain Receipt Rs ${money(receiptHistoryOnAccountTotal)}`} sx={{ fontWeight: 800 }} />
             </Stack>
           </Stack>
         </Paper>
@@ -972,7 +974,7 @@ export default function CustomerLedgerPage() {
                 <SortableHeader label="Online" sortKey="online" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <SortableHeader label="Total" sortKey="total" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <SortableHeader label="Applied" sortKey="adjusted" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
-                <SortableHeader label="On acct" sortKey="onAccount" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Plain" sortKey="onAccount" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <th className="allocation-col">Allocation</th>
                 <th className="action-col"></th>
               </tr>
@@ -1037,7 +1039,7 @@ export default function CustomerLedgerPage() {
                               <Typography variant="caption">Cash: <b>Rs {money(receipt.cash)}</b></Typography>
                               <Typography variant="caption">Online: <b>Rs {money(receipt.online)}</b></Typography>
                               <Typography variant="caption">Applied: <b>Rs {money(receipt.adjusted)}</b></Typography>
-                              <Typography variant="caption">On account: <b>Rs {money(receipt.onAccount)}</b></Typography>
+                              <Typography variant="caption">Plain receipt: <b>Rs {money(receipt.onAccount)}</b></Typography>
                             </Stack>
                           </Stack>
                         </td>
@@ -1070,7 +1072,7 @@ export default function CustomerLedgerPage() {
                 type="number"
                 value={receiptAmount}
                 onChange={(e) => handleReceiptAmountChange(e.target.value)}
-                helperText="Enter total first, then focus bill rows to auto-fill."
+                helperText="Enter full received amount. Apply only what should go against bills."
                 fullWidth
               />
               <TextField
@@ -1178,8 +1180,8 @@ export default function CustomerLedgerPage() {
 
             <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
               <Typography>Receipt Total: {money(receiptTotal)}</Typography>
-              <Typography>Adjusted Total: {money(adjustmentTotal)}</Typography>
-              <Typography fontWeight={700}>On Account: {money(onAccountAmount)}</Typography>
+              <Typography>Applied to Bills: {money(adjustmentTotal)}</Typography>
+              <Typography fontWeight={700}>Plain Receipt: {money(onAccountAmount)}</Typography>
             </Stack>
           </Stack>
         </DialogContent>

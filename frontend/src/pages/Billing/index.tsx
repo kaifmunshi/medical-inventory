@@ -77,11 +77,17 @@ function buildGroupKey(it: any) {
   return `${name}__${brand}__${kind}`
 }
 
+function usesUnitSplit(it: any) {
+  return Boolean(it?.loose_sale_enabled || it?.is_loose_stock)
+}
+
 function itemKindLabel(it: any) {
+  if (!usesUnitSplit(it)) return ''
   return it?.is_loose_stock ? 'Loose' : 'Pack'
 }
 
 function itemUnitLabel(it: any) {
+  if (!usesUnitSplit(it)) return ''
   return String(
     it?.stock_unit_label ||
     (it?.is_loose_stock ? it?.child_unit_name : it?.parent_unit_name) ||
@@ -90,7 +96,8 @@ function itemUnitLabel(it: any) {
 }
 
 function itemStockText(it: any) {
-  return `${Number(it?.stock || 0)} ${itemUnitLabel(it)}`
+  const unit = itemUnitLabel(it)
+  return `${Number(it?.stock || 0)}${unit ? ` ${unit}` : ''}`
 }
 
 function canOpenForLoose(it: any) {
@@ -249,7 +256,23 @@ export default function Billing() {
 
   const { data: inventoryItemsPage, isFetching: isFetchingGridItems } = useQuery({
     queryKey: ['billing-grid-items', debouncedGridSearchTerm],
-    queryFn: ({ signal }) => listItemsPage(debouncedGridSearchTerm, BILLING_ITEM_PAGE_SIZE, 0, undefined, undefined, { signal }),
+    queryFn: async ({ signal }) => {
+      if (
+        activeGridSearchRow === null ||
+        debouncedGridSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS ||
+        gridSearchTerm !== debouncedGridSearchTerm
+      ) {
+        return { items: [], total: 0, next_offset: null }
+      }
+      try {
+        return await listItemsPage(debouncedGridSearchTerm, BILLING_ITEM_PAGE_SIZE, 0, undefined, undefined, { signal })
+      } catch (err: any) {
+        if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') throw err
+        const msg = err?.response?.data?.detail || err?.message || 'Failed to load products'
+        toast.push(String(msg), 'error')
+        throw err
+      }
+    },
     enabled: canSearchGridItems,
     staleTime: 60_000,
     gcTime: 5 * 60_000,
@@ -374,7 +397,7 @@ export default function Billing() {
       return
     }
     if (packs > stock) {
-      toast.push(`Only ${stock} ${itemUnitLabel(openLooseDraft.item)} available to open.`, 'warning')
+      toast.push(`Only ${stock} ${itemUnitLabel(openLooseDraft.item) || 'unit(s)'} available to open.`, 'warning')
       return
     }
     mOpenParentPacks.mutate({ item: openLooseDraft.item, rowIndex: openLooseDraft.rowIndex, packs })
@@ -1272,7 +1295,7 @@ export default function Billing() {
                               <Typography variant="body2" sx={{ fontWeight: 600 }}>
                                 {option.name}
                                 {option.brand ? ` (${option.brand})` : ''}
-                                {` - ${itemKindLabel(option)}`}
+                                {itemKindLabel(option) ? ` - ${itemKindLabel(option)}` : ''}
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
                                 #{option.id} | {option.brand ? `${option.brand} | ` : ''}MRP ₹{Number(option.mrp || 0).toFixed(2)} | Stock {itemStockText(option)} | Exp {formatExpiry(option.expiry_date)}
@@ -1317,7 +1340,7 @@ export default function Billing() {
                             Number(r.item_id) > 0
                               ? [
                                   String(r.brand || '').trim(),
-                                  `${itemKindLabel(r)} stock: ${itemStockText(r)}`,
+                                  `${itemKindLabel(r) ? `${itemKindLabel(r)} ` : ''}stock: ${itemStockText(r)}`,
                                 ].filter(Boolean).join(' | ')
                               : ''
                           }
@@ -1645,20 +1668,20 @@ export default function Billing() {
       <ItemPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={addRow} />
 
       <Dialog open={Boolean(openLooseDraft)} onClose={() => setOpenLooseDraft(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>Open {openLooseDraft ? itemUnitLabel(openLooseDraft.item) : 'Parent Unit'}</DialogTitle>
+        <DialogTitle>Open {openLooseDraft ? itemUnitLabel(openLooseDraft.item) || 'Parent Unit' : 'Parent Unit'}</DialogTitle>
         <DialogContent>
           <Box sx={{ pt: 1 }}>
             <TextField
               autoFocus
               fullWidth
-              label={`How many ${openLooseDraft ? itemUnitLabel(openLooseDraft.item) : 'parent units'}?`}
+              label={`How many ${openLooseDraft ? itemUnitLabel(openLooseDraft.item) || 'parent units' : 'parent units'}?`}
               type="number"
               value={openLooseQty}
               onChange={(e) => setOpenLooseQty(e.target.value)}
               inputProps={{ min: 1, max: Number(openLooseDraft?.item?.stock || 0), step: 1 }}
               helperText={
                 openLooseDraft
-                  ? `Available ${itemUnitLabel(openLooseDraft.item)}: ${Number(openLooseDraft.item?.stock || 0)}`
+                  ? `Available ${itemUnitLabel(openLooseDraft.item) || 'unit(s)'}: ${Number(openLooseDraft.item?.stock || 0)}`
                   : ''
               }
             />

@@ -8,7 +8,20 @@ from sqlalchemy import text  # ✅ use sqlalchemy.text (NOT sqlmodel.text)
 
 from backend.controls import assert_financial_year_unlocked
 from backend.db import get_session
-from backend.models import BankbookEntry, CashbookEntry, CashbookCreate, CashbookOut, Bill, BillPayment, Return, ExchangeRecord, Purchase, PurchasePayment
+from backend.models import (
+    BankbookEntry,
+    Bill,
+    BillPayment,
+    CashbookCreate,
+    CashbookEntry,
+    CashbookOut,
+    ExchangeRecord,
+    PartyReceipt,
+    Purchase,
+    PurchasePayment,
+    ReceiptBillAdjustment,
+    Return,
+)
 from backend.security import require_min_role
 
 router = APIRouter()
@@ -73,6 +86,16 @@ def _parse_ymd(date_str: str) -> datetime:
 
 
 def _sum_bill_cash(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
+    receipt_adjustment_payment_ids = {
+        int(row.bill_payment_id)
+        for row in session.exec(
+            select(ReceiptBillAdjustment)
+            .join(PartyReceipt, PartyReceipt.id == ReceiptBillAdjustment.receipt_id)
+            .where(ReceiptBillAdjustment.bill_payment_id.is_not(None))
+            .where(PartyReceipt.is_deleted == False)  # noqa: E712
+        ).all()
+        if row.bill_payment_id is not None
+    }
     stmt = (
         select(BillPayment)
         .join(Bill, Bill.id == BillPayment.bill_id)
@@ -86,7 +109,17 @@ def _sum_bill_cash(session, *, start_iso: Optional[str] = None, end_iso: Optiona
     rows = session.exec(stmt).all()
     total = 0.0
     for p in rows:
+        if int(getattr(p, "id", 0) or 0) in receipt_adjustment_payment_ids:
+            continue
         total += float(getattr(p, "cash_amount", 0) or 0)
+
+    receipt_stmt = select(PartyReceipt).where(PartyReceipt.is_deleted == False)  # noqa: E712
+    if start_iso:
+        receipt_stmt = receipt_stmt.where(PartyReceipt.received_at >= start_iso)
+    if end_iso:
+        receipt_stmt = receipt_stmt.where(PartyReceipt.received_at <= end_iso)
+    for receipt in session.exec(receipt_stmt).all():
+        total += float(getattr(receipt, "cash_amount", 0) or 0)
     return round(total, 2)
 
 

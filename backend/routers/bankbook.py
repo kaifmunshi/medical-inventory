@@ -15,8 +15,10 @@ from backend.models import (
     BillPayment,
     CashbookEntry,
     ExchangeRecord,
+    PartyReceipt,
     Purchase,
     PurchasePayment,
+    ReceiptBillAdjustment,
     Return,
 )
 from backend.security import require_min_role
@@ -103,6 +105,16 @@ def _sum_rows(rows: List[BankbookEntry]):
 
 
 def _sum_bill_online(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
+    receipt_adjustment_payment_ids = {
+        int(row.bill_payment_id)
+        for row in session.exec(
+            select(ReceiptBillAdjustment)
+            .join(PartyReceipt, PartyReceipt.id == ReceiptBillAdjustment.receipt_id)
+            .where(ReceiptBillAdjustment.bill_payment_id.is_not(None))
+            .where(PartyReceipt.is_deleted == False)  # noqa: E712
+        ).all()
+        if row.bill_payment_id is not None
+    }
     stmt = (
         select(BillPayment)
         .join(Bill, Bill.id == BillPayment.bill_id)
@@ -116,7 +128,17 @@ def _sum_bill_online(session, *, start_iso: Optional[str] = None, end_iso: Optio
     rows = session.exec(stmt).all()
     total = 0.0
     for p in rows:
+        if int(getattr(p, "id", 0) or 0) in receipt_adjustment_payment_ids:
+            continue
         total += float(getattr(p, "online_amount", 0) or 0)
+
+    receipt_stmt = select(PartyReceipt).where(PartyReceipt.is_deleted == False)  # noqa: E712
+    if start_iso:
+        receipt_stmt = receipt_stmt.where(PartyReceipt.received_at >= start_iso)
+    if end_iso:
+        receipt_stmt = receipt_stmt.where(PartyReceipt.received_at <= end_iso)
+    for receipt in session.exec(receipt_stmt).all():
+        total += float(getattr(receipt, "online_amount", 0) or 0)
     return round(total, 2)
 
 

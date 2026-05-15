@@ -44,7 +44,7 @@ import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 
 import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
-import { PRODUCT_SEARCH_MIN_CHARS } from '../../lib/constants'
+import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import {
   createBrand,
   createCategory,
@@ -161,6 +161,8 @@ export default function Inventory() {
   const [productOrigin, setProductOrigin] = useState<{ id: number | null; name: string; brand: string } | null>(null)
   const [productBrandOpen, setProductBrandOpen] = useState(false)
   const [productCategoryOpen, setProductCategoryOpen] = useState(false)
+  const [brandFilterOptionsOpen, setBrandFilterOptionsOpen] = useState(false)
+  const [categoryFilterOptionsOpen, setCategoryFilterOptionsOpen] = useState(false)
   const [productBrandName, setProductBrandName] = useState('')
   const [productCategoryName, setProductCategoryName] = useState('')
   const [productForm, setProductForm] = useState<ProductPayload>({
@@ -215,10 +217,13 @@ export default function Inventory() {
   const LIMIT = 50
   const [pageOffset, setPageOffset] = useState(0)
   const effectiveInventorySearch = debouncedQ.length >= PRODUCT_SEARCH_MIN_CHARS ? debouncedQ : ''
+  const hasInventorySearch = effectiveInventorySearch.length >= PRODUCT_SEARCH_MIN_CHARS
+  const hasInventoryRackFilter = debouncedRackQ.trim() !== ''
+  const canLoadInventory = hasInventorySearch || hasInventoryRackFilter || brandFilter !== '' || categoryFilter !== ''
 
   useEffect(() => {
     setPageOffset(0)
-  }, [brandFilter, categoryFilter, debouncedRackQ, effectiveInventorySearch])
+  }, [brandFilter, canLoadInventory, categoryFilter, debouncedRackQ, effectiveInventorySearch])
 
   // ✅ Paged inventory query (keeps each fetch to 50 rows)
   const {
@@ -227,7 +232,8 @@ export default function Inventory() {
     isFetching,
   } = useQuery({
     queryKey: ['inventory-items', effectiveInventorySearch, debouncedRackQ, brandFilter, categoryFilter, pageOffset],
-    queryFn: async () => {
+    enabled: canLoadInventory,
+    queryFn: async ({ signal }) => {
       try {
         const rackFilter =
           debouncedRackQ !== '' && /^\d+$/.test(debouncedRackQ)
@@ -236,25 +242,44 @@ export default function Inventory() {
         return await listItemsPage(effectiveInventorySearch, LIMIT, pageOffset, rackFilter, {
           brand: brandFilter || undefined,
           category_id: categoryFilter ? Number(categoryFilter) : undefined,
-        })
+        }, { signal })
       } catch (err: any) {
+        if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') throw err
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load inventory'
         toast.push(String(msg), 'error')
         throw err
       }
     },
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   })
 
-  const rows = useMemo(() => data?.items ?? [], [data])
-  const totalRows = Number(data?.total || 0)
+  const rows = useMemo(() => (canLoadInventory ? data?.items ?? [] : []), [canLoadInventory, data])
+  const totalRows = canLoadInventory ? Number(data?.total || 0) : 0
   const hasPrevPage = pageOffset > 0
-  const hasNextPage = data?.next_offset != null
+  const hasNextPage = canLoadInventory && data?.next_offset != null
   const pageStart = rows.length > 0 ? pageOffset + 1 : 0
   const pageEnd = rows.length > 0 ? pageOffset + rows.length : 0
   const hasFilters = q.trim() !== '' || rackQ.trim() !== '' || brandFilter !== '' || categoryFilter !== ''
+  const shouldLoadBrandOptions = brandFilterOptionsOpen || productOpen || productBrandOpen || brandFilter !== ''
+  const shouldLoadCategoryOptions = canLoadInventory || categoryFilterOptionsOpen || productOpen || productCategoryOpen || categoryFilter !== ''
 
-  const brandsQ = useQuery({ queryKey: ['inventory-brands'], queryFn: () => fetchBrands({ active_only: true }) })
-  const categoriesQ = useQuery({ queryKey: ['inventory-categories'], queryFn: () => fetchCategories({ active_only: false }) })
+  const brandsQ = useQuery({
+    queryKey: ['inventory-brands'],
+    queryFn: () => fetchBrands({ active_only: true }),
+    enabled: shouldLoadBrandOptions,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+  })
+  const categoriesQ = useQuery({
+    queryKey: ['inventory-categories'],
+    queryFn: () => fetchCategories({ active_only: false }),
+    enabled: shouldLoadCategoryOptions,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+  })
   const productsQ = useQuery({
     queryKey: ['inventory-products-master'],
     queryFn: () => fetchProducts({ active_only: true, limit: 2000 }),
@@ -606,6 +631,7 @@ export default function Inventory() {
   }
 
   function renderPageControls() {
+    if (!canLoadInventory) return null
     return (
       <Stack
         direction={{ xs: 'column', sm: 'row' }}
@@ -718,6 +744,7 @@ export default function Inventory() {
             label="Brand"
             value={brandFilter}
             onChange={(e) => setBrandFilter(e.target.value)}
+            SelectProps={{ onOpen: () => setBrandFilterOptionsOpen(true) }}
             size="small"
             sx={{ width: { xs: '100%', md: 190 }, '& .MuiOutlinedInput-root': { borderRadius: 2.5, background: '#fff', minHeight: 46 } }}
           >
@@ -734,6 +761,7 @@ export default function Inventory() {
             label="Category"
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value)}
+            SelectProps={{ onOpen: () => setCategoryFilterOptionsOpen(true) }}
             size="small"
             sx={{ width: { xs: '100%', md: 210 }, '& .MuiOutlinedInput-root': { borderRadius: 2.5, background: '#fff', minHeight: 46 } }}
           >
@@ -778,7 +806,7 @@ export default function Inventory() {
       </Paper>
 
       <Paper sx={{ p: 2, minWidth: 0, width: '100%', overflow: 'hidden' }}>
-        {isLoading ? (
+        {canLoadInventory && isLoading ? (
           <Loading />
         ) : (
           <>
@@ -1057,10 +1085,10 @@ export default function Inventory() {
               </table>
             </Box>
 
-            {!isFetching && rows.length === 0 && (
+            {(!canLoadInventory || (!isFetching && rows.length === 0)) && (
               <Box sx={{ py: 3, textAlign: 'center' }}>
                 <Typography variant="body2" color="text.secondary">
-                  No items found.
+                  {canLoadInventory ? 'No items found.' : PRODUCT_SEARCH_PROMPT}
                 </Typography>
               </Box>
             )}

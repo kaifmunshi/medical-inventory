@@ -51,6 +51,7 @@ import {
   createBrand,
   createCategory,
   createProduct,
+  deleteProduct,
   fetchBrands,
   fetchCategories,
   fetchProducts,
@@ -416,10 +417,11 @@ function daysUntilExpiry(expiry?: string | null) {
 function findExactProduct(products: any[], name?: string, brand?: string) {
   const nameKey = String(name || '').trim().toLowerCase()
   const brandKey = String(brand || '').trim().toLowerCase()
-  return products.find((product) => (
+  const matches = products.filter((product) => (
     String(product?.name || '').trim().toLowerCase() === nameKey
     && String(product?.brand || '').trim().toLowerCase() === brandKey
-  )) || null
+  ))
+  return matches.find((product) => product?.is_active !== false) || matches[0] || null
 }
 
 function inventoryReturnPath(raw?: string | null) {
@@ -475,6 +477,7 @@ export default function StockCardPage() {
   const [billEditOpen, setBillEditOpen] = useState(false)
   const [productOpen, setProductOpen] = useState(false)
   const [productId, setProductId] = useState<number | null>(null)
+  const [productOrigin, setProductOrigin] = useState<{ id: number | null; name: string; brand: string } | null>(null)
   const [productBrandOpen, setProductBrandOpen] = useState(false)
   const [productCategoryOpen, setProductCategoryOpen] = useState(false)
   const [productBrandName, setProductBrandName] = useState('')
@@ -736,20 +739,33 @@ export default function StockCardPage() {
         child_unit_name: productForm.loose_sale_enabled ? productForm.child_unit_name?.trim() || 'Unit' : undefined,
         default_conversion_qty: productForm.loose_sale_enabled ? Number(productForm.default_conversion_qty || 1) : undefined,
       }
-      let targetId = productId
+      let targetId = productId || productOrigin?.id || null
       if (!targetId) {
-        const knownMatch = findExactProduct(productsQ.data || [], payload.name, payload.brand)
-        const freshMatch = knownMatch || findExactProduct(
+        const originName = productOrigin?.name || payload.name
+        const originBrand = productOrigin?.brand ?? (payload.brand || '')
+        const knownOriginMatch = findExactProduct(productsQ.data || [], originName, originBrand)
+        const freshOriginMatch = knownOriginMatch || findExactProduct(
+          await fetchProducts({ q: originName, active_only: false, limit: 1000 }),
+          originName,
+          originBrand,
+        )
+        const knownPayloadMatch = freshOriginMatch || findExactProduct(productsQ.data || [], payload.name, payload.brand)
+        const freshPayloadMatch = knownPayloadMatch || findExactProduct(
           await fetchProducts({ q: payload.name, active_only: false, limit: 1000 }),
           payload.name,
           payload.brand,
         )
-        targetId = freshMatch?.id ? Number(freshMatch.id) : null
+        targetId = freshPayloadMatch?.id ? Number(freshPayloadMatch.id) : null
       }
       return targetId ? updateProduct(targetId, payload) : createProduct(payload)
     },
     onSuccess: (savedProduct) => {
       setProductId(Number(savedProduct.id))
+      setProductOrigin({
+        id: Number(savedProduct.id),
+        name: savedProduct.name,
+        brand: savedProduct.brand || '',
+      })
       setProductForm({
         name: savedProduct.name,
         brand: savedProduct.brand || '',
@@ -771,6 +787,26 @@ export default function StockCardPage() {
     },
     onError: (err: any) => {
       toast.push(String(err?.message || 'Product save failed'), 'error')
+    },
+  })
+
+  const mDeleteProduct = useMutation({
+    mutationFn: (id: number) => deleteProduct(id),
+    onSuccess: () => {
+      setProductOpen(false)
+      setProductId(null)
+      setProductOrigin(null)
+      queryClient.invalidateQueries({ queryKey: ['stock-card-products'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-group'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      toast.push('Product deleted', 'success')
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.detail || err?.message || 'Product delete failed'
+      toast.push(String(msg), 'error')
     },
   })
 
@@ -822,7 +858,13 @@ export default function StockCardPage() {
     } catch {
       product = productMatch
     }
-    setProductId(product?.id ? Number(product.id) : null)
+    const linkedProductId =
+      Number(batch?.product_id || 0) ||
+      Number(stockCardProductId || 0) ||
+      Number(product?.id || 0) ||
+      null
+    setProductId(linkedProductId)
+    setProductOrigin({ id: linkedProductId, name, brand })
     setProductForm({
       name,
       brand,
@@ -1725,11 +1767,25 @@ export default function StockCardPage() {
         </Stack>
       </DialogContent>
       <DialogActions>
+        {productId ? (
+          <Button
+            color="error"
+            startIcon={<DeleteIcon />}
+            disabled={mDeleteProduct.isPending || mSaveProduct.isPending}
+            onClick={() => {
+              const ok = window.confirm(`Delete product master "${productForm.name.trim()}" only if it has no stock or purchase links. If this duplicate came from a purchase, use Merge from Manage Product instead.`)
+              if (ok) mDeleteProduct.mutate(Number(productId))
+            }}
+          >
+            Delete
+          </Button>
+        ) : null}
+        <Box sx={{ flex: 1 }} />
         <Button onClick={() => setProductOpen(false)}>Cancel</Button>
         <Button
           variant="contained"
           onClick={() => mSaveProduct.mutate()}
-          disabled={!productForm.name.trim() || mSaveProduct.isPending}
+          disabled={!productForm.name.trim() || mSaveProduct.isPending || mDeleteProduct.isPending}
         >
           {mSaveProduct.isPending ? 'Saving...' : 'Save Product'}
         </Button>

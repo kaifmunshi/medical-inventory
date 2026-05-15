@@ -16,15 +16,20 @@ import {
   Typography,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
+import CallMergeIcon from '@mui/icons-material/CallMerge'
+import DeleteIcon from '@mui/icons-material/Delete'
+import RestoreFromTrashIcon from '@mui/icons-material/RestoreFromTrash'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
   createProduct,
   createBrand,
   createCategory,
+  deleteProduct,
   fetchBrands,
   fetchCategories,
   fetchProducts,
+  mergeProduct,
   type ProductPayload,
   updateProduct,
 } from '../../services/products'
@@ -55,6 +60,7 @@ export default function ProductsPage() {
   const [q, setQ] = useState(searchParams.get('q') || '')
   const [brandFilter, setBrandFilter] = useState(searchParams.get('brand') || '')
   const [categoryFilter, setCategoryFilter] = useState<number | null>(null)
+  const [showInactive, setShowInactive] = useState(false)
   const [page, setPage] = useState(0)
   const [rowsPerPage, setRowsPerPage] = useState(25)
   const [open, setOpen] = useState(false)
@@ -62,6 +68,9 @@ export default function ProductsPage() {
   const [form, setForm] = useState<ProductForm>(emptyForm)
   const [brandDialogOpen, setBrandDialogOpen] = useState(false)
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false)
+  const [mergeSource, setMergeSource] = useState<Product | null>(null)
+  const [mergeTarget, setMergeTarget] = useState<Product | null>(null)
+  const [mergeSearch, setMergeSearch] = useState('')
   const [newBrandName, setNewBrandName] = useState('')
   const [newCategoryName, setNewCategoryName] = useState('')
 
@@ -72,7 +81,7 @@ export default function ProductsPage() {
 
   useEffect(() => {
     setPage(0)
-  }, [q, brandFilter, categoryFilter, rowsPerPage])
+  }, [q, brandFilter, categoryFilter, rowsPerPage, showInactive])
 
   const categoriesQ = useQuery<Category[], Error>({
     queryKey: ['product-categories-master', { active_only: false }],
@@ -85,16 +94,27 @@ export default function ProductsPage() {
   })
 
   const productsQ = useQuery<Product[], Error>({
-    queryKey: ['products-master', q, brandFilter, categoryFilter, page, rowsPerPage],
+    queryKey: ['products-master', q, brandFilter, categoryFilter, showInactive, page, rowsPerPage],
     queryFn: () =>
       fetchProducts({
         q: q.trim() || undefined,
         brand: brandFilter.trim() || undefined,
         category_id: categoryFilter || undefined,
-        active_only: true,
+        active_only: !showInactive,
         limit: rowsPerPage + 1,
         offset: page * rowsPerPage,
       }),
+  })
+
+  const mergeOptionsQ = useQuery<Product[], Error>({
+    queryKey: ['product-merge-options', mergeSource?.id, mergeSearch],
+    queryFn: () =>
+      fetchProducts({
+        q: mergeSearch.trim() || mergeSource?.name || undefined,
+        active_only: false,
+        limit: 50,
+      }),
+    enabled: Boolean(mergeSource),
   })
 
   const createM = useMutation({
@@ -117,6 +137,49 @@ export default function ProductsPage() {
       closeForm()
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to update product'), 'error'),
+  })
+
+  const deleteM = useMutation({
+    mutationFn: (id: number) => deleteProduct(id),
+    onSuccess: () => {
+      toast.push('Product deleted', 'success')
+      queryClient.invalidateQueries({ queryKey: ['products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to delete product'), 'error'),
+  })
+
+  const restoreM = useMutation({
+    mutationFn: (id: number) => updateProduct(id, { is_active: true }),
+    onSuccess: () => {
+      toast.push('Product restored', 'success')
+      queryClient.invalidateQueries({ queryKey: ['products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to restore product'), 'error'),
+  })
+
+  const mergeM = useMutation({
+    mutationFn: ({ sourceId, targetId }: { sourceId: number; targetId: number }) => mergeProduct(sourceId, targetId),
+    onSuccess: (result) => {
+      toast.push(
+        `Merged product. Moved ${result.moved_items} stock rows and ${result.moved_purchase_items} purchase rows.`,
+        'success',
+      )
+      setMergeSource(null)
+      setMergeTarget(null)
+      setMergeSearch('')
+      queryClient.invalidateQueries({ queryKey: ['products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['product-merge-options'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to merge product'), 'error'),
   })
 
   const categories = categoriesQ.data || []
@@ -151,6 +214,10 @@ export default function ProductsPage() {
     return (productsQ.data || []).slice(0, rowsPerPage)
   }, [productsQ.data, rowsPerPage])
   const hasNextPage = (productsQ.data || []).length > rowsPerPage
+  const mergeOptions = useMemo(() => {
+    const sourceId = Number(mergeSource?.id || 0)
+    return (mergeOptionsQ.data || []).filter((product) => Number(product.id) !== sourceId)
+  }, [mergeOptionsQ.data, mergeSource?.id])
 
   function openAdd() {
     setEditing(null)
@@ -250,6 +317,31 @@ export default function ProductsPage() {
     createCategoryM.mutate(name)
   }
 
+  function deleteRow(row: Product) {
+    const ok = window.confirm(`Delete product "${row.name}" only if it has no stock or purchase links. If this duplicate came from a purchase, use Merge instead.`)
+    if (ok) deleteM.mutate(Number(row.id))
+  }
+
+  function openMerge(row: Product) {
+    setMergeSource(row)
+    setMergeTarget(null)
+    setMergeSearch(row.name)
+  }
+
+  function closeMerge() {
+    setMergeSource(null)
+    setMergeTarget(null)
+    setMergeSearch('')
+  }
+
+  function submitMerge() {
+    if (!mergeSource || !mergeTarget) return
+    const ok = window.confirm(
+      `Merge "${mergeSource.name}" into "${mergeTarget.name}"? Stock batches, lots, and purchase rows will move to the target product.`
+    )
+    if (ok) mergeM.mutate({ sourceId: Number(mergeSource.id), targetId: Number(mergeTarget.id) })
+  }
+
   return (
     <Stack gap={2}>
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
@@ -289,6 +381,16 @@ export default function ProductsPage() {
           <Button variant="outlined" onClick={resetFilters}>
             Reset
           </Button>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={showInactive}
+                onChange={(e) => setShowInactive(e.target.checked)}
+              />
+            }
+            label="Show deleted"
+            sx={{ whiteSpace: 'nowrap' }}
+          />
         </Stack>
       </Paper>
 
@@ -309,28 +411,67 @@ export default function ProductsPage() {
                 <th>Category</th>
                 <th>Default Rack</th>
                 <th>Printed Price</th>
+                <th>Status</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.id} onDoubleClick={() => openEdit(row)} style={{ cursor: 'pointer' }}>
+                <tr key={row.id} onDoubleClick={() => openEdit(row)} style={{ cursor: 'pointer', opacity: row.is_active ? 1 : 0.58 }}>
                   <td>{row.name}</td>
                   <td>{row.brand || '-'}</td>
                   <td>{row.alias || '-'}</td>
                   <td>{categoryName(row.category_id)}</td>
                   <td>{row.default_rack_number || 0}</td>
                   <td>{Number(row.printed_price || 0).toFixed(2)}</td>
+                  <td>{row.is_active ? 'Active' : 'Deleted'}</td>
                   <td>
                     <Stack direction="row" gap={1}>
                       <Button size="small" onClick={() => openEdit(row)}>Edit</Button>
+                      <Button
+                        size="small"
+                        startIcon={<CallMergeIcon fontSize="small" />}
+                        disabled={mergeM.isPending}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          openMerge(row)
+                        }}
+                      >
+                        Merge
+                      </Button>
+                      {row.is_active ? (
+                        <Button
+                          size="small"
+                          color="error"
+                          startIcon={<DeleteIcon fontSize="small" />}
+                          disabled={deleteM.isPending}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            deleteRow(row)
+                          }}
+                        >
+                          Delete
+                        </Button>
+                      ) : (
+                        <Button
+                          size="small"
+                          startIcon={<RestoreFromTrashIcon fontSize="small" />}
+                          disabled={restoreM.isPending}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            restoreM.mutate(Number(row.id))
+                          }}
+                        >
+                          Restore
+                        </Button>
+                      )}
                     </Stack>
                   </td>
                 </tr>
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={8}>
                     <Box p={2} color="text.secondary">No products found.</Box>
                   </td>
                 </tr>
@@ -472,6 +613,41 @@ export default function ProductsPage() {
           <Button onClick={closeForm}>Cancel</Button>
           <Button variant="contained" onClick={save} disabled={createM.isPending || updateM.isPending}>
             {editing ? 'Update' : 'Save'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(mergeSource)} onClose={closeMerge} fullWidth maxWidth="sm">
+        <DialogTitle>Merge Duplicate Product</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} sx={{ mt: 1 }}>
+            <TextField
+              label="Duplicate"
+              value={mergeSource ? `#${mergeSource.id} • ${mergeSource.name}${mergeSource.brand ? ` • ${mergeSource.brand}` : ''}` : ''}
+              fullWidth
+              disabled
+            />
+            <Autocomplete
+              options={mergeOptions}
+              value={mergeTarget}
+              loading={mergeOptionsQ.isFetching}
+              onChange={(_, value) => setMergeTarget(value)}
+              onInputChange={(_, value) => setMergeSearch(value)}
+              getOptionLabel={(option) => `#${option.id} • ${option.name}${option.brand ? ` • ${option.brand}` : ''}${option.is_active ? '' : ' • deleted'}`}
+              isOptionEqualToValue={(option, value) => Number(option.id) === Number(value.id)}
+              renderInput={(params) => <TextField {...params} label="Merge Into" autoFocus />}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeMerge}>Cancel</Button>
+          <Button
+            variant="contained"
+            startIcon={<CallMergeIcon />}
+            onClick={submitMerge}
+            disabled={!mergeSource || !mergeTarget || mergeM.isPending}
+          >
+            {mergeM.isPending ? 'Merging...' : 'Merge'}
           </Button>
         </DialogActions>
       </Dialog>

@@ -69,3 +69,22 @@ export async function updateProduct(id: number, payload: ProductUpdatePayload): 
   const res = await api.patch<Product>(`/products/${id}`, payload)
   return res.data
 }
+
+export async function deleteProduct(id: number): Promise<Product> {
+  const res = await api.delete<Product>(`/products/${id}`)
+  return res.data
+}
+
+export interface ProductMergeResult {
+  product: Product
+  deactivated_product_id: number
+  moved_items: number
+  moved_lots: number
+  moved_purchase_items: number
+  backup_path?: string | null
+}
+
+export async function mergeProduct(sourceId: number, targetId: number): Promise<ProductMergeResult> {
+  const res = await api.post<ProductMergeResult>(`/products/${sourceId}/merge-into/${targetId}`)
+  return res.data
+}

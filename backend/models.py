@@ -1141,6 +1141,21 @@ class DebtorLedgerRow(SQLModel):
     notes: Optional[str] = None
 
 
+class CustomerReturnLedgerRow(SQLModel):
+    return_id: int
+    date_time: str
+    source_bill_id: Optional[int] = None
+    customer_name: str
+    subtotal_return: float
+    refund_mode: str
+    refund_cash: float = 0.0
+    refund_online: float = 0.0
+    credit_amount: float = 0.0
+    exchange_id: Optional[int] = None
+    exchange_new_bill_id: Optional[int] = None
+    notes: Optional[str] = None
+
+
 class OpenBillOut(SQLModel):
     bill_id: int
     bill_date: str

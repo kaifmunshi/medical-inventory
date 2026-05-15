@@ -28,6 +28,7 @@ import { fetchCustomers } from '../../services/customers'
 import {
   createPartyReceipt,
   deletePartyReceipt,
+  fetchCustomerReturns,
   fetchDebtorLedger,
   fetchOpenBills,
   fetchParties,
@@ -35,7 +36,15 @@ import {
   fetchReceiptAdjustments,
 } from '../../services/parties'
 import { getBill, listPayments, undoBillPayment, type BillPaymentRow } from '../../services/billing'
-import type { Customer, DebtorLedgerRow, OpenBill, Party, PartyReceipt, ReceiptBillAdjustment } from '../../lib/types'
+import type {
+  Customer,
+  CustomerReturnLedgerRow,
+  DebtorLedgerRow,
+  OpenBill,
+  Party,
+  PartyReceipt,
+  ReceiptBillAdjustment,
+} from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
@@ -242,6 +251,12 @@ export default function CustomerLedgerPage() {
     enabled: Boolean(selectedParty?.id),
   })
 
+  const returnsQ = useQuery<CustomerReturnLedgerRow[], Error>({
+    queryKey: ['customer-returns', selectedParty?.id],
+    queryFn: () => fetchCustomerReturns(Number(selectedParty?.id)),
+    enabled: Boolean(selectedParty?.id),
+  })
+
   const receiptsQ = useQuery<PartyReceipt[], Error>({
     queryKey: ['customer-receipts', selectedParty?.id],
     queryFn: () => fetchPartyReceipts(Number(selectedParty?.id)),
@@ -333,9 +348,12 @@ export default function CustomerLedgerPage() {
 
   const ledgerRows = ledgerQ.data || []
   const openBills = openBillsQ.data || []
+  const returnRows = returnsQ.data || []
   const receipts = receiptsQ.data || []
   const adjustments = receiptAdjustmentsQ.data || []
   const totalOutstanding = ledgerRows.reduce((sum, row) => sum + Number(row.outstanding_amount || 0), 0)
+  const totalReturnCredit = returnRows.reduce((sum, row) => sum + Number(row.credit_amount || 0), 0)
+  const totalReturnRefund = returnRows.reduce((sum, row) => sum + Number(row.refund_cash || 0) + Number(row.refund_online || 0), 0)
   const adjustmentTotal = Object.values(adjustmentDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
   const receiptTotal = Number(receiptAmount || 0)
   const receiptCashAmount = mode === 'cash' ? receiptTotal : mode === 'online' ? 0 : Number(cashAmount || 0)
@@ -586,6 +604,7 @@ export default function CustomerLedgerPage() {
   function refreshLedgerQueries() {
     queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
     queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-returns'] })
     queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
     queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
     queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
@@ -677,6 +696,8 @@ export default function CustomerLedgerPage() {
             <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
               <Chip color={totalOutstanding > 0 ? 'error' : 'success'} label={`Outstanding Rs ${money(totalOutstanding)}`} sx={{ fontWeight: 900 }} />
               <Chip color="primary" variant="outlined" label={`Open Bills ${openBills.length}`} sx={{ fontWeight: 800 }} />
+              <Chip color="warning" variant="outlined" label={`Return Credit Rs ${money(totalReturnCredit)}`} sx={{ fontWeight: 800 }} />
+              <Chip color="secondary" variant="outlined" label={`Return Refund Rs ${money(totalReturnRefund)}`} sx={{ fontWeight: 800 }} />
               <Chip color="success" variant="outlined" label={`Receipts Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
             </Stack>
           </Stack>
@@ -857,6 +878,77 @@ export default function CustomerLedgerPage() {
                   <td colSpan={9}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No debtor ledger rows for this customer yet.' : 'Select a customer to view the ledger.'}
+                    </Box>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </Box>
+      </Paper>
+
+      <Paper sx={{ p: 2 }}>
+        <Typography variant="h6" sx={{ mb: 2 }}>Return History</Typography>
+        <Box sx={receiptGridSx}>
+          <table className="table customer-ledger-grid">
+            <thead>
+              <tr>
+                <th className="receipt-col">Return</th>
+                <th className="date-col">Date</th>
+                <th className="bill-col">Source Bill</th>
+                <th className="mode-col">Mode</th>
+                <th className="amount-col">Credit</th>
+                <th className="amount-col">Cash Refund</th>
+                <th className="amount-col">Online Refund</th>
+                <th className="amount-col">Return Total</th>
+                <th className="allocation-col">Exchange</th>
+                <th className="allocation-col">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {returnRows.map((row) => (
+                <tr key={row.return_id}>
+                  <td>
+                    <Typography fontWeight={800}>Return #{row.return_id}</Typography>
+                  </td>
+                  <td className="date-col">
+                    <Typography variant="body2">{row.date_time || '-'}</Typography>
+                  </td>
+                  <td>
+                    {row.source_bill_id ? (
+                      <Link
+                        component="button"
+                        underline="hover"
+                        onClick={() => openBillDetail(Number(row.source_bill_id))}
+                        sx={{ fontWeight: 800 }}
+                      >
+                        Bill #{row.source_bill_id}
+                      </Link>
+                    ) : '-'}
+                  </td>
+                  <td>{modeChip(row.refund_mode)}</td>
+                  <td className="amount-col"><MoneyCell value={row.credit_amount} strong={Number(row.credit_amount || 0) > 0} /></td>
+                  <td className="amount-col"><MoneyCell value={row.refund_cash} /></td>
+                  <td className="amount-col"><MoneyCell value={row.refund_online} /></td>
+                  <td className="amount-col"><MoneyCell value={row.subtotal_return} strong /></td>
+                  <td className="allocation-col">
+                    {row.exchange_id ? (
+                      <Typography variant="body2" className="clip-text">
+                        Exchange #{row.exchange_id}
+                        {row.exchange_new_bill_id ? ` / New Bill #${row.exchange_new_bill_id}` : ''}
+                      </Typography>
+                    ) : '-'}
+                  </td>
+                  <td className="allocation-col">
+                    <Typography variant="body2" className="clip-text">{row.notes || '-'}</Typography>
+                  </td>
+                </tr>
+              ))}
+              {returnRows.length === 0 && (
+                <tr>
+                  <td colSpan={10}>
+                    <Box p={2} color="text.secondary">
+                      {selectedParty ? 'No returns recorded for this customer yet.' : 'Select a customer to view returns.'}
                     </Box>
                   </td>
                 </tr>

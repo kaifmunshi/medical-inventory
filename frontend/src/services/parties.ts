@@ -1,5 +1,5 @@
 import api from './api'
-import type { DebtorLedgerRow, OpenBill, Party, PartyReceipt, ReceiptBillAdjustment } from '../lib/types'
+import type { CustomerReturnLedgerRow, DebtorLedgerRow, OpenBill, Party, PartyReceipt, ReceiptBillAdjustment } from '../lib/types'
 
 export interface PartyPayload {
   name: string
@@ -42,6 +42,11 @@ export async function fetchDebtorLedger(partyId: number): Promise<DebtorLedgerRo
 
 export async function fetchOpenBills(partyId: number): Promise<OpenBill[]> {
   const res = await api.get<OpenBill[]>(`/parties/${partyId}/open-bills`)
+  return res.data
+}
+
+export async function fetchCustomerReturns(partyId: number): Promise<CustomerReturnLedgerRow[]> {
+  const res = await api.get<CustomerReturnLedgerRow[]>(`/parties/${partyId}/returns`)
   return res.data
 }
 

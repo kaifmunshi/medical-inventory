@@ -12,7 +12,9 @@ from backend.models import (
     Bill,
     BillPayment,
     Customer,
+    CustomerReturnLedgerRow,
     DebtorLedgerRow,
+    ExchangeRecord,
     OpenBillOut,
     Party,
     PartyCreate,
@@ -21,6 +23,7 @@ from backend.models import (
     PartyReceiptCreate,
     PartyReceiptOut,
     PartyUpdate,
+    Return,
     ReceiptBillAdjustment,
     ReceiptBillAdjustmentOut,
 )
@@ -257,6 +260,18 @@ def _validate_receipt_mode(mode: str, cash_amount: float, online_amount: float) 
     return cash, online, total
 
 
+def _infer_return_refund_mode(row: Return) -> str:
+    cash = _round2(float(getattr(row, "refund_cash", 0.0) or 0.0))
+    online = _round2(float(getattr(row, "refund_online", 0.0) or 0.0))
+    if cash > 0 and online > 0:
+        return "split"
+    if cash > 0:
+        return "cash"
+    if online > 0:
+        return "online"
+    return "credit"
+
+
 @router.post("/", response_model=PartyOut, status_code=201)
 def create_party(payload: PartyCreate) -> PartyOut:
     require_min_role("MANAGER", context="Party creation")
@@ -471,6 +486,59 @@ def debtor_open_bills(party_id: int) -> List[OpenBillOut]:
                     outstanding_amount=_round2(outstanding),
                     payment_status=str(bill.payment_status or "UNPAID"),
                     notes=bill.notes,
+                )
+            )
+        return out
+
+
+@router.get("/{party_id}/returns", response_model=List[CustomerReturnLedgerRow])
+def debtor_returns(party_id: int) -> List[CustomerReturnLedgerRow]:
+    with get_session() as session:
+        _sync_customer_debtor_parties(session)
+        party = session.get(Party, party_id)
+        if not party or party.party_group != "SUNDRY_DEBTOR":
+            raise HTTPException(status_code=404, detail="Debtor party not found")
+        customer_name = _party_customer_name(session, party)
+
+        bills = session.exec(
+            select(Bill)
+            .where(Bill.is_deleted == False)  # noqa: E712
+            .where(_customer_note_matches_expr(customer_name))
+        ).all()
+        bill_ids = [int(bill.id) for bill in bills if bill.id is not None]
+        if not bill_ids:
+            return []
+
+        exchange_by_return_id = {
+            int(row.return_id): row
+            for row in session.exec(select(ExchangeRecord).where(ExchangeRecord.return_id.is_not(None))).all()
+            if row.return_id is not None
+        }
+        rows = session.exec(
+            select(Return)
+            .where(Return.source_bill_id.in_(bill_ids))
+            .order_by(Return.date_time.desc(), Return.id.desc())
+        ).all()
+
+        out: List[CustomerReturnLedgerRow] = []
+        for row in rows:
+            refund_mode = _infer_return_refund_mode(row)
+            subtotal = _round2(float(getattr(row, "subtotal_return", 0.0) or 0.0))
+            exchange = exchange_by_return_id.get(int(row.id or 0))
+            out.append(
+                CustomerReturnLedgerRow(
+                    return_id=int(row.id or 0),
+                    date_time=row.date_time,
+                    source_bill_id=row.source_bill_id,
+                    customer_name=customer_name,
+                    subtotal_return=subtotal,
+                    refund_mode=refund_mode,
+                    refund_cash=_round2(float(getattr(row, "refund_cash", 0.0) or 0.0)),
+                    refund_online=_round2(float(getattr(row, "refund_online", 0.0) or 0.0)),
+                    credit_amount=subtotal if refund_mode == "credit" else 0.0,
+                    exchange_id=int(exchange.id) if exchange and exchange.id is not None else None,
+                    exchange_new_bill_id=int(exchange.new_bill_id) if exchange and exchange.new_bill_id is not None else None,
+                    notes=row.notes,
                 )
             )
         return out

@@ -324,6 +324,21 @@ export interface DebtorLedgerRow {
   notes?: string | null
 }
 
+export interface CustomerReturnLedgerRow {
+  return_id: ID
+  date_time: string
+  source_bill_id?: ID | null
+  customer_name: string
+  subtotal_return: number
+  refund_mode: 'cash' | 'online' | 'split' | 'credit'
+  refund_cash: number
+  refund_online: number
+  credit_amount: number
+  exchange_id?: ID | null
+  exchange_new_bill_id?: ID | null
+  notes?: string | null
+}
+
 export interface OpenBill {
   bill_id: ID
   bill_date: string

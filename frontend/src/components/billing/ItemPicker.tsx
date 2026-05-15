@@ -17,7 +17,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { listItemsPage } from '../../services/inventory'
 import { openPack } from '../../services/lots'
-import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
+import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../ui/Toaster'
 
 export interface PickerItem {
@@ -112,7 +112,13 @@ export default function ItemPicker({
   const [openDraftItem, setOpenDraftItem] = useState<PickerItem | null>(null)
   const [openDraftQty, setOpenDraftQty] = useState('1')
   const searchTerm = q.trim()
-  const canSearchItems = searchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('')
+  const canSearchItems = (
+    open &&
+    searchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
+    debouncedSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
+    searchTerm === debouncedSearchTerm
+  )
   const ITEM_PAGE_SIZE = 50
   const [pageOffset, setPageOffset] = useState(0)
 
@@ -120,18 +126,34 @@ export default function ItemPicker({
     setPageOffset(0)
   }, [searchTerm, open])
 
+  useEffect(() => {
+    if (!open || searchTerm.length < PRODUCT_SEARCH_MIN_CHARS) {
+      setDebouncedSearchTerm('')
+      return undefined
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm)
+    }, PRODUCT_SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [open, searchTerm])
+
   const { data, isFetching } = useQuery({
-    queryKey: ['billing-items', searchTerm, pageOffset],
-    enabled: open && canSearchItems,
-    queryFn: async () => {
+    queryKey: ['billing-items', debouncedSearchTerm, pageOffset],
+    enabled: canSearchItems,
+    queryFn: async ({ signal }) => {
       try {
-        return await listItemsPage(searchTerm, ITEM_PAGE_SIZE, pageOffset)
+        return await listItemsPage(debouncedSearchTerm, ITEM_PAGE_SIZE, pageOffset, undefined, undefined, { signal })
       } catch (err: any) {
+        if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') throw err
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load items'
         toast.push(String(msg), 'error')
         throw err
       }
     },
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   })
   const rawItems = canSearchItems ? ((data?.items || []) as PickerItem[]) : []
   const totalItems = Number(data?.total || 0)

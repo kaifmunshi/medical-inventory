@@ -73,9 +73,11 @@ def add_movement(
 
 
 def return_item_to_out(session, row: ReturnItem) -> ReturnItemOut:
+    item = session.get(Item, int(row.item_id or 0)) if row.item_id else None
     return ReturnItemOut(
         item_id=row.item_id,
         item_name=row.item_name,
+        brand=(str(item.brand) if item and item.brand else None),
         mrp=row.mrp,
         quantity=row.quantity,
         line_total=row.line_total,
@@ -239,6 +241,7 @@ def bill_return_summary(bill_id: int):
             out.append({
                 "item_id": bi.item_id,
                 "item_name": bi.item_name,
+                "brand": (str(item.brand) if (item := session.get(Item, int(bi.item_id or 0))) and item.brand else None),
                 "mrp": bi.mrp,
                 "sold": s,
                 "already_returned": a,
@@ -382,6 +385,11 @@ def get_exchange_by_return(return_id: int):
                     {
                         "item_id": i.item_id,
                         "item_name": i.item_name,
+                        "brand": (
+                            str(item.brand)
+                            if (item := session.get(Item, int(i.item_id or 0))) and item.brand
+                            else None
+                        ),
                         "mrp": i.mrp,
                         "quantity": i.quantity,
                         "line_total": i.line_total,
@@ -403,6 +411,11 @@ def get_exchange_by_return(return_id: int):
                     {
                         "item_id": i.item_id,
                         "item_name": i.item_name,
+                        "brand": (
+                            str(item.brand)
+                            if (item := session.get(Item, int(i.item_id or 0))) and item.brand
+                            else None
+                        ),
                         "mrp": i.mrp,
                         "quantity": i.quantity,
                         "line_total": i.line_total,

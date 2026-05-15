@@ -1,5 +1,6 @@
 // src/services/returns.ts
 import api from './api'
+import { PRODUCT_SEARCH_MIN_CHARS } from '../lib/constants'
 
 // --- Types (match backend schema exactly) ---
 export type ReturnLine = { item_id: number; quantity: number }
@@ -22,6 +23,7 @@ export type ListReturnsParams = {
 
 // Optional typing for a return record (adjust to your API as needed)
 export type ReturnStockMeta = {
+  brand?: string | null
   inventory_lot_id?: number | null
   opened_from_lot_id?: number | null
   is_loose_stock?: boolean
@@ -52,6 +54,7 @@ export type BillSearchResult = any | any[]
 export type ReturnSummaryRow = {
   item_id: number
   item_name: string
+  brand?: string | null
   mrp: number
   sold: number
   already_returned: number
@@ -74,14 +77,17 @@ export type ExchangeRecord = {
 
 // --- API calls ---
 
-// Keep existing behavior: numeric id → /billing/{id}/, else → /billing/?q=
+// Numeric id loads directly; text search uses paged bill lookup and waits for 3+ chars.
 export async function findBill(idOrQuery: string) {
-  if (/^\d+$/.test(idOrQuery)) {
-    const { data } = await api.get(`/billing/${idOrQuery}/`)
+  const query = String(idOrQuery || '').trim()
+  if (/^\d+$/.test(query)) {
+    const { data } = await api.get(`/billing/${query}/`)
     return data as BillSearchResult
   }
-  const { data } = await api.get('/billing/', { params: { q: idOrQuery } })
-  return data as BillSearchResult
+  if (query.length < PRODUCT_SEARCH_MIN_CHARS) return []
+  const { data } = await api.get('/billing/paged', { params: { q: query, limit: 50, offset: 0 } })
+  const rows = (data?.items || []) as any[]
+  return rows.length === 1 ? rows[0] : rows
 }
 
 // Create Return (matches Swagger schema)

@@ -8,8 +8,8 @@ import ItemPicker from '../../components/billing/ItemPicker'
 import BillPickerDialog from '../../components/billing/BillPickerDialog'
 import { useToast } from '../../components/ui/Toaster'
 
-type RetRow = { item_id:number; name:string; qty:number; max:number; mrp:number }
-type AddRow = { item_id:number; name:string; qty:number; mrp:number }
+type RetRow = { item_id:number; name:string; brand?: string | null; qty:number; max:number; mrp:number }
+type AddRow = { item_id:number; name:string; brand?: string | null; qty:number; mrp:number }
 
 function round2(n:number){ return Math.round(n*100)/100 }
 function asString(x:any){
@@ -47,14 +47,26 @@ export default function Exchange() {
   const clamp = (v:number, lo:number, hi:number) => Math.max(lo, Math.min(v, hi))
   const nameOf = (it:any) =>
     it?.item_name ?? it?.name ?? it?.item?.name ?? it?.item?.item_name ?? `#${it?.item_id ?? ''}`
+  const brandOf = (it:any) => it?.brand ?? it?.item_brand ?? it?.item?.brand ?? null
 
   // ====== Load bill + remaining qty (like Returns) ======
   async function load() {
     const res = await refetch()
-    const data = res.data
+    let data = res.data
     if (!data) return
 
-    if (Array.isArray(data)) { setBillPickerOpen(true); return }
+    if (Array.isArray(data)) {
+      if (data.length === 0) {
+        toast.push('No bill found', 'error')
+        return
+      }
+      if (data.length === 1) {
+        data = data[0]
+      } else {
+        setBillPickerOpen(true)
+        return
+      }
+    }
     if (Boolean((data as any).is_deleted)) {
       toast.push('Deleted bill cannot be used for exchange', 'error')
       return
@@ -65,8 +77,12 @@ export default function Exchange() {
     const lines = (data?.items || []) as any[]
 
     let remById: Record<number, number> = {}
+    let summaryById: Record<number, any> = {}
     try {
       const summary = await getReturnSummary(Number(data.id))
+      summaryById = Object.fromEntries(
+        (summary || []).map((s: any) => [Number(s.item_id), s])
+      )
       remById = Object.fromEntries(
         (summary || []).map((s: any) => [Number(s.item_id), Number(s.remaining)])
       )
@@ -83,6 +99,7 @@ export default function Exchange() {
       return {
         item_id,
         name: nameOf(it),
+        brand: brandOf(it) || summaryById[item_id]?.brand || null,
         qty: 0,
         max: remaining,
         mrp,
@@ -316,7 +333,16 @@ export default function Exchange() {
               <tbody>
                 {ret.map((r, i) => (
                   <tr key={`${r.item_id}-${i}`}>
-                    <td>{r.name}</td>
+                    <td>
+                      <Stack gap={0.25}>
+                        <Typography variant="body2">{r.name}</Typography>
+                        {r.brand ? (
+                          <Typography variant="caption" color="text.secondary">
+                            {r.brand}
+                          </Typography>
+                        ) : null}
+                      </Stack>
+                    </td>
                     <td>{r.max}</td>
                     <td>
                       <TextField
@@ -365,7 +391,16 @@ export default function Exchange() {
                 <tbody>
                   {add.map((r, i) => (
                     <tr key={`${r.item_id}-${i}`}>
-                      <td>{r.name}</td>
+                      <td>
+                        <Stack gap={0.25}>
+                          <Typography variant="body2">{r.name}</Typography>
+                          {r.brand ? (
+                            <Typography variant="caption" color="text.secondary">
+                              {r.brand}
+                            </Typography>
+                          ) : null}
+                        </Stack>
+                      </td>
                       <td>{r.mrp}</td>
                       <td>
                         <TextField
@@ -626,10 +661,10 @@ export default function Exchange() {
             const mrp = Number(it.mrp) || 0
             if (idx >= 0) {
               const c = [...prev]
-              c[idx] = { ...c[idx], qty: c[idx].qty + 1, mrp }
+              c[idx] = { ...c[idx], qty: c[idx].qty + 1, mrp, brand: it.brand ?? c[idx].brand ?? null }
               return c
             }
-            return [...prev, { item_id: it.id, name: it.name, mrp, qty: 1 }]
+            return [...prev, { item_id: it.id, name: it.name, brand: it.brand || null, mrp, qty: 1 }]
           })
         }}
       />

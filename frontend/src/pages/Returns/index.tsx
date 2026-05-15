@@ -11,6 +11,7 @@ import BillPickerDialog from '../../components/billing/BillPickerDialog'
 type BillLine = {
   item_id: number
   name: string
+  brand?: string | null
   soldQty: number
   mrp: number
 }
@@ -18,6 +19,7 @@ type BillLine = {
 type Row = {
   item_id: number
   name: string
+  brand?: string | null
   qty: number
   max: number
   mrp: number
@@ -137,37 +139,51 @@ export default function Returns() {
   async function loadBill(): Promise<LoadResult> {
     try {
       const res = await refetch()
-      const b = res.data
+      let b = res.data
 
       if (!b) {
         return { ok: false, error: 'No bill found' }
       }
 
       if (Array.isArray(b)) {
-        // let UI open picker; no state change yet
-        setBillPickerOpen(true)
-        return { ok: false, error: 'Multiple bills found' }
+        if (b.length === 0) {
+          return { ok: false, error: 'No bill found' }
+        }
+        if (b.length === 1) {
+          b = b[0]
+        } else {
+          // let UI open picker; no state change yet
+          setBillPickerOpen(true)
+          return { ok: false, error: 'Multiple bills found' }
+        }
       }
 
       if (Boolean((b as any).is_deleted)) {
         return { ok: false, error: 'Deleted bill cannot be used for return' }
       }
 
-      const lines: BillLine[] = (b.items || []).map((it: any): BillLine => ({
-        item_id: Number(it.item_id),
-        name: it.item_name || it.name || it.item?.name || `#${it.item_id}`,
-        soldQty: Number(it.quantity),
-        mrp: Number(it.mrp),
-      }))
-
       let remById: Record<number, number> = {}
+      let summaryById: Record<number, any> = {}
       try {
         const summary = await getReturnSummary(Number(b.id))
+        summaryById = Object.fromEntries((summary || []).map((s: any) => [Number(s.item_id), s]))
         remById = Object.fromEntries((summary || []).map((s: any) => [Number(s.item_id), Number(s.remaining)]))
       } catch (e) {
         remById = {}
+        summaryById = {}
         console.error('getReturnSummary failed', e)
       }
+
+      const lines: BillLine[] = (b.items || []).map((it: any): BillLine => {
+        const itemId = Number(it.item_id)
+        return {
+          item_id: itemId,
+          name: it.item_name || it.name || it.item?.name || `#${it.item_id}`,
+          brand: it.brand || it.item_brand || it.item?.brand || summaryById[itemId]?.brand || null,
+          soldQty: Number(it.quantity),
+          mrp: Number(it.mrp),
+        }
+      })
 
       setBill(b)
       setRows(
@@ -176,6 +192,7 @@ export default function Returns() {
           return {
             item_id: l.item_id,
             name: l.name,
+            brand: l.brand,
             qty: 0,
             max: remaining,
             mrp: l.mrp,
@@ -299,7 +316,16 @@ export default function Returns() {
               <tbody>
                 {rows.map((r, i) => (
                   <tr key={r.item_id}>
-                    <td>{r.name}</td>
+                    <td>
+                      <Stack gap={0.25}>
+                        <Typography variant="body2">{r.name}</Typography>
+                        {r.brand ? (
+                          <Typography variant="caption" color="text.secondary">
+                            {r.brand}
+                          </Typography>
+                        ) : null}
+                      </Stack>
+                    </td>
                     <td>{r.max}</td>
                     <td>
                       <TextField

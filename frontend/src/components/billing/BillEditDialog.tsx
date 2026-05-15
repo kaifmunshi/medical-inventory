@@ -23,7 +23,7 @@ import { createCustomer, fetchCustomers } from '../../services/customers'
 import { updateBill } from '../../services/billing'
 import { openPack } from '../../services/lots'
 import type { Customer } from '../../lib/types'
-import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
+import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import BillPaymentsPanel from './BillPaymentsPanel'
 
 type EditMode = 'cash' | 'online' | 'split' | 'credit'
@@ -291,6 +291,7 @@ export default function BillEditDialog({
   const [editFinalAmount, setEditFinalAmount] = useState<number>(0)
   const [editFinalManuallyEdited, setEditFinalManuallyEdited] = useState(false)
   const [editItemQuery, setEditItemQuery] = useState('')
+  const [debouncedEditItemQuery, setDebouncedEditItemQuery] = useState('')
   const [editPriceDraftByRow, setEditPriceDraftByRow] = useState<Record<number, string>>({})
   const [editDiscountDraftByRow, setEditDiscountDraftByRow] = useState<Record<number, string>>({})
   const [editSuggestionPage, setEditSuggestionPage] = useState(0)
@@ -303,7 +304,13 @@ export default function BillEditDialog({
   const [editOpenLooseDraft, setEditOpenLooseDraft] = useState<any | null>(null)
   const [editOpenLooseQty, setEditOpenLooseQty] = useState('1')
   const editItemSearchTerm = editItemQuery.trim()
-  const canSearchEditItems = editItemSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const debouncedEditItemSearchTerm = debouncedEditItemQuery.trim()
+  const canSearchEditItems = (
+    open &&
+    editItemSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
+    debouncedEditItemSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
+    editItemSearchTerm === debouncedEditItemSearchTerm
+  )
 
   useEffect(() => {
     if (!open) {
@@ -362,6 +369,7 @@ export default function BillEditDialog({
     setEditFinalAmount(billedTotal)
     setEditFinalManuallyEdited(Math.abs(round2(billedTotal - sumByRows)) > 0.009)
     setEditItemQuery('')
+    setDebouncedEditItemQuery('')
     setEditPriceDraftByRow({})
     setEditDiscountDraftByRow({})
     setEditSuggestionPage(0)
@@ -370,10 +378,32 @@ export default function BillEditDialog({
   }, [open, bill])
 
   const EDIT_SUGGESTIONS_PAGE_SIZE = 50
+  useEffect(() => {
+    if (!open || editItemSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS) {
+      setDebouncedEditItemQuery('')
+      return undefined
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedEditItemQuery(editItemSearchTerm)
+    }, PRODUCT_SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [open, editItemSearchTerm])
+
   const qEditItems = useQuery({
-    queryKey: ['edit-bill-items', editItemSearchTerm, editSuggestionPage],
-    enabled: open && canSearchEditItems,
-    queryFn: () => listItemsPage(editItemSearchTerm, EDIT_SUGGESTIONS_PAGE_SIZE, editSuggestionPage * EDIT_SUGGESTIONS_PAGE_SIZE),
+    queryKey: ['edit-bill-items', debouncedEditItemSearchTerm, editSuggestionPage],
+    enabled: canSearchEditItems,
+    queryFn: ({ signal }) => listItemsPage(
+      debouncedEditItemSearchTerm,
+      EDIT_SUGGESTIONS_PAGE_SIZE,
+      editSuggestionPage * EDIT_SUGGESTIONS_PAGE_SIZE,
+      undefined,
+      undefined,
+      { signal },
+    ),
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   })
   const { data: editCustomerOptions = [] } = useQuery({
     queryKey: ['edit-billing-customers', editCustomerQ],

@@ -55,9 +55,13 @@ function itemUnitLabel(it: any) {
   )
 }
 
+function itemMetaLine(it: any) {
+  return [it?.brand, itemKindLabel(it), itemUnitLabel(it)].filter(Boolean).join(' | ')
+}
+
 function itemDisplayName(it: any) {
   const name = it.item_name || it.name || it.item?.name || `#${it.item_id}`
-  return `${name} - ${itemKindLabel(it)}`
+  return `${name}${it?.brand ? ` | ${it.brand}` : ''} - ${itemKindLabel(it)}`
 }
 
 function inferReturnRefundMode(row: any) {
@@ -303,7 +307,7 @@ export default function ReturnsReport(props: {
                           <Stack gap={0.25}>
                             <Typography variant="body2">{it.item_name || `#${it.item_id}`}</Typography>
                             <Typography variant="caption" color="text.secondary">
-                              {itemKindLabel(it)} | {itemUnitLabel(it)}
+                              {itemMetaLine(it)}
                             </Typography>
                           </Stack>
                         </td>
@@ -334,7 +338,7 @@ export default function ReturnsReport(props: {
                           <Stack gap={0.25}>
                             <Typography variant="body2">{it.item_name || `#${it.item_id}`}</Typography>
                             <Typography variant="caption" color="text.secondary">
-                              {itemKindLabel(it)} | {itemUnitLabel(it)}
+                              {itemMetaLine(it)}
                             </Typography>
                           </Stack>
                         </td>
@@ -397,7 +401,7 @@ export default function ReturnsReport(props: {
                             <Stack gap={0.25}>
                               <Typography variant="body2">{name}</Typography>
                               <Typography variant="caption" color="text.secondary">
-                                {itemKindLabel(it)} | {itemUnitLabel(it)}
+                                {itemMetaLine(it)}
                               </Typography>
                             </Stack>
                           </td>

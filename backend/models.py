@@ -272,6 +272,7 @@ class BillCreate(SQLModel):
 class BillItemOut(SQLModel):
     item_id: int
     item_name: str
+    brand: Optional[str] = None
     mrp: float
     quantity: int
     line_total: float
@@ -325,6 +326,7 @@ class ReturnCreate(SQLModel):
 class ReturnItemOut(SQLModel):
     item_id: int
     item_name: str
+    brand: Optional[str] = None
     mrp: float
     quantity: int
     line_total: float

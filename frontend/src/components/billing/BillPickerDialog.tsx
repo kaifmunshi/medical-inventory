@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Box, Button, Dialog, DialogTitle, DialogContent, Stack, TextField } from '@mui/material'
+import { useMemo, useState } from 'react'
+import { Box, Button, Dialog, DialogTitle, DialogContent, Stack, TextField, Typography } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
-// ✅ value import
-import { listAllBills } from '../../services/billing'
+import { listBillsPaged } from '../../services/billing'
 // ✅ type-only import
 import type { Bill } from '../../services/billing'
 import { fetchFinancialYears } from '../../services/settings'
 import type { FinancialYear } from '../../lib/types'
+import { PRODUCT_SEARCH_MIN_CHARS } from '../../lib/constants'
 
 // ✅ correct path to lib/date from components/billing/*
 import { toYMD } from '../../lib/date'
@@ -20,23 +20,33 @@ function previousFinancialYear(years: FinancialYear[], activeYear: FinancialYear
   )
 }
 
+const BILL_PICKER_LIMIT = 20
+const BILL_SEARCH_PROMPT = `Type ${PRODUCT_SEARCH_MIN_CHARS} letters, or a bill ID, to search`
+
 export default function BillPickerDialog({
   open, onClose, onPick
 }:{ open:boolean; onClose:()=>void; onPick:(bill:Bill)=>void }){
 
-  // Client-side search over id/notes/item names
+  // Server-side search over bill id, notes, item names, and brand.
   const [q, setQ] = useState('')
   const [from, setFrom] = useState(toYMD(new Date()))
   const [to, setTo] = useState(toYMD(new Date()))
   const [offset, setOffset] = useState(0)
+  const searchTerm = q.trim()
+  const canSearchBills = /^\d+$/.test(searchTerm) || searchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
 
-  const { data, refetch, isFetching } = useQuery({
-    queryKey:['bill-picker', from, to, offset],
+  const { data, isFetching } = useQuery({
+    queryKey:['bill-picker', searchTerm, from, to, offset],
     queryFn:async()=>{
-      const rows = await listAllBills({ from_date: from || undefined, to_date: to || undefined })
-      return rows.slice(offset, offset + 20)
+      return listBillsPaged({
+        q: searchTerm,
+        from_date: from || undefined,
+        to_date: to || undefined,
+        limit: BILL_PICKER_LIMIT,
+        offset,
+      })
     },
-    enabled: open
+    enabled: open && canSearchBills
   })
   const yearsQ = useQuery({
     queryKey: ['bill-picker-financial-years'],
@@ -46,21 +56,9 @@ export default function BillPickerDialog({
   const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
   const prevYear = useMemo(() => previousFinancialYear(yearsQ.data || [], activeYear), [activeYear, yearsQ.data])
 
-  useEffect(()=>{ if(open) refetch() }, [open])
-
   // Raw rows from API
-  const rows = useMemo(()=> (data || []) as Bill[], [data])
-
-  // Client filter: id, notes, any item_name
-  const filtered = useMemo(()=>{
-    const t = q.trim().toLowerCase()
-    if (!t) return rows
-    return rows.filter(b => {
-      if (String(b.id).includes(t)) return true
-      if (b.notes && b.notes.toLowerCase().includes(t)) return true
-      return (b.items || []).some(it => (it.item_name || '').toLowerCase().includes(t))
-    })
-  }, [rows, q])
+  const rows = useMemo(()=> (canSearchBills ? (data?.items || []) : []) as Bill[], [canSearchBills, data])
+  const hasNextPage = Boolean(data?.next_offset)
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
@@ -68,9 +66,13 @@ export default function BillPickerDialog({
       <DialogContent>
         <Stack direction={{xs:'column', md:'row'}} gap={2} sx={{ mb:2 }}>
           <TextField
-            label="Search (id / item / notes)"
+            label="Search (bill ID / item / brand / notes)"
             value={q}
-            onChange={e=>setQ(e.target.value)}
+            onChange={e=>{
+              setOffset(0)
+              setQ(e.target.value)
+            }}
+            helperText={BILL_SEARCH_PROMPT}
             fullWidth
           />
           <TextField
@@ -89,8 +91,8 @@ export default function BillPickerDialog({
           />
           <Button
             variant="contained"
-            onClick={()=>{ setOffset(0); refetch() }}
-            disabled={isFetching}
+            onClick={()=>setOffset(0)}
+            disabled={!canSearchBills || isFetching}
           >
             Search
           </Button>
@@ -141,7 +143,7 @@ export default function BillPickerDialog({
               </tr>
             </thead>
             <tbody>
-              {filtered.map((b)=>(
+              {rows.map((b)=>(
                 <tr key={b.id}>
                   <td>{b.id}</td>
                   <td>{b.date_time}</td>
@@ -157,16 +159,24 @@ export default function BillPickerDialog({
                   <td><Button size="small" onClick={()=>{ onPick(b); onClose() }}>Select</Button></td>
                 </tr>
               ))}
-              {filtered.length===0 && (
-                <tr><td colSpan={6}><Box p={2}>No bills.</Box></td></tr>
+              {rows.length===0 && (
+                <tr>
+                  <td colSpan={6}>
+                    <Box p={2}>
+                      <Typography color="text.secondary">
+                        {!canSearchBills ? BILL_SEARCH_PROMPT : isFetching ? 'Searching bills...' : 'No bills found.'}
+                      </Typography>
+                    </Box>
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>
         </Box>
 
         <Stack direction="row" justifyContent="space-between" sx={{ mt:1 }}>
-          <Button onClick={()=>{ const n=Math.max(0, offset-20); setOffset(n); refetch() }} disabled={offset===0}>Prev</Button>
-          <Button onClick={()=>{ setOffset(offset+20); refetch() }}>Next</Button>
+          <Button onClick={()=>setOffset((prev)=>Math.max(0, prev - BILL_PICKER_LIMIT))} disabled={offset===0 || isFetching}>Prev</Button>
+          <Button onClick={()=>setOffset(data?.next_offset ?? offset + BILL_PICKER_LIMIT)} disabled={!hasNextPage || isFetching}>Next</Button>
         </Stack>
       </DialogContent>
     </Dialog>

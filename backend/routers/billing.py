@@ -235,9 +235,11 @@ def add_movement(
 
 
 def bill_item_to_out(session, row: BillItem) -> BillItemOut:
+    item = session.get(Item, int(row.item_id or 0)) if row.item_id else None
     return BillItemOut(
         item_id=row.item_id,
         item_name=row.item_name,
+        brand=(str(item.brand) if item and item.brand else None),
         mrp=row.mrp,
         quantity=row.quantity,
         line_total=row.line_total,
@@ -369,10 +371,16 @@ def list_bills_paged(
                 (func.lower(func.coalesce(BillItem.item_name, "")).like(like))
             )
 
+            brand_match = exists().where(
+                (BillItem.bill_id == Bill.id) &
+                (BillItem.item_id == Item.id) &
+                (func.lower(func.coalesce(Item.brand, "")).like(like))
+            )
+
             if id_filter is not None:
-                stmt = stmt.where(or_(id_filter, notes_match, items_match))
+                stmt = stmt.where(or_(id_filter, notes_match, items_match, brand_match))
             else:
-                stmt = stmt.where(or_(notes_match, items_match))
+                stmt = stmt.where(or_(notes_match, items_match, brand_match))
 
         # ✅ Order + accurate pagination (limit+1)
         stmt = stmt.order_by(Bill.id.desc()).limit(limit + 1).offset(offset)

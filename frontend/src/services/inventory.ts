@@ -7,6 +7,10 @@ export type ItemsPage = {
   next_offset: number | null
 }
 
+export type InventoryRequestOptions = {
+  signal?: AbortSignal
+}
+
 export type IncomingStockEntry = {
   movement_id: number
   item_id: number
@@ -226,7 +230,8 @@ export async function listItemsPage(
   limit: number = 50,
   offset: number = 0,
   rackNumber?: number,
-  filters?: { brand?: string; category_id?: number; include_archived?: boolean; created_from?: string; incoming_from?: string }
+  filters?: { brand?: string; category_id?: number; include_archived?: boolean; created_from?: string; incoming_from?: string },
+  requestOptions?: InventoryRequestOptions,
 ): Promise<ItemsPage> {
   const params: Record<string, string | number | boolean> = { q, limit, offset }
   if (typeof rackNumber === 'number' && Number.isFinite(rackNumber)) {
@@ -237,7 +242,7 @@ export async function listItemsPage(
   if (typeof filters?.include_archived === 'boolean') params.include_archived = filters.include_archived
   if (filters?.created_from) params.created_from = filters.created_from
   if (filters?.incoming_from) params.incoming_from = filters.incoming_from
-  const { data } = await api.get('/inventory', { params })
+  const { data } = await api.get('/inventory', { params, signal: requestOptions?.signal })
   return data as ItemsPage
 }
 

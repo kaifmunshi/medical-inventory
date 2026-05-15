@@ -31,7 +31,7 @@ import { createCustomer, fetchCustomers } from '../../services/customers'
 import type { Customer } from '../../lib/types'
 import { listItemsPage } from '../../services/inventory'
 import { openPack } from '../../services/lots'
-import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
+import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
 
 interface CartRow {
@@ -196,6 +196,7 @@ export default function Billing() {
   const [discountDraftByRow, setDiscountDraftByRow] = useState<Record<number, string>>({})
   const [stockErrorByRow, setStockErrorByRow] = useState<Record<number, string>>({})
   const [gridSearch, setGridSearch] = useState('')
+  const [debouncedGridSearch, setDebouncedGridSearch] = useState('')
   const [activeGridSearchRow, setActiveGridSearchRow] = useState<number | null>(null)
   const [pendingQtyFocusRow, setPendingQtyFocusRow] = useState<number | null>(null)
   const qtyInputRefs = useRef<Record<number, HTMLInputElement | null>>({})
@@ -227,12 +228,33 @@ export default function Billing() {
   // ✅ Beautiful confirm dialog for CASH
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
   const gridSearchTerm = gridSearch.trim()
-  const canSearchGridItems = activeGridSearchRow !== null && gridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const debouncedGridSearchTerm = debouncedGridSearch.trim()
+  const canSearchGridItems = (
+    activeGridSearchRow !== null &&
+    gridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
+    debouncedGridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
+    gridSearchTerm === debouncedGridSearchTerm
+  )
   const BILLING_ITEM_PAGE_SIZE = 50
+  useEffect(() => {
+    if (activeGridSearchRow === null || gridSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS) {
+      setDebouncedGridSearch('')
+      return undefined
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedGridSearch(gridSearchTerm)
+    }, PRODUCT_SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [activeGridSearchRow, gridSearchTerm])
+
   const { data: inventoryItemsPage, isFetching: isFetchingGridItems } = useQuery({
-    queryKey: ['billing-grid-items', gridSearchTerm],
-    queryFn: () => listItemsPage(gridSearchTerm, BILLING_ITEM_PAGE_SIZE, 0),
+    queryKey: ['billing-grid-items', debouncedGridSearchTerm],
+    queryFn: ({ signal }) => listItemsPage(debouncedGridSearchTerm, BILLING_ITEM_PAGE_SIZE, 0, undefined, undefined, { signal }),
     enabled: canSearchGridItems,
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   })
   const inventoryItems = canSearchGridItems ? inventoryItemsPage?.items || [] : []
   const { data: customerOptions = [] } = useQuery({
@@ -1214,6 +1236,7 @@ export default function Billing() {
                       onInputChange={(_e, val, reason) => {
                         if (reason === 'clear' || reason === 'reset') {
                           setGridSearch('')
+                          setDebouncedGridSearch('')
                           return
                         }
                         if (reason === 'input') {
@@ -1225,10 +1248,12 @@ export default function Billing() {
                         selectItemAtRow(i, val)
                         setActiveGridSearchRow(null)
                         setGridSearch('')
+                        setDebouncedGridSearch('')
                       }}
                       onClose={() => {
                         setActiveGridSearchRow((prev) => (prev === i ? null : prev))
                         setGridSearch('')
+                        setDebouncedGridSearch('')
                       }}
                       noOptionsText={activeGridSearchRow === i && canSearchGridItems ? 'No products found' : PRODUCT_SEARCH_PROMPT}
                       ListboxProps={{ style: { maxHeight: 300 } }}

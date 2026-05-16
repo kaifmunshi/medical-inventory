@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { Route, Routes, Navigate, useLocation } from 'react-router-dom'
 import AppLayout from '../components/layout/AppLayout'
 import { useUserSession } from '../components/session/UserSessionProvider'
+import { enableJournalEntry } from '../lib/features'
 import { isLockAllowedPath } from '../lib/sessionLock'
 import Dashboard from '../pages/Dashboard'
 import Inventory from '../pages/Inventory'
@@ -26,6 +27,7 @@ import SuppliersPage from '../pages/Suppliers'
 import PurchasesPage from '../pages/Purchases'
 import StockAuditPage from '../pages/StockAudit'
 import DayBookPage from '../pages/DayBook'
+import JournalEntryPage from '../pages/JournalEntry'
 import LooseStockPage from '../pages/LooseStock'
 import SupplierLedgerPage from '../pages/SupplierLedger'
 import CustomerLedgerPage from '../pages/CustomerLedger'
@@ -69,6 +71,11 @@ export default function AppRoutes() {
         <Route path="bank-book" element={<BankBookPage />} />
         <Route path="sales-book" element={<SalesBookPage />} />
         <Route path="day-book" element={<DayBookPage />} />
+        {enableJournalEntry ? (
+          <Route path="journal-entry" element={<JournalEntryPage />} />
+        ) : (
+          <Route path="journal-entry" element={<Navigate to="/day-book" replace />} />
+        )}
         <Route path="loose-stock" element={<LooseStockPage />} />
         <Route path="supplier-ledger" element={<SupplierLedgerPage />} />
         <Route path="customer-ledger" element={<CustomerLedgerPage />} />

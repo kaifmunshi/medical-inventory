@@ -378,6 +378,7 @@ export interface VoucherDayBookRow {
   voucher_type:
     | 'SALE'
     | 'PURCHASE'
+    | 'JOURNAL'
     | 'RECEIPT'
     | 'PAYMENT'
     | 'RETURN'
@@ -402,6 +403,7 @@ export interface VoucherDayBookSummary {
   total_rows: number
   sales_total: number
   purchase_total: number
+  journal_total: number
   receipt_total: number
   payment_total: number
   return_total: number
@@ -446,6 +448,7 @@ export interface PostedVoucherEntry {
   id: ID
   voucher_id: ID
   ledger_id: ID
+  ledger_name?: string | null
   entry_type: 'DR' | 'CR'
   amount: number
   narration?: string | null

@@ -1307,10 +1307,6 @@ def list_items(
                     positive_stock_exists,
                 )
             )
-        
-
-        ...
-
         # If ONLY q is present (client didn't pass limit/offset), return ALL matches
         if q and limit is None and offset is None:
             stmt = base_stmt.order_by(Item.name, Item.id)

@@ -1273,6 +1273,7 @@ class VoucherDayBookSummary(SQLModel):
     total_rows: int
     sales_total: float = 0.0
     purchase_total: float = 0.0
+    journal_total: float = 0.0
     receipt_total: float = 0.0
     payment_total: float = 0.0
     return_total: float = 0.0
@@ -1317,6 +1318,7 @@ class VoucherEntryOut(SQLModel):
     id: int
     voucher_id: int
     ledger_id: int
+    ledger_name: Optional[str] = None
     entry_type: str
     amount: float
     narration: Optional[str] = None

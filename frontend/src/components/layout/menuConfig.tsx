@@ -24,6 +24,7 @@ import {
   LocalShipping,
   Inventory,
 } from '@mui/icons-material'
+import { enableJournalEntry } from '../../lib/features'
 
 export type AppMenuItem = {
   to: string
@@ -89,6 +90,9 @@ export const appMenuGroups: AppMenuGroup[] = [
       { to: '/credit-bills', label: 'Credit Bills', icon: <CreditCard fontSize="small" />, hint: 'Open and partial bills' },
       { to: '/sales-book', label: 'Sales Book', icon: <MenuBook fontSize="small" />, hint: 'Sales register' },
       { to: '/day-book', label: 'Day Book', icon: <ReceiptLong fontSize="small" />, hint: 'Voucher-style day register' },
+      ...(enableJournalEntry
+        ? [{ to: '/journal-entry', label: 'Journal Entry', icon: <MenuBook fontSize="small" />, hint: 'Manual debit and credit vouchers' }]
+        : []),
       { to: '/customer-ledger', label: 'Customer Ledger', icon: <Group fontSize="small" />, hint: 'Debtor bills and receipts' },
       { to: '/supplier-ledger', label: 'Supplier Ledger', icon: <LocalShipping fontSize="small" />, hint: 'Supplier purchases and settlements' },
     ],

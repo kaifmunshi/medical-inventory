@@ -2,10 +2,12 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import func
-from sqlmodel import select
+from sqlmodel import delete, select
 
 from backend.accounting import ensure_accounting_setup
+from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import (
     Bill,
@@ -31,8 +33,28 @@ from backend.models import (
     VoucherDayBookSummary,
     VoucherOut,
 )
+from backend.security import require_min_role
 
 router = APIRouter()
+
+
+class JournalEntryLineIn(BaseModel):
+    ledger_id: int
+    entry_type: str
+    amount: float
+    narration: Optional[str] = None
+
+
+class JournalEntryIn(BaseModel):
+    voucher_date: Optional[str] = None
+    voucher_no: Optional[str] = None
+    narration: Optional[str] = None
+    entries: List[JournalEntryLineIn]
+
+
+class LedgerCreateIn(BaseModel):
+    name: str
+    group_id: int
 
 
 def _round2(x: float) -> float:
@@ -83,6 +105,12 @@ def _voucher_out(session, voucher: Voucher) -> VoucherOut:
     entries = session.exec(
         select(VoucherEntry).where(VoucherEntry.voucher_id == voucher.id).order_by(VoucherEntry.sort_order.asc(), VoucherEntry.id.asc())
     ).all()
+    ledger_ids = [int(entry.ledger_id) for entry in entries]
+    ledgers = {
+        int(row.id): row
+        for row in session.exec(select(Ledger).where(Ledger.id.in_(ledger_ids))).all()
+        if row.id is not None
+    } if ledger_ids else {}
     return VoucherOut(
         id=int(voucher.id),
         voucher_type=voucher.voucher_type,
@@ -96,8 +124,91 @@ def _voucher_out(session, voucher: Voucher) -> VoucherOut:
         deleted_at=voucher.deleted_at,
         created_at=voucher.created_at,
         updated_at=voucher.updated_at,
-        entries=[VoucherEntryOut(**entry.dict()) for entry in entries],
+        entries=[
+            VoucherEntryOut(
+                **entry.dict(),
+                ledger_name=(ledgers.get(int(entry.ledger_id)).name if ledgers.get(int(entry.ledger_id)) else None),
+            )
+            for entry in entries
+        ],
     )
+
+
+def _manual_journal_or_404(session, voucher_id: int) -> Voucher:
+    row = session.get(Voucher, voucher_id)
+    if (
+        not row
+        or str(row.source_type or "").upper() != "MANUAL_JOURNAL"
+        or str(row.voucher_type or "").upper() != "JOURNAL"
+    ):
+        raise HTTPException(status_code=404, detail="Journal voucher not found")
+    return row
+
+
+def _validate_journal_payload(
+    session,
+    payload: JournalEntryIn,
+    *,
+    current_voucher_id: Optional[int] = None,
+):
+    voucher_date = _normalize_ymd(payload.voucher_date, default_to_today=True)
+    voucher_no = str(payload.voucher_no or "").strip() or None
+    narration = str(payload.narration or "").strip() or None
+
+    if voucher_no:
+        existing = session.exec(
+            select(Voucher).where(
+                Voucher.voucher_no == voucher_no,
+                Voucher.is_deleted == False,  # noqa: E712
+            )
+        ).all()
+        for row in existing:
+            if current_voucher_id is None or int(row.id or 0) != int(current_voucher_id):
+                raise HTTPException(status_code=400, detail=f"Voucher number '{voucher_no}' already exists")
+
+    raw_lines = list(payload.entries or [])
+    if len(raw_lines) < 2:
+        raise HTTPException(status_code=400, detail="Journal entry needs at least two lines")
+
+    ledger_ids = {int(line.ledger_id or 0) for line in raw_lines if int(line.ledger_id or 0) > 0}
+    ledgers = {
+        int(row.id): row
+        for row in session.exec(select(Ledger).where(Ledger.id.in_(ledger_ids))).all()
+        if row.id is not None
+    } if ledger_ids else {}
+
+    posting_lines = []
+    debit_total = 0.0
+    credit_total = 0.0
+    for idx, raw in enumerate(raw_lines, start=1):
+        ledger_id = int(raw.ledger_id or 0)
+        ledger = ledgers.get(ledger_id)
+        if not ledger or not bool(getattr(ledger, "is_active", True)):
+            raise HTTPException(status_code=400, detail=f"Line {idx}: ledger is invalid or inactive")
+        entry_type = str(raw.entry_type or "").strip().upper()
+        if entry_type not in {"DR", "CR"}:
+            raise HTTPException(status_code=400, detail=f"Line {idx}: entry type must be DR or CR")
+        amount = _round2(raw.amount)
+        if amount <= 0:
+            raise HTTPException(status_code=400, detail=f"Line {idx}: amount must be greater than 0")
+        line_narration = str(raw.narration or "").strip() or None
+        if entry_type == "DR":
+            debit_total = _round2(debit_total + amount)
+        else:
+            credit_total = _round2(credit_total + amount)
+        posting_lines.append({
+            "ledger_id": ledger_id,
+            "entry_type": entry_type,
+            "amount": amount,
+            "narration": line_narration,
+        })
+
+    if debit_total <= 0 or credit_total <= 0:
+        raise HTTPException(status_code=400, detail="Journal entry needs both debit and credit lines")
+    if abs(debit_total - credit_total) > 0.009:
+        raise HTTPException(status_code=400, detail="Total debit must equal total credit")
+
+    return voucher_date, voucher_no, narration, _round2(debit_total), posting_lines
 
 
 @router.get("/ledger-groups", response_model=List[LedgerGroupOut])
@@ -128,6 +239,54 @@ def list_ledgers(
         return [LedgerOut(**row.dict()) for row in rows]
 
 
+@router.post("/ledgers", response_model=LedgerOut)
+def create_ledger(payload: LedgerCreateIn):
+    require_min_role("MANAGER", context="Ledger creation")
+    name = " ".join(str(payload.name or "").strip().split())
+    if not name:
+        raise HTTPException(status_code=400, detail="Ledger name is required")
+
+    with get_session() as session:
+        ensure_accounting_setup(session)
+        group = session.get(LedgerGroup, int(payload.group_id or 0))
+        if not group or not bool(group.is_active):
+            raise HTTPException(status_code=400, detail="Ledger group is invalid or inactive")
+
+        existing = session.exec(
+            select(Ledger).where(
+                Ledger.group_id == int(group.id),
+                func.lower(func.trim(func.coalesce(Ledger.name, ""))) == name.lower(),
+            )
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Ledger already exists in this group")
+
+        ts = datetime.now().isoformat(timespec="seconds")
+        row = Ledger(
+            name=name,
+            group_id=int(group.id),
+            party_id=None,
+            system_key=None,
+            is_system=False,
+            is_active=True,
+            created_at=ts,
+            updated_at=ts,
+        )
+        session.add(row)
+        session.flush()
+        log_audit(
+            session,
+            entity_type="LEDGER",
+            entity_id=int(row.id),
+            action="CREATE",
+            note=f"Created ledger {row.name}",
+            details={"group_id": int(group.id), "group_name": group.name},
+        )
+        session.commit()
+        session.refresh(row)
+        return LedgerOut(**row.dict())
+
+
 @router.get("/", response_model=List[VoucherOut])
 def list_posted_vouchers(
     voucher_type: Optional[str] = Query(None),
@@ -151,13 +310,209 @@ def list_posted_vouchers(
         return [_voucher_out(session, row) for row in rows]
 
 
+@router.get("/journals", response_model=List[VoucherOut])
+def list_journal_vouchers(
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    q: Optional[str] = Query(None, description="Search voucher no, narration, or ledger"),
+    deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    with get_session() as session:
+        stmt = select(Voucher).where(
+            Voucher.voucher_type == "JOURNAL",
+            Voucher.source_type == "MANUAL_JOURNAL",
+        )
+        if deleted_filter == "active":
+            stmt = stmt.where(Voucher.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            stmt = stmt.where(Voucher.is_deleted == True)  # noqa: E712
+        if from_date:
+            stmt = stmt.where(Voucher.voucher_date >= _normalize_ymd(from_date, default_to_today=False))
+        if to_date:
+            stmt = stmt.where(Voucher.voucher_date <= _normalize_ymd(to_date, default_to_today=False))
+
+        rows = session.exec(stmt.order_by(Voucher.voucher_date.desc(), Voucher.id.desc())).all()
+        query_text = str(q or "").strip().lower()
+        if query_text:
+            filtered = []
+            for row in rows:
+                entries = session.exec(select(VoucherEntry).where(VoucherEntry.voucher_id == row.id)).all()
+                ledger_names = []
+                for entry in entries:
+                    ledger = session.get(Ledger, int(entry.ledger_id))
+                    if ledger:
+                        ledger_names.append(str(ledger.name or ""))
+                haystack = " | ".join([
+                    str(row.voucher_no or ""),
+                    str(row.narration or ""),
+                    " | ".join(ledger_names),
+                ]).lower()
+                if query_text in haystack:
+                    filtered.append(row)
+            rows = filtered
+
+        return [_voucher_out(session, row) for row in rows[offset:offset + limit]]
+
+
+@router.post("/journals", response_model=VoucherOut)
+def create_journal_voucher(payload: JournalEntryIn):
+    require_min_role("MANAGER", context="Journal entry creation")
+    with get_session() as session:
+        ensure_accounting_setup(session)
+        voucher_date, voucher_no, narration, total_amount, posting_lines = _validate_journal_payload(session, payload)
+        assert_financial_year_unlocked(session, voucher_date, context="Journal entry")
+
+        ts = datetime.now().isoformat(timespec="seconds")
+        voucher = Voucher(
+            voucher_type="JOURNAL",
+            source_type="MANUAL_JOURNAL",
+            source_id=0,
+            voucher_no=voucher_no or "JV-PENDING",
+            voucher_date=voucher_date,
+            narration=narration,
+            total_amount=total_amount,
+            is_deleted=False,
+            deleted_at=None,
+            created_at=ts,
+            updated_at=ts,
+        )
+        session.add(voucher)
+        session.flush()
+        voucher.source_id = int(voucher.id)
+        if not voucher_no:
+            voucher.voucher_no = f"JV-{voucher.id}"
+        session.add(voucher)
+        for idx, line in enumerate(posting_lines, start=1):
+            session.add(
+                VoucherEntry(
+                    voucher_id=int(voucher.id),
+                    ledger_id=int(line["ledger_id"]),
+                    entry_type=str(line["entry_type"]),
+                    amount=_round2(line["amount"]),
+                    narration=line.get("narration"),
+                    sort_order=idx,
+                    created_at=ts,
+                )
+            )
+        log_audit(
+            session,
+            entity_type="JOURNAL",
+            entity_id=int(voucher.id),
+            action="CREATE",
+            note=f"Created journal voucher {voucher.voucher_no}",
+            details={"voucher_date": voucher_date, "total_amount": total_amount},
+        )
+        session.commit()
+        session.refresh(voucher)
+        return _voucher_out(session, voucher)
+
+
+@router.patch("/journals/{voucher_id}", response_model=VoucherOut)
+def update_journal_voucher(voucher_id: int, payload: JournalEntryIn):
+    require_min_role("MANAGER", context="Journal entry edit")
+    with get_session() as session:
+        voucher = _manual_journal_or_404(session, voucher_id)
+        if bool(voucher.is_deleted):
+            raise HTTPException(status_code=400, detail="Deleted journal voucher cannot be edited")
+        assert_financial_year_unlocked(session, voucher.voucher_date, context="Journal entry edit")
+        voucher_date, voucher_no, narration, total_amount, posting_lines = _validate_journal_payload(
+            session,
+            payload,
+            current_voucher_id=int(voucher.id),
+        )
+        assert_financial_year_unlocked(session, voucher_date, context="Journal entry edit")
+
+        ts = datetime.now().isoformat(timespec="seconds")
+        voucher.voucher_date = voucher_date
+        voucher.voucher_no = voucher_no or f"JV-{voucher.id}"
+        voucher.narration = narration
+        voucher.total_amount = total_amount
+        voucher.updated_at = ts
+        session.add(voucher)
+        session.flush()
+        session.exec(delete(VoucherEntry).where(VoucherEntry.voucher_id == voucher.id))
+        session.flush()
+        for idx, line in enumerate(posting_lines, start=1):
+            session.add(
+                VoucherEntry(
+                    voucher_id=int(voucher.id),
+                    ledger_id=int(line["ledger_id"]),
+                    entry_type=str(line["entry_type"]),
+                    amount=_round2(line["amount"]),
+                    narration=line.get("narration"),
+                    sort_order=idx,
+                    created_at=ts,
+                )
+            )
+        log_audit(
+            session,
+            entity_type="JOURNAL",
+            entity_id=int(voucher.id),
+            action="UPDATE",
+            note=f"Updated journal voucher {voucher.voucher_no}",
+            details={"voucher_date": voucher_date, "total_amount": total_amount},
+        )
+        session.commit()
+        session.refresh(voucher)
+        return _voucher_out(session, voucher)
+
+
+@router.delete("/journals/{voucher_id}", response_model=VoucherOut)
+def delete_journal_voucher(voucher_id: int):
+    require_min_role("MANAGER", context="Journal entry delete")
+    with get_session() as session:
+        voucher = _manual_journal_or_404(session, voucher_id)
+        if not bool(voucher.is_deleted):
+            assert_financial_year_unlocked(session, voucher.voucher_date, context="Journal entry delete")
+            ts = datetime.now().isoformat(timespec="seconds")
+            voucher.is_deleted = True
+            voucher.deleted_at = ts
+            voucher.updated_at = ts
+            session.add(voucher)
+            log_audit(
+                session,
+                entity_type="JOURNAL",
+                entity_id=int(voucher.id),
+                action="DELETE",
+                note=f"Deleted journal voucher {voucher.voucher_no}",
+            )
+            session.commit()
+            session.refresh(voucher)
+        return _voucher_out(session, voucher)
+
+
+@router.post("/journals/{voucher_id}/restore", response_model=VoucherOut)
+def restore_journal_voucher(voucher_id: int):
+    require_min_role("MANAGER", context="Journal entry restore")
+    with get_session() as session:
+        voucher = _manual_journal_or_404(session, voucher_id)
+        if bool(voucher.is_deleted):
+            assert_financial_year_unlocked(session, voucher.voucher_date, context="Journal entry restore")
+            voucher.is_deleted = False
+            voucher.deleted_at = None
+            voucher.updated_at = datetime.now().isoformat(timespec="seconds")
+            session.add(voucher)
+            log_audit(
+                session,
+                entity_type="JOURNAL",
+                entity_id=int(voucher.id),
+                action="RESTORE",
+                note=f"Restored journal voucher {voucher.voucher_no}",
+            )
+            session.commit()
+            session.refresh(voucher)
+        return _voucher_out(session, voucher)
+
+
 @router.get("/daybook", response_model=VoucherDayBookOut)
 def daybook(
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     voucher_type: Optional[str] = Query(
         None,
-        description="SALE | PURCHASE | RECEIPT | PAYMENT | RETURN | EXCHANGE | EXPENSE | WITHDRAWAL | STOCK_JOURNAL | WRITE_OFF",
+        description="SALE | PURCHASE | JOURNAL | RECEIPT | PAYMENT | RETURN | EXCHANGE | EXPENSE | WITHDRAWAL | STOCK_JOURNAL | WRITE_OFF",
     ),
     q: Optional[str] = Query(None, description="Search by voucher no, party, narration"),
     deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
@@ -277,6 +632,33 @@ def daybook(
                     online_amount=0.0,
                     status=purchase.payment_status,
                     is_deleted=bool(purchase.is_deleted),
+                )
+            )
+
+        journal_stmt = select(Voucher).where(
+            Voucher.voucher_type == "JOURNAL",
+            Voucher.source_type == "MANUAL_JOURNAL",
+            Voucher.voucher_date >= start_date,
+            Voucher.voucher_date <= end_date,
+        )
+        if deleted_filter == "active":
+            journal_stmt = journal_stmt.where(Voucher.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            journal_stmt = journal_stmt.where(Voucher.is_deleted == True)  # noqa: E712
+        for voucher in session.exec(journal_stmt).all():
+            rows.append(
+                VoucherDayBookRow(
+                    ts=f"{voucher.voucher_date}T00:00:00",
+                    voucher_type="JOURNAL",
+                    source_type="MANUAL_JOURNAL",
+                    source_id=int(voucher.id or 0),
+                    voucher_no=voucher.voucher_no,
+                    narration=voucher.narration or "Journal entry",
+                    amount=_round2(voucher.total_amount),
+                    cash_amount=0.0,
+                    online_amount=0.0,
+                    status="DELETED" if bool(voucher.is_deleted) else "POSTED",
+                    is_deleted=bool(voucher.is_deleted),
                 )
             )
 
@@ -465,6 +847,8 @@ def daybook(
                 summary.sales_total = _round2(summary.sales_total + amount)
             elif row.voucher_type == "PURCHASE":
                 summary.purchase_total = _round2(summary.purchase_total + amount)
+            elif row.voucher_type == "JOURNAL":
+                summary.journal_total = _round2(summary.journal_total + amount)
             elif row.voucher_type == "RECEIPT":
                 summary.receipt_total = _round2(summary.receipt_total + amount)
             elif row.voucher_type == "PAYMENT":

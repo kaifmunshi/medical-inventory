@@ -37,6 +37,14 @@ class ReturnRefundUpdate(BaseModel):
     refund_online: float = 0.0
 
 
+class ReturnDashboardSummary(BaseModel):
+    cash_refund: float = 0.0
+    online_refund: float = 0.0
+    total_refund: float = 0.0
+    credit_return: float = 0.0
+    count: int = 0
+
+
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -212,6 +220,43 @@ def list_returns(
         for r in rows:
             out.append(return_to_out(session, r))
         return out
+
+
+@router.get("/dashboard-summary", response_model=ReturnDashboardSummary)
+def returns_dashboard_summary(
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
+):
+    with get_session() as session:
+        stmt = select(Return.refund_cash, Return.refund_online, Return.subtotal_return)
+        if from_date:
+            stmt = stmt.where(Return.date_time >= f"{from_date}T00:00:00")
+        if to_date:
+            stmt = stmt.where(Return.date_time <= f"{to_date}T23:59:59")
+
+        cash = 0.0
+        online = 0.0
+        credit = 0.0
+        count = 0
+        for refund_cash, refund_online, subtotal_return in session.exec(stmt).all():
+            count += 1
+            rc = float(refund_cash or 0)
+            ro = float(refund_online or 0)
+            if rc != 0 or ro != 0:
+                cash += rc
+                online += ro
+            else:
+                credit += float(subtotal_return or 0)
+
+        cash = round2(cash)
+        online = round2(online)
+        return ReturnDashboardSummary(
+            cash_refund=cash,
+            online_refund=online,
+            total_refund=round2(cash + online),
+            credit_return=round2(credit),
+            count=count,
+        )
 
 
 # ✅ IMPORTANT: summary MUST be defined before "/{return_id}" or it gets swallowed!

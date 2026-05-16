@@ -1588,6 +1588,11 @@ def payments_summary(
             stmt = stmt.where(Bill.is_deleted == False)  # noqa: E712
         elif deleted_filter == "deleted":
             stmt = stmt.where(Bill.is_deleted == True)  # noqa: E712
+        payment_date_expr = func.substr(func.coalesce(BillPayment.received_at, ""), 1, 10)
+        if from_date:
+            stmt = stmt.where(payment_date_expr >= from_date)
+        if to_date:
+            stmt = stmt.where(payment_date_expr <= to_date)
 
         pays = [
             p for p in session.exec(stmt).all()
@@ -1595,20 +1600,16 @@ def payments_summary(
             and int(getattr(p, "id", 0) or 0) not in receipt_adjustment_payment_ids
         ]
 
-        if from_date:
-            pays = [p for p in pays if iso_date(p.received_at) >= from_date]
-        if to_date:
-            pays = [p for p in pays if iso_date(p.received_at) <= to_date]
-
         cash = round2(sum(as_f(p.cash_amount) for p in pays))
         online = round2(sum(as_f(p.online_amount) for p in pays))
         receipt_rows: List[PartyReceipt] = []
         if deleted_filter != "deleted":
             receipt_stmt = select(PartyReceipt).where(PartyReceipt.is_deleted == False)  # noqa: E712
+            receipt_date_expr = func.substr(func.coalesce(PartyReceipt.received_at, ""), 1, 10)
             if from_date:
-                receipt_stmt = receipt_stmt.where(PartyReceipt.received_at >= f"{from_date}T00:00:00")
+                receipt_stmt = receipt_stmt.where(receipt_date_expr >= from_date)
             if to_date:
-                receipt_stmt = receipt_stmt.where(PartyReceipt.received_at <= f"{to_date}T23:59:59")
+                receipt_stmt = receipt_stmt.where(receipt_date_expr <= to_date)
             receipt_rows = session.exec(receipt_stmt).all()
         cash = round2(cash + sum(as_f(row.cash_amount) for row in receipt_rows))
         online = round2(online + sum(as_f(row.online_amount) for row in receipt_rows))

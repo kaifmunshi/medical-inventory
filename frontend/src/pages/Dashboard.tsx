@@ -22,8 +22,8 @@ import {
   TablePagination,
 } from '@mui/material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { listBills, getCreditPendingTotal, getPaymentsSummary } from '../services/billing'
-import { listReturns } from '../services/returns'
+import { getCreditPendingTotal, getPaymentsSummary, getSalesAggregate } from '../services/billing'
+import { getReturnsDashboardSummary } from '../services/returns'
 import { getInventoryDashboardStats, listItemsPage } from '../services/inventory'
 import { todayRange } from '../lib/date'
 import {
@@ -126,26 +126,30 @@ export default function Dashboard() {
   const [openCashbookHistory, setOpenCashbookHistory] = useState(false)
   const [histFrom, setHistFrom] = useState(from)
   const [histTo, setHistTo] = useState(to)
+  const shouldLoadMoneyCards = showMoneyCards || openCollectedBreakdown
 
-  // Bills created today (used for "Billed Today" + "Credit Pending")
-  const qBills = useQuery({
-    queryKey: ['dash-bills', from, to],
-    queryFn: () => listBills({ from_date: from, to_date: to, limit: 500 }),
+  const qSalesAggregate = useQuery({
+    queryKey: ['dash-sales-aggregate', from, to],
+    queryFn: () => getSalesAggregate({ from_date: from, to_date: to, group_by: 'day' }),
+    enabled: shouldLoadMoneyCards,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 
-  // Returns created today
-  const qReturns = useQuery({
-    queryKey: ['dash-returns', from, to],
-    queryFn: () => listReturns({ from_date: from, to_date: to, limit: 500 }),
+  const qReturnsSummary = useQuery({
+    queryKey: ['dash-returns-summary', from, to],
+    queryFn: () => getReturnsDashboardSummary({ from_date: from, to_date: to }),
+    enabled: shouldLoadMoneyCards,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 
   const qInventoryStats = useQuery({
     queryKey: ['dash-inventory-stats'],
     queryFn: () => getInventoryDashboardStats(),
     placeholderData: (previousData) => previousData,
-    staleTime: 0,
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 
   // Inventory for low-stock + expiry
@@ -154,9 +158,8 @@ export default function Dashboard() {
   queryFn: () => fetchAllInventoryRows(),
   enabled: openZeroStock || openLow || openExp || openExpired,
   placeholderData: (previousData) => previousData,
-  staleTime: 0,                 // ✅ always treat as stale
-  refetchOnMount: 'always',     // ✅ when you go to dashboard, always refresh
-  refetchOnWindowFocus: true,   // ✅ if you tab back, refresh
+  staleTime: 60_000,
+  refetchOnWindowFocus: false,
 })
 
   // ✅ Inventory totals (Total Qty + Total Types) + ✅ Zero stock types list
@@ -223,12 +226,18 @@ export default function Dashboard() {
   const qCollected = useQuery({
     queryKey: ['dash-collected', from, to],
     queryFn: () => getPaymentsSummary({ from_date: from, to_date: to }),
+    enabled: shouldLoadMoneyCards,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 
   // Cashbook summary for today (withdrawals + misc expenses)
   const qCashbook = useQuery({
     queryKey: ['dash-cashbook', from, to],
     queryFn: () => getCashbookSummary({ from_date: from, to_date: to }),
+    enabled: shouldLoadMoneyCards,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 
   // Cashbook History list (only fetch when dialog open)
@@ -247,11 +256,8 @@ export default function Dashboard() {
 
   // -------------------- Money Computations --------------------
   const billedToday = useMemo(() => {
-    const bills = (qBills.data || []) as any[]
-    let total = 0
-    for (const b of bills) total += Number(b.total_amount || 0)
-    return to2(total)
-  }, [qBills.data])
+    return to2((qSalesAggregate.data || []).reduce((sum, row) => sum + Number(row.gross_sales || 0), 0))
+  }, [qSalesAggregate.data])
 
   const collectedTodayCash = to2(qCollected.data?.cash_collected)
   const collectedTodayOnline = to2(qCollected.data?.online_collected)
@@ -261,41 +267,12 @@ export default function Dashboard() {
   const cashOutTodayWithdrawals = to2(qCashbook.data?.withdrawals)
   const cashOutTodayExpenses = to2(qCashbook.data?.expenses)
 
-const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCredit } = useMemo(() => {
-  const rets = (qReturns.data || []) as any[]
-  let cash = 0
-  let online = 0
-  let total = 0
-  let credit = 0
-
-  for (const r of rets) {
-    const rc = Number(r.refund_cash ?? 0)
-    const ro = Number(r.refund_online ?? 0)
-
-    if (rc !== 0 || ro !== 0) {
-      cash += rc
-      online += ro
-      total += rc + ro   // only real money refunds
-      continue
-    }
-
-    const sub =
-      typeof r.subtotal_return === 'number'
-        ? Number(r.subtotal_return)
-        : (r.items || []).reduce((s: number, it: any) => s + Number(it.mrp) * Number(it.quantity), 0)
-
-    credit += Number(sub || 0)
-
-    // ✅ DO NOT add credit to total
-  }
-
-  return {
-    returnsTodayCash: to2(cash),
-    returnsTodayOnline: to2(online),
-    returnsTodayTotal: to2(total),   // now only cash + online
-    returnsTodayCredit: to2(credit),
-  }
-}, [qReturns.data])
+const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCredit } = useMemo(() => ({
+  returnsTodayCash: to2(qReturnsSummary.data?.cash_refund),
+  returnsTodayOnline: to2(qReturnsSummary.data?.online_refund),
+  returnsTodayTotal: to2(qReturnsSummary.data?.total_refund),
+  returnsTodayCredit: to2(qReturnsSummary.data?.credit_return),
+}), [qReturnsSummary.data])
 
   const netCashInHandToday = useMemo(() => {
     return to2(collectedTodayCash - returnsTodayCash - cashOutTodayTotal)
@@ -312,6 +289,9 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
   const qCreditPending = useQuery({
     queryKey: ['dash-credit-pending-total'],
     queryFn: getCreditPendingTotal,
+    enabled: shouldLoadMoneyCards,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 
   const creditPendingAllDates = to2(qCreditPending.data || 0)

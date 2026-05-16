@@ -47,6 +47,14 @@ export type ReturnRecord = {
   subtotal_return?: number
 }
 
+export type ReturnsDashboardSummary = {
+  cash_refund: number
+  online_refund: number
+  total_refund: number
+  credit_return: number
+  count: number
+}
+
 // When searching bills, backend may return a single bill or a list.
 export type BillSearchResult = any | any[]
 
@@ -100,6 +108,11 @@ export async function createReturn(body: CreateReturnBody) {
 export async function listReturns(params: ListReturnsParams = {}) {
   const { data } = await api.get('/returns/', { params })
   return data as ReturnRecord[]
+}
+
+export async function getReturnsDashboardSummary(params: Pick<ListReturnsParams, 'from_date' | 'to_date'> = {}) {
+  const { data } = await api.get('/returns/dashboard-summary', { params })
+  return data as ReturnsDashboardSummary
 }
 
 // ✅ Exchange API — matches Swagger: POST /returns/exchange

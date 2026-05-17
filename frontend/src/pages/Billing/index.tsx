@@ -194,6 +194,10 @@ function round2(n: number) {
   return Number(Number(n || 0).toFixed(2))
 }
 
+function money(n: number | string | undefined | null) {
+  return Number(n || 0).toFixed(2)
+}
+
 export default function Billing() {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -541,6 +545,15 @@ export default function Billing() {
           : 0
     ).toFixed(2)
   )
+  const partialCreditAmount = Number(
+    (
+      mode === 'cash'
+        ? Math.max(0, chosenFinal - Number(cash || 0))
+        : mode === 'online'
+          ? Math.max(0, chosenFinal - Number(online || 0))
+          : 0
+    ).toFixed(2)
+  )
   const effectiveDiscountPercent = totals.subtotal > 0 ? ((totals.discount / totals.subtotal) * 100) : 0
   const customerNote = useMemo(() => {
     if (!selectedCustomer) return ''
@@ -560,8 +573,8 @@ export default function Billing() {
     const c = Number(cash || 0)
     const o = Number(online || 0)
     if (mode === 'credit') return true
-    if (mode === 'cash') return Number(c.toFixed(2)) === chosenFinal
-    if (mode === 'online') return Number(o.toFixed(2)) === chosenFinal
+    if (mode === 'cash') return c > 0 && round2(c) <= chosenFinal
+    if (mode === 'online') return o > 0 && round2(o) <= chosenFinal
     if (splitCombination === 'cash-online') {
       return Number((c + o).toFixed(2)) === chosenFinal
     }
@@ -637,9 +650,7 @@ export default function Billing() {
 
   function commitPaymentAmountBlur() {
     let nextFinal: number | null = null
-    if (mode === 'cash') nextFinal = Number(cash || 0)
-    else if (mode === 'online') nextFinal = Number(online || 0)
-    else if (mode === 'split' && splitCombination === 'cash-online') {
+    if (mode === 'split' && splitCombination === 'cash-online') {
       nextFinal = Number(cash || 0) + Number(online || 0)
     }
     if (nextFinal === null || nextFinal <= 0) return
@@ -689,6 +700,7 @@ export default function Billing() {
           })),
         discount_percent: 0,
         tax_percent: Number(tax) || 0,
+        customer_id: selectedCustomer?.id && Number(selectedCustomer.id) > 0 ? Number(selectedCustomer.id) : undefined,
         payment_mode: mode,
         payment_cash: Number(cash || 0),
         payment_online: Number(online || 0),
@@ -701,11 +713,29 @@ export default function Billing() {
         payload.payment_cash = 0
         payload.payment_online = 0
       } else if (mode === 'cash') {
-        payload.payment_cash = chosenFinal
+        const paidCash = round2(Number(payload.payment_cash || 0))
+        if (paidCash > chosenFinal) {
+          toast.push('Cash amount cannot be greater than Final Amount.', 'error')
+          throw new Error('Invalid cash amount')
+        }
+        payload.payment_cash = paidCash
         payload.payment_online = 0
+        if (paidCash < chosenFinal) {
+          payload.payment_mode = 'split'
+          payload.payment_credit = round2(chosenFinal - paidCash)
+        }
       } else if (mode === 'online') {
+        const paidOnline = round2(Number(payload.payment_online || 0))
+        if (paidOnline > chosenFinal) {
+          toast.push('Online amount cannot be greater than Final Amount.', 'error')
+          throw new Error('Invalid online amount')
+        }
         payload.payment_cash = 0
-        payload.payment_online = chosenFinal
+        payload.payment_online = paidOnline
+        if (paidOnline < chosenFinal) {
+          payload.payment_mode = 'split'
+          payload.payment_credit = round2(chosenFinal - paidOnline)
+        }
       } else {
         if (splitCombination === 'cash-online') {
           const sum = +(
@@ -1539,6 +1569,16 @@ export default function Billing() {
                   disabled
                 />
               )}
+              {(mode === 'cash' || mode === 'online') && partialCreditAmount > 0 ? (
+                <TextField
+                  label="Credit Amount"
+                  type="text"
+                  value={partialCreditAmount.toFixed(2)}
+                  sx={{ width: 170, ...noSpinnerSx }}
+                  inputProps={{ inputMode: 'decimal' }}
+                  disabled
+                />
+              ) : null}
             </Stack>
           </Stack>
 
@@ -1769,7 +1809,7 @@ export default function Billing() {
             </Stack>
             <Chip
               icon={<PaymentsIcon />}
-              label={`₹${chosenFinal.toFixed(2)}`}
+              label={`₹${money(cash || chosenFinal)}`}
               variant="outlined"
               sx={{ fontWeight: 700 }}
             />
@@ -1785,11 +1825,16 @@ export default function Billing() {
 
           <Stack mt={2} spacing={1}>
             <Typography variant="body2" color="text.secondary">
-              Final Amount (you charge)
+              Cash received
             </Typography>
             <Typography variant="h5" sx={{ fontWeight: 800 }}>
-              ₹{chosenFinal.toFixed(2)}
+              ₹{money(cash || chosenFinal)}
             </Typography>
+            {round2(Number(cash || 0)) < chosenFinal ? (
+              <Typography variant="body2" color="text.secondary">
+                Balance will stay as credit: <b>₹{money(chosenFinal - Number(cash || 0))}</b>
+              </Typography>
+            ) : null}
           </Stack>
         </DialogContent>
 

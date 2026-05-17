@@ -25,6 +25,8 @@ class Item(SQLModel, table=True):
 class Bill(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     date_time: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    customer_id: Optional[int] = Field(default=None, index=True)
+    party_id: Optional[int] = Field(default=None, index=True)
     discount_percent: float = 0.0
     subtotal: float
     total_amount: float
@@ -264,6 +266,8 @@ class BillCreate(SQLModel):
     payment_cash: float = 0.0
     payment_online: float = 0.0
     payment_credit: float = 0.0
+    customer_id: Optional[int] = None
+    party_id: Optional[int] = None
     final_amount: Optional[float] = None
     date_time: Optional[str] = None
     notes: Optional[str] = None
@@ -289,6 +293,8 @@ class BillItemOut(SQLModel):
 class BillOut(SQLModel):
     id: int
     date_time: str
+    customer_id: Optional[int] = None
+    party_id: Optional[int] = None
     discount_percent: float
     subtotal: float
     total_amount: float
@@ -1178,7 +1184,32 @@ class PartyReceiptCreate(SQLModel):
     online_amount: float = 0.0
     note: Optional[str] = None
     payment_date: Optional[str] = None
-    adjustments: List[ReceiptAdjustmentIn] = []
+    adjustments: List[ReceiptAdjustmentIn] = Field(default_factory=list)
+
+
+class PartyReceiptApply(SQLModel):
+    payment_date: Optional[str] = None
+    note: Optional[str] = None
+    adjustments: List[ReceiptAdjustmentIn] = Field(default_factory=list)
+
+
+class PartyReceiptUpdate(SQLModel):
+    mode: str
+    cash_amount: float = 0.0
+    online_amount: float = 0.0
+    note: Optional[str] = None
+    payment_date: Optional[str] = None
+
+
+class ReceiptBillAdjustmentOut(SQLModel):
+    id: int
+    receipt_id: int
+    bill_id: int
+    bill_payment_id: Optional[int] = None
+    adjusted_amount: float
+    created_at: str
+    cash_amount: float = 0.0
+    online_amount: float = 0.0
 
 
 class PartyReceiptOut(SQLModel):
@@ -1193,15 +1224,7 @@ class PartyReceiptOut(SQLModel):
     note: Optional[str] = None
     is_deleted: bool
     deleted_at: Optional[str] = None
-
-
-class ReceiptBillAdjustmentOut(SQLModel):
-    id: int
-    receipt_id: int
-    bill_id: int
-    bill_payment_id: Optional[int] = None
-    adjusted_amount: float
-    created_at: str
+    adjustments: List[ReceiptBillAdjustmentOut] = Field(default_factory=list)
 
 
 class LotOpenCreate(SQLModel):

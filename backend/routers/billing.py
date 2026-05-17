@@ -7,14 +7,14 @@ from pydantic import BaseModel
 from sqlmodel import select
 from sqlalchemy import or_, exists, func, cast
 from sqlalchemy.types import Integer, Float
-from backend.accounting import mark_voucher_deleted, post_bill_payment_voucher, sync_bill_vouchers
+from backend.accounting import mark_voucher_deleted, post_bill_payment_voucher, post_party_receipt_voucher, sync_bill_vouchers
 from backend.controls import assert_financial_year_unlocked
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
     Item, Bill, BillItem, BillPayment,
     BillCreate, BillOut, BillItemOut,
-    PartyReceipt, ReceiptBillAdjustment,
+    Customer, Party, PartyReceipt, ReceiptBillAdjustment,
     StockMovement,  # ✅ NEW
 )
 from backend.inventory_lot_sync import item_stock_kind, item_stock_meta, sync_lot_quantity_for_item
@@ -98,6 +98,77 @@ def is_deleted_bill(b: Bill) -> bool:
     return bool(getattr(b, "is_deleted", False))
 
 
+def normalize_name(v: Optional[str]) -> str:
+    return " ".join(str(v or "").strip().split())
+
+
+def resolve_bill_party_links(session, *, customer_id: Optional[int], party_id: Optional[int], notes: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    cid = int(customer_id) if customer_id is not None and int(customer_id or 0) > 0 else None
+    pid = int(party_id) if party_id is not None and int(party_id or 0) > 0 else None
+
+    if cid:
+        customer = session.get(Customer, cid)
+        if not customer:
+            raise HTTPException(status_code=400, detail="Customer not found")
+        party = session.exec(
+            select(Party).where(
+                Party.party_group == "SUNDRY_DEBTOR",
+                Party.legacy_customer_id == cid,
+            )
+        ).first()
+        if not party:
+            name = normalize_name(customer.name)
+            if name:
+                party = session.exec(
+                    select(Party).where(
+                        Party.party_group == "SUNDRY_DEBTOR",
+                        func.lower(func.trim(func.coalesce(Party.name, ""))) == name.lower(),
+                    )
+                ).first()
+        if not party:
+            party = Party(
+                name=normalize_name(customer.name) or f"Customer #{cid}",
+                party_group="SUNDRY_DEBTOR",
+                phone=getattr(customer, "phone", None),
+                address_line=getattr(customer, "address_line", None),
+                opening_balance=0.0,
+                opening_balance_type="DR",
+                legacy_customer_id=cid,
+                is_active=True,
+                created_at=now_ts(),
+                updated_at=now_ts(),
+            )
+            session.add(party)
+            session.flush()
+        elif getattr(party, "legacy_customer_id", None) is None:
+            party.legacy_customer_id = cid
+            party.updated_at = now_ts()
+            session.add(party)
+            session.flush()
+        return cid, int(party.id)
+
+    if pid:
+        party = session.get(Party, pid)
+        if not party or party.party_group != "SUNDRY_DEBTOR":
+            raise HTTPException(status_code=400, detail="Debtor party not found")
+        return getattr(party, "legacy_customer_id", None), int(party.id)
+
+    first = str(notes or "").splitlines()[0].strip()
+    if first.lower().startswith("customer:"):
+        name = normalize_name(first.split(":", 1)[1].split("|", 1)[0])
+        if name:
+            party = session.exec(
+                select(Party).where(
+                    Party.party_group == "SUNDRY_DEBTOR",
+                    func.lower(func.trim(func.coalesce(Party.name, ""))) == name.lower(),
+                )
+            ).first()
+            if party:
+                return getattr(party, "legacy_customer_id", None), int(party.id)
+
+    return None, None
+
+
 def active_bill_payments_query(bill_id: int):
     return select(BillPayment).where(BillPayment.bill_id == bill_id, BillPayment.is_deleted == False)  # noqa: E712
 
@@ -172,6 +243,42 @@ def active_receipt_adjusted_total(session, receipt_id: int, *, exclude_adjustmen
                 continue
         total += as_f(adjustment.adjusted_amount)
     return round2(total)
+
+
+def active_receipt_channel_totals(session, receipt_id: int, *, exclude_adjustment_id: Optional[int] = None) -> Dict[str, float]:
+    adjustments = session.exec(
+        select(ReceiptBillAdjustment).where(ReceiptBillAdjustment.receipt_id == int(receipt_id))
+    ).all()
+    cash = 0.0
+    online = 0.0
+    for adjustment in adjustments:
+        if exclude_adjustment_id is not None and int(adjustment.id or 0) == int(exclude_adjustment_id):
+            continue
+        if adjustment.bill_payment_id is None:
+            continue
+        payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+        if not payment or bool(getattr(payment, "is_deleted", False)):
+            continue
+        cash += as_f(payment.cash_amount)
+        online += as_f(payment.online_amount)
+    return {"cash": round2(cash), "online": round2(online)}
+
+
+def validate_receipt_payment_channels(session, adjustment: ReceiptBillAdjustment, cash: float, online: float) -> None:
+    receipt = session.get(PartyReceipt, int(adjustment.receipt_id))
+    if not receipt:
+        raise HTTPException(status_code=400, detail="Customer receipt for this payment was not found")
+    used = active_receipt_channel_totals(
+        session,
+        int(receipt.id),
+        exclude_adjustment_id=int(adjustment.id or 0),
+    )
+    proposed_cash = round2(used["cash"] + cash)
+    proposed_online = round2(used["online"] + online)
+    if proposed_cash > round2(as_f(receipt.cash_amount)) + 0.0001:
+        raise HTTPException(status_code=400, detail="Cash amount exceeds cash balance on the customer receipt")
+    if proposed_online > round2(as_f(receipt.online_amount)) + 0.0001:
+        raise HTTPException(status_code=400, detail="Online amount exceeds online balance on the customer receipt")
 
 
 def sync_party_receipt_unallocated(session, receipt_id: int) -> None:
@@ -307,6 +414,8 @@ def list_bills(
             out.append(BillOut(
                 id=b.id,
                 date_time=b.date_time,
+                customer_id=getattr(b, "customer_id", None),
+                party_id=getattr(b, "party_id", None),
                 discount_percent=b.discount_percent,
                 subtotal=b.subtotal,
                 total_amount=b.total_amount,
@@ -396,6 +505,8 @@ def list_bills_paged(
             out.append(BillOut(
                 id=b.id,
                 date_time=b.date_time,
+                customer_id=getattr(b, "customer_id", None),
+                party_id=getattr(b, "party_id", None),
                 discount_percent=b.discount_percent,
                 subtotal=b.subtotal,
                 total_amount=b.total_amount,
@@ -560,7 +671,7 @@ def list_payments(
         if from_date:
             stmt = stmt.where(BillPayment.received_at >= f"{from_date}T00:00:00")
         if to_date:
-            stmt = stmt.where(BillPayment.received_at <= f"{to_date}T23:59:59")
+            stmt = stmt.where(BillPayment.received_at <= f"{to_date}T23:59:59.999999")
 
         stmt = stmt.order_by(BillPayment.id.desc()).offset(offset).limit(limit)
         rows = session.exec(stmt).all()
@@ -594,6 +705,8 @@ def get_bill(bill_id: int):
         return BillOut(
             id=b.id,
             date_time=b.date_time,
+            customer_id=getattr(b, "customer_id", None),
+            party_id=getattr(b, "party_id", None),
             discount_percent=b.discount_percent,
             subtotal=b.subtotal,
             total_amount=b.total_amount,
@@ -706,10 +819,18 @@ def create_bill(payload: BillCreate):
             status = "PAID"
             paid_at = bill_ts
         paid_amount = paid_now
+        linked_customer_id, linked_party_id = resolve_bill_party_links(
+            session,
+            customer_id=getattr(payload, "customer_id", None),
+            party_id=getattr(payload, "party_id", None),
+            notes=getattr(payload, "notes", None),
+        )
 
         try:
             b = Bill(
                 date_time=bill_ts,
+                customer_id=linked_customer_id,
+                party_id=linked_party_id,
                 discount_percent=payload.discount_percent,
                 subtotal=subtotal,
                 total_amount=total,
@@ -792,6 +913,8 @@ def create_bill(payload: BillCreate):
         return BillOut(
             id=b.id,
             date_time=b.date_time,
+            customer_id=getattr(b, "customer_id", None),
+            party_id=getattr(b, "party_id", None),
             discount_percent=b.discount_percent,
             subtotal=b.subtotal,
             total_amount=b.total_amount,
@@ -825,6 +948,8 @@ class BillUpdateIn(BaseModel):
     payment_cash: float = 0.0
     payment_online: float = 0.0
     payment_credit: float = 0.0
+    customer_id: Optional[int] = None
+    party_id: Optional[int] = None
     final_amount: Optional[float] = None
     date_time: Optional[str] = None
     notes: Optional[str] = None
@@ -1049,6 +1174,12 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             status = "PAID"
             paid_at = bill_ts
         paid_amount = paid_now
+        linked_customer_id, linked_party_id = resolve_bill_party_links(
+            session,
+            customer_id=getattr(payload, "customer_id", None),
+            party_id=getattr(payload, "party_id", None),
+            notes=getattr(payload, "notes", None),
+        )
 
         try:
             # Update stock and append stock ledger correction entries.
@@ -1105,6 +1236,8 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                     ))
 
             b.date_time = bill_ts
+            b.customer_id = linked_customer_id
+            b.party_id = linked_party_id
             b.discount_percent = payload.discount_percent
             b.subtotal = subtotal
             b.total_amount = total
@@ -1136,6 +1269,8 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         return BillOut(
             id=b.id,
             date_time=b.date_time,
+            customer_id=getattr(b, "customer_id", None),
+            party_id=getattr(b, "party_id", None),
             discount_percent=b.discount_percent,
             subtotal=b.subtotal,
             total_amount=b.total_amount,
@@ -1401,6 +1536,12 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
         p = session.get(BillPayment, payment_id)
         if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Payment not found")
+        receipt_adjustment = receipt_adjustment_for_payment(session, int(p.id or 0))
+        receipt_managed = receipt_adjustment is not None
+        if receipt_adjustment:
+            if is_writeoff or writeoff > 0:
+                raise HTTPException(status_code=400, detail="Customer receipt allocations cannot be changed to write-off")
+            validate_receipt_payment_channels(session, receipt_adjustment, cash, online)
 
         other_active_total = round2(
             sum(
@@ -1421,22 +1562,25 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
         p.note = payload.note
         p.is_writeoff = is_writeoff
         session.add(p)
-        sync_receipt_adjustment_for_payment(session, p, round2(cash + online + writeoff))
+        sync_receipt_adjustment_for_payment(session, p, round2(cash + online))
 
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
         session.commit()
-        post_bill_payment_voucher(
-            session,
-            b,
-            int(p.id),
-            p.received_at,
-            float(p.cash_amount or 0),
-            float(p.online_amount or 0),
-            float(getattr(p, "writeoff_amount", 0) or 0),
-            bool(getattr(p, "is_writeoff", False)),
-            p.note,
-        )
+        if receipt_managed:
+            mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(p.id))
+        else:
+            post_bill_payment_voucher(
+                session,
+                b,
+                int(p.id),
+                p.received_at,
+                float(p.cash_amount or 0),
+                float(p.online_amount or 0),
+                float(getattr(p, "writeoff_amount", 0) or 0),
+                bool(getattr(p, "is_writeoff", False)),
+                p.note,
+            )
         session.commit()
         return result
 
@@ -1492,7 +1636,6 @@ def undo_bill_payment(bill_id: int, payment_id: int):
         if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Payment not found")
         assert_financial_year_unlocked(session, p.received_at, context="Bill payment delete")
-
         p.is_deleted = True
         p.deleted_at = now_ts()
         session.add(p)
@@ -1520,6 +1663,14 @@ def recover_bill_payment(bill_id: int, payment_id: int):
         if not p or int(p.bill_id) != int(bill_id) or not bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Deleted payment not found")
         assert_financial_year_unlocked(session, p.received_at, context="Bill payment recover")
+        receipt_adjustment = receipt_adjustment_for_payment(session, int(p.id or 0))
+        receipt_managed = receipt_adjustment is not None
+        receipt = session.get(PartyReceipt, int(receipt_adjustment.receipt_id)) if receipt_adjustment else None
+        restore_receipt_voucher = bool(receipt and getattr(receipt, "is_deleted", False))
+        if receipt_adjustment:
+            if bool(getattr(p, "is_writeoff", False)) or as_f(getattr(p, "writeoff_amount", 0.0)) > 0:
+                raise HTTPException(status_code=400, detail="Customer receipt allocations cannot be recovered as write-off")
+            validate_receipt_payment_channels(session, receipt_adjustment, round2(as_f(p.cash_amount)), round2(as_f(p.online_amount)))
 
         p.is_deleted = False
         p.deleted_at = None
@@ -1527,24 +1678,40 @@ def recover_bill_payment(bill_id: int, payment_id: int):
         sync_receipt_adjustment_for_payment(
             session,
             p,
-            round2(as_f(p.cash_amount) + as_f(p.online_amount) + as_f(getattr(p, "writeoff_amount", 0.0))),
+            round2(as_f(p.cash_amount) + as_f(p.online_amount)),
             restore_receipt=True,
         )
 
         result = recalculate_bill_payment_state(session, b)
         session.add(b)
         session.commit()
-        post_bill_payment_voucher(
-            session,
-            b,
-            int(p.id),
-            p.received_at,
-            float(p.cash_amount or 0),
-            float(p.online_amount or 0),
-            float(getattr(p, "writeoff_amount", 0) or 0),
-            bool(getattr(p, "is_writeoff", False)),
-            p.note,
-        )
+        if receipt_managed:
+            mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(p.id))
+            if restore_receipt_voucher and receipt:
+                party = session.get(Party, int(receipt.party_id))
+                if party:
+                    post_party_receipt_voucher(
+                        session,
+                        int(receipt.id),
+                        party,
+                        receipt.received_at,
+                        float(receipt.total_amount or 0),
+                        float(receipt.cash_amount or 0),
+                        float(receipt.online_amount or 0),
+                        receipt.note,
+                    )
+        else:
+            post_bill_payment_voucher(
+                session,
+                b,
+                int(p.id),
+                p.received_at,
+                float(p.cash_amount or 0),
+                float(p.online_amount or 0),
+                float(getattr(p, "writeoff_amount", 0) or 0),
+                bool(getattr(p, "is_writeoff", False)),
+                p.note,
+            )
         session.commit()
         return result
 

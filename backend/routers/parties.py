@@ -20,8 +20,10 @@ from backend.models import (
     PartyCreate,
     PartyOut,
     PartyReceipt,
+    PartyReceiptApply,
     PartyReceiptCreate,
     PartyReceiptOut,
+    PartyReceiptUpdate,
     PartyUpdate,
     Return,
     ReceiptBillAdjustment,
@@ -79,6 +81,16 @@ def _customer_note_matches_expr(name: str):
         note.like(f"{base} |%"),
         note.like(f"{base}\n%"),
     )
+
+
+def _bill_matches_party_expr(party: Party, customer_name: str):
+    matches = [
+        _customer_note_matches_expr(customer_name),
+        Bill.party_id == int(party.id or 0),
+    ]
+    if party.legacy_customer_id is not None:
+        matches.append(Bill.customer_id == int(party.legacy_customer_id))
+    return or_(*matches)
 
 
 def _round2(x: float) -> float:
@@ -158,6 +170,142 @@ def _sync_bill_payment_states(session, bills: List[Bill]) -> None:
             changed = True
     if changed:
         session.commit()
+
+
+def _active_receipt_adjustments(session, receipt_id: int) -> List[ReceiptBillAdjustment]:
+    rows = session.exec(
+        select(ReceiptBillAdjustment).where(ReceiptBillAdjustment.receipt_id == int(receipt_id))
+    ).all()
+    active: List[ReceiptBillAdjustment] = []
+    for adjustment in rows:
+        if adjustment.bill_payment_id is not None:
+            payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+            if payment and bool(getattr(payment, "is_deleted", False)):
+                continue
+        active.append(adjustment)
+    return active
+
+
+def _sync_party_receipt_unallocated(session, receipt: PartyReceipt) -> None:
+    adjusted = _round2(sum(_as_float(row.adjusted_amount) for row in _active_receipt_adjustments(session, int(receipt.id or 0))))
+    receipt.unallocated_amount = _round2(max(0.0, _as_float(receipt.total_amount) - adjusted))
+    session.add(receipt)
+
+
+def _receipt_remaining_channels(session, receipt: PartyReceipt) -> tuple[float, float]:
+    used_cash = 0.0
+    used_online = 0.0
+    for adjustment in _active_receipt_adjustments(session, int(receipt.id or 0)):
+        if adjustment.bill_payment_id is None:
+            continue
+        payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+        if not payment or bool(getattr(payment, "is_deleted", False)):
+            continue
+        used_cash += _as_float(payment.cash_amount)
+        used_online += _as_float(payment.online_amount)
+    return (
+        _round2(max(0.0, _as_float(receipt.cash_amount) - used_cash)),
+        _round2(max(0.0, _as_float(receipt.online_amount) - used_online)),
+    )
+
+
+def _allocate_receipt_channels(amount: float, remaining_cash: float, remaining_online: float) -> tuple[float, float]:
+    amount = _round2(amount)
+    remaining_cash = _round2(max(0.0, remaining_cash))
+    remaining_online = _round2(max(0.0, remaining_online))
+    remaining_total = _round2(remaining_cash + remaining_online)
+    if amount <= 0 or remaining_total <= 0:
+        return 0.0, 0.0
+    if remaining_online <= 0:
+        return amount, 0.0
+    if remaining_cash <= 0:
+        return 0.0, amount
+    cash_share = _round2((remaining_cash / remaining_total) * amount)
+    cash_share = _round2(min(remaining_cash, max(0.0, cash_share)))
+    online_share = _round2(amount - cash_share)
+    if online_share > remaining_online:
+        online_share = remaining_online
+        cash_share = _round2(amount - online_share)
+    return cash_share, online_share
+
+
+def _receipt_adjustment_outs_by_receipt(
+    session,
+    receipt_ids: List[int],
+    include_deleted_for_receipts: Optional[set[int]] = None,
+) -> dict[int, List[ReceiptBillAdjustmentOut]]:
+    ids = [int(receipt_id) for receipt_id in receipt_ids if int(receipt_id or 0) > 0]
+    if not ids:
+        return {}
+    include_deleted_for_receipts = include_deleted_for_receipts or set()
+
+    adjustments = session.exec(
+        select(ReceiptBillAdjustment)
+        .where(ReceiptBillAdjustment.receipt_id.in_(ids))
+        .order_by(ReceiptBillAdjustment.created_at.asc(), ReceiptBillAdjustment.id.asc())
+    ).all()
+    payment_ids = [
+        int(adjustment.bill_payment_id)
+        for adjustment in adjustments
+        if adjustment.bill_payment_id is not None
+    ]
+    payments_by_id = {
+        int(payment.id): payment
+        for payment in session.exec(select(BillPayment).where(BillPayment.id.in_(payment_ids))).all()
+        if payment.id is not None
+    } if payment_ids else {}
+
+    out: dict[int, List[ReceiptBillAdjustmentOut]] = {}
+    for adjustment in adjustments:
+        if _as_float(adjustment.adjusted_amount) <= 0:
+            continue
+        payment = payments_by_id.get(int(adjustment.bill_payment_id or 0))
+        if adjustment.bill_payment_id is not None:
+            if (
+                payment
+                and bool(getattr(payment, "is_deleted", False))
+                and int(adjustment.receipt_id) not in include_deleted_for_receipts
+            ):
+                continue
+            cash_amount = _round2(_as_float(payment.cash_amount)) if payment else 0.0
+            online_amount = _round2(_as_float(payment.online_amount)) if payment else 0.0
+        else:
+            cash_amount = 0.0
+            online_amount = 0.0
+
+        receipt_id = int(adjustment.receipt_id)
+        out.setdefault(receipt_id, []).append(
+            ReceiptBillAdjustmentOut(
+                **adjustment.dict(),
+                cash_amount=cash_amount,
+                online_amount=online_amount,
+            )
+        )
+    return out
+
+
+def _party_receipt_outs(session, receipts: List[PartyReceipt]) -> List[PartyReceiptOut]:
+    receipt_ids = [int(receipt.id) for receipt in receipts if receipt.id is not None]
+    deleted_receipt_ids = {
+        int(receipt.id)
+        for receipt in receipts
+        if receipt.id is not None and bool(getattr(receipt, "is_deleted", False))
+    }
+    adjustments_by_receipt = _receipt_adjustment_outs_by_receipt(
+        session,
+        receipt_ids,
+        include_deleted_for_receipts=deleted_receipt_ids,
+    )
+    out: List[PartyReceiptOut] = []
+    for receipt in receipts:
+        data = receipt.dict()
+        data["adjustments"] = adjustments_by_receipt.get(int(receipt.id or 0), [])
+        out.append(PartyReceiptOut(**data))
+    return out
+
+
+def _party_receipt_out(session, receipt: PartyReceipt) -> PartyReceiptOut:
+    return _party_receipt_outs(session, [receipt])[0]
 
 
 def _sync_customer_debtor_parties(session) -> None:
@@ -425,7 +573,7 @@ def debtor_ledger(party_id: int) -> List[DebtorLedgerRow]:
         stmt = (
             select(Bill)
             .where(Bill.is_deleted == False)  # noqa: E712
-            .where(_customer_note_matches_expr(customer_name))
+            .where(_bill_matches_party_expr(party, customer_name))
             .order_by(Bill.date_time.desc(), Bill.id.desc())
         )
         rows = session.exec(stmt).all()
@@ -464,7 +612,7 @@ def debtor_open_bills(party_id: int) -> List[OpenBillOut]:
         rows = session.exec(
             select(Bill)
             .where(Bill.is_deleted == False)  # noqa: E712
-            .where(_customer_note_matches_expr(customer_name))
+            .where(_bill_matches_party_expr(party, customer_name))
             .order_by(Bill.date_time.desc(), Bill.id.desc())
         ).all()
         _sync_bill_payment_states(session, rows)
@@ -503,7 +651,7 @@ def debtor_returns(party_id: int) -> List[CustomerReturnLedgerRow]:
         bills = session.exec(
             select(Bill)
             .where(Bill.is_deleted == False)  # noqa: E712
-            .where(_customer_note_matches_expr(customer_name))
+            .where(_bill_matches_party_expr(party, customer_name))
         ).all()
         bill_ids = [int(bill.id) for bill in bills if bill.id is not None]
         if not bill_ids:
@@ -545,19 +693,46 @@ def debtor_returns(party_id: int) -> List[CustomerReturnLedgerRow]:
 
 
 @router.get("/{party_id}/receipts", response_model=List[PartyReceiptOut])
-def list_party_receipts(party_id: int) -> List[PartyReceiptOut]:
+def list_party_receipts(
+    party_id: int,
+    deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
+) -> List[PartyReceiptOut]:
     with get_session() as session:
         _sync_customer_debtor_parties(session)
         party = session.get(Party, party_id)
         if not party or party.party_group != "SUNDRY_DEBTOR":
             raise HTTPException(status_code=404, detail="Debtor party not found")
-        rows = session.exec(
+        stmt = select(PartyReceipt).where(PartyReceipt.party_id == party_id)
+        if deleted_filter == "active":
+            stmt = stmt.where(PartyReceipt.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            stmt = stmt.where(PartyReceipt.is_deleted == True)  # noqa: E712
+        rows = session.exec(stmt.order_by(PartyReceipt.id.desc())).all()
+        return _party_receipt_outs(session, rows)
+
+
+@router.get("/receipts", response_model=List[PartyReceiptOut])
+def list_receipts(
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> List[PartyReceiptOut]:
+    with get_session() as session:
+        _sync_customer_debtor_parties(session)
+        stmt = (
             select(PartyReceipt)
-            .where(PartyReceipt.party_id == party_id)
             .where(PartyReceipt.is_deleted == False)  # noqa: E712
             .order_by(PartyReceipt.id.desc())
-        ).all()
-        return [PartyReceiptOut(**row.dict()) for row in rows]
+            .offset(offset)
+            .limit(limit)
+        )
+        if from_date:
+            stmt = stmt.where(PartyReceipt.received_at >= f"{from_date}T00:00:00")
+        if to_date:
+            stmt = stmt.where(PartyReceipt.received_at <= f"{to_date}T23:59:59.999999")
+        rows = session.exec(stmt).all()
+        return _party_receipt_outs(session, rows)
 
 
 @router.get("/{party_id}/receipt-adjustments", response_model=List[ReceiptBillAdjustmentOut])
@@ -574,7 +749,12 @@ def list_receipt_adjustments(party_id: int) -> List[ReceiptBillAdjustmentOut]:
             .where(PartyReceipt.is_deleted == False)  # noqa: E712
             .order_by(ReceiptBillAdjustment.id.desc())
         ).all()
-        return [ReceiptBillAdjustmentOut(**row.dict()) for row in rows]
+        grouped = _receipt_adjustment_outs_by_receipt(
+            session,
+            sorted({int(row.receipt_id) for row in rows}),
+        )
+        out = [adjustment for receipt_rows in grouped.values() for adjustment in receipt_rows]
+        return sorted(out, key=lambda row: int(row.id), reverse=True)
 
 
 @router.post("/{party_id}/receipts", response_model=PartyReceiptOut, status_code=201)
@@ -595,7 +775,7 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
             for bill in session.exec(
                 select(Bill)
                 .where(Bill.is_deleted == False)  # noqa: E712
-                .where(_customer_note_matches_expr(customer_name))
+                .where(_bill_matches_party_expr(party, customer_name))
             ).all()
         }
 
@@ -634,8 +814,7 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
             deleted_at=None,
         )
         session.add(receipt)
-        session.commit()
-        session.refresh(receipt)
+        session.flush()
         post_party_receipt_voucher(
             session,
             int(receipt.id),
@@ -671,8 +850,7 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
                 deleted_at=None,
             )
             session.add(bill_payment)
-            session.commit()
-            session.refresh(bill_payment)
+            session.flush()
 
             session.add(
                 ReceiptBillAdjustment(
@@ -684,25 +862,309 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
                 )
             )
 
-            bill.paid_amount = _round2(float(bill.paid_amount or 0) + amount)
-            outstanding = _round2(
-                float(bill.total_amount or 0)
-                - float(bill.paid_amount or 0)
-                - float(getattr(bill, "writeoff_amount", 0.0) or 0)
-            )
-            if bill.paid_amount <= 0:
-                bill.payment_status = "UNPAID"
-            elif outstanding > 0.0001:
-                bill.payment_status = "PARTIAL"
-            else:
-                bill.payment_status = "PAID"
-                bill.paid_at = receipt_ts
-            bill.is_credit = outstanding > 0.0001
+            _recalculate_bill_payment_state(session, bill)
             session.add(bill)
-            session.commit()
 
         session.commit()
-        return PartyReceiptOut(**receipt.dict())
+        session.refresh(receipt)
+        return _party_receipt_out(session, receipt)
+
+
+@router.post("/{party_id}/receipts/{receipt_id}/apply", response_model=PartyReceiptOut)
+def apply_party_receipt(party_id: int, receipt_id: int, payload: PartyReceiptApply) -> PartyReceiptOut:
+    with get_session() as session:
+        _sync_customer_debtor_parties(session)
+        party = session.get(Party, party_id)
+        if not party or party.party_group != "SUNDRY_DEBTOR":
+            raise HTTPException(status_code=404, detail="Debtor party not found")
+
+        receipt = session.get(PartyReceipt, receipt_id)
+        if not receipt or int(receipt.party_id) != int(party_id) or bool(getattr(receipt, "is_deleted", False)):
+            raise HTTPException(status_code=404, detail="Receipt not found")
+
+        allocation_ts = _normalize_payment_ts(payload.payment_date)
+        assert_financial_year_unlocked(session, allocation_ts, context="Customer advance allocation")
+        customer_name = _party_customer_name(session, party)
+
+        open_bills = {
+            int(bill.id): bill
+            for bill in session.exec(
+                select(Bill)
+                .where(Bill.is_deleted == False)  # noqa: E712
+                .where(_bill_matches_party_expr(party, customer_name))
+            ).all()
+        }
+        _sync_bill_payment_states(session, list(open_bills.values()))
+
+        by_bill: dict[int, float] = {}
+        for adj in payload.adjustments:
+            amount = _round2(adj.amount)
+            if amount <= 0:
+                continue
+            bill_id = int(adj.bill_id)
+            by_bill[bill_id] = _round2(by_bill.get(bill_id, 0.0) + amount)
+        if not by_bill:
+            raise HTTPException(status_code=400, detail="Add at least one bill adjustment")
+
+        _sync_party_receipt_unallocated(session, receipt)
+        available = _round2(_as_float(receipt.unallocated_amount))
+        adjustment_total = _round2(sum(by_bill.values()))
+        if adjustment_total > available + 0.0001:
+            raise HTTPException(status_code=400, detail="Adjusted amount exceeds available advance")
+
+        normalized_adjustments: List[tuple[Bill, float]] = []
+        for bill_id, amount in by_bill.items():
+            bill = open_bills.get(int(bill_id))
+            if not bill:
+                raise HTTPException(status_code=400, detail=f"Bill {bill_id} does not belong to this customer")
+            outstanding = _round2(
+                max(
+                    0.0,
+                    _as_float(bill.total_amount)
+                    - _as_float(bill.paid_amount)
+                    - _as_float(getattr(bill, "writeoff_amount", 0.0)),
+                )
+            )
+            if amount > outstanding + 0.0001:
+                raise HTTPException(status_code=400, detail=f"Adjustment for bill {bill_id} exceeds outstanding amount")
+            normalized_adjustments.append((bill, amount))
+
+        remaining_cash, remaining_online = _receipt_remaining_channels(session, receipt)
+        allocation_note = _normalize_text(payload.note)
+        for bill, amount in normalized_adjustments:
+            cash_share, online_share = _allocate_receipt_channels(amount, remaining_cash, remaining_online)
+            if _round2(cash_share + online_share) != _round2(amount):
+                raise HTTPException(status_code=400, detail="Receipt advance balance is not available for this allocation")
+            remaining_cash = _round2(remaining_cash - cash_share)
+            remaining_online = _round2(remaining_online - online_share)
+            payment_mode = "split" if cash_share > 0 and online_share > 0 else "cash" if cash_share > 0 else "online"
+            bill_payment = BillPayment(
+                bill_id=bill.id,
+                received_at=allocation_ts,
+                mode=payment_mode,
+                cash_amount=cash_share,
+                online_amount=online_share,
+                writeoff_amount=0.0,
+                note=f"party receipt #{receipt.id} advance allocation{f': {allocation_note}' if allocation_note else ''}",
+                is_writeoff=False,
+                is_deleted=False,
+                deleted_at=None,
+            )
+            session.add(bill_payment)
+            session.flush()
+
+            session.add(
+                ReceiptBillAdjustment(
+                    receipt_id=receipt.id,
+                    bill_id=bill.id,
+                    bill_payment_id=bill_payment.id,
+                    adjusted_amount=amount,
+                    created_at=allocation_ts,
+                )
+            )
+            _recalculate_bill_payment_state(session, bill)
+            session.add(bill)
+
+        _sync_party_receipt_unallocated(session, receipt)
+        log_audit(
+            session,
+            entity_type="PARTY_RECEIPT",
+            entity_id=int(receipt.id),
+            action="APPLY",
+            note=f"Applied customer advance receipt #{receipt.id}",
+            details={
+                "party_id": party.id,
+                "applied_amount": adjustment_total,
+                "bill_ids": [int(bill.id) for bill, _amount in normalized_adjustments],
+                "note": allocation_note,
+            },
+        )
+        session.commit()
+        session.refresh(receipt)
+        return _party_receipt_out(session, receipt)
+
+
+@router.patch("/{party_id}/receipts/{receipt_id}", response_model=PartyReceiptOut)
+def update_party_receipt(party_id: int, receipt_id: int, payload: PartyReceiptUpdate) -> PartyReceiptOut:
+    require_min_role("MANAGER", context="Customer receipt edit")
+    with get_session() as session:
+        _sync_customer_debtor_parties(session)
+        party = session.get(Party, party_id)
+        if not party or party.party_group != "SUNDRY_DEBTOR":
+            raise HTTPException(status_code=404, detail="Debtor party not found")
+
+        receipt = session.get(PartyReceipt, receipt_id)
+        if not receipt or int(receipt.party_id) != int(party_id):
+            raise HTTPException(status_code=404, detail="Receipt not found")
+        if bool(getattr(receipt, "is_deleted", False)):
+            raise HTTPException(status_code=400, detail="Deleted receipt cannot be edited. Recover it first.")
+
+        cash, online, total_amount = _validate_receipt_mode(payload.mode, payload.cash_amount, payload.online_amount)
+        receipt_ts = _normalize_payment_ts(payload.payment_date) if payload.payment_date else str(receipt.received_at or datetime.now().isoformat(timespec="seconds"))
+        assert_financial_year_unlocked(session, receipt_ts, context="Customer receipt edit")
+
+        active_adjustments = sorted(
+            _active_receipt_adjustments(session, int(receipt.id)),
+            key=lambda row: (str(row.created_at or ""), int(row.id or 0)),
+        )
+        adjusted_total = _round2(sum(_as_float(row.adjusted_amount) for row in active_adjustments))
+        if total_amount + 0.0001 < adjusted_total:
+            raise HTTPException(status_code=400, detail="Receipt total cannot be less than applied bill amount")
+
+        receipt.received_at = receipt_ts
+        receipt.mode = str(payload.mode).strip().lower()
+        receipt.cash_amount = cash
+        receipt.online_amount = online
+        receipt.total_amount = total_amount
+        receipt.unallocated_amount = _round2(max(0.0, total_amount - adjusted_total))
+        receipt.note = _normalize_text(payload.note)
+        session.add(receipt)
+
+        remaining_cash = cash
+        remaining_online = online
+        affected_bill_ids = set()
+        for adjustment in active_adjustments:
+            amount = _round2(_as_float(adjustment.adjusted_amount))
+            if amount <= 0:
+                continue
+            if adjustment.bill_payment_id is None:
+                continue
+            payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+            if not payment or bool(getattr(payment, "is_deleted", False)):
+                continue
+            cash_share, online_share = _allocate_receipt_channels(amount, remaining_cash, remaining_online)
+            if _round2(cash_share + online_share) != amount:
+                raise HTTPException(status_code=400, detail="Receipt payment channels cannot cover existing bill adjustments")
+            remaining_cash = _round2(remaining_cash - cash_share)
+            remaining_online = _round2(remaining_online - online_share)
+            payment.cash_amount = cash_share
+            payment.online_amount = online_share
+            payment.mode = "split" if cash_share > 0 and online_share > 0 else "cash" if cash_share > 0 else "online"
+            session.add(payment)
+            mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(payment.id))
+            affected_bill_ids.add(int(adjustment.bill_id))
+
+        for bill_id in affected_bill_ids:
+            bill = session.get(Bill, int(bill_id))
+            if bill:
+                _recalculate_bill_payment_state(session, bill)
+                session.add(bill)
+
+        post_party_receipt_voucher(
+            session,
+            int(receipt.id),
+            party,
+            receipt.received_at,
+            float(receipt.total_amount or 0),
+            float(receipt.cash_amount or 0),
+            float(receipt.online_amount or 0),
+            receipt.note,
+        )
+        log_audit(
+            session,
+            entity_type="PARTY_RECEIPT",
+            entity_id=int(receipt.id),
+            action="UPDATE",
+            note=f"Updated customer receipt #{receipt.id}",
+            details={
+                "party_id": party.id,
+                "total_amount": receipt.total_amount,
+                "unallocated_amount": receipt.unallocated_amount,
+                "affected_bill_ids": sorted(affected_bill_ids),
+            },
+        )
+        session.commit()
+        session.refresh(receipt)
+        return _party_receipt_out(session, receipt)
+
+
+@router.post("/{party_id}/receipts/{receipt_id}/recover", response_model=PartyReceiptOut)
+def recover_party_receipt(party_id: int, receipt_id: int) -> PartyReceiptOut:
+    require_min_role("MANAGER", context="Customer receipt recover")
+    with get_session() as session:
+        _sync_customer_debtor_parties(session)
+        party = session.get(Party, party_id)
+        if not party or party.party_group != "SUNDRY_DEBTOR":
+            raise HTTPException(status_code=404, detail="Debtor party not found")
+
+        receipt = session.get(PartyReceipt, receipt_id)
+        if not receipt or int(receipt.party_id) != int(party_id):
+            raise HTTPException(status_code=404, detail="Receipt not found")
+        if not bool(getattr(receipt, "is_deleted", False)):
+            return _party_receipt_out(session, receipt)
+
+        assert_financial_year_unlocked(session, receipt.received_at, context="Customer receipt recover")
+        adjustments = session.exec(
+            select(ReceiptBillAdjustment).where(ReceiptBillAdjustment.receipt_id == receipt.id)
+        ).all()
+
+        for adjustment in adjustments:
+            if adjustment.bill_payment_id is None:
+                continue
+            payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+            bill = session.get(Bill, int(adjustment.bill_id))
+            if not payment or not bill:
+                raise HTTPException(status_code=400, detail=f"Cannot recover receipt because bill/payment for bill {adjustment.bill_id} is missing")
+            if bool(getattr(bill, "is_deleted", False)):
+                raise HTTPException(status_code=400, detail=f"Cannot recover receipt because bill {bill.id} is deleted")
+            other_total = _round2(
+                sum(
+                    _as_float(row.cash_amount) + _as_float(row.online_amount) + _as_float(getattr(row, "writeoff_amount", 0.0))
+                    for row in session.exec(
+                        select(BillPayment).where(
+                            BillPayment.bill_id == bill.id,
+                            BillPayment.is_deleted == False,  # noqa: E712
+                        )
+                    ).all()
+                    if int(getattr(row, "id", 0) or 0) != int(payment.id)
+                )
+            )
+            proposed = _round2(_as_float(payment.cash_amount) + _as_float(payment.online_amount) + _as_float(getattr(payment, "writeoff_amount", 0.0)))
+            if other_total + proposed > _round2(_as_float(bill.total_amount)) + 0.0001:
+                raise HTTPException(status_code=400, detail=f"Recovering receipt would overpay bill {bill.id}")
+
+        receipt.is_deleted = False
+        receipt.deleted_at = None
+        session.add(receipt)
+        affected_bill_ids = set()
+        for adjustment in adjustments:
+            affected_bill_ids.add(int(adjustment.bill_id))
+            if adjustment.bill_payment_id is None:
+                continue
+            payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+            if payment:
+                payment.is_deleted = False
+                payment.deleted_at = None
+                session.add(payment)
+                mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(payment.id))
+
+        for bill_id in affected_bill_ids:
+            bill = session.get(Bill, int(bill_id))
+            if bill:
+                _recalculate_bill_payment_state(session, bill)
+                session.add(bill)
+        _sync_party_receipt_unallocated(session, receipt)
+        post_party_receipt_voucher(
+            session,
+            int(receipt.id),
+            party,
+            receipt.received_at,
+            float(receipt.total_amount or 0),
+            float(receipt.cash_amount or 0),
+            float(receipt.online_amount or 0),
+            receipt.note,
+        )
+        log_audit(
+            session,
+            entity_type="PARTY_RECEIPT",
+            entity_id=int(receipt.id),
+            action="RECOVER",
+            note=f"Recovered customer receipt #{receipt.id}",
+            details={"party_id": party.id, "affected_bill_ids": sorted(affected_bill_ids)},
+        )
+        session.commit()
+        session.refresh(receipt)
+        return _party_receipt_out(session, receipt)
 
 
 @router.delete("/{party_id}/receipts/{receipt_id}", response_model=PartyReceiptOut)
@@ -718,7 +1180,7 @@ def delete_party_receipt(party_id: int, receipt_id: int) -> PartyReceiptOut:
         if not receipt or int(receipt.party_id) != int(party_id):
             raise HTTPException(status_code=404, detail="Receipt not found")
         if bool(getattr(receipt, "is_deleted", False)):
-            return PartyReceiptOut(**receipt.dict())
+            return _party_receipt_out(session, receipt)
 
         assert_financial_year_unlocked(session, receipt.received_at, context="Customer receipt delete")
         deleted_at = datetime.now().isoformat(timespec="seconds")
@@ -759,4 +1221,4 @@ def delete_party_receipt(party_id: int, receipt_id: int) -> PartyReceiptOut:
         )
         session.commit()
         session.refresh(receipt)
-        return PartyReceiptOut(**receipt.dict())
+        return _party_receipt_out(session, receipt)

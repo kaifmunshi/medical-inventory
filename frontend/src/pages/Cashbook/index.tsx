@@ -45,6 +45,7 @@ import { listBankbookEntries } from '../../services/bankbook'
 import { getBill, listPayments } from '../../services/billing'
 import { listPurchasePayments } from '../../services/purchases'
 import { listExchangeRecords, listReturns } from '../../services/returns'
+import { fetchReceipts } from '../../services/parties'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
@@ -163,9 +164,46 @@ function partyReceiptIdFromPayment(row: any): number | null {
   return match ? Number(match[1]) : null
 }
 
-function buildReceiptPaymentRows(payments: any[], amountField: 'cash_amount' | 'online_amount', label: 'Cash' | 'Online') {
+function buildReceiptPaymentRows(payments: any[], amountField: 'cash_amount' | 'online_amount', label: 'Cash' | 'Online', receipts: any[] = []) {
   const rows: any[] = []
   const grouped = new Map<number, any>()
+  const receiptsById = new Map<number, any>()
+  for (const receipt of receipts || []) {
+    receiptsById.set(Number(receipt.id), receipt)
+  }
+
+  function receiptAmount(receipt: any) {
+    return Number(receipt?.[amountField] || 0)
+  }
+
+  function adjustmentAmountForReceiptChannel(adjustment: any, receipt: any) {
+    const channelAmount = Number(adjustment?.[amountField] || 0)
+    if (channelAmount > 0) return channelAmount
+    const adjustedAmount = Number(adjustment?.adjusted_amount || 0)
+    if (adjustedAmount <= 0) return 0
+    if (amountField === 'cash_amount' && receiptAmount(receipt) > 0 && Number(receipt?.online_amount || 0) <= 0) return adjustedAmount
+    if (amountField === 'online_amount' && receiptAmount(receipt) > 0 && Number(receipt?.cash_amount || 0) <= 0) return adjustedAmount
+    return 0
+  }
+
+  function receiptRow(receiptId: number, fallbackPayment?: any) {
+    const receipt = receiptsById.get(receiptId)
+    return {
+      id: `party-receipt-${label.toLowerCase()}-${receiptId}`,
+      receipt_id: receiptId,
+      created_at: receipt?.received_at || fallbackPayment?.received_at,
+      entry_type: 'RECEIPT',
+      pill_type: (receipt?.mode || fallbackPayment?.mode) === 'split' ? 'SPLIT' : 'RECEIPT',
+      amount: receiptAmount(receipt),
+      adjusted_amount: 0,
+      note: `${label} customer receipt #${receiptId}`,
+      source: 'PARTY_RECEIPT' as const,
+      receipt_note: receipt?.note || '',
+      plain_amount: 0,
+      subRows: [],
+    }
+  }
+
   for (const p of payments || []) {
     const amount = Number(p?.[amountField] || 0)
     if (amount <= 0) continue
@@ -183,25 +221,46 @@ function buildReceiptPaymentRows(payments: any[], amountField: 'cash_amount' | '
       })
       continue
     }
-    const current = grouped.get(receiptId) || {
-      id: `party-receipt-${label.toLowerCase()}-${receiptId}`,
-      receipt_id: receiptId,
-      created_at: p.received_at,
-      entry_type: 'RECEIPT',
-      pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
-      amount: 0,
-      note: `${label} customer receipt #${receiptId}`,
-      source: 'PARTY_RECEIPT' as const,
-      subRows: [],
+    const current = grouped.get(receiptId) || receiptRow(receiptId, p)
+    if (receiptsById.has(receiptId)) grouped.set(receiptId, current)
+  }
+  for (const receipt of receipts || []) {
+    const receiptId = Number(receipt.id)
+    const amount = receiptAmount(receipt)
+    if (amount <= 0) continue
+    const current = grouped.get(receiptId) || receiptRow(receiptId)
+    current.amount = amount
+    current.created_at = receipt.received_at || current.created_at
+    current.receipt_note = receipt.note || current.receipt_note || ''
+    current.subRows = []
+    current.adjusted_amount = 0
+    for (const adjustment of receipt.adjustments || []) {
+      const appliedAmount = adjustmentAmountForReceiptChannel(adjustment, receipt)
+      if (appliedAmount <= 0) continue
+      current.adjusted_amount = Number(current.adjusted_amount || 0) + appliedAmount
+      current.subRows.push({
+        bill_id: Number(adjustment.bill_id || 0),
+        amount: appliedAmount,
+        payment_id: adjustment.bill_payment_id,
+        adjustment_id: adjustment.id,
+        applied_at: adjustment.created_at,
+      })
     }
-    current.amount = Number(current.amount || 0) + amount
-    if (p.mode === 'split') current.pill_type = 'SPLIT'
-    current.subRows.push({ bill_id: Number(p.bill_id || 0), amount, payment_id: p.id })
-    current.note = `${label} customer receipt #${receiptId}: ${current.subRows.map((sub: any) => `Bill #${sub.bill_id}`).join(', ')}`
     grouped.set(receiptId, current)
   }
   for (const row of grouped.values()) {
     row.subRows.sort((a: any, b: any) => Number(a.bill_id || 0) - Number(b.bill_id || 0))
+    const plainAmount = Math.max(0, round2(Number(row.amount || 0) - Number(row.adjusted_amount || 0)))
+    row.plain_amount = plainAmount
+    if (plainAmount > 0.009) {
+      row.subRows.push({ kind: 'plain', amount: plainAmount, key: `plain-${row.receipt_id}` })
+    }
+    const billLabels = row.subRows
+      .filter((sub: any) => sub.kind !== 'plain')
+      .map((sub: any) => `Bill #${sub.bill_id}`)
+    if (plainAmount > 0.009) billLabels.push('Advance / on account')
+    row.note = `${label} customer receipt #${row.receipt_id}${billLabels.length ? `: ${billLabels.join(', ')}` : ''}${row.receipt_note ? ` (${row.receipt_note})` : ''}`
+    delete row.adjusted_amount
     rows.push(row)
   }
   return rows
@@ -263,6 +322,18 @@ function currentFinancialYearStart(ymd: string) {
   const [year, month] = ymd.split('-').map(Number)
   const startYear = (month || 1) >= 4 ? year : year - 1
   return `${startYear}-04-01`
+}
+
+async function fetchPagedRows<T>(load: (limit: number, offset: number) => Promise<T[]>, limit = 500) {
+  const out: T[] = []
+  let offset = 0
+  while (true) {
+    const rows = await load(limit, offset)
+    out.push(...(rows || []))
+    if (!rows || rows.length < limit) break
+    offset += limit
+  }
+  return out
 }
 
 export default function CashbookPage() {
@@ -337,133 +408,92 @@ export default function CashbookPage() {
 
   const qDayPayments = useQuery({
     queryKey: ['cashbook-payments-day', selectedDate],
-    queryFn: () => listPayments({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listPayments({ from_date: selectedDate, to_date: selectedDate, limit, offset }), 500),
+    enabled: recordsFilter === 'DAY',
+  })
+
+  const qDayReceipts = useQuery({
+    queryKey: ['cashbook-receipts-day', selectedDate],
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => fetchReceipts({ from_date: selectedDate, to_date: selectedDate, limit, offset }), 1000),
     enabled: recordsFilter === 'DAY',
   })
 
   const qDayPurchasePayments = useQuery({
     queryKey: ['cashbook-purchase-payments-day', selectedDate],
-    queryFn: () => listPurchasePayments({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listPurchasePayments({ from_date: selectedDate, to_date: selectedDate, limit, offset }), 500),
     enabled: recordsFilter === 'DAY',
   })
 
   const qDayReturns = useQuery({
     queryKey: ['cashbook-returns-day', selectedDate],
-    queryFn: () => listReturns({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listReturns({ from_date: selectedDate, to_date: selectedDate, limit, offset }), 500),
     enabled: recordsFilter === 'DAY',
   })
 
   const qDayExchanges = useQuery({
     queryKey: ['cashbook-exchanges-day', selectedDate],
-    queryFn: () => listExchangeRecords({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listExchangeRecords({ from_date: selectedDate, to_date: selectedDate, limit, offset }), 500),
     enabled: recordsFilter === 'DAY',
   })
 
   const qAllCashbook = useQuery({
     queryKey: ['cashbook-all-entries', allView, allRange.from, allRange.to],
-    queryFn: async () => {
-      const out: any[] = []
-      let offset = 0
-      const limit = 500
-      while (true) {
-        const rows = await listCashbookEntries({ from_date: allRange.from, to_date: allRange.to, limit, offset })
-        out.push(...(rows || []))
-        if (!rows || rows.length < limit) break
-        offset += limit
-      }
-      return out
-    },
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listCashbookEntries({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 500),
     enabled: canLoadAllRange,
   })
 
   const qAllPayments = useQuery({
     queryKey: ['cashbook-all-payments', allView, allRange.from, allRange.to],
-    queryFn: async () => {
-      const out: any[] = []
-      let offset = 0
-      const limit = 500
-      while (true) {
-        const rows = await listPayments({ from_date: allRange.from, to_date: allRange.to, limit, offset })
-        out.push(...(rows || []))
-        if (!rows || rows.length < limit) break
-        offset += limit
-      }
-      return out
-    },
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listPayments({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 500),
+    enabled: canLoadAllRange,
+  })
+
+  const qAllReceipts = useQuery({
+    queryKey: ['cashbook-all-receipts', allView, allRange.from, allRange.to],
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => fetchReceipts({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 1000),
     enabled: canLoadAllRange,
   })
 
   const qAllPurchasePayments = useQuery({
     queryKey: ['cashbook-all-purchase-payments', allView, allRange.from, allRange.to],
-    queryFn: async () => {
-      const out: any[] = []
-      let offset = 0
-      const limit = 500
-      while (true) {
-        const rows = await listPurchasePayments({ from_date: allRange.from, to_date: allRange.to, limit, offset })
-        out.push(...(rows || []))
-        if (!rows || rows.length < limit) break
-        offset += limit
-      }
-      return out
-    },
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listPurchasePayments({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 500),
     enabled: canLoadAllRange,
   })
 
   const qAllReturns = useQuery({
     queryKey: ['cashbook-all-returns', allView, allRange.from, allRange.to],
-    queryFn: async () => {
-      const out: any[] = []
-      let offset = 0
-      const limit = 500
-      while (true) {
-        const rows = await listReturns({ from_date: allRange.from, to_date: allRange.to, limit, offset })
-        out.push(...(rows || []))
-        if (!rows || rows.length < limit) break
-        offset += limit
-      }
-      return out
-    },
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listReturns({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 500),
     enabled: canLoadAllRange,
   })
 
   const qAllExchanges = useQuery({
     queryKey: ['cashbook-all-exchanges', allView, allRange.from, allRange.to],
-    queryFn: async () => {
-      const out: any[] = []
-      let offset = 0
-      const limit = 500
-      while (true) {
-        const rows = await listExchangeRecords({ from_date: allRange.from, to_date: allRange.to, limit, offset })
-        out.push(...(rows || []))
-        if (!rows || rows.length < limit) break
-        offset += limit
-      }
-      return out
-    },
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listExchangeRecords({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 500),
     enabled: canLoadAllRange,
   })
 
   const qDayBankbookContra = useQuery({
     queryKey: ['cashbook-bankbook-contra-day', selectedDate],
-    queryFn: () => listBankbookEntries({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listBankbookEntries({ from_date: selectedDate, to_date: selectedDate, limit, offset }), 500),
     enabled: recordsFilter === 'DAY',
   })
 
   const qAllBankbookContra = useQuery({
     queryKey: ['cashbook-bankbook-contra-all', allView, allRange.from, allRange.to],
-    queryFn: async () => {
-      const out: any[] = []
-      let offset = 0
-      const limit = 500
-      while (true) {
-        const rows = await listBankbookEntries({ from_date: allRange.from, to_date: allRange.to, limit, offset })
-        out.push(...(rows || []))
-        if (!rows || rows.length < limit) break
-        offset += limit
-      }
-      return out
-    },
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => listBankbookEntries({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 500),
     enabled: canLoadAllRange,
   })
 
@@ -572,13 +602,15 @@ export default function CashbookPage() {
 
   const billCashRowsDay = useMemo(() => {
     const payments = (qDayPayments.data || []) as any[]
-    return buildReceiptPaymentRows(payments, 'cash_amount', 'Cash')
-  }, [qDayPayments.data])
+    const receipts = (qDayReceipts.data || []) as any[]
+    return buildReceiptPaymentRows(payments, 'cash_amount', 'Cash', receipts)
+  }, [qDayPayments.data, qDayReceipts.data])
 
   const billCashRowsAll = useMemo(() => {
     const payments = (qAllPayments.data || []) as any[]
-    return buildReceiptPaymentRows(payments, 'cash_amount', 'Cash')
-  }, [qAllPayments.data])
+    const receipts = (qAllReceipts.data || []) as any[]
+    return buildReceiptPaymentRows(payments, 'cash_amount', 'Cash', receipts)
+  }, [qAllPayments.data, qAllReceipts.data])
 
   const purchaseCashRowsDay = useMemo(() => {
     const payments = (qDayPurchasePayments.data || []) as any[]
@@ -1101,9 +1133,16 @@ export default function CashbookPage() {
             </TableHead>
             <TableBody>
               {(recordsFilter === 'DAY'
-                ? qDay.isLoading || qDayPayments.isLoading || qDayPurchasePayments.isLoading || qDayReturns.isLoading || qDayExchanges.isLoading || qDayBankbookContra.isLoading
+                ? qDay.isLoading ||
+                  qDayPayments.isLoading ||
+                  qDayReceipts.isLoading ||
+                  qDayPurchasePayments.isLoading ||
+                  qDayReturns.isLoading ||
+                  qDayExchanges.isLoading ||
+                  qDayBankbookContra.isLoading
                 : qAllCashbook.isLoading ||
                   qAllPayments.isLoading ||
+                  qAllReceipts.isLoading ||
                   qAllPurchasePayments.isLoading ||
                   qAllReturns.isLoading ||
                   qAllExchanges.isLoading ||
@@ -1190,7 +1229,8 @@ export default function CashbookPage() {
                                   Customer receipt #{row.receipt_id}
                                 </Typography>
                                 <Typography variant="caption" color="text.secondary">
-                                  {(row.subRows || []).length} bill adjustment(s)
+                                  {(row.subRows || []).filter((sub: any) => sub.kind !== 'plain').length} bill adjustment(s)
+                                  {Number(row.plain_amount || 0) > 0 ? ` • Advance / on account Rs ${money(row.plain_amount)}` : ''}
                                 </Typography>
                               </Stack>
                             ) : row.source === 'PURCHASE_PAYMENT' && Number(row.purchase_id || 0) > 0 ? (
@@ -1250,21 +1290,32 @@ export default function CashbookPage() {
                         </TableCell>
                       </TableRow>
                       {(row.subRows || []).map((sub: any) => (
-                        <TableRow key={`${row.id}-sub-${sub.payment_id || sub.bill_id}`} sx={{ bgcolor: recordsFilter === 'ALL' ? dayColorMap[date] : '#fafafa' }}>
+                        <TableRow key={`${row.id}-sub-${sub.payment_id || sub.bill_id || sub.key || sub.kind}`} sx={{ bgcolor: recordsFilter === 'ALL' ? dayColorMap[date] : '#fafafa' }}>
                           <TableCell />
                           <TableCell />
                           <TableCell>
                             <Stack direction="row" spacing={1} alignItems="center" sx={{ pl: 5 }}>
-                              <Typography variant="caption" color="text.secondary">Applied to</Typography>
-                              <Link component="button" onClick={() => openBillDetail(Number(sub.bill_id))} underline="hover" sx={{ fontSize: 13, fontWeight: 800 }}>
-                                Bill #{sub.bill_id}
-                              </Link>
+                              {sub.kind === 'plain' ? (
+                                <>
+                                  <Typography variant="caption" color="text.secondary">Advance / on account</Typography>
+                                  <Typography variant="caption" sx={{ fontWeight: 800 }}>
+                                    On account / unadjusted
+                                  </Typography>
+                                </>
+                              ) : (
+                                <>
+                                  <Typography variant="caption" color="text.secondary">Applied to</Typography>
+                                  <Link component="button" onClick={() => openBillDetail(Number(sub.bill_id))} underline="hover" sx={{ fontSize: 13, fontWeight: 800 }}>
+                                    Bill #{sub.bill_id}
+                                  </Link>
+                                </>
+                              )}
                             </Stack>
                           </TableCell>
                           <TableCell align="right" sx={{ color: 'text.secondary', fontWeight: 600 }}>
                             Rs {money(sub.amount)}
                           </TableCell>
-                          <TableCell sx={{ color: 'text.secondary' }}>Receipt bill</TableCell>
+                          <TableCell sx={{ color: 'text.secondary' }}>{sub.kind === 'plain' ? 'Advance / on account' : 'Receipt bill'}</TableCell>
                           <TableCell />
                         </TableRow>
                       ))}
@@ -1408,6 +1459,8 @@ export default function CashbookPage() {
                   qc.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
                   qc.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
                   qc.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
+                  qc.invalidateQueries({ queryKey: ['cashbook-receipts-day'] })
+                  qc.invalidateQueries({ queryKey: ['cashbook-all-receipts'] })
                 }}
               />
             </Stack>
@@ -1425,6 +1478,8 @@ export default function CashbookPage() {
           qc.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
           qc.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
           qc.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
+          qc.invalidateQueries({ queryKey: ['cashbook-receipts-day'] })
+          qc.invalidateQueries({ queryKey: ['cashbook-all-receipts'] })
         }}
       />
       <Dialog open={!!editRow} onClose={() => setEditRow(null)} fullWidth maxWidth="sm">

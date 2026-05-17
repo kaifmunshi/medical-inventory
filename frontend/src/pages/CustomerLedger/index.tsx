@@ -20,12 +20,14 @@ import {
 import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
+import RestoreIcon from '@mui/icons-material/Restore'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchCustomers } from '../../services/customers'
 import {
+  applyPartyReceipt,
   createPartyReceipt,
   deletePartyReceipt,
   fetchCustomerReturns,
@@ -34,6 +36,8 @@ import {
   fetchParties,
   fetchPartyReceipts,
   fetchReceiptAdjustments,
+  recoverPartyReceipt,
+  updatePartyReceipt,
 } from '../../services/parties'
 import { getBill, listPayments, undoBillPayment, type BillPaymentRow } from '../../services/billing'
 import type {
@@ -155,7 +159,7 @@ const receiptGridSx = {
   '& .mode-col': { width: 88 },
   '& .amount-col': { width: 92, textAlign: 'right' },
   '& .allocation-col': { width: 188, whiteSpace: 'normal', wordBreak: 'break-word' },
-  '& .action-col': { width: 58, textAlign: 'right' },
+  '& .action-col': { width: 180, textAlign: 'right' },
 } as const
 
 type ReceiptHistoryRow = {
@@ -173,6 +177,8 @@ type ReceiptHistoryRow = {
   onAccount: number
   allocation: string
   note: string
+  isDeleted?: boolean
+  deletedAt?: string | null
 }
 
 export default function CustomerLedgerPage() {
@@ -195,6 +201,18 @@ export default function CustomerLedgerPage() {
   const [billDetail, setBillDetail] = useState<any | null>(null)
   const [billEditOpen, setBillEditOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<ReceiptHistoryRow | null>(null)
+  const [editReceiptTarget, setEditReceiptTarget] = useState<ReceiptHistoryRow | null>(null)
+  const [recoverReceiptTarget, setRecoverReceiptTarget] = useState<ReceiptHistoryRow | null>(null)
+  const [applyTarget, setApplyTarget] = useState<ReceiptHistoryRow | null>(null)
+  const [applyDate, setApplyDate] = useState(today)
+  const [applyNote, setApplyNote] = useState('')
+  const [applyDrafts, setApplyDrafts] = useState<Record<number, string>>({})
+  const [editReceiptMode, setEditReceiptMode] = useState<'cash' | 'online' | 'split'>('cash')
+  const [editReceiptAmount, setEditReceiptAmount] = useState('0')
+  const [editReceiptCash, setEditReceiptCash] = useState('0')
+  const [editReceiptOnline, setEditReceiptOnline] = useState('0')
+  const [editReceiptDate, setEditReceiptDate] = useState(today)
+  const [editReceiptNote, setEditReceiptNote] = useState('')
   const [openBillSort, setOpenBillSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
   const [ledgerSort, setLedgerSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
   const [receiptSort, setReceiptSort] = useState<SortState<ReceiptSortKey>>({ key: 'when', direction: 'desc' })
@@ -259,7 +277,7 @@ export default function CustomerLedgerPage() {
 
   const receiptsQ = useQuery<PartyReceipt[], Error>({
     queryKey: ['customer-receipts', selectedParty?.id],
-    queryFn: () => fetchPartyReceipts(Number(selectedParty?.id)),
+    queryFn: () => fetchPartyReceipts(Number(selectedParty?.id), { deleted_filter: 'all' }),
     enabled: Boolean(selectedParty?.id),
   })
 
@@ -303,13 +321,7 @@ export default function CustomerLedgerPage() {
     }) => createPartyReceipt(partyId, payload),
     onSuccess: () => {
       toast.push('Receipt recorded', 'success')
-      queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
-      queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] })
-      queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
-      queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
-      queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
-      queryClient.invalidateQueries({ queryKey: ['bill-payments-panel'] })
-      queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
+      refreshLedgerQueries()
       setReceiptOpen(false)
       setMode('cash')
       setReceiptAmount('0')
@@ -346,6 +358,65 @@ export default function CustomerLedgerPage() {
     onError: (err: any) => toast.push(String(err?.message || 'Failed to delete receipt'), 'error'),
   })
 
+  const applyReceiptM = useMutation({
+    mutationFn: ({
+      partyId,
+      receiptId,
+      payload,
+    }: {
+      partyId: number
+      receiptId: number
+      payload: {
+        payment_date?: string
+        note?: string
+        adjustments: Array<{ bill_id: number; amount: number }>
+      }
+    }) => applyPartyReceipt(partyId, receiptId, payload),
+    onSuccess: () => {
+      toast.push('Advance applied to bills', 'success')
+      setApplyTarget(null)
+      setApplyDate(today)
+      setApplyNote('')
+      setApplyDrafts({})
+      refreshLedgerQueries()
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to apply advance'), 'error'),
+  })
+
+  const editReceiptM = useMutation({
+    mutationFn: ({
+      partyId,
+      receiptId,
+      payload,
+    }: {
+      partyId: number
+      receiptId: number
+      payload: {
+        mode: 'cash' | 'online' | 'split'
+        cash_amount?: number
+        online_amount?: number
+        note?: string
+        payment_date?: string
+      }
+    }) => updatePartyReceipt(partyId, receiptId, payload),
+    onSuccess: () => {
+      toast.push('Receipt updated', 'success')
+      setEditReceiptTarget(null)
+      refreshLedgerQueries()
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to update receipt'), 'error'),
+  })
+
+  const recoverReceiptM = useMutation({
+    mutationFn: ({ partyId, receiptId }: { partyId: number; receiptId: number }) => recoverPartyReceipt(partyId, receiptId),
+    onSuccess: () => {
+      toast.push('Receipt recovered', 'success')
+      setRecoverReceiptTarget(null)
+      refreshLedgerQueries()
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to recover receipt'), 'error'),
+  })
+
   const ledgerRows = ledgerQ.data || []
   const openBills = openBillsQ.data || []
   const returnRows = returnsQ.data || []
@@ -358,7 +429,15 @@ export default function CustomerLedgerPage() {
   const receiptTotal = Number(receiptAmount || 0)
   const receiptCashAmount = mode === 'cash' ? receiptTotal : mode === 'online' ? 0 : Number(cashAmount || 0)
   const receiptOnlineAmount = mode === 'online' ? receiptTotal : mode === 'cash' ? 0 : Number(onlineAmount || 0)
+  const editReceiptTotal = Number(editReceiptAmount || 0)
+  const editReceiptCashAmount = editReceiptMode === 'cash' ? editReceiptTotal : editReceiptMode === 'online' ? 0 : Number(editReceiptCash || 0)
+  const editReceiptOnlineAmount = editReceiptMode === 'online' ? editReceiptTotal : editReceiptMode === 'cash' ? 0 : Number(editReceiptOnline || 0)
+  const editReceiptApplied = Number(editReceiptTarget?.adjusted || 0)
+  const editReceiptAdvance = Math.max(0, editReceiptTotal - editReceiptApplied)
   const onAccountAmount = Math.max(0, receiptTotal - adjustmentTotal)
+  const applyAvailable = Number(applyTarget?.onAccount || 0)
+  const applyAdjustmentTotal = Object.values(applyDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
+  const applyRemaining = Math.max(0, applyAvailable - applyAdjustmentTotal)
   const openBillsForReceipt = useMemo(
     () =>
       [...openBills].sort((a, b) => {
@@ -397,7 +476,7 @@ export default function CustomerLedgerPage() {
         lines.length > 0
           ? lines.map((line) => `Bill #${line.bill_id}: ${money(line.adjusted_amount)}`).join(', ')
           : Number(receipt.unallocated_amount || 0) > 0
-            ? 'Plain receipt'
+            ? 'Advance / on account'
             : '-'
       return {
         id: `party-${receipt.id}`,
@@ -413,6 +492,8 @@ export default function CustomerLedgerPage() {
         onAccount: Number(receipt.unallocated_amount || 0),
         allocation,
         note: receipt.note || '',
+        isDeleted: Boolean(receipt.is_deleted),
+        deletedAt: receipt.deleted_at || null,
       }
     })
 
@@ -439,13 +520,16 @@ export default function CustomerLedgerPage() {
           onAccount: 0,
           allocation: `Bill #${payment.bill_id}: ${money(total)}`,
           note: payment.note || '',
+          isDeleted: false,
+          deletedAt: null,
         }
       })
 
     return [...partyReceiptRows, ...directPaymentRows].sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')))
   }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receipts])
-  const receiptHistoryTotal = receiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
-  const receiptHistoryOnAccountTotal = receiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
+  const activeReceiptHistory = receiptHistory.filter((row) => !row.isDeleted)
+  const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
+  const receiptHistoryOnAccountTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
 
   function billSortValue(row: DebtorLedgerRow | OpenBill, key: BillSortKey): string | number {
     if (key === 'payment_status') {
@@ -538,6 +622,45 @@ export default function CustomerLedgerPage() {
     }
   }
 
+  function setEditReceiptModeValue(next: 'cash' | 'online' | 'split') {
+    setEditReceiptMode(next)
+    const total = String(editReceiptAmount || '0')
+    if (next === 'cash') {
+      setEditReceiptCash(total)
+      setEditReceiptOnline('0')
+    } else if (next === 'online') {
+      setEditReceiptCash('0')
+      setEditReceiptOnline(total)
+    } else {
+      setEditReceiptCash(total)
+      setEditReceiptOnline('0')
+    }
+  }
+
+  function handleEditReceiptAmountChange(raw: string) {
+    setEditReceiptAmount(raw)
+    if (editReceiptMode === 'cash') {
+      setEditReceiptCash(raw)
+      setEditReceiptOnline('0')
+    } else if (editReceiptMode === 'online') {
+      setEditReceiptCash('0')
+      setEditReceiptOnline(raw)
+    } else {
+      setEditReceiptCash(raw)
+      setEditReceiptOnline('0')
+    }
+  }
+
+  function setEditSplitCash(raw: string) {
+    setEditReceiptCash(raw)
+    setEditReceiptAmount(String(Number(raw || 0) + Number(editReceiptOnline || 0)))
+  }
+
+  function setEditSplitOnline(raw: string) {
+    setEditReceiptOnline(raw)
+    setEditReceiptAmount(String(Number(editReceiptCash || 0) + Number(raw || 0)))
+  }
+
   function setSplitCash(raw: string) {
     setCashAmount(raw)
     setReceiptAmount(String(Number(raw || 0) + Number(onlineAmount || 0)))
@@ -587,6 +710,80 @@ export default function CustomerLedgerPage() {
     )
   }
 
+  function openApplyAdvance(row: ReceiptHistoryRow) {
+    setApplyTarget(row)
+    setApplyDate(today)
+    setApplyNote('')
+    setApplyDrafts(Object.fromEntries(openBillsForReceipt.map((bill) => [Number(bill.bill_id), '0'])))
+  }
+
+  function openEditReceipt(row: ReceiptHistoryRow) {
+    if (row.isDeleted || row.sourceType !== 'party_receipt') return
+    const cash = Number(row.cash || 0)
+    const online = Number(row.online || 0)
+    const total = Number(row.total || cash + online)
+    const normalizedMode =
+      cash > 0 && online > 0
+        ? 'split'
+        : String(row.mode || '').toLowerCase() === 'online'
+          ? 'online'
+          : String(row.mode || '').toLowerCase() === 'split'
+            ? 'split'
+            : 'cash'
+    setEditReceiptTarget(row)
+    setEditReceiptMode(normalizedMode)
+    setEditReceiptAmount(String(total))
+    setEditReceiptCash(String(cash))
+    setEditReceiptOnline(String(online))
+    setEditReceiptDate(String(row.when || today).slice(0, 10))
+    setEditReceiptNote(row.note || '')
+  }
+
+  function setApplyDraft(billId: number, value: string) {
+    setApplyDrafts((prev) => ({ ...prev, [billId]: value }))
+  }
+
+  function fillApplyAdjustmentOnFocus(bill: OpenBill) {
+    const billId = Number(bill.bill_id)
+    const current = Number(applyDrafts[billId] || 0)
+    if (current > 0) return
+    const usedElsewhere = Object.entries(applyDrafts).reduce((sum, [id, value]) => {
+      return Number(id) === billId ? sum : sum + Number(value || 0)
+    }, 0)
+    const remaining = Math.max(0, applyAvailable - usedElsewhere)
+    if (remaining <= 0) return
+    setApplyDraft(billId, String(Math.min(Number(bill.outstanding_amount || 0), remaining)))
+  }
+
+  function clampApplyAdjustment(bill: OpenBill) {
+    const billId = Number(bill.bill_id)
+    const raw = Number(applyDrafts[billId] || 0)
+    if (!Number.isFinite(raw) || raw <= 0) {
+      setApplyDraft(billId, '0')
+      return
+    }
+    const usedElsewhere = Object.entries(applyDrafts).reduce((sum, [id, value]) => {
+      return Number(id) === billId ? sum : sum + Number(value || 0)
+    }, 0)
+    const remaining = Math.max(0, applyAvailable - usedElsewhere)
+    setApplyDraft(billId, String(Math.min(raw, Number(bill.outstanding_amount || 0), remaining)))
+  }
+
+  function fillApplyFromAdvance() {
+    let remaining = applyAvailable
+    const next: Record<number, string> = {}
+    for (const bill of openBillsForReceipt) {
+      const amount = Math.min(Number(bill.outstanding_amount || 0), Math.max(0, remaining))
+      next[Number(bill.bill_id)] = amount > 0 ? String(amount) : '0'
+      remaining = Math.max(0, remaining - amount)
+    }
+    setApplyDrafts(next)
+  }
+
+  function clearApplyAdjustments() {
+    setApplyDrafts(Object.fromEntries(openBillsForReceipt.map((bill) => [Number(bill.bill_id), '0'])))
+  }
+
   async function openBillDetail(billId: number) {
     if (!Number.isFinite(billId) || billId <= 0) return
     setBillOpen(true)
@@ -611,6 +808,23 @@ export default function CustomerLedgerPage() {
     queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
     queryClient.invalidateQueries({ queryKey: ['bill-payments-panel'] })
     queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-day'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-receipts-day'] })
+    queryClient.invalidateQueries({ queryKey: ['cashbook-all-receipts'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-day'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-payments-day'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-all-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-receipts-day'] })
+    queryClient.invalidateQueries({ queryKey: ['bankbook-all-receipts'] })
+    queryClient.invalidateQueries({ queryKey: ['dash-cashbook'] })
+    queryClient.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
+    queryClient.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
   }
 
   function renderBillRefs(text: string) {
@@ -650,6 +864,47 @@ export default function CustomerLedgerPage() {
           }))
           .filter((adj) => adj.amount > 0),
       },
+    })
+  }
+
+  function saveApplyAdvance() {
+    if (!selectedParty?.id || !applyTarget?.receiptId) return
+    applyReceiptM.mutate({
+      partyId: Number(selectedParty.id),
+      receiptId: Number(applyTarget.receiptId),
+      payload: {
+        payment_date: applyDate,
+        note: applyNote.trim() || undefined,
+        adjustments: openBills
+          .map((bill) => ({
+            bill_id: Number(bill.bill_id),
+            amount: Number(applyDrafts[Number(bill.bill_id)] || 0),
+          }))
+          .filter((adj) => adj.amount > 0),
+      },
+    })
+  }
+
+  function saveEditReceipt() {
+    if (!selectedParty?.id || !editReceiptTarget?.receiptId) return
+    editReceiptM.mutate({
+      partyId: Number(selectedParty.id),
+      receiptId: Number(editReceiptTarget.receiptId),
+      payload: {
+        mode: editReceiptMode,
+        cash_amount: editReceiptCashAmount,
+        online_amount: editReceiptOnlineAmount,
+        payment_date: editReceiptDate,
+        note: editReceiptNote.trim() || undefined,
+      },
+    })
+  }
+
+  function saveRecoverReceipt() {
+    if (!selectedParty?.id || !recoverReceiptTarget?.receiptId) return
+    recoverReceiptM.mutate({
+      partyId: Number(selectedParty.id),
+      receiptId: Number(recoverReceiptTarget.receiptId),
     })
   }
 
@@ -700,7 +955,7 @@ export default function CustomerLedgerPage() {
               <Chip color="warning" variant="outlined" label={`Return Credit Rs ${money(totalReturnCredit)}`} sx={{ fontWeight: 800 }} />
               <Chip color="secondary" variant="outlined" label={`Return Refund Rs ${money(totalReturnRefund)}`} sx={{ fontWeight: 800 }} />
               <Chip color="success" variant="outlined" label={`Receipts Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
-              <Chip color="info" variant="outlined" label={`Plain Receipt Rs ${money(receiptHistoryOnAccountTotal)}`} sx={{ fontWeight: 800 }} />
+              <Chip color="info" variant="outlined" label={`Advance Rs ${money(receiptHistoryOnAccountTotal)}`} sx={{ fontWeight: 800 }} />
             </Stack>
           </Stack>
         </Paper>
@@ -974,7 +1229,7 @@ export default function CustomerLedgerPage() {
                 <SortableHeader label="Online" sortKey="online" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <SortableHeader label="Total" sortKey="total" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <SortableHeader label="Applied" sortKey="adjusted" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
-                <SortableHeader label="Plain" sortKey="onAccount" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Advance" sortKey="onAccount" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <th className="allocation-col">Allocation</th>
                 <th className="action-col"></th>
               </tr>
@@ -982,9 +1237,14 @@ export default function CustomerLedgerPage() {
             <tbody>
               {sortedReceiptHistory.map((receipt) => {
                 const isExpanded = Boolean(expandedReceipts[receipt.id])
+                const rowClass = receipt.isDeleted
+                  ? 'receipt-deleted'
+                  : Number(receipt.onAccount || 0) > 0
+                    ? 'receipt-on-account'
+                    : 'receipt-applied'
                 return (
                   <Fragment key={receipt.id}>
-                    <tr className={Number(receipt.onAccount || 0) > 0 ? 'receipt-on-account' : 'receipt-applied'}>
+                    <tr className={rowClass} style={receipt.isDeleted ? { opacity: 0.68 } : undefined}>
                       <td className="expand-col">
                         <IconButton
                           size="small"
@@ -994,8 +1254,9 @@ export default function CustomerLedgerPage() {
                         </IconButton>
                       </td>
                       <td>
-                        <Stack gap={0.25}>
+                        <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
                           <Typography fontWeight={800}>{receipt.source} #{receipt.receiptId}</Typography>
+                          {receipt.isDeleted ? <Chip size="small" color="error" variant="outlined" label="Deleted" /> : null}
                         </Stack>
                       </td>
                       <td className="date-col">
@@ -1013,14 +1274,48 @@ export default function CustomerLedgerPage() {
                         <Typography variant="body2" className="clip-text">{receipt.allocation}</Typography>
                       </td>
                       <td align="right">
-                        <IconButton
-                          size="small"
-                          color="error"
-                          onClick={() => setDeleteTarget(receipt)}
-                          disabled={deleteReceiptM.isPending}
-                        >
-                          <DeleteIcon fontSize="small" />
-                        </IconButton>
+                        <Stack direction="row" gap={0.5} justifyContent="flex-end" alignItems="center">
+                          {receipt.sourceType === 'party_receipt' && receipt.isDeleted ? (
+                            <IconButton
+                              size="small"
+                              color="success"
+                              onClick={() => setRecoverReceiptTarget(receipt)}
+                              disabled={recoverReceiptM.isPending}
+                            >
+                              <RestoreIcon fontSize="small" />
+                            </IconButton>
+                          ) : null}
+                          {receipt.sourceType === 'party_receipt' && !receipt.isDeleted ? (
+                            <IconButton
+                              size="small"
+                              color="primary"
+                              onClick={() => openEditReceipt(receipt)}
+                              disabled={editReceiptM.isPending}
+                            >
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                          ) : null}
+                          {receipt.sourceType === 'party_receipt' && !receipt.isDeleted && Number(receipt.onAccount || 0) > 0 ? (
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              onClick={() => openApplyAdvance(receipt)}
+                              disabled={applyReceiptM.isPending}
+                            >
+                              Apply
+                            </Button>
+                          ) : null}
+                          {!receipt.isDeleted ? (
+                            <IconButton
+                              size="small"
+                              color="error"
+                              onClick={() => setDeleteTarget(receipt)}
+                              disabled={deleteReceiptM.isPending}
+                            >
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          ) : null}
+                        </Stack>
                       </td>
                     </tr>
                     {isExpanded ? (
@@ -1039,7 +1334,12 @@ export default function CustomerLedgerPage() {
                               <Typography variant="caption">Cash: <b>Rs {money(receipt.cash)}</b></Typography>
                               <Typography variant="caption">Online: <b>Rs {money(receipt.online)}</b></Typography>
                               <Typography variant="caption">Applied: <b>Rs {money(receipt.adjusted)}</b></Typography>
-                              <Typography variant="caption">Plain receipt: <b>Rs {money(receipt.onAccount)}</b></Typography>
+                              <Typography variant="caption">Advance: <b>Rs {money(receipt.onAccount)}</b></Typography>
+                              {receipt.isDeleted ? (
+                                <Typography variant="caption" color="error">
+                                  Deleted at: <b>{receipt.deletedAt || '-'}</b>
+                                </Typography>
+                              ) : null}
                             </Stack>
                           </Stack>
                         </td>
@@ -1181,7 +1481,7 @@ export default function CustomerLedgerPage() {
             <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
               <Typography>Receipt Total: {money(receiptTotal)}</Typography>
               <Typography>Applied to Bills: {money(adjustmentTotal)}</Typography>
-              <Typography fontWeight={700}>Plain Receipt: {money(onAccountAmount)}</Typography>
+              <Typography fontWeight={700}>Advance / On Account: {money(onAccountAmount)}</Typography>
             </Stack>
           </Stack>
         </DialogContent>
@@ -1189,6 +1489,231 @@ export default function CustomerLedgerPage() {
           <Button onClick={() => setReceiptOpen(false)}>Cancel</Button>
           <Button variant="contained" onClick={saveReceipt} disabled={receiptM.isPending || !selectedParty || receiptTotal <= 0 || adjustmentTotal > receiptTotal}>
             Save Receipt
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(applyTarget)} onClose={() => !applyReceiptM.isPending && setApplyTarget(null)} fullWidth maxWidth="lg">
+        <DialogTitle>Apply Advance to Bills</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={2} justifyContent="space-between">
+              <Typography>
+                Receipt #{applyTarget?.receiptId || '-'} available: <b>Rs {money(applyAvailable)}</b>
+              </Typography>
+              <TextField
+                label="Apply Date"
+                type="date"
+                value={applyDate}
+                onChange={(e) => setApplyDate(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                sx={{ minWidth: 180 }}
+              />
+            </Stack>
+            <TextField
+              label="Note"
+              value={applyNote}
+              onChange={(e) => setApplyNote(e.target.value)}
+              multiline
+              minRows={2}
+              fullWidth
+            />
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={1} justifyContent="space-between" alignItems={{ md: 'center' }}>
+              <Typography variant="h6">Bill Adjustments</Typography>
+              <Stack direction="row" gap={1}>
+                <Button variant="outlined" onClick={fillApplyFromAdvance} disabled={applyAvailable <= 0 || openBillsForReceipt.length === 0}>
+                  Auto Fill
+                </Button>
+                <Button variant="outlined" color="inherit" onClick={clearApplyAdjustments} disabled={openBillsForReceipt.length === 0}>
+                  Clear
+                </Button>
+              </Stack>
+            </Stack>
+            <Box sx={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Bill</th>
+                    <th>Outstanding</th>
+                    <th>Remaining Advance</th>
+                    <th>Apply Now</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openBillsForReceipt.map((bill) => {
+                    const billId = Number(bill.bill_id)
+                    const usedElsewhere = Object.entries(applyDrafts).reduce((sum, [id, value]) => {
+                      return Number(id) === billId ? sum : sum + Number(value || 0)
+                    }, 0)
+                    const remainingForThis = Math.max(0, applyAvailable - usedElsewhere)
+                    return (
+                      <tr key={bill.bill_id}>
+                        <td>
+                          <Stack gap={0.25}>
+                            <Link
+                              component="button"
+                              underline="hover"
+                              onClick={() => openBillDetail(Number(bill.bill_id))}
+                              sx={{ fontWeight: 800 }}
+                            >
+                              Bill #{bill.bill_id}
+                            </Link>
+                            <Typography variant="caption" color="text.secondary">{bill.bill_date}</Typography>
+                          </Stack>
+                        </td>
+                        <td><Typography fontWeight={800}>Rs {money(bill.outstanding_amount)}</Typography></td>
+                        <td>Rs {money(remainingForThis)}</td>
+                        <td>
+                          <TextField
+                            type="number"
+                            value={applyDrafts[Number(bill.bill_id)] ?? '0'}
+                            onChange={(e) => setApplyDraft(Number(bill.bill_id), e.target.value)}
+                            onFocus={() => fillApplyAdjustmentOnFocus(bill)}
+                            onBlur={() => clampApplyAdjustment(bill)}
+                            helperText="Focus to fill"
+                            sx={{ width: 150 }}
+                          />
+                        </td>
+                      </tr>
+                    )
+                  })}
+                  {openBillsForReceipt.length === 0 && (
+                    <tr>
+                      <td colSpan={4}>
+                        <Box p={2} color="text.secondary">No open bills to adjust.</Box>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </Box>
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
+              <Typography>Available Advance: {money(applyAvailable)}</Typography>
+              <Typography>Applied to Bills: {money(applyAdjustmentTotal)}</Typography>
+              <Typography fontWeight={700}>Remaining Advance: {money(applyRemaining)}</Typography>
+            </Stack>
+            {applyReceiptM.isError ? (
+              <Typography color="error">{(applyReceiptM.error as any)?.response?.data?.detail || (applyReceiptM.error as any)?.message || 'Apply failed'}</Typography>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setApplyTarget(null)} disabled={applyReceiptM.isPending}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={saveApplyAdvance}
+            disabled={!applyTarget || !selectedParty || !applyDate || applyReceiptM.isPending || applyAdjustmentTotal <= 0 || applyAdjustmentTotal > applyAvailable}
+          >
+            Apply Advance
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(editReceiptTarget)} onClose={() => !editReceiptM.isPending && setEditReceiptTarget(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Edit Receipt #{editReceiptTarget?.receiptId || ''}</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+              <TextField
+                label="Receipt Amount"
+                type="number"
+                value={editReceiptAmount}
+                onChange={(e) => handleEditReceiptAmountChange(e.target.value)}
+                helperText={`Already applied: Rs ${money(editReceiptApplied)}`}
+                fullWidth
+              />
+              <TextField
+                select
+                label="Mode"
+                value={editReceiptMode}
+                onChange={(e) => setEditReceiptModeValue(e.target.value as 'cash' | 'online' | 'split')}
+                fullWidth
+              >
+                <MenuItem value="cash">Cash</MenuItem>
+                <MenuItem value="online">Online</MenuItem>
+                <MenuItem value="split">Split</MenuItem>
+              </TextField>
+              <TextField
+                label="Date"
+                type="date"
+                value={editReceiptDate}
+                onChange={(e) => setEditReceiptDate(e.target.value)}
+                InputLabelProps={{ shrink: true }}
+                fullWidth
+              />
+            </Stack>
+            {editReceiptMode === 'split' ? (
+              <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+                <TextField
+                  label="Cash"
+                  type="number"
+                  value={editReceiptCash}
+                  onChange={(e) => setEditSplitCash(e.target.value)}
+                  fullWidth
+                />
+                <TextField
+                  label="Online"
+                  type="number"
+                  value={editReceiptOnline}
+                  onChange={(e) => setEditSplitOnline(e.target.value)}
+                  fullWidth
+                />
+              </Stack>
+            ) : null}
+            <TextField
+              label="Note"
+              value={editReceiptNote}
+              onChange={(e) => setEditReceiptNote(e.target.value)}
+              multiline
+              minRows={2}
+              fullWidth
+            />
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+              <Typography>Receipt Total: {money(editReceiptTotal)}</Typography>
+              <Typography>Applied to Bills: {money(editReceiptApplied)}</Typography>
+              <Typography fontWeight={700}>Advance / On Account: {money(editReceiptAdvance)}</Typography>
+            </Stack>
+            {editReceiptM.isError ? (
+              <Typography color="error">{(editReceiptM.error as any)?.response?.data?.detail || (editReceiptM.error as any)?.message || 'Update failed'}</Typography>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditReceiptTarget(null)} disabled={editReceiptM.isPending}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={saveEditReceipt}
+            disabled={!editReceiptTarget || !selectedParty || !editReceiptDate || editReceiptM.isPending || editReceiptTotal <= 0 || editReceiptTotal + 0.0001 < editReceiptApplied}
+          >
+            Save Changes
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(recoverReceiptTarget)} onClose={() => !recoverReceiptM.isPending && setRecoverReceiptTarget(null)} fullWidth maxWidth="xs">
+        <DialogTitle>Recover Receipt</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={1}>
+            <Typography>
+              Customer receipt #{recoverReceiptTarget?.receiptId} for Rs {money(Number(recoverReceiptTarget?.total || 0))}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Linked bill balances and statuses will be recalculated from the recovered receipt.
+            </Typography>
+            {recoverReceiptM.isError ? (
+              <Typography color="error">{(recoverReceiptM.error as any)?.response?.data?.detail || (recoverReceiptM.error as any)?.message || 'Recover failed'}</Typography>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRecoverReceiptTarget(null)} disabled={recoverReceiptM.isPending}>Cancel</Button>
+          <Button
+            color="success"
+            variant="contained"
+            onClick={saveRecoverReceipt}
+            disabled={!recoverReceiptTarget || !selectedParty || recoverReceiptM.isPending}
+          >
+            Recover
           </Button>
         </DialogActions>
       </Dialog>

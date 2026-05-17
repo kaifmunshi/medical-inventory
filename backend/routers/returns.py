@@ -212,7 +212,7 @@ def list_returns(
         if from_date:
             stmt = stmt.where(Return.date_time >= f"{from_date}T00:00:00")
         if to_date:
-            stmt = stmt.where(Return.date_time <= f"{to_date}T23:59:59")
+            stmt = stmt.where(Return.date_time <= f"{to_date}T23:59:59.999999")
         stmt = stmt.order_by(Return.id.desc()).limit(limit).offset(offset)
         rows = session.exec(stmt).all()
 
@@ -308,7 +308,7 @@ def list_exchange_records(
         if from_date:
             stmt = stmt.where(ExchangeRecord.created_at >= f"{from_date}T00:00:00")
         if to_date:
-            stmt = stmt.where(ExchangeRecord.created_at <= f"{to_date}T23:59:59")
+            stmt = stmt.where(ExchangeRecord.created_at <= f"{to_date}T23:59:59.999999")
         stmt = stmt.order_by(ExchangeRecord.id.desc()).offset(offset).limit(limit)
         rows = session.exec(stmt).all()
         return [

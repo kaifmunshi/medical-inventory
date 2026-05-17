@@ -14,6 +14,8 @@ export interface BillCreate {
   discount_percent?: number
   tax_percent?: number
   date_time?: string
+  customer_id?: number
+  party_id?: number
   payment_mode: 'cash' | 'online' | 'split' | 'credit'
   payment_cash?: number
   payment_online?: number
@@ -25,6 +27,8 @@ export interface BillUpdate {
   items: Array<{ item_id: number; quantity: number; custom_unit_price?: number }>
   discount_percent?: number
   date_time?: string
+  customer_id?: number
+  party_id?: number
   payment_mode: 'cash' | 'online' | 'split' | 'credit'
   payment_cash?: number
   payment_online?: number
@@ -64,6 +68,8 @@ export interface BillItem {
 export interface Bill {
   id: number
   date_time: string
+  customer_id?: number | null
+  party_id?: number | null
   discount_percent: number
   subtotal: number
   total_amount: number

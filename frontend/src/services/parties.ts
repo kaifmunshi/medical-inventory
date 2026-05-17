@@ -50,8 +50,20 @@ export async function fetchCustomerReturns(partyId: number): Promise<CustomerRet
   return res.data
 }
 
-export async function fetchPartyReceipts(partyId: number): Promise<PartyReceipt[]> {
-  const res = await api.get<PartyReceipt[]>(`/parties/${partyId}/receipts`)
+export async function fetchPartyReceipts(partyId: number, params?: {
+  deleted_filter?: 'active' | 'deleted' | 'all'
+}): Promise<PartyReceipt[]> {
+  const res = await api.get<PartyReceipt[]>(`/parties/${partyId}/receipts`, { params })
+  return res.data
+}
+
+export async function fetchReceipts(params?: {
+  from_date?: string
+  to_date?: string
+  limit?: number
+  offset?: number
+}): Promise<PartyReceipt[]> {
+  const res = await api.get<PartyReceipt[]>('/parties/receipts', { params })
   return res.data
 }
 
@@ -72,6 +84,39 @@ export async function createPartyReceipt(
   },
 ): Promise<PartyReceipt> {
   const res = await api.post<PartyReceipt>(`/parties/${partyId}/receipts`, payload)
+  return res.data
+}
+
+export async function applyPartyReceipt(
+  partyId: number,
+  receiptId: number,
+  payload: {
+    payment_date?: string
+    note?: string
+    adjustments: Array<{ bill_id: number; amount: number }>
+  },
+): Promise<PartyReceipt> {
+  const res = await api.post<PartyReceipt>(`/parties/${partyId}/receipts/${receiptId}/apply`, payload)
+  return res.data
+}
+
+export async function updatePartyReceipt(
+  partyId: number,
+  receiptId: number,
+  payload: {
+    mode: 'cash' | 'online' | 'split'
+    cash_amount?: number
+    online_amount?: number
+    note?: string
+    payment_date?: string
+  },
+): Promise<PartyReceipt> {
+  const res = await api.patch<PartyReceipt>(`/parties/${partyId}/receipts/${receiptId}`, payload)
+  return res.data
+}
+
+export async function recoverPartyReceipt(partyId: number, receiptId: number): Promise<PartyReceipt> {
+  const res = await api.post<PartyReceipt>(`/parties/${partyId}/receipts/${receiptId}/recover`)
   return res.data
 }
 

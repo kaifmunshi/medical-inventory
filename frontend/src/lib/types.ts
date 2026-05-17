@@ -362,6 +362,7 @@ export interface PartyReceipt {
   note?: string | null
   is_deleted: boolean
   deleted_at?: string | null
+  adjustments?: ReceiptBillAdjustment[]
 }
 
 export interface ReceiptBillAdjustment {
@@ -371,6 +372,8 @@ export interface ReceiptBillAdjustment {
   bill_payment_id?: ID | null
   adjusted_amount: number
   created_at: string
+  cash_amount?: number
+  online_amount?: number
 }
 
 export interface VoucherDayBookRow {

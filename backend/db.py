@@ -1706,7 +1706,17 @@ def migrate_db():
             session.exec(text(
                 "ALTER TABLE bill ADD COLUMN deleted_at TEXT"
             ))
+        if "customer_id" not in bill_col_names:
+            session.exec(text(
+                "ALTER TABLE bill ADD COLUMN customer_id INTEGER"
+            ))
+        if "party_id" not in bill_col_names:
+            session.exec(text(
+                "ALTER TABLE bill ADD COLUMN party_id INTEGER"
+            ))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_bill_is_deleted ON bill (is_deleted)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_bill_customer_id ON bill (customer_id)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_bill_party_id ON bill (party_id)"))
         session.commit()
 
         # ---------- billpayment table migration ----------

@@ -46,6 +46,7 @@ import { listCashbookEntries } from '../../services/cashbook'
 import { getBill, listPayments } from '../../services/billing'
 import { listPurchasePayments } from '../../services/purchases'
 import { listExchangeRecords, listReturns } from '../../services/returns'
+import { fetchReceipts } from '../../services/parties'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
@@ -149,9 +150,43 @@ function partyReceiptIdFromPayment(row: any): number | null {
   return match ? Number(match[1]) : null
 }
 
-function buildOnlineReceiptRows(payments: any[]) {
+function buildOnlineReceiptRows(payments: any[], receipts: any[] = []) {
   const rows: any[] = []
   const grouped = new Map<number, any>()
+  const receiptsById = new Map<number, any>()
+  for (const receipt of receipts || []) {
+    receiptsById.set(Number(receipt.id), receipt)
+  }
+
+  function adjustmentOnlineAmount(adjustment: any, receipt: any) {
+    const onlineAmount = Number(adjustment?.online_amount || 0)
+    if (onlineAmount > 0) return onlineAmount
+    const adjustedAmount = Number(adjustment?.adjusted_amount || 0)
+    if (adjustedAmount <= 0) return 0
+    if (Number(receipt?.online_amount || 0) > 0 && Number(receipt?.cash_amount || 0) <= 0) return adjustedAmount
+    return 0
+  }
+
+  function receiptRow(receiptId: number, fallbackPayment?: any) {
+    const receipt = receiptsById.get(receiptId)
+    return {
+      id: `party-receipt-online-${receiptId}`,
+      receipt_id: receiptId,
+      created_at: receipt?.received_at || fallbackPayment?.received_at,
+      entry_type: 'RECEIPT',
+      pill_type: (receipt?.mode || fallbackPayment?.mode) === 'split' ? 'SPLIT' : 'RECEIPT',
+      amount: Number(receipt?.online_amount || 0),
+      adjusted_online_amount: 0,
+      txn_charges: 0,
+      mode: 'ONLINE',
+      note: `Online customer receipt #${receiptId}`,
+      source: 'PARTY_RECEIPT' as const,
+      receipt_note: receipt?.note || '',
+      unallocated_amount: Number(receipt?.unallocated_amount || 0),
+      subRows: [],
+    }
+  }
+
   for (const p of payments || []) {
     const amount = Number(p?.online_amount || 0)
     if (amount <= 0) continue
@@ -171,27 +206,47 @@ function buildOnlineReceiptRows(payments: any[]) {
       })
       continue
     }
-    const current = grouped.get(receiptId) || {
-      id: `party-receipt-online-${receiptId}`,
-      receipt_id: receiptId,
-      created_at: p.received_at,
-      entry_type: 'RECEIPT',
-      pill_type: p.mode === 'split' ? 'SPLIT' : 'RECEIPT',
-      amount: 0,
-      txn_charges: 0,
-      mode: 'ONLINE',
-      note: `Online customer receipt #${receiptId}`,
-      source: 'PARTY_RECEIPT' as const,
-      subRows: [],
+    const current = grouped.get(receiptId) || receiptRow(receiptId, p)
+    if (receiptsById.has(receiptId)) grouped.set(receiptId, current)
+  }
+  for (const receipt of receipts || []) {
+    const receiptId = Number(receipt.id)
+    const onlineAmount = Number(receipt.online_amount || 0)
+    if (onlineAmount <= 0) continue
+    const current = grouped.get(receiptId) || receiptRow(receiptId)
+    current.amount = onlineAmount
+    current.created_at = receipt.received_at || current.created_at
+    current.receipt_note = receipt.note || current.receipt_note || ''
+    current.unallocated_amount = Number(receipt.unallocated_amount || current.unallocated_amount || 0)
+    current.subRows = []
+    current.adjusted_online_amount = 0
+    for (const adjustment of receipt.adjustments || []) {
+      const appliedAmount = adjustmentOnlineAmount(adjustment, receipt)
+      if (appliedAmount <= 0) continue
+      current.adjusted_online_amount = Number(current.adjusted_online_amount || 0) + appliedAmount
+      current.subRows.push({
+        bill_id: Number(adjustment.bill_id || 0),
+        amount: appliedAmount,
+        payment_id: adjustment.bill_payment_id,
+        adjustment_id: adjustment.id,
+        applied_at: adjustment.created_at,
+      })
     }
-    current.amount = Number(current.amount || 0) + amount
-    if (p.mode === 'split') current.pill_type = 'SPLIT'
-    current.subRows.push({ bill_id: Number(p.bill_id || 0), amount, payment_id: p.id })
-    current.note = `Online customer receipt #${receiptId}: ${current.subRows.map((sub: any) => `Bill #${sub.bill_id}`).join(', ')}`
     grouped.set(receiptId, current)
   }
   for (const row of grouped.values()) {
     row.subRows.sort((a: any, b: any) => Number(a.bill_id || 0) - Number(b.bill_id || 0))
+    const plainOnlineAmount = Math.max(0, round2(Number(row.amount || 0) - Number(row.adjusted_online_amount || 0)))
+    row.plain_online_amount = plainOnlineAmount
+    if (plainOnlineAmount > 0.009) {
+      row.subRows.push({ kind: 'plain', amount: plainOnlineAmount, key: `plain-${row.receipt_id}` })
+    }
+    const billLabels = row.subRows
+      .filter((sub: any) => sub.kind !== 'plain')
+      .map((sub: any) => `Bill #${sub.bill_id}`)
+    if (plainOnlineAmount > 0.009) billLabels.push('Advance / on account')
+    row.note = `Online customer receipt #${row.receipt_id}${billLabels.length ? `: ${billLabels.join(', ')}` : ''}${row.receipt_note ? ` (${row.receipt_note})` : ''}`
+    delete row.adjusted_online_amount
     rows.push(row)
   }
   return rows
@@ -290,6 +345,18 @@ function bankDepositDefaultNote(entryType: BankbookType) {
   if (entryType === 'RECEIPT') return 'Contra entry: cash deposited into bank'
   if (entryType === 'WITHDRAWAL') return 'Contra entry: cash withdrawn from bank'
   return 'Contra entry: bank adjustment'
+}
+
+async function fetchPagedRows<T>(load: (limit: number, offset: number) => Promise<T[]>, limit = 500) {
+  const out: T[] = []
+  let offset = 0
+  while (true) {
+    const rows = await load(limit, offset)
+    out.push(...(rows || []))
+    if (!rows || rows.length < limit) break
+    offset += limit
+  }
+  return out
 }
 
 const bankDepositDefaultNotes = [
@@ -395,6 +462,13 @@ export default function BankBookPage() {
     enabled: recordsFilter === 'DAY',
   })
 
+  const qDayReceipts = useQuery({
+    queryKey: ['bankbook-receipts-day', selectedDate],
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => fetchReceipts({ from_date: selectedDate, to_date: selectedDate, limit, offset }), 1000),
+    enabled: recordsFilter === 'DAY',
+  })
+
   const qDayPurchasePayments = useQuery({
     queryKey: ['bankbook-purchase-payments-day', selectedDate],
     queryFn: () => listPurchasePayments({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
@@ -444,6 +518,23 @@ export default function BankBookPage() {
       const limit = 500
       while (true) {
         const rows = await listPayments({ from_date: allRange.from, to_date: allRange.to, limit, offset })
+        out.push(...(rows || []))
+        if (!rows || rows.length < limit) break
+        offset += limit
+      }
+      return out
+    },
+    enabled: canLoadAllRange,
+  })
+
+  const qAllReceipts = useQuery({
+    queryKey: ['bankbook-all-receipts', allView, allRange.from, allRange.to],
+    queryFn: async () => {
+      const out: any[] = []
+      let offset = 0
+      const limit = 1000
+      while (true) {
+        const rows = await fetchReceipts({ from_date: allRange.from, to_date: allRange.to, limit, offset })
         out.push(...(rows || []))
         if (!rows || rows.length < limit) break
         offset += limit
@@ -629,13 +720,15 @@ export default function BankBookPage() {
 
   const billOnlineRowsDay = useMemo(() => {
     const payments = (qDayPayments.data || []) as any[]
-    return buildOnlineReceiptRows(payments)
-  }, [qDayPayments.data])
+    const receipts = (qDayReceipts.data || []) as any[]
+    return buildOnlineReceiptRows(payments, receipts)
+  }, [qDayPayments.data, qDayReceipts.data])
 
   const billOnlineRowsAll = useMemo(() => {
     const payments = (qAllPayments.data || []) as any[]
-    return buildOnlineReceiptRows(payments)
-  }, [qAllPayments.data])
+    const receipts = (qAllReceipts.data || []) as any[]
+    return buildOnlineReceiptRows(payments, receipts)
+  }, [qAllPayments.data, qAllReceipts.data])
 
   const purchaseOnlineRowsDay = useMemo(() => {
     const payments = (qDayPurchasePayments.data || []) as any[]
@@ -1330,12 +1423,14 @@ export default function BankBookPage() {
               {(recordsFilter === 'DAY'
                 ? qDay.isLoading ||
                   qDayPayments.isLoading ||
+                  qDayReceipts.isLoading ||
                   qDayPurchasePayments.isLoading ||
                   qDayReturns.isLoading ||
                   qDayExchanges.isLoading ||
                   qDayCashbookContra.isLoading
                 : qAllBankbook.isLoading ||
                   qAllPayments.isLoading ||
+                  qAllReceipts.isLoading ||
                   qAllPurchasePayments.isLoading ||
                   qAllReturns.isLoading ||
                   qAllExchanges.isLoading ||
@@ -1429,7 +1524,8 @@ export default function BankBookPage() {
                                   Customer receipt #{row.receipt_id}
                                 </Typography>
                                 <Typography variant="caption" color="text.secondary">
-                                  {(row.subRows || []).length} bill adjustment(s)
+                                  {(row.subRows || []).filter((sub: any) => sub.kind !== 'plain').length} bill adjustment(s)
+                                  {Number(row.plain_online_amount || 0) > 0 ? ` • Advance / on account Rs ${money(row.plain_online_amount)}` : ''}
                                 </Typography>
                               </Stack>
                             ) : (row.source === 'PURCHASE_PAYMENT' || row.source === 'PURCHASE_PAYMENT_CHARGE') && Number(row.purchase_id || 0) > 0 ? (
@@ -1512,23 +1608,34 @@ export default function BankBookPage() {
                         </TableCell>
                       </TableRow>
                       {(row.subRows || []).map((sub: any) => (
-                        <TableRow key={`${row.id}-sub-${sub.payment_id || sub.bill_id}`} sx={{ bgcolor: recordsFilter === 'ALL' ? dayColorMap[date] : '#fafafa' }}>
+                        <TableRow key={`${row.id}-sub-${sub.payment_id || sub.bill_id || sub.key || sub.kind}`} sx={{ bgcolor: recordsFilter === 'ALL' ? dayColorMap[date] : '#fafafa' }}>
                           <TableCell />
                           <TableCell />
                           <TableCell />
                           <TableCell>
                             <Stack direction="row" spacing={1} alignItems="center" sx={{ pl: 5 }}>
-                              <Typography variant="caption" color="text.secondary">Applied to</Typography>
-                              <Link component="button" onClick={() => openBillDetail(Number(sub.bill_id))} underline="hover" sx={{ fontSize: 13, fontWeight: 800 }}>
-                                Bill #{sub.bill_id}
-                              </Link>
+                              {sub.kind === 'plain' ? (
+                                <>
+                                  <Typography variant="caption" color="text.secondary">Advance / on account</Typography>
+                                  <Typography variant="caption" sx={{ fontWeight: 800 }}>
+                                    On account / unadjusted
+                                  </Typography>
+                                </>
+                              ) : (
+                                <>
+                                  <Typography variant="caption" color="text.secondary">Applied to</Typography>
+                                  <Link component="button" onClick={() => openBillDetail(Number(sub.bill_id))} underline="hover" sx={{ fontSize: 13, fontWeight: 800 }}>
+                                    Bill #{sub.bill_id}
+                                  </Link>
+                                </>
+                              )}
                             </Stack>
                           </TableCell>
                           <TableCell align="right" sx={{ color: 'text.secondary', fontWeight: 600 }}>
                             Rs {money(sub.amount)}
                           </TableCell>
                           <TableCell align="right">-</TableCell>
-                          <TableCell sx={{ color: 'text.secondary' }}>Deposit bill</TableCell>
+                          <TableCell sx={{ color: 'text.secondary' }}>{sub.kind === 'plain' ? 'Advance / on account' : 'Deposit bill'}</TableCell>
                           <TableCell />
                         </TableRow>
                       ))}

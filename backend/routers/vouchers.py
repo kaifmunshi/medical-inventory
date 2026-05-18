@@ -67,7 +67,10 @@ def _parse_note_party(notes: Optional[str]) -> Optional[str]:
         return None
     lowered = raw.lower()
     if lowered.startswith("customer:"):
-        first = raw.split("|", 1)[0].splitlines()[0]
+        first_lines = raw.split("|", 1)[0].splitlines()
+        first = first_lines[0] if first_lines else ""
+        if ":" not in first:
+            return None
         return first.split(":", 1)[1].strip() or None
     return None
 

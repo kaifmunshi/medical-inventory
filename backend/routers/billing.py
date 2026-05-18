@@ -153,7 +153,8 @@ def resolve_bill_party_links(session, *, customer_id: Optional[int], party_id: O
             raise HTTPException(status_code=400, detail="Debtor party not found")
         return getattr(party, "legacy_customer_id", None), int(party.id)
 
-    first = str(notes or "").splitlines()[0].strip()
+    note_lines = str(notes or "").splitlines()
+    first = note_lines[0].strip() if note_lines else ""
     if first.lower().startswith("customer:"):
         name = normalize_name(first.split(":", 1)[1].split("|", 1)[0])
         if name:

@@ -144,10 +144,31 @@ def ensure_party_ledger(session, party: Party) -> Ledger:
 
 
 def resolve_bill_party_ledger(session, bill: Bill) -> Optional[Ledger]:
+    party_id = int(getattr(bill, "party_id", 0) or 0)
+    if party_id > 0:
+        party = session.get(Party, party_id)
+        if party and party.party_group == "SUNDRY_DEBTOR":
+            return ensure_party_ledger(session, party)
+
+    customer_id = int(getattr(bill, "customer_id", 0) or 0)
+    if customer_id > 0:
+        party = session.exec(
+            select(Party).where(
+                Party.party_group == "SUNDRY_DEBTOR",
+                Party.legacy_customer_id == customer_id,
+            )
+        ).first()
+        if party:
+            return ensure_party_ledger(session, party)
+
     notes = str(bill.notes or "").strip()
     lower = notes.lower()
     if lower.startswith("customer:"):
-        customer_name = notes.split("|", 1)[0].splitlines()[0].split(":", 1)[1].strip()
+        first_lines = notes.split("|", 1)[0].splitlines()
+        first = first_lines[0] if first_lines else ""
+        customer_name = first.split(":", 1)[1].strip() if ":" in first else ""
+        if not customer_name:
+            return None
         party = session.exec(
             select(Party).where(
                 Party.party_group == "SUNDRY_DEBTOR",

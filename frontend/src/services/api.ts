@@ -9,7 +9,10 @@ if (typeof window !== 'undefined') {
 const hostname = String(window.location.hostname || '').trim()
 if (hostname) {
 const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
-return `${protocol}//${hostname}:8000`
+const normalizedHost = hostname.replace(/^\[|\]$/g, '')
+if (normalizedHost === 'localhost' || normalizedHost === '::1') return `${protocol}//127.0.0.1:8000`
+const apiHost = normalizedHost.includes(':') ? `[${normalizedHost}]` : normalizedHost
+return `${protocol}//${apiHost}:8000`
 }
 }
 

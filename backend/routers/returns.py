@@ -5,6 +5,7 @@ from typing import List, Optional, Dict
 from pydantic import BaseModel
 from sqlmodel import select
 from datetime import datetime
+from backend.accounting import sync_bill_vouchers
 from backend.controls import assert_financial_year_unlocked
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
@@ -105,10 +106,43 @@ def infer_refund_mode(r: Return) -> str:
     return "credit"
 
 
+def bill_line_base_total(session, bill: Bill) -> float:
+    rows = session.exec(select(BillItem).where(BillItem.bill_id == bill.id)).all()
+    item_total = round2(sum(float(getattr(row, "line_total", 0.0) or 0.0) for row in rows))
+    if item_total > MONEY_EPSILON:
+        return item_total
+
+    subtotal = round2(float(getattr(bill, "subtotal", 0.0) or 0.0))
+    if subtotal > MONEY_EPSILON:
+        return subtotal
+
+    return round2(float(getattr(bill, "total_amount", 0.0) or 0.0))
+
+
+def exchange_return_ids_for_bill(session, bill_id: int) -> set[int]:
+    rows = session.exec(
+        select(ExchangeRecord.return_id).where(ExchangeRecord.source_bill_id == bill_id)
+    ).all()
+    return {int(row) for row in rows if row is not None}
+
+
+def bill_credit_return_total(session, bill_id: int) -> float:
+    exchange_return_ids = exchange_return_ids_for_bill(session, bill_id)
+    total = 0.0
+    rows = session.exec(select(Return).where(Return.source_bill_id == bill_id)).all()
+    for row in rows:
+        if row.id is None or int(row.id) in exchange_return_ids:
+            continue
+        if infer_refund_mode(row) == "credit":
+            total += float(getattr(row, "subtotal_return", 0.0) or 0.0)
+    return round2(total)
+
+
 def apply_return_credit_to_bill(session, r: Return, old_credit_amount: float, new_credit_amount: float) -> None:
     bill_id = int(getattr(r, "source_bill_id", 0) or 0)
-    delta = round2(float(new_credit_amount or 0.0) - float(old_credit_amount or 0.0))
-    if not bill_id or abs(delta) <= MONEY_EPSILON:
+    old_credit = round2(float(old_credit_amount or 0.0))
+    new_credit = round2(float(new_credit_amount or 0.0))
+    if not bill_id and max(old_credit, new_credit) <= MONEY_EPSILON:
         return
 
     bill = session.get(Bill, bill_id)
@@ -117,10 +151,22 @@ def apply_return_credit_to_bill(session, r: Return, old_credit_amount: float, ne
     if is_deleted_bill(bill):
         raise HTTPException(status_code=400, detail="Cannot adjust credit on deleted source bill")
 
-    next_total = round2(float(getattr(bill, "total_amount", 0.0) or 0.0) - delta)
-    if next_total < -MONEY_EPSILON:
-        raise HTTPException(status_code=400, detail="Credit adjustment exceeds bill total")
-    bill.total_amount = max(0.0, next_total)
+    current_credit_total = bill_credit_return_total(session, bill_id)
+    previous_credit_total = round2(current_credit_total - new_credit + old_credit)
+    base_total = round2(float(getattr(bill, "total_amount", 0.0) or 0.0) + previous_credit_total)
+
+    line_base_total = bill_line_base_total(session, bill)
+    if (
+        base_total + MONEY_EPSILON < current_credit_total
+        or (
+            float(getattr(bill, "total_amount", 0.0) or 0.0) <= MONEY_EPSILON
+            and line_base_total > current_credit_total + MONEY_EPSILON
+        )
+    ):
+        base_total = line_base_total
+
+    next_total = round2(max(0.0, base_total - current_credit_total))
+    bill.total_amount = next_total
 
     covered = round2(
         float(getattr(bill, "paid_amount", 0.0) or 0.0)
@@ -138,6 +184,8 @@ def apply_return_credit_to_bill(session, r: Return, old_credit_amount: float, ne
         bill.is_credit = True
         bill.paid_at = None
     session.add(bill)
+    session.flush()
+    sync_bill_vouchers(session, bill)
 
 
 def return_to_out(session, r: Return) -> ReturnOut:
@@ -380,10 +428,11 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
             if abs(round2(rc + ro) - subtotal) > ROUND_TOLERANCE:
                 raise HTTPException(status_code=400, detail="cash+online deviates from return subtotal")
 
-        apply_return_credit_to_bill(session, r, old_credit_amount, new_credit_amount)
         r.refund_cash = rc
         r.refund_online = ro
         session.add(r)
+        session.flush()
+        apply_return_credit_to_bill(session, r, old_credit_amount, new_credit_amount)
         session.commit()
         session.refresh(r)
         return return_to_out(session, r)
@@ -602,20 +651,19 @@ def create_return(payload: ReturnCreate):
                     )
                 )
 
-        # ----- save Return header -----
-        r = Return(
-            source_bill_id=payload.source_bill_id,
-            subtotal_return=subtotal_return,
-            refund_cash=rc,
-            refund_online=ro,
-            notes=payload.notes,
-        )
-        session.add(r)
-        session.commit()
-        session.refresh(r)
-
-        # ----- save Return items + restock + ledger -----
         try:
+            # ----- save Return header -----
+            r = Return(
+                source_bill_id=payload.source_bill_id,
+                subtotal_return=subtotal_return,
+                refund_cash=rc,
+                refund_online=ro,
+                notes=payload.notes,
+            )
+            session.add(r)
+            session.flush()
+
+            # ----- save Return items + restock + ledger -----
             for line in payload.items:
                 itm = db_items[line.item_id]
                 qty = int(line.quantity)
@@ -655,15 +703,19 @@ def create_return(payload: ReturnCreate):
                     line_total=round2(line_total)
                 ))
 
+            # If refund was credited to the source bill, adjust that bill's outstanding.
+            if payload.refund_mode == "credit" and payload.source_bill_id:
+                apply_return_credit_to_bill(session, r, 0.0, subtotal_return)
+
             session.commit()
+            session.refresh(r)
+        except HTTPException:
+            session.rollback()
+            raise
         except Exception as e:
             session.rollback()
             raise HTTPException(status_code=500, detail=f"Failed to create return: {e}")
 
-        # If refund was credited to the source bill, adjust that bill's outstanding.
-        if payload.refund_mode == "credit" and payload.source_bill_id:
-            apply_return_credit_to_bill(session, r, 0.0, subtotal_return)
-            session.commit()
         return return_to_out(session, r)
 
 

@@ -1394,7 +1394,14 @@ export default function CashbookPage() {
                       const mrp = Number(it.mrp)
                       return (
                         <tr key={idx}>
-                          <td>{name}</td>
+                          <td>
+                            <Stack gap={0.25}>
+                              <Typography variant="body2">{name}</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Brand: {String(it.brand || '').trim() || '-'}
+                              </Typography>
+                            </Stack>
+                          </td>
                           <td>{qty}</td>
                           <td>{money(mrp)}</td>
                           <td>{money(chargedLine(billDetail, mrp, qty))}</td>

@@ -1784,7 +1784,16 @@ export default function CustomerLedgerPage() {
                   <tbody>
                     {(billDetail.items || []).map((it: any, idx: number) => (
                       <tr key={idx}>
-                        <td>{it.item_name || it.name || it.item?.name || `#${it.item_id}`}</td>
+                        <td>
+                          <Stack gap={0.25}>
+                            <Typography variant="body2">
+                              {it.item_name || it.name || it.item?.name || `#${it.item_id}`}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              Brand: {String(it.brand || '').trim() || '-'}
+                            </Typography>
+                          </Stack>
+                        </td>
                         <td>{Number(it.quantity || 0)}</td>
                         <td>{money(it.mrp)}</td>
                         <td>{money(it.line_total)}</td>

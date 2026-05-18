@@ -91,6 +91,11 @@ function itemStockText(it: any) {
   return `${Number(it?.stock || 0)}${unit ? ` ${unit}` : ''}`
 }
 
+function editItemStockMeta(it: any) {
+  if (it?.stock === undefined) return itemKindLabel(it)
+  return `stock: ${itemStockText(it)}`
+}
+
 function canOpenForLoose(it: any) {
   return Boolean(
     it &&
@@ -1164,8 +1169,8 @@ export default function BillEditDialog({
                             <Typography variant="body2">{it.item_name}</Typography>
                             <Typography variant="caption" color="text.secondary">
                               {[
-                                String(it.brand || '').trim(),
-                                `${itemKindLabel(it) ? `${itemKindLabel(it)} ` : ''}${it.stock !== undefined ? `stock: ${itemStockText(it)}` : ''}`,
+                                `Brand: ${String(it.brand || '').trim() || '-'}`,
+                                editItemStockMeta(it),
                               ].filter(Boolean).join(' | ')}
                             </Typography>
                           </Stack>

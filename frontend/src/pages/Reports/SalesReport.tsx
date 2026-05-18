@@ -68,6 +68,14 @@ function itemDisplayName(it: any) {
   return `${name} - ${itemKindLabel(it)}`
 }
 
+function itemMetaLine(it: any) {
+  const kind = itemKindLabel(it)
+  const unit = itemUnitLabel(it)
+  const parts = [`Brand: ${String(it?.brand || '').trim() || '-'}`, kind]
+  if (unit && unit.trim().toLowerCase() !== kind.trim().toLowerCase()) parts.push(unit)
+  return parts.filter(Boolean).join(' | ')
+}
+
 // ---------- Charged share helpers (same theory as Returns) ----------
 function round2(n: number) {
   return Math.round(n * 100) / 100
@@ -577,7 +585,7 @@ export default function SalesReport(props: {
                             <Stack gap={0.25}>
                               <Typography variant="body2">{name}</Typography>
                               <Typography variant="caption" color="text.secondary">
-                                {itemKindLabel(it)} | {itemUnitLabel(it)}
+                                {itemMetaLine(it)}
                               </Typography>
                             </Stack>
                           </td>

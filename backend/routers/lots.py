@@ -39,6 +39,14 @@ def clean_text(v: Optional[str]) -> Optional[str]:
     return text or None
 
 
+def effective_conversion_qty(lot: InventoryLot, product: Product) -> Optional[int]:
+    product_qty = int(product.default_conversion_qty or 0) if product and product.loose_sale_enabled else 0
+    if product_qty > 0:
+        return product_qty
+    lot_qty = int(lot.conversion_qty or 0) if lot else 0
+    return lot_qty if lot_qty > 0 else None
+
+
 def add_movement(
     session,
     *,
@@ -81,7 +89,7 @@ def lot_to_out(lot: InventoryLot, product: Product, item: Optional[Item] = None)
         rack_number=int(lot.rack_number or 0),
         sealed_qty=sealed_qty,
         loose_qty=loose_qty,
-        conversion_qty=lot.conversion_qty or product.default_conversion_qty,
+        conversion_qty=effective_conversion_qty(lot, product),
         loose_sale_enabled=bool(product.loose_sale_enabled),
         parent_unit_name=product.parent_unit_name,
         child_unit_name=product.child_unit_name,
@@ -202,9 +210,11 @@ def open_pack(payload: LotOpenCreate) -> PackOpenEventOut:
         if not product.loose_sale_enabled:
             raise HTTPException(status_code=400, detail="This product is not configured for loose sales")
 
-        conversion_qty = int(source_lot.conversion_qty or product.default_conversion_qty or 0)
+        conversion_qty = int(effective_conversion_qty(source_lot, product) or 0)
         if conversion_qty <= 0:
             raise HTTPException(status_code=400, detail="Conversion quantity is missing for this lot")
+        if int(source_lot.conversion_qty or 0) != conversion_qty:
+            source_lot.conversion_qty = conversion_qty
 
         source_item = session.get(Item, source_lot.legacy_item_id) if source_lot.legacy_item_id else None
         if not source_item:
@@ -235,6 +245,7 @@ def open_pack(payload: LotOpenCreate) -> PackOpenEventOut:
             loose_item.updated_at = ts
             apply_archive_rules(session, loose_item)
             loose_lot.loose_qty = max(0, int(loose_item.stock or 0))
+            loose_lot.conversion_qty = conversion_qty
             loose_lot.mrp = loose_mrp
             loose_lot.cost_price = loose_cost_price
         else:
@@ -347,9 +358,17 @@ def close_pack(payload: LotCloseCreate) -> PackOpenEventOut:
         if not product or not product.is_active:
             raise HTTPException(status_code=400, detail="Product not found")
 
-        conversion_qty = int(loose_lot.conversion_qty or source_lot.conversion_qty or product.default_conversion_qty or 0)
+        conversion_qty = int(
+            effective_conversion_qty(loose_lot, product)
+            or effective_conversion_qty(source_lot, product)
+            or 0
+        )
         if conversion_qty <= 0:
             raise HTTPException(status_code=400, detail="Conversion quantity is missing for this lot")
+        if int(source_lot.conversion_qty or 0) != conversion_qty:
+            source_lot.conversion_qty = conversion_qty
+        if int(loose_lot.conversion_qty or 0) != conversion_qty:
+            loose_lot.conversion_qty = conversion_qty
 
         source_item = session.get(Item, source_lot.legacy_item_id) if source_lot.legacy_item_id else None
         loose_item = session.get(Item, loose_lot.legacy_item_id) if loose_lot.legacy_item_id else None

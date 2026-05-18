@@ -154,6 +154,80 @@ def _sync_product_to_inventory_items(
     return len(items)
 
 
+def _sync_product_conversion_to_lots(session, product: Product) -> dict:
+    conversion_qty = int(product.default_conversion_qty or 0)
+    if not product.id or not bool(product.loose_sale_enabled) or conversion_qty <= 0:
+        return {"sealed_lots": 0, "loose_lots": 0, "loose_items": 0}
+
+    now = _now()
+    sealed_count = 0
+    loose_count = 0
+    loose_item_count = 0
+
+    sealed_lots = session.exec(
+        select(InventoryLot).where(
+            InventoryLot.product_id == int(product.id),
+            InventoryLot.opened_from_lot_id.is_(None),
+        )
+    ).all()
+    for sealed_lot in sealed_lots:
+        if int(sealed_lot.conversion_qty or 0) != conversion_qty:
+            sealed_lot.conversion_qty = conversion_qty
+            sealed_lot.updated_at = now
+            session.add(sealed_lot)
+            sealed_count += 1
+
+        loose_lots = session.exec(
+            select(InventoryLot).where(InventoryLot.opened_from_lot_id == int(sealed_lot.id or 0))
+        ).all()
+        loose_mrp = round(float(sealed_lot.mrp or 0) / conversion_qty, 2)
+        loose_cost = (
+            round(float(sealed_lot.cost_price or 0) / conversion_qty, 2)
+            if sealed_lot.cost_price is not None
+            else None
+        )
+        for loose_lot in loose_lots:
+            lot_changed = False
+            if int(loose_lot.conversion_qty or 0) != conversion_qty:
+                loose_lot.conversion_qty = conversion_qty
+                lot_changed = True
+            if abs(float(loose_lot.mrp or 0) - loose_mrp) > 0.001:
+                loose_lot.mrp = loose_mrp
+                lot_changed = True
+            if loose_cost is not None and abs(float(loose_lot.cost_price or 0) - loose_cost) > 0.001:
+                loose_lot.cost_price = loose_cost
+                lot_changed = True
+            if lot_changed:
+                loose_lot.updated_at = now
+                session.add(loose_lot)
+                loose_count += 1
+
+            loose_item = session.get(Item, int(loose_lot.legacy_item_id or 0)) if loose_lot.legacy_item_id else None
+            if loose_item:
+                item_changed = False
+                if loose_item.name != product.name:
+                    loose_item.name = product.name
+                    item_changed = True
+                if loose_item.brand != product.brand:
+                    loose_item.brand = product.brand
+                    item_changed = True
+                if loose_item.category_id != product.category_id:
+                    loose_item.category_id = product.category_id
+                    item_changed = True
+                if abs(float(loose_item.mrp or 0) - loose_mrp) > 0.001:
+                    loose_item.mrp = loose_mrp
+                    item_changed = True
+                if loose_cost is not None and abs(float(loose_item.cost_price or 0) - loose_cost) > 0.001:
+                    loose_item.cost_price = loose_cost
+                    item_changed = True
+                if item_changed:
+                    loose_item.updated_at = now
+                    session.add(loose_item)
+                    loose_item_count += 1
+
+    return {"sealed_lots": sealed_count, "loose_lots": loose_count, "loose_items": loose_item_count}
+
+
 def _product_ref_counts(session, product_id: int) -> dict:
     return {
         "items": int(session.exec(select(func.count()).select_from(Item).where(Item.product_id == int(product_id))).one() or 0),
@@ -390,6 +464,7 @@ def create_product(payload: ProductCreate) -> ProductOut:
                 previous_name=previous_name,
                 previous_brand=previous_brand,
             )
+            synced_conversion = _sync_product_conversion_to_lots(session, existing)
             log_audit(
                 session,
                 entity_type="PRODUCT",
@@ -400,6 +475,7 @@ def create_product(payload: ProductCreate) -> ProductOut:
                     "brand": existing.brand,
                     "category_id": existing.category_id,
                     "synced_inventory_items": synced_items,
+                    "synced_conversion": synced_conversion,
                 },
             )
             session.commit()
@@ -507,13 +583,14 @@ def update_product(product_id: int, payload: ProductUpdate) -> ProductOut:
             previous_name=previous_name,
             previous_brand=previous_brand,
         )
+        synced_conversion = _sync_product_conversion_to_lots(session, row)
         log_audit(
             session,
             entity_type="PRODUCT",
             entity_id=int(row.id),
             action="UPDATE",
             note=f"Updated product {row.name}",
-            details={**data, "synced_inventory_items": synced_items},
+            details={**data, "synced_inventory_items": synced_items, "synced_conversion": synced_conversion},
         )
         session.commit()
         session.refresh(row)

@@ -350,6 +350,57 @@ def auto_repair_hidden_purchase_duplicate_stock() -> tuple[int, str | None, int]
         conn.close()
 
 
+def auto_repair_client_loose_conversion_and_credit_returns() -> tuple[int, int, int, int, str | None, int]:
+    """Run the client loose-conversion/bill-return repair once at startup."""
+    from scripts.client_db_repair import ClientRepair, backup_database
+
+    def run_repair(*, apply: bool):
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        try:
+            repair = ClientRepair(
+                conn,
+                apply=apply,
+                product_ids=set(),
+                bill_ids=set(),
+                fix_all_bill_mismatches=False,
+            )
+            stats = repair.run()
+            if apply:
+                conn.commit()
+            else:
+                conn.rollback()
+            return stats
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    preview = run_repair(apply=False)
+    change_count = int(preview.loose_syncs or 0) + int(preview.loose_stock_repairs or 0) + int(preview.bill_total_repairs or 0)
+    if change_count <= 0:
+        return (
+            int(preview.loose_syncs or 0),
+            int(preview.loose_stock_repairs or 0),
+            int(preview.bill_total_repairs or 0),
+            int(preview.voucher_syncs or 0),
+            None,
+            int(preview.warnings or 0),
+        )
+
+    backup_path = backup_database(DB_FILE, BASE_DIR / "backups")
+    applied = run_repair(apply=True)
+    return (
+        int(applied.loose_syncs or 0),
+        int(applied.loose_stock_repairs or 0),
+        int(applied.bill_total_repairs or 0),
+        int(applied.voucher_syncs or 0),
+        str(backup_path),
+        int(applied.warnings or 0),
+    )
+
+
 def create_data_repair_backup(label: str) -> str:
     backup_dir = BASE_DIR / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -2832,6 +2883,37 @@ def migrate_db():
             """).bindparams(ts=ts_lot_upkeep),
         )
         session.commit()
+
+        # ---------- one-time client repair: loose conversion + credit return bill totals ----------
+        client_repair_key = "repair_client_loose_conversion_and_credit_returns_v1"
+        client_repair_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=client_repair_key),
+        ).first()
+        if not client_repair_done:
+            session.commit()
+            ts_repair = _now_ts()
+            loose_syncs, loose_stock_repairs, bill_total_repairs, voucher_syncs, backup_path, warning_count = (
+                auto_repair_client_loose_conversion_and_credit_returns()
+            )
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=client_repair_key,
+                    value=(
+                        f"done;loose_syncs:{loose_syncs};"
+                        f"loose_stock_repairs:{loose_stock_repairs};"
+                        f"bill_total_repairs:{bill_total_repairs};"
+                        f"voucher_syncs:{voucher_syncs};"
+                        f"warnings:{warning_count};"
+                        f"backup:{backup_path or ''}"
+                    ),
+                    ts=ts_repair,
+                ),
+            )
+            session.commit()
 
         # ---------- one-time backfill: deleted bill stock + ledger ----------
         backfill_key = "backfill_deleted_bill_stock_ledger_v2"

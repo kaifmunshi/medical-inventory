@@ -51,6 +51,16 @@ def as_i(x: Any) -> int:
         return 0
 
 
+def bill_line_unit_price(line: Any, item: Item) -> float:
+    raw = getattr(line, "custom_unit_price", None)
+    if raw is None:
+        return round2(as_f(getattr(item, "mrp", 0.0)))
+    price = round2(as_f(raw))
+    if price < 0:
+        raise HTTPException(status_code=400, detail="custom_unit_price cannot be negative")
+    return price
+
+
 def iso_date(s: Optional[str]) -> str:
     """
     Extract YYYY-MM-DD from an ISO string safely.
@@ -198,7 +208,11 @@ def recalculate_bill_payment_state(session, bill: Bill) -> Dict[str, Any]:
     bill.paid_amount = total_paid
     bill.writeoff_amount = total_writeoff
 
-    if covered_total <= 0:
+    if total_amount <= 0:
+        bill.payment_status = "PAID"
+        bill.paid_at = bill.paid_at or getattr(bill, "date_time", None)
+        bill.is_credit = False
+    elif covered_total <= 0:
         bill.payment_status = "UNPAID"
         bill.paid_at = None
         bill.is_credit = True
@@ -765,9 +779,7 @@ def create_bill(payload: BillCreate):
                 raise HTTPException(status_code=400, detail=f"Insufficient stock for {itm.name}")
 
             db_items[line.item_id] = itm
-            line_price = as_f(getattr(line, "custom_unit_price", None))
-            if line_price <= 0:
-                line_price = as_f(itm.mrp)
+            line_price = bill_line_unit_price(line, itm)
             line_price_by_item[line.item_id] = line_price
             subtotal += (as_i(line.quantity) * line_price)
 
@@ -782,16 +794,22 @@ def create_bill(payload: BillCreate):
         pay_online_in = round2(as_f(getattr(payload, "payment_online", 0.0)))
         pay_credit_in = round2(as_f(getattr(payload, "payment_credit", 0.0)))
 
-        if payload.payment_mode == "credit":
+        if total <= 0:
+            cash, online, credit = 0.0, 0.0, 0.0
+            stored_payment_mode = "cash"
+        elif payload.payment_mode == "credit":
             cash, online, credit = 0.0, 0.0, total
+            stored_payment_mode = payload.payment_mode
         elif payload.payment_mode == "cash":
             if round2(pay_cash_in) != total:
                 raise HTTPException(status_code=400, detail="payment_cash must equal total_amount")
             cash, online, credit = total, 0.0, 0.0
+            stored_payment_mode = payload.payment_mode
         elif payload.payment_mode == "online":
             if round2(pay_online_in) != total:
                 raise HTTPException(status_code=400, detail="payment_online must equal total_amount")
             cash, online, credit = 0.0, total, 0.0
+            stored_payment_mode = payload.payment_mode
         else:  # split
             if pay_credit_in < 0:
                 raise HTTPException(status_code=400, detail="payment_credit cannot be negative")
@@ -801,6 +819,7 @@ def create_bill(payload: BillCreate):
                     detail="Cash + Online + Credit must equal total_amount"
                 )
             cash, online, credit = round2(pay_cash_in), round2(pay_online_in), round2(pay_credit_in)
+            stored_payment_mode = payload.payment_mode
 
         # 4) Create Bill + BillItems and deduct stock (✅ single transaction)
         now_iso = now_ts()
@@ -808,9 +827,11 @@ def create_bill(payload: BillCreate):
         assert_financial_year_unlocked(session, bill_ts, context="Bill creation")
 
         paid_now = round2(cash + online)
-        has_credit_component = round2(total - paid_now) > 0
-        is_credit = payload.payment_mode == "credit" or has_credit_component
-        if paid_now <= 0:
+        if total <= 0:
+            status = "PAID"
+            paid_at = bill_ts
+            is_credit = False
+        elif paid_now <= 0:
             status = "UNPAID"
             paid_at = None
         elif paid_now + 0.0001 < total:
@@ -819,6 +840,8 @@ def create_bill(payload: BillCreate):
         else:
             status = "PAID"
             paid_at = bill_ts
+        has_credit_component = round2(total - paid_now) > 0
+        is_credit = False if total <= 0 else payload.payment_mode == "credit" or has_credit_component
         paid_amount = paid_now
         linked_customer_id, linked_party_id = resolve_bill_party_links(
             session,
@@ -835,7 +858,7 @@ def create_bill(payload: BillCreate):
                 discount_percent=payload.discount_percent,
                 subtotal=subtotal,
                 total_amount=total,
-                payment_mode=payload.payment_mode,
+                payment_mode=stored_payment_mode,
                 payment_cash=cash,
                 payment_online=online,
                 notes=getattr(payload, "notes", None),
@@ -889,7 +912,7 @@ def create_bill(payload: BillCreate):
                 p = BillPayment(
                     bill_id=b.id,
                     received_at=bill_ts,
-                    mode=payload.payment_mode,  # cash/online/split
+                    mode=stored_payment_mode,  # cash/online/split
                     cash_amount=cash,
                     online_amount=online,
                     writeoff_amount=0.0,
@@ -1028,9 +1051,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             gk = _group_key(seed.name, getattr(seed, "brand", None), _stock_kind(seed))
             requested_qty_by_group[gk] = requested_qty_by_group.get(gk, 0) + qty
             seed_item_by_group[gk] = seed
-            custom_price = as_f(getattr(line, "custom_unit_price", None))
-            if custom_price <= 0:
-                custom_price = as_f(seed.mrp)
+            custom_price = bill_line_unit_price(line, seed)
             if gk not in unit_price_by_group:
                 unit_price_by_group[gk] = custom_price
 
@@ -1093,16 +1114,22 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         pay_cash_in = round2(as_f(payload.payment_cash))
         pay_online_in = round2(as_f(payload.payment_online))
         pay_credit_in = round2(as_f(getattr(payload, "payment_credit", 0.0)))
-        if payload.payment_mode == "credit":
+        if total <= 0:
+            cash, online, credit = 0.0, 0.0, 0.0
+            requested_payment_mode = "cash"
+        elif payload.payment_mode == "credit":
             cash, online, credit = 0.0, 0.0, total
+            requested_payment_mode = payload.payment_mode
         elif payload.payment_mode == "cash":
             if pay_cash_in != total:
                 raise HTTPException(status_code=400, detail="payment_cash must equal total_amount")
             cash, online, credit = total, 0.0, 0.0
+            requested_payment_mode = payload.payment_mode
         elif payload.payment_mode == "online":
             if pay_online_in != total:
                 raise HTTPException(status_code=400, detail="payment_online must equal total_amount")
             cash, online, credit = 0.0, total, 0.0
+            requested_payment_mode = payload.payment_mode
         else:
             if pay_credit_in < 0:
                 raise HTTPException(status_code=400, detail="payment_credit cannot be negative")
@@ -1112,6 +1139,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                     detail="Cash + Online + Credit must equal total_amount"
                 )
             cash, online, credit = pay_cash_in, pay_online_in, pay_credit_in
+            requested_payment_mode = payload.payment_mode
 
         pays = session.exec(active_bill_payments_query(b.id)).all()
         manual_receipts = [
@@ -1134,7 +1162,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             else:
                 effective_payment_mode = "credit"
         else:
-            effective_payment_mode = payload.payment_mode
+            effective_payment_mode = requested_payment_mode
 
         for iid, itm in db_items.items():
             old_qty = old_qty_by_item.get(iid, 0)
@@ -1164,8 +1192,11 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                 ),
             )
         has_credit_component = round2(total - paid_now) > 0
-        is_credit = effective_payment_mode == "credit" or has_credit_component
-        if paid_now <= 0:
+        is_credit = False if total <= 0 else effective_payment_mode == "credit" or has_credit_component
+        if total <= 0:
+            status = "PAID"
+            paid_at = bill_ts
+        elif paid_now <= 0:
             status = "UNPAID"
             paid_at = None
         elif paid_now + 0.0001 < total:

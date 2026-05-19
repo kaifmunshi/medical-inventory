@@ -816,6 +816,7 @@ export default function BillEditDialog({
   const editPaymentsOk = useMemo(() => {
     const c = Number(editCash || 0)
     const o = Number(editOnline || 0)
+    if (editChosenFinal <= 0) return round2(c) === 0 && round2(o) === 0
     if (editPaymentMode === 'credit') return true
     if (editPaymentMode === 'cash') return c > 0 && round2(c) <= round2(editChosenFinal)
     if (editPaymentMode === 'online') return o > 0 && round2(o) <= round2(editChosenFinal)
@@ -905,7 +906,7 @@ export default function BillEditDialog({
         .map((it) => ({
           item_id: Number(it.item_id),
           quantity: Number(it.quantity || 0),
-          custom_unit_price: Number(it.custom_unit_price || it.mrp || 0),
+          custom_unit_price: Number(it.custom_unit_price ?? it.mrp ?? 0),
         }))
         .filter((it) => it.quantity > 0)
       if (cleanedItems.length === 0) throw new Error('At least one item quantity must be > 0')
@@ -922,7 +923,12 @@ export default function BillEditDialog({
         notes: editEffectiveNotes || undefined,
       }
 
-      if (editPaymentMode === 'credit') {
+      if (finalForSubmit <= 0) {
+        payload.payment_mode = 'cash'
+        payload.payment_cash = 0
+        payload.payment_online = 0
+        payload.payment_credit = 0
+      } else if (editPaymentMode === 'credit') {
         payload.payment_cash = 0
         payload.payment_online = 0
       } else if (editPaymentMode === 'cash') {
@@ -1298,7 +1304,12 @@ export default function BillEditDialog({
                     value={String(editFinalAmount)}
                     onChange={(e) => {
                       const v = parseNumText(e.target.value)
-                      setEditFinalAmount(Number(v || 0))
+                      const next = Number(v || 0)
+                      setEditFinalAmount(next)
+                      if (next <= 0) {
+                        setEditCash(0)
+                        setEditOnline(0)
+                      }
                       setEditFinalManuallyEdited(true)
                     }}
                     onBlur={() => applyEditFinalAmountToRows(editFinalAmount)}

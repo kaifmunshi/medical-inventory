@@ -128,7 +128,11 @@ def _recalculate_bill_payment_state(session, bill: Bill) -> None:
     bill.paid_amount = total_paid
     bill.writeoff_amount = total_writeoff
 
-    if covered <= 0:
+    if bill_total <= 0:
+        bill.payment_status = "PAID"
+        bill.paid_at = bill.paid_at or getattr(bill, "date_time", None)
+        bill.is_credit = False
+    elif covered <= 0:
         bill.payment_status = "UNPAID"
         bill.paid_at = None
         bill.is_credit = True

@@ -20,6 +20,7 @@ export interface BillCreate {
   payment_cash?: number
   payment_online?: number
   payment_credit?: number
+  final_amount?: number
   notes?: string
 }
 

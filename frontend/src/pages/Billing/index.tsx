@@ -572,6 +572,7 @@ export default function Billing() {
   const paymentsOk = useMemo(() => {
     const c = Number(cash || 0)
     const o = Number(online || 0)
+    if (chosenFinal <= 0) return round2(c) === 0 && round2(o) === 0
     if (mode === 'credit') return true
     if (mode === 'cash') return c > 0 && round2(c) <= chosenFinal
     if (mode === 'online') return o > 0 && round2(o) <= chosenFinal
@@ -696,7 +697,7 @@ export default function Billing() {
             item_id: r.item_id,
             quantity: Number(r.quantity) || 1,
             mrp: Number(r.mrp) || 0,
-            custom_unit_price: Number(r.custom_unit_price || r.mrp || 0),
+            custom_unit_price: Number(r.custom_unit_price ?? r.mrp ?? 0),
           })),
         discount_percent: 0,
         tax_percent: Number(tax) || 0,
@@ -709,7 +710,12 @@ export default function Billing() {
         notes: effectiveNotes,
       }
 
-      if (mode === 'credit') {
+      if (chosenFinal <= 0) {
+        payload.payment_mode = 'cash'
+        payload.payment_cash = 0
+        payload.payment_online = 0
+        payload.payment_credit = 0
+      } else if (mode === 'credit') {
         payload.payment_cash = 0
         payload.payment_online = 0
       } else if (mode === 'cash') {
@@ -1139,7 +1145,7 @@ export default function Billing() {
       return
     }
 
-    if (mode === 'cash') {
+    if (mode === 'cash' && chosenFinal > 0) {
       setCashConfirmOpen(true)
       return
     }
@@ -1624,7 +1630,12 @@ export default function Billing() {
                     value={String(finalAmount)}
                     onChange={(e) => {
                       const v = parseNumText(e.target.value)
-                      setFinalAmount(Number(v || 0))
+                      const next = Number(v || 0)
+                      setFinalAmount(next)
+                      if (next <= 0) {
+                        setCash('')
+                        setOnline('')
+                      }
                       setFinalManuallyEdited(true)
                     }}
                     onBlur={commitFinalAmountBlur}

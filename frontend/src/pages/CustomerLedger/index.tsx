@@ -1,8 +1,9 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react'
 import {
   Box,
   Button,
   Chip,
+  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
@@ -67,7 +68,9 @@ function billStatusClass(status: string) {
 type SortDirection = 'asc' | 'desc'
 type SortState<Key extends string> = { key: Key; direction: SortDirection }
 type BillSortKey = 'bill_id' | 'bill_date' | 'total_amount' | 'paid_amount' | 'writeoff_amount' | 'outstanding_amount' | 'payment_status'
+type ReturnSortKey = 'return_id' | 'date_time' | 'source_bill_id' | 'refund_mode' | 'credit_amount' | 'refund_cash' | 'refund_online' | 'subtotal_return'
 type ReceiptSortKey = 'receiptId' | 'when' | 'mode' | 'cash' | 'online' | 'total' | 'adjusted' | 'onAccount'
+type LedgerSectionKey = 'openBills' | 'billLedger' | 'returns' | 'receipts'
 
 function compareSortValues(a: string | number, b: string | number) {
   if (typeof a === 'number' && typeof b === 'number') return a - b
@@ -113,6 +116,50 @@ function MoneyCell({
     <Typography variant="body2" sx={{ fontWeight: strong ? 800 : 500 }}>
       {money(amount)}
     </Typography>
+  )
+}
+
+function CollapsibleLedgerSection({
+  title,
+  open,
+  onToggle,
+  summary,
+  children,
+}: {
+  title: string
+  open: boolean
+  onToggle: () => void
+  summary?: ReactNode
+  children: ReactNode
+}) {
+  return (
+    <Paper sx={{ p: 2 }}>
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        justifyContent="space-between"
+        alignItems={{ xs: 'stretch', sm: 'center' }}
+        gap={1}
+        sx={{ mb: open ? 2 : 0 }}
+      >
+        <Button
+          variant="text"
+          color="inherit"
+          onClick={onToggle}
+          startIcon={open ? <KeyboardArrowDownIcon /> : <KeyboardArrowRightIcon />}
+          sx={{ justifyContent: 'flex-start', px: 0, fontWeight: 900, fontSize: 18 }}
+        >
+          {title}
+        </Button>
+        {summary ? (
+          <Stack direction="row" gap={1} flexWrap="wrap" useFlexGap justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}>
+            {summary}
+          </Stack>
+        ) : null}
+      </Stack>
+      <Collapse in={open} timeout="auto" unmountOnExit={false}>
+        {children}
+      </Collapse>
+    </Paper>
   )
 }
 
@@ -215,10 +262,18 @@ export default function CustomerLedgerPage() {
   const [editReceiptNote, setEditReceiptNote] = useState('')
   const [openBillSort, setOpenBillSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
   const [ledgerSort, setLedgerSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
+  const [returnSort, setReturnSort] = useState<SortState<ReturnSortKey>>({ key: 'date_time', direction: 'desc' })
   const [receiptSort, setReceiptSort] = useState<SortState<ReceiptSortKey>>({ key: 'when', direction: 'desc' })
   const [expandedOpenBills, setExpandedOpenBills] = useState<Record<number, boolean>>({})
   const [expandedLedgerRows, setExpandedLedgerRows] = useState<Record<number, boolean>>({})
+  const [expandedReturns, setExpandedReturns] = useState<Record<number, boolean>>({})
   const [expandedReceipts, setExpandedReceipts] = useState<Record<string, boolean>>({})
+  const [sectionOpen, setSectionOpen] = useState<Record<LedgerSectionKey, boolean>>({
+    openBills: true,
+    billLedger: true,
+    returns: true,
+    receipts: true,
+  })
 
   const customersQ = useQuery<Customer[], Error>({
     queryKey: ['customer-ledger-customers'],
@@ -547,6 +602,11 @@ export default function CustomerLedgerPage() {
     return Number(row[key] || 0)
   }
 
+  function returnSortValue(row: CustomerReturnLedgerRow, key: ReturnSortKey): string | number {
+    if (key === 'date_time' || key === 'refund_mode') return String(row[key] || '')
+    return Number(row[key] || 0)
+  }
+
   function sortBills<T extends DebtorLedgerRow | OpenBill>(rows: T[], sort: SortState<BillSortKey>) {
     const dir = sort.direction === 'asc' ? 1 : -1
     return [...rows].sort((a, b) => {
@@ -565,6 +625,15 @@ export default function CustomerLedgerPage() {
     })
   }
 
+  function sortReturns(rows: CustomerReturnLedgerRow[], sort: SortState<ReturnSortKey>) {
+    const dir = sort.direction === 'asc' ? 1 : -1
+    return [...rows].sort((a, b) => {
+      const primary = compareSortValues(returnSortValue(a, sort.key), returnSortValue(b, sort.key))
+      if (primary !== 0) return primary * dir
+      return Number(b.return_id || 0) - Number(a.return_id || 0)
+    })
+  }
+
   function nextSort<Key extends string>(current: SortState<Key>, key: Key): SortState<Key> {
     return {
       key,
@@ -574,7 +643,12 @@ export default function CustomerLedgerPage() {
 
   const sortedOpenBills = useMemo(() => sortBills(openBills, openBillSort), [openBills, openBillSort])
   const sortedLedgerRows = useMemo(() => sortBills(ledgerRows, ledgerSort), [ledgerRows, ledgerSort])
+  const sortedReturnRows = useMemo(() => sortReturns(returnRows, returnSort), [returnRows, returnSort])
   const sortedReceiptHistory = useMemo(() => sortReceipts(receiptHistory, receiptSort), [receiptHistory, receiptSort])
+
+  function toggleSection(key: LedgerSectionKey) {
+    setSectionOpen((prev) => ({ ...prev, [key]: !prev[key] }))
+  }
 
   function openReceiptDialog() {
     setAdjustmentDrafts(
@@ -961,8 +1035,17 @@ export default function CustomerLedgerPage() {
         </Paper>
       )}
 
-      <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>Open Bills</Typography>
+      <CollapsibleLedgerSection
+        title="Open Bills"
+        open={sectionOpen.openBills}
+        onToggle={() => toggleSection('openBills')}
+        summary={
+          <>
+            <Chip size="small" variant="outlined" label={`${openBills.length} open`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color={totalOutstanding > 0 ? 'error' : 'success'} label={`Pending Rs ${money(totalOutstanding)}`} sx={{ fontWeight: 800 }} />
+          </>
+        }
+      >
         <Box sx={billGridSx}>
           <table className="table customer-ledger-grid">
             <thead>
@@ -1050,10 +1133,19 @@ export default function CustomerLedgerPage() {
             </tbody>
           </table>
         </Box>
-      </Paper>
+      </CollapsibleLedgerSection>
 
-      <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>Bill Ledger</Typography>
+      <CollapsibleLedgerSection
+        title="Bill Ledger"
+        open={sectionOpen.billLedger}
+        onToggle={() => toggleSection('billLedger')}
+        summary={
+          <>
+            <Chip size="small" variant="outlined" label={`${ledgerRows.length} bills`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color={totalOutstanding > 0 ? 'error' : 'success'} label={`Outstanding Rs ${money(totalOutstanding)}`} sx={{ fontWeight: 800 }} />
+          </>
+        }
+      >
         <Box sx={billGridSx}>
           <table className="table customer-ledger-grid">
             <thead>
@@ -1142,68 +1234,144 @@ export default function CustomerLedgerPage() {
             </tbody>
           </table>
         </Box>
-      </Paper>
+      </CollapsibleLedgerSection>
 
-      <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>Return History</Typography>
+      <CollapsibleLedgerSection
+        title="Return History"
+        open={sectionOpen.returns}
+        onToggle={() => toggleSection('returns')}
+        summary={
+          <>
+            <Chip size="small" variant="outlined" label={`${returnRows.length} returns`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color="warning" variant="outlined" label={`Credit Rs ${money(totalReturnCredit)}`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color="secondary" variant="outlined" label={`Refund Rs ${money(totalReturnRefund)}`} sx={{ fontWeight: 800 }} />
+          </>
+        }
+      >
         <Box sx={receiptGridSx}>
           <table className="table customer-ledger-grid">
             <thead>
               <tr>
-                <th className="receipt-col">Return</th>
-                <th className="date-col">Date</th>
-                <th className="bill-col">Source Bill</th>
-                <th className="mode-col">Mode</th>
-                <th className="amount-col">Credit</th>
-                <th className="amount-col">Cash Refund</th>
-                <th className="amount-col">Online Refund</th>
-                <th className="amount-col">Return Total</th>
+                <th className="expand-col"></th>
+                <SortableHeader label="Return" sortKey="return_id" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="receipt-col" />
+                <SortableHeader label="Date" sortKey="date_time" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="date-col" />
+                <SortableHeader label="Source Bill" sortKey="source_bill_id" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="bill-col" />
+                <SortableHeader label="Mode" sortKey="refund_mode" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="mode-col" />
+                <SortableHeader label="Credit" sortKey="credit_amount" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Cash Refund" sortKey="refund_cash" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Online Refund" sortKey="refund_online" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Return Total" sortKey="subtotal_return" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <th className="allocation-col">Exchange</th>
                 <th className="allocation-col">Notes</th>
               </tr>
             </thead>
             <tbody>
-              {returnRows.map((row) => (
-                <tr key={row.return_id}>
-                  <td>
-                    <Typography fontWeight={800}>Return #{row.return_id}</Typography>
-                  </td>
-                  <td className="date-col">
-                    <Typography variant="body2">{row.date_time || '-'}</Typography>
-                  </td>
-                  <td>
-                    {row.source_bill_id ? (
-                      <Link
-                        component="button"
-                        underline="hover"
-                        onClick={() => openBillDetail(Number(row.source_bill_id))}
-                        sx={{ fontWeight: 800 }}
-                      >
-                        Bill #{row.source_bill_id}
-                      </Link>
-                    ) : '-'}
-                  </td>
-                  <td>{modeChip(row.refund_mode)}</td>
-                  <td className="amount-col"><MoneyCell value={row.credit_amount} strong={Number(row.credit_amount || 0) > 0} /></td>
-                  <td className="amount-col"><MoneyCell value={row.refund_cash} /></td>
-                  <td className="amount-col"><MoneyCell value={row.refund_online} /></td>
-                  <td className="amount-col"><MoneyCell value={row.subtotal_return} strong /></td>
-                  <td className="allocation-col">
-                    {row.exchange_id ? (
-                      <Typography variant="body2" className="clip-text">
-                        Exchange #{row.exchange_id}
-                        {row.exchange_new_bill_id ? ` / New Bill #${row.exchange_new_bill_id}` : ''}
-                      </Typography>
-                    ) : '-'}
-                  </td>
-                  <td className="allocation-col">
-                    <Typography variant="body2" className="clip-text">{row.notes || '-'}</Typography>
-                  </td>
-                </tr>
-              ))}
+              {sortedReturnRows.map((row) => {
+                const returnId = Number(row.return_id)
+                const items = row.items || []
+                const isExpanded = Boolean(expandedReturns[returnId])
+                return (
+                  <Fragment key={row.return_id}>
+                    <tr>
+                      <td className="expand-col">
+                        <IconButton
+                          size="small"
+                          onClick={() => setExpandedReturns((prev) => ({ ...prev, [returnId]: !prev[returnId] }))}
+                        >
+                          {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
+                        </IconButton>
+                      </td>
+                      <td>
+                        <Stack gap={0.25}>
+                          <Typography fontWeight={800}>Return #{row.return_id}</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {items.length} item{items.length === 1 ? '' : 's'}
+                          </Typography>
+                        </Stack>
+                      </td>
+                      <td className="date-col">
+                        <Typography variant="body2">{row.date_time || '-'}</Typography>
+                      </td>
+                      <td>
+                        {row.source_bill_id ? (
+                          <Link
+                            component="button"
+                            underline="hover"
+                            onClick={() => openBillDetail(Number(row.source_bill_id))}
+                            sx={{ fontWeight: 800 }}
+                          >
+                            Bill #{row.source_bill_id}
+                          </Link>
+                        ) : '-'}
+                      </td>
+                      <td>{modeChip(row.refund_mode)}</td>
+                      <td className="amount-col"><MoneyCell value={row.credit_amount} strong={Number(row.credit_amount || 0) > 0} /></td>
+                      <td className="amount-col"><MoneyCell value={row.refund_cash} /></td>
+                      <td className="amount-col"><MoneyCell value={row.refund_online} /></td>
+                      <td className="amount-col"><MoneyCell value={row.subtotal_return} strong /></td>
+                      <td className="allocation-col">
+                        {row.exchange_id ? (
+                          <Typography variant="body2" className="clip-text">
+                            Exchange #{row.exchange_id}
+                            {row.exchange_new_bill_id ? ` / New Bill #${row.exchange_new_bill_id}` : ''}
+                          </Typography>
+                        ) : '-'}
+                      </td>
+                      <td className="allocation-col">
+                        <Typography variant="body2" className="clip-text">{row.notes || '-'}</Typography>
+                      </td>
+                    </tr>
+                    {isExpanded ? (
+                      <tr className="detail-row">
+                        <td colSpan={11}>
+                          <Stack gap={1}>
+                            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap" useFlexGap>
+                              <Typography variant="caption">Return total: <b>Rs {money(row.subtotal_return)}</b></Typography>
+                              <Typography variant="caption">Credit: <b>Rs {money(row.credit_amount)}</b></Typography>
+                              <Typography variant="caption">Refund: <b>Rs {money(Number(row.refund_cash || 0) + Number(row.refund_online || 0))}</b></Typography>
+                              <Typography variant="caption">Notes: <b>{row.notes || '-'}</b></Typography>
+                            </Stack>
+                            <Box sx={{ overflowX: 'auto' }}>
+                              <table className="table">
+                                <thead>
+                                  <tr>
+                                    <th>Product</th>
+                                    <th>Brand</th>
+                                    <th className="amount-col">Qty</th>
+                                    <th className="amount-col">MRP</th>
+                                    <th className="amount-col">Line Total</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {items.map((item, idx) => (
+                                    <tr key={`${row.return_id}-${item.item_id}-${idx}`}>
+                                      <td>{item.item_name || `Item #${item.item_id}`}</td>
+                                      <td>{item.brand || '-'}</td>
+                                      <td className="amount-col">{Number(item.quantity || 0)}</td>
+                                      <td className="amount-col">{money(item.mrp)}</td>
+                                      <td className="amount-col">{money(item.line_total)}</td>
+                                    </tr>
+                                  ))}
+                                  {items.length === 0 ? (
+                                    <tr>
+                                      <td colSpan={5}>
+                                        <Box p={1} color="text.secondary">No item lines found for this return.</Box>
+                                      </td>
+                                    </tr>
+                                  ) : null}
+                                </tbody>
+                              </table>
+                            </Box>
+                          </Stack>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
+                )
+              })}
               {returnRows.length === 0 && (
                 <tr>
-                  <td colSpan={10}>
+                  <td colSpan={11}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No returns recorded for this customer yet.' : 'Select a customer to view returns.'}
                     </Box>
@@ -1213,10 +1381,20 @@ export default function CustomerLedgerPage() {
             </tbody>
           </table>
         </Box>
-      </Paper>
+      </CollapsibleLedgerSection>
 
-      <Paper sx={{ p: 2 }}>
-        <Typography variant="h6" sx={{ mb: 2 }}>Receipt History</Typography>
+      <CollapsibleLedgerSection
+        title="Receipt History"
+        open={sectionOpen.receipts}
+        onToggle={() => toggleSection('receipts')}
+        summary={
+          <>
+            <Chip size="small" variant="outlined" label={`${activeReceiptHistory.length} receipts`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color="success" variant="outlined" label={`Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color="info" variant="outlined" label={`Advance Rs ${money(receiptHistoryOnAccountTotal)}`} sx={{ fontWeight: 800 }} />
+          </>
+        }
+      >
         <Box sx={receiptGridSx}>
           <table className="table customer-ledger-grid">
             <thead>
@@ -1360,7 +1538,7 @@ export default function CustomerLedgerPage() {
             </tbody>
           </table>
         </Box>
-      </Paper>
+      </CollapsibleLedgerSection>
 
       <Dialog open={receiptOpen} onClose={() => setReceiptOpen(false)} fullWidth maxWidth="lg">
         <DialogTitle>Record Receipt</DialogTitle>

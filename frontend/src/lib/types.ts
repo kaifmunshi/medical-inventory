@@ -337,6 +337,14 @@ export interface CustomerReturnLedgerRow {
   exchange_id?: ID | null
   exchange_new_bill_id?: ID | null
   notes?: string | null
+  items?: Array<{
+    item_id: ID
+    item_name: string
+    brand?: string | null
+    quantity: number
+    mrp: number
+    line_total: number
+  }>
 }
 
 export interface OpenBill {

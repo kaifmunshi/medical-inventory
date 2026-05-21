@@ -1147,6 +1147,15 @@ class DebtorLedgerRow(SQLModel):
     notes: Optional[str] = None
 
 
+class CustomerReturnLedgerItem(SQLModel):
+    item_id: int
+    item_name: str
+    brand: Optional[str] = None
+    quantity: int
+    mrp: float
+    line_total: float
+
+
 class CustomerReturnLedgerRow(SQLModel):
     return_id: int
     date_time: str
@@ -1160,6 +1169,7 @@ class CustomerReturnLedgerRow(SQLModel):
     exchange_id: Optional[int] = None
     exchange_new_bill_id: Optional[int] = None
     notes: Optional[str] = None
+    items: List[CustomerReturnLedgerItem] = []
 
 
 class OpenBillOut(SQLModel):

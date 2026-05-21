@@ -12,9 +12,11 @@ from backend.models import (
     Bill,
     BillPayment,
     Customer,
+    CustomerReturnLedgerItem,
     CustomerReturnLedgerRow,
     DebtorLedgerRow,
     ExchangeRecord,
+    Item,
     OpenBillOut,
     Party,
     PartyCreate,
@@ -26,6 +28,7 @@ from backend.models import (
     PartyReceiptUpdate,
     PartyUpdate,
     Return,
+    ReturnItem,
     ReceiptBillAdjustment,
     ReceiptBillAdjustmentOut,
 )
@@ -677,6 +680,22 @@ def debtor_returns(party_id: int) -> List[CustomerReturnLedgerRow]:
             refund_mode = _infer_return_refund_mode(row)
             subtotal = _round2(float(getattr(row, "subtotal_return", 0.0) or 0.0))
             exchange = exchange_by_return_id.get(int(row.id or 0))
+            item_rows = session.exec(
+                select(ReturnItem).where(ReturnItem.return_id == int(row.id or 0))
+            ).all()
+            items: List[CustomerReturnLedgerItem] = []
+            for item_row in item_rows:
+                item = session.get(Item, int(item_row.item_id or 0)) if item_row.item_id else None
+                items.append(
+                    CustomerReturnLedgerItem(
+                        item_id=int(item_row.item_id or 0),
+                        item_name=item_row.item_name,
+                        brand=str(item.brand) if item and item.brand else None,
+                        quantity=int(item_row.quantity or 0),
+                        mrp=_round2(float(item_row.mrp or 0.0)),
+                        line_total=_round2(float(item_row.line_total or 0.0)),
+                    )
+                )
             out.append(
                 CustomerReturnLedgerRow(
                     return_id=int(row.id or 0),
@@ -691,6 +710,7 @@ def debtor_returns(party_id: int) -> List[CustomerReturnLedgerRow]:
                     exchange_id=int(exchange.id) if exchange and exchange.id is not None else None,
                     exchange_new_bill_id=int(exchange.new_bill_id) if exchange and exchange.new_bill_id is not None else None,
                     notes=row.notes,
+                    items=items,
                 )
             )
         return out

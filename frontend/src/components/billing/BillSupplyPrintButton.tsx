@@ -100,6 +100,7 @@ function paymentLabel(bill: any) {
 function buildPrintHtml(bill: Bill | any, logoUrl: string) {
   const items = Array.isArray(bill?.items) ? bill.items : []
   const notes = parseBillNotes(bill?.notes)
+  const billFileName = `Bill-${String(bill?.id || 'new').replace(/[^\w-]/g, '')}`
   const grossMrp = items.reduce((sum: number, item: any) => {
     return sum + Number(item?.quantity || 0) * Number(item?.mrp || 0)
   }, 0)
@@ -139,7 +140,7 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>${escapeHtml(SHOP_NAME)} - Bill of Supply #${escapeHtml(bill?.id || '')}</title>
+    <title>${escapeHtml(billFileName)}</title>
     <style>
       @page { size: A4; margin: 0; }
       * { box-sizing: border-box; }
@@ -178,7 +179,7 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
         align-self: stretch;
         display: flex;
         flex-direction: column;
-        justify-content: center;
+        justify-content: flex-start;
       }
       .logo-box {
         min-height: 68px;
@@ -217,18 +218,20 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
         margin-top: 5px;
         display: inline-block;
         border: 1px solid #111;
-        padding: 2px 12px;
+        padding: 2px 10px;
         font-size: 10.5px;
         font-weight: 800;
         text-transform: uppercase;
         text-align: center;
+        align-self: flex-start;
       }
       .doc-title {
-        text-align: right;
+        text-align: left;
         text-transform: uppercase;
         letter-spacing: 0.9px;
         font-size: 17px;
         font-weight: 900;
+        margin-bottom: 6px;
       }
       .deleted-banner {
         margin-top: 6px;
@@ -246,9 +249,6 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
         padding: 3px 0;
       }
       .meta {
-        display: grid;
-        grid-template-columns: 1.2fr 0.8fr;
-        gap: 14px;
         padding: 10px 0;
         border-bottom: 1px solid #111;
       }
@@ -354,18 +354,18 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
     <div class="sheet">
       <div class="brand-header">
         <div class="seller-box">
+          <div class="doc-title">Bill of Supply</div>
           <div class="seller-status">${escapeHtml(SELLER_STATUS)}</div>
           <div class="gst-line">GSTIN : ${escapeHtml(SHOP_GSTIN)}</div>
+          <div class="tax-notice">${escapeHtml(TAX_NOTICE)}</div>
           ${deletedBanner}
         </div>
         <div style="text-align:center">
           <div class="logo-box">
             <img src="${escapeHtml(logoUrl)}" alt="${escapeHtml(SHOP_NAME)} logo" />
           </div>
-          <div class="tax-notice">${escapeHtml(TAX_NOTICE)}</div>
         </div>
         <div>
-          <div class="doc-title">Bill of Supply</div>
           <div class="boxline"><span class="label">Bill No.</span> <b>${escapeHtml(bill?.id || '-')}</b></div>
           <div class="boxline"><span class="label">Date</span> <b>${escapeHtml(formatDateTime(bill?.date_time))}</b></div>
           <div class="boxline"><span class="label">Payment</span> <b>${escapeHtml(paymentLabel(bill))}</b></div>
@@ -376,10 +376,6 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
         <div>
           <div class="label">Bill To</div>
           <div class="value">${escapeHtml(customer)}</div>
-        </div>
-        <div>
-          <div class="label">Supply Type</div>
-          <div class="value">Bill of Supply - ${escapeHtml(TAX_NOTICE)}</div>
         </div>
       </div>
 

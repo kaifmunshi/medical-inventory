@@ -26,7 +26,8 @@ import PaymentsIcon from '@mui/icons-material/Payments'
 import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 
 import ItemPicker from '../../components/billing/ItemPicker'
-import { createBill } from '../../services/billing'
+import BillSupplyPrintButton from '../../components/billing/BillSupplyPrintButton'
+import { createBill, type Bill } from '../../services/billing'
 import { createCustomer, fetchCustomers } from '../../services/customers'
 import type { Customer } from '../../lib/types'
 import { listItemsPage } from '../../services/inventory'
@@ -235,6 +236,7 @@ export default function Billing() {
   const [finalAmount, setFinalAmount] = useState<number>(0)
   const [finalManuallyEdited, setFinalManuallyEdited] = useState(false)
   const [paymentAutoFilledOnce, setPaymentAutoFilledOnce] = useState(false)
+  const [lastCreatedBill, setLastCreatedBill] = useState<Bill | null>(null)
 
   // ✅ Beautiful confirm dialog for CASH
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
@@ -773,7 +775,8 @@ export default function Billing() {
 
       return createBill(payload)
     },
-    onSuccess: () => {
+    onSuccess: (created) => {
+      setLastCreatedBill(created as Bill)
       setRows(normalizeRows([]))
       setPriceDraftByRow({})
       setDiscountDraftByRow({})
@@ -1172,6 +1175,22 @@ export default function Billing() {
   return (
     <Stack gap={2}>
       <Typography variant="h5">Billing</Typography>
+
+      {lastCreatedBill ? (
+        <Paper sx={{ p: 1.5, border: '1px solid', borderColor: 'success.light', bgcolor: 'rgba(46, 125, 50, 0.06)' }}>
+          <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1.5}>
+            <Stack spacing={0.25}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
+                Bill #{lastCreatedBill.id} created
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Total Rs {money(lastCreatedBill.total_amount)} | {String(lastCreatedBill.payment_status || 'PAID')}
+              </Typography>
+            </Stack>
+            <BillSupplyPrintButton bill={lastCreatedBill} variant="contained" />
+          </Stack>
+        </Paper>
+      ) : null}
 
       <Paper sx={{ p: 2 }}>
         <Stack gap={1.5}>

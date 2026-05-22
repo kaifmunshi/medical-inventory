@@ -27,6 +27,7 @@ import {
   type BillPaymentRow,
 } from '../../services/billing'
 import { todayRange } from '../../lib/date'
+import BillSupplyPrintButton from './BillSupplyPrintButton'
 
 function money(n: number | string | undefined | null) {
   return Number(n || 0).toFixed(2)
@@ -235,21 +236,23 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
 
   return (
     <>
-      {!bill?.is_deleted ? (
-        <Box textAlign={{ xs: 'left', md: 'right' }}>
-          {payPending > 0.0001 ? (
-            <Button variant="contained" onClick={openReceivePayment} disabled={mPay.isPending}>
-              Receive Payment
-            </Button>
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              Bill fully paid
-            </Typography>
-          )}
-        </Box>
-      ) : null}
-
-      <Typography variant="subtitle1">Payment History</Typography>
+      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1}>
+        <Typography variant="subtitle1">Payment History</Typography>
+        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="flex-end" gap={1}>
+          <BillSupplyPrintButton bill={bill} />
+          {!bill?.is_deleted ? (
+            payPending > 0.0001 ? (
+              <Button variant="contained" onClick={openReceivePayment} disabled={mPay.isPending}>
+                Receive Payment
+              </Button>
+            ) : (
+              <Typography variant="body2" color="text.secondary">
+                Bill fully paid
+              </Typography>
+            )
+          ) : null}
+        </Stack>
+      </Stack>
       {qPayments.isLoading ? (
         <Typography color="text.secondary">Loading payments…</Typography>
       ) : (

@@ -238,7 +238,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
     <>
       <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1}>
         <Typography variant="subtitle1">Payment History</Typography>
-        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="flex-end" gap={1}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="flex-end" gap={1}>
           <BillSupplyPrintButton bill={bill} />
           {!bill?.is_deleted ? (
             payPending > 0.0001 ? (

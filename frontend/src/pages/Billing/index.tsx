@@ -1187,7 +1187,7 @@ export default function Billing() {
                 Total Rs {money(lastCreatedBill.total_amount)} | {String(lastCreatedBill.payment_status || 'PAID')}
               </Typography>
             </Stack>
-            <BillSupplyPrintButton bill={lastCreatedBill} variant="contained" />
+            <BillSupplyPrintButton bill={lastCreatedBill} label="Print Bill" size="medium" />
           </Stack>
         </Paper>
       ) : null}

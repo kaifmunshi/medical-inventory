@@ -1,4 +1,4 @@
-import { Button } from '@mui/material'
+import { Button, Tooltip } from '@mui/material'
 import PrintIcon from '@mui/icons-material/Print'
 import type { Bill } from '../../services/billing'
 
@@ -441,7 +441,7 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
 
 export default function BillSupplyPrintButton({
   bill,
-  label = 'Print Bill',
+  label = 'Print',
   size = 'small',
   variant = 'outlined',
   disabled,
@@ -457,7 +457,7 @@ export default function BillSupplyPrintButton({
     win.document.close()
   }
 
-  return (
+  const button = (
     <Button
       type="button"
       size={size}
@@ -466,9 +466,45 @@ export default function BillSupplyPrintButton({
       onClick={printBill}
       disabled={disabled || !bill?.id}
       fullWidth={fullWidth}
-      sx={{ fontWeight: 800 }}
+      aria-label={bill?.id ? `Print bill ${bill.id}` : 'Print bill'}
+      sx={{
+        minWidth: fullWidth ? undefined : 86,
+        height: size === 'medium' ? 36 : 32,
+        px: 1.25,
+        borderRadius: 1.25,
+        fontWeight: 700,
+        letterSpacing: 0,
+        whiteSpace: 'nowrap',
+        ...(variant === 'outlined'
+          ? {
+              color: 'text.primary',
+              borderColor: 'divider',
+              bgcolor: 'background.paper',
+              '&:hover': {
+                borderColor: 'primary.main',
+                bgcolor: 'rgba(31, 107, 74, 0.06)',
+              },
+            }
+          : {}),
+        ...(variant === 'contained'
+          ? {
+              boxShadow: 'none',
+              '&:hover': { boxShadow: 'none' },
+            }
+          : {}),
+        '& .MuiButton-startIcon': {
+          mr: 0.75,
+          ml: 0,
+        },
+      }}
     >
       {label}
     </Button>
+  )
+
+  return (
+    <Tooltip title={bill?.id ? `Print Bill #${bill.id}` : 'Print bill'} arrow>
+      <span>{button}</span>
+    </Tooltip>
   )
 }

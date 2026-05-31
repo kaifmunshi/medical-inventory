@@ -16,6 +16,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 
 import { listReturns, getReturn, getExchangeByReturn, updateReturnRefundMode } from '../../services/returns'
+import { getBill } from '../../services/billing'
 import { useToast } from '../../components/ui/Toaster'
 
 function toCSV(rows: string[][]) {
@@ -41,6 +42,16 @@ function itemsPreview(items: any[], max = 6) {
 function money(n: number | string | undefined | null) {
   const v = Number(n || 0)
   return v.toFixed(2)
+}
+
+function formatDateTime(v: any) {
+  const s = String(v || '').trim()
+  return s || '-'
+}
+
+function formatExpiry(v: any) {
+  const s = String(v || '').trim()
+  return s ? s.slice(0, 10) : '-'
 }
 
 function itemKindLabel(it: any) {
@@ -75,6 +86,50 @@ function inferReturnRefundMode(row: any) {
   return 'credit'
 }
 
+function soldUnitPrice(it: any) {
+  const qty = Number(it?.quantity || 0)
+  const line = Number(it?.line_total || 0)
+  if (qty > 0 && line > 0) return line / qty
+  return Number(it?.mrp || 0)
+}
+
+function discountPerUnit(it: any) {
+  return Math.max(0, Number(it?.mrp || 0) - soldUnitPrice(it))
+}
+
+function billMrpSum(bill: any) {
+  return (bill?.items || []).reduce((sum: number, it: any) => sum + Number(it?.mrp || 0) * Number(it?.quantity || 0), 0)
+}
+
+function billSoldUnitPrice(bill: any, it: any) {
+  const mrpSum = billMrpSum(bill)
+  const total = Number(bill?.total_amount || 0)
+  if (mrpSum > 0 && total > 0) return Number(it?.mrp || 0) * (total / mrpSum)
+  return soldUnitPrice(it)
+}
+
+function billDiscountPerUnit(bill: any, it: any) {
+  return Math.max(0, Number(it?.mrp || 0) - billSoldUnitPrice(bill, it))
+}
+
+function actualRefundTotal(row: any) {
+  const cashOnline = Number(row?.refund_cash || 0) + Number(row?.refund_online || 0)
+  if (cashOnline > 0) return cashOnline
+  return Number(row?.subtotal_return || 0)
+}
+
+function adjustedLineRefund(row: any, items: any[], it: any, salePrice: number) {
+  const qty = Number(it?.quantity || 0)
+  const lineValue = qty * salePrice
+  const actualTotal = actualRefundTotal(row)
+  const computedTotal = (items || []).reduce((sum: number, item: any) => {
+    const unit = row?.source_bill ? billSoldUnitPrice(row.source_bill, item) : soldUnitPrice(item)
+    return sum + Number(item?.quantity || 0) * unit
+  }, 0)
+  if (actualTotal > 0 && computedTotal > 0) return lineValue * (actualTotal / computedTotal)
+  return lineValue
+}
+
 export default function ReturnsReport(props: {
   from: string
   to: string
@@ -88,6 +143,9 @@ export default function ReturnsReport(props: {
   // dialog
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState<any | null>(null)
+  const [billDetail, setBillDetail] = useState<any | null>(null)
+  const [billReturnItems, setBillReturnItems] = useState<any[]>([])
+  const [billOpen, setBillOpen] = useState(false)
 
   const qRets = useInfiniteQuery({
     queryKey: ['rpt-returns', from, to],
@@ -130,7 +188,13 @@ export default function ReturnsReport(props: {
   async function openDetail(row: any) {
     try {
       const ex = await getExchangeByReturn(row.id)
-      setDetail({ kind: 'exchange', ...ex })
+      let sourceBill: any = null
+      if (ex.source_bill_id) {
+        try {
+          sourceBill = await getBill(Number(ex.source_bill_id))
+        } catch {}
+      }
+      setDetail({ kind: 'exchange', source_bill: sourceBill, ...ex })
       setOpen(true)
       return
     } catch {}
@@ -141,8 +205,33 @@ export default function ReturnsReport(props: {
         r = await getReturn(row.id)
       } catch {}
     }
-    setDetail({ kind: 'return', ...r })
+    let sourceBill: any = null
+    if (r?.source_bill_id) {
+      try {
+        sourceBill = await getBill(Number(r.source_bill_id))
+      } catch {}
+    }
+    setDetail({ kind: 'return', source_bill: sourceBill, ...r })
     setOpen(true)
+  }
+
+  async function openBillDetail(billId: any, returnItems: any[] = []) {
+    const id = Number(billId || 0)
+    if (!id) return
+    try {
+      const bill = await getBill(id)
+      setBillDetail(bill)
+      setBillReturnItems(returnItems || [])
+      setBillOpen(true)
+    } catch (err: any) {
+      toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to load bill'), 'error')
+    }
+  }
+
+  function returnedQtyForItem(item: any) {
+    return (billReturnItems || [])
+      .filter((ret) => Number(ret?.item_id || 0) === Number(item?.item_id || 0))
+      .reduce((sum, ret) => sum + Number(ret?.quantity || 0), 0)
   }
 
   const mMoveRefundToCredit = useMutation({
@@ -262,11 +351,28 @@ export default function ReturnsReport(props: {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  Return ID: <b>{detail.return_id}</b> | New Bill ID: <b>{detail.new_bill_id}</b>
+                  Return ID: <b>{detail.return_id}</b>
+                  {' '}| Source Bill:{' '}
+                  {detail.source_bill_id ? (
+                    <Link component="button" underline="hover" onClick={() => openBillDetail(detail.source_bill_id, detail.return?.items || [])}>
+                      #{detail.source_bill_id}
+                    </Link>
+                  ) : (
+                    <b>-</b>
+                  )}
+                  {' '}| New Bill:{' '}
+                  <Link component="button" underline="hover" onClick={() => openBillDetail(detail.new_bill_id)}>
+                    #{detail.new_bill_id}
+                  </Link>
                 </Typography>
-                <Typography variant="subtitle1">
-                  Date/Time: <b>{detail.created_at || detail.return?.date_time || '-'}</b>
-                </Typography>
+                <Stack gap={0.25} alignItems={{ md: 'flex-end' }}>
+                  <Typography variant="subtitle1">
+                    Return Date: <b>{formatDateTime(detail.return?.date_time || detail.created_at)}</b>
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Bill Date: <b>{formatDateTime(detail.source_bill?.date_time)}</b>
+                  </Typography>
+                </Stack>
               </Stack>
 
               <Divider />
@@ -297,25 +403,43 @@ export default function ReturnsReport(props: {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
-                      <th>Line Total</th>
+                      <th>Sale Price</th>
+                      <th>Discount</th>
+                      <th>Line Refund</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(detail.return?.items || []).map((it: any, idx: number) => (
-                      <tr key={`ret-${idx}`}>
-                        <td>
-                          <Stack gap={0.25}>
-                            <Typography variant="body2">{it.item_name || `#${it.item_id}`}</Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {itemMetaLine(it)}
-                            </Typography>
-                          </Stack>
-                        </td>
-                        <td>{Number(it.quantity || 0)} {itemUnitLabel(it)}</td>
-                        <td>{money(it.mrp)}</td>
-                        <td>{money(it.line_total ?? Number(it.quantity || 0) * Number(it.mrp || 0))}</td>
-                      </tr>
-                    ))}
+                    {(detail.return?.items || []).map((it: any, idx: number) => {
+                      const refundContext = {
+                        ...(detail.return || {}),
+                        source_bill: detail.source_bill,
+                        refund_cash: detail.refund_cash,
+                        refund_online: detail.refund_online,
+                      }
+                      const sale = detail.source_bill ? billSoldUnitPrice(detail.source_bill, it) : soldUnitPrice(it)
+                      const discount = detail.source_bill ? billDiscountPerUnit(detail.source_bill, it) : discountPerUnit(it)
+                      const lineRefund = adjustedLineRefund(refundContext, detail.return?.items || [], it, sale)
+                      return (
+                        <tr key={`ret-${idx}`}>
+                          <td>
+                            <Stack gap={0.25}>
+                              <Typography variant="body2">{it.item_name || `#${it.item_id}`}</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {itemMetaLine(it)}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Batch #{it.batch_number || it.item_id || '-'} | Exp {formatExpiry(it.expiry_date)}
+                              </Typography>
+                            </Stack>
+                          </td>
+                          <td>{Number(it.quantity || 0)} {itemUnitLabel(it)}</td>
+                          <td>₹{money(it.mrp)}</td>
+                          <td>₹{money(sale)}</td>
+                          <td>{discount > 0 ? `₹${money(discount)}` : '-'}</td>
+                          <td>₹{money(lineRefund)}</td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </Box>
@@ -355,11 +479,24 @@ export default function ReturnsReport(props: {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  ID: <b>{detail.id}</b>
+                  Return ID: <b>{detail.id}</b>
+                  {' '}| Bill:{' '}
+                  {detail.source_bill_id ? (
+                    <Link component="button" underline="hover" onClick={() => openBillDetail(detail.source_bill_id, detail.items || [])}>
+                      #{detail.source_bill_id}
+                    </Link>
+                  ) : (
+                    <b>-</b>
+                  )}
                 </Typography>
-                <Typography variant="subtitle1">
-                  Date/Time: <b>{detail.date_time || detail.created_at || '-'}</b>
-                </Typography>
+                <Stack gap={0.25} alignItems={{ md: 'flex-end' }}>
+                  <Typography variant="subtitle1">
+                    Return Date: <b>{formatDateTime(detail.date_time || detail.created_at)}</b>
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Bill Date: <b>{formatDateTime(detail.source_bill?.date_time)}</b>
+                  </Typography>
+                </Stack>
               </Stack>
 
               <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
@@ -387,7 +524,9 @@ export default function ReturnsReport(props: {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
-                      <th>Line Total</th>
+                      <th>Sale Price</th>
+                      <th>Discount</th>
+                      <th>Line Refund</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -395,6 +534,9 @@ export default function ReturnsReport(props: {
                       const name = it.item_name || it.name || it.item?.name || `#${it.item_id}`
                       const qty = Number(it.quantity)
                       const mrp = Number(it.mrp)
+                      const sale = detail.source_bill ? billSoldUnitPrice(detail.source_bill, it) : soldUnitPrice(it)
+                      const discount = detail.source_bill ? billDiscountPerUnit(detail.source_bill, it) : discountPerUnit(it)
+                      const lineRefund = adjustedLineRefund(detail, detail.items || [], it, sale)
                       return (
                         <tr key={idx}>
                           <td>
@@ -403,18 +545,23 @@ export default function ReturnsReport(props: {
                               <Typography variant="caption" color="text.secondary">
                                 {itemMetaLine(it)}
                               </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Batch #{it.batch_number || it.item_id || '-'} | Exp {formatExpiry(it.expiry_date)}
+                              </Typography>
                             </Stack>
                           </td>
                           <td>{qty} {itemUnitLabel(it)}</td>
-                          <td>{money(mrp)}</td>
-                          <td>{money(qty * mrp)}</td>
+                          <td>₹{money(mrp)}</td>
+                          <td>₹{money(sale)}</td>
+                          <td>{discount > 0 ? `₹${money(discount)}` : '-'}</td>
+                          <td>₹{money(lineRefund)}</td>
                         </tr>
                       )
                     })}
 
                     {(detail.items || []).length === 0 && (
                       <tr>
-                        <td colSpan={4}>
+                        <td colSpan={6}>
                           <Box p={2} color="text.secondary">
                             No items.
                           </Box>
@@ -430,11 +577,12 @@ export default function ReturnsReport(props: {
                   Refund:{' '}
                   <b>
                     {money(
-                      detail.subtotal_return ??
+                      actualRefundTotal(detail) ||
+                        (detail.subtotal_return ??
                         (detail.items || []).reduce(
                           (s: number, it: any) => s + Number(it.mrp) * Number(it.quantity),
                           0
-                        )
+                        ))
                     )}
                   </b>
                 </Typography>
@@ -443,6 +591,90 @@ export default function ReturnsReport(props: {
                     Notes: <i>{detail.notes}</i>
                   </Typography>
                 ) : null}
+              </Stack>
+            </Stack>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Bill Details {billDetail?.id ? `#${billDetail.id}` : ''}
+          <IconButton onClick={() => setBillOpen(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          {!billDetail ? (
+            <Typography color="text.secondary">Loading…</Typography>
+          ) : (
+            <Stack gap={2}>
+              <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
+                <Typography variant="subtitle1">
+                  Bill ID: <b>{billDetail.id}</b>
+                </Typography>
+                <Typography variant="subtitle1">
+                  Bill Date: <b>{formatDateTime(billDetail.date_time || billDetail.created_at)}</b>
+                </Typography>
+              </Stack>
+
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 220 }}>Item</th>
+                      <th>Qty</th>
+                      <th>MRP</th>
+                      <th>Sale Price</th>
+                      <th>Discount</th>
+                      <th>Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(billDetail.items || []).map((it: any, idx: number) => {
+                      const qty = Number(it.quantity || 0)
+                      const returnedQty = returnedQtyForItem(it)
+                      const sale = billSoldUnitPrice(billDetail, it)
+                      const discount = billDiscountPerUnit(billDetail, it)
+                      const line = qty * sale
+                      return (
+                        <tr
+                          key={`bill-detail-${idx}`}
+                          style={returnedQty > 0 ? { backgroundColor: 'rgba(211, 47, 47, 0.10)' } : undefined}
+                        >
+                          <td>
+                            <Stack gap={0.25}>
+                              <Typography variant="body2">{it.item_name || `#${it.item_id}`}</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {itemMetaLine(it)}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Batch #{it.batch_number || it.item_id || '-'} | Exp {formatExpiry(it.expiry_date)}
+                              </Typography>
+                              {returnedQty > 0 ? (
+                                <Typography variant="caption" color="error" sx={{ fontWeight: 700 }}>
+                                  Returned qty: {returnedQty} {itemUnitLabel(it)}
+                                </Typography>
+                              ) : null}
+                            </Stack>
+                          </td>
+                          <td>{qty} {itemUnitLabel(it)}</td>
+                          <td>₹{money(it.mrp)}</td>
+                          <td>₹{money(sale)}</td>
+                          <td>{discount > 0 ? `₹${money(discount)}` : '-'}</td>
+                          <td>₹{money(line)}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </Box>
+
+              <Stack gap={0.5} sx={{ ml: 'auto', maxWidth: 360 }}>
+                <Typography>Total: <b>₹{money(billDetail.total_amount)}</b></Typography>
+                <Typography>Payment Mode: <b>{billDetail.payment_mode || '-'}</b></Typography>
+                <Typography>Payment Status: <b>{billDetail.payment_status || (billDetail.is_credit ? 'UNPAID' : 'PAID')}</b></Typography>
+                <Typography>Paid Amount: <b>₹{money(billDetail.paid_amount)}</b></Typography>
               </Stack>
             </Stack>
           )}

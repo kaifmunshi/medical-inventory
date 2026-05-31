@@ -37,7 +37,15 @@ export type ReturnStockMeta = {
 export type ReturnRecord = {
   id: number
   source_bill_id: number
-  items: Array<{ item_id: number; quantity: number; mrp?: number; item_name?: string; line_total?: number } & ReturnStockMeta>
+  items: Array<{
+    item_id: number
+    quantity: number
+    mrp?: number
+    item_name?: string
+    line_total?: number
+    batch_number?: string | null
+    expiry_date?: string | null
+  } & ReturnStockMeta>
   refund_mode: 'cash' | 'online' | 'credit' | 'split'
   refund_cash: number
   refund_online: number

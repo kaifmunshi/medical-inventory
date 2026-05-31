@@ -9,6 +9,7 @@ import theme from './theme/theme'
 import './styles.css'
 import GlobalFetchingUI from './components/ui/GlobalFetchingUI'
 import DisableNumberInputScroll from './components/ui/DisableNumberInputScroll'
+import EnterKeyDefaultAction from './components/ui/EnterKeyDefaultAction'
 
 const client = new QueryClient({
   defaultOptions: {
@@ -24,6 +25,7 @@ function Root() {
   return (
     <>
       <DisableNumberInputScroll />
+      <EnterKeyDefaultAction />
       <GlobalFetchingUI />
       <App />
     </>

@@ -277,6 +277,8 @@ class BillItemOut(SQLModel):
     item_id: int
     item_name: str
     brand: Optional[str] = None
+    batch_number: Optional[str] = None
+    expiry_date: Optional[str] = None
     mrp: float
     quantity: int
     line_total: float
@@ -333,6 +335,8 @@ class ReturnItemOut(SQLModel):
     item_id: int
     item_name: str
     brand: Optional[str] = None
+    batch_number: Optional[str] = None
+    expiry_date: Optional[str] = None
     mrp: float
     quantity: int
     line_total: float

@@ -362,6 +362,8 @@ def bill_item_to_out(session, row: BillItem) -> BillItemOut:
         item_id=row.item_id,
         item_name=row.item_name,
         brand=(str(item.brand) if item and item.brand else None),
+        batch_number=(str(item.id) if item and item.id else None),
+        expiry_date=(str(item.expiry_date) if item and item.expiry_date else None),
         mrp=row.mrp,
         quantity=row.quantity,
         line_total=row.line_total,

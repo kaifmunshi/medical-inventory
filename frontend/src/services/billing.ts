@@ -53,6 +53,8 @@ export interface BillItem {
   item_id: number
   item_name: string
   brand?: string | null
+  batch_number?: string | null
+  expiry_date?: string | null
   mrp: number
   quantity: number
   line_total: number

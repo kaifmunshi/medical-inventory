@@ -279,6 +279,22 @@ export default function Returns() {
     )
   }
 
+  function handleSubmitReturn() {
+    if (rows.every(r => r.qty === 0)) {
+      toast.push('Enter at least one return quantity', 'warning')
+      return
+    }
+    if (finalRefund < 0) {
+      toast.push('Final refund cannot be negative', 'warning')
+      return
+    }
+    if (mode !== 'credit' && Math.abs(clamp2(finalRefund) - computedRefund) > 5) {
+      toast.push(`Final refund must be within ±₹5 of computed ₹${computedRefund.toFixed(2)}`, 'warning')
+      return
+    }
+    if (!mCreate.isPending) mCreate.mutate()
+  }
+
   function soldUnitPrice(row: Row) {
     return chargedLine(row.mrp, 1)
   }
@@ -293,7 +309,12 @@ export default function Returns() {
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
-          <TextField label="Bill ID" value={query} onChange={e => setQuery(e.target.value)} fullWidth />
+          <TextField
+            label="Bill ID"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            fullWidth
+          />
           <Button variant="contained" onClick={handleLoadClick} disabled={!query || isFetching}>
             Load Bill
           </Button>
@@ -457,21 +478,7 @@ export default function Returns() {
             <Button
               variant="contained"
               disabled={rows.every(r => r.qty === 0) || mCreate.isPending}
-              onClick={() => {
-                if (rows.every(r => r.qty === 0)) {
-                  toast.push('Enter at least one return quantity', 'warning')
-                  return
-                }
-                if (finalRefund < 0) {
-                  toast.push('Final refund cannot be negative', 'warning')
-                  return
-                }
-                if (mode !== 'credit' && Math.abs(clamp2(finalRefund) - computedRefund) > 5) {
-                  toast.push(`Final refund must be within ±₹5 of computed ₹${computedRefund.toFixed(2)}`, 'warning')
-                  return
-                }
-                mCreate.mutate()
-              }}
+              onClick={handleSubmitReturn}
             >
               Submit Return
             </Button>

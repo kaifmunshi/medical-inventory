@@ -14,7 +14,6 @@ type BillLine = {
   brand?: string | null
   soldQty: number
   mrp: number
-  line_total: number
 }
 
 type Row = {
@@ -24,7 +23,6 @@ type Row = {
   qty: number
   max: number
   mrp: number
-  line_total: number
 }
 
 type RefundMode = 'cash' | 'online' | 'credit'
@@ -80,15 +78,8 @@ export default function Returns() {
   }, [bill])
 
   // charged share for a line (partial only / also used for per-line display always)
-  const chargedLine = (row: Row, qty: number) => {
+  const chargedLine = (mrp: number, qty: number) => {
     if (!bill) return 0
-    const soldQty = Number(row.max || 0)
-    const savedLineTotal = Number(row.line_total || 0)
-    if (soldQty > 0 && savedLineTotal > 0) {
-      return round2((savedLineTotal / soldQty) * Number(qty || 0))
-    }
-
-    const mrp = Number(row.mrp || 0)
     const sub = Number(mrp) * Number(qty)
     const afterDisc = sub * (1 - Number(bill.discount_percent || 0) / 100)
     const afterTax = afterDisc * (1 + Number(bill.tax_percent || 0) / 100)
@@ -98,7 +89,7 @@ export default function Returns() {
   // refund computation (TOTAL)
   const refund = isFullReturn
     ? Number(proration.finalTotal)
-    : rows.reduce((s, r) => s + chargedLine(r, r.qty), 0)
+    : rows.reduce((s, r) => s + chargedLine(r.mrp, r.qty), 0)
   const computedRefund = clamp2(refund)
 
   // ✅ FIX: always compute per-line refund values (even for full return)
@@ -106,7 +97,7 @@ export default function Returns() {
   const lineRefunds = useMemo(() => {
     if (!bill || rows.length === 0) return rows.map(() => 0)
 
-    const base = rows.map(r => (r.qty > 0 ? chargedLine(r, r.qty) : 0))
+    const base = rows.map(r => (r.qty > 0 ? chargedLine(r.mrp, r.qty) : 0))
 
     if (!isFullReturn) return base
 
@@ -191,7 +182,6 @@ export default function Returns() {
           brand: it.brand || it.item_brand || it.item?.brand || summaryById[itemId]?.brand || null,
           soldQty: Number(it.quantity),
           mrp: Number(it.mrp),
-          line_total: Number(it.line_total || 0),
         }
       })
 
@@ -206,7 +196,6 @@ export default function Returns() {
             qty: 0,
             max: remaining,
             mrp: l.mrp,
-            line_total: l.soldQty > 0 ? round2((l.line_total / l.soldQty) * remaining) : 0,
           }
         })
       )
@@ -290,6 +279,14 @@ export default function Returns() {
     )
   }
 
+  function soldUnitPrice(row: Row) {
+    return chargedLine(row.mrp, 1)
+  }
+
+  function discountPerUnit(row: Row) {
+    return round2(Math.max(0, Number(row.mrp || 0) - soldUnitPrice(row)))
+  }
+
   return (
     <Stack gap={2}>
       <Typography variant="h5">Returns</Typography>
@@ -320,6 +317,7 @@ export default function Returns() {
                   <th>Avail. to Return</th>
                   <th>Return Qty</th>
                   <th>MRP</th>
+                  <th>Sold Price</th>
                   <th>Line Refund</th>
                   <th></th>
                 </tr>
@@ -347,7 +345,17 @@ export default function Returns() {
                         sx={{ width: 110 }}
                       />
                     </td>
-                    <td>{r.mrp}</td>
+                    <td>
+                      <Stack gap={0}>
+                        <Typography variant="body2">₹{Number(r.mrp || 0).toFixed(2)}</Typography>
+                        {discountPerUnit(r) > 0 ? (
+                          <Typography variant="caption" color="text.secondary">
+                            -₹{discountPerUnit(r).toFixed(2)}
+                          </Typography>
+                        ) : null}
+                      </Stack>
+                    </td>
+                    <td>₹{soldUnitPrice(r).toFixed(2)}</td>
                     <td>{(lineRefunds[i] ?? 0).toFixed(2)}</td>
                     <td>
                       <IconButton
@@ -363,7 +371,7 @@ export default function Returns() {
                 ))}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={6}>
+                    <td colSpan={7}>
                       <Box p={2}>No items.</Box>
                     </td>
                   </tr>

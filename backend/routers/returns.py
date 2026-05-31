@@ -228,17 +228,28 @@ def already_returned_map_for_bill(session, bill_id: int) -> Dict[int, int]:
 
 def charged_unit_map_for_bill(session, bill_id: int) -> Dict[int, float]:
     """
-    item_id -> effective charged per-unit from BillItem rows.
-    Uses historical billed line_total/qty, so exchange/return matches original charge,
-    even when item MRP changed or bill used manual final amount adjustments.
+    item_id -> effective charged per-unit from the saved bill snapshot.
+    The return UI treats a manual final bill total as a bill-level adjustment,
+    so mirror that here instead of reading old line_total distributions literally.
     """
+    bill = session.get(Bill, bill_id)
+    final_total = round2(float(getattr(bill, "total_amount", 0.0) or 0.0)) if bill else 0.0
     totals: Dict[int, float] = {}
     qtys: Dict[int, int] = {}
     rows = session.exec(select(BillItem).where(BillItem.bill_id == bill_id)).all()
+    mrp_total = round2(
+        sum(
+            float(getattr(bi, "mrp", 0.0) or 0.0) * int(getattr(bi, "quantity", 0) or 0)
+            for bi in rows
+        )
+    )
+    factor = (final_total / mrp_total) if mrp_total > MONEY_EPSILON and final_total > MONEY_EPSILON else 1.0
+
     for bi in rows:
         iid = int(bi.item_id)
-        totals[iid] = float(totals.get(iid, 0.0)) + float(getattr(bi, "line_total", 0.0) or 0.0)
-        qtys[iid] = int(qtys.get(iid, 0)) + int(getattr(bi, "quantity", 0) or 0)
+        q = int(getattr(bi, "quantity", 0) or 0)
+        totals[iid] = float(totals.get(iid, 0.0)) + (float(getattr(bi, "mrp", 0.0) or 0.0) * q * factor)
+        qtys[iid] = int(qtys.get(iid, 0)) + q
     out: Dict[int, float] = {}
     for iid, q in qtys.items():
         if q > 0:

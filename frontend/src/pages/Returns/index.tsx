@@ -158,7 +158,7 @@ export default function Returns() {
         }
       }
 
-      if (Boolean((b as any).is_deleted)) {
+      if ((b as any).is_deleted) {
         return { ok: false, error: 'Deleted bill cannot be used for return' }
       }
 

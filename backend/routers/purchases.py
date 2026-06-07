@@ -120,6 +120,13 @@ def clean_date(v: Optional[str]) -> Optional[str]:
     return text
 
 
+def require_expiry_date(v: Optional[str], *, context: str) -> str:
+    expiry = clean_date(v)
+    if not expiry:
+        raise HTTPException(status_code=400, detail=f"{context} expiry date is required")
+    return expiry
+
+
 def round2(x: Any) -> float:
     return float(f"{float(x or 0):.2f}")
 
@@ -637,8 +644,6 @@ def _purchase_line_identity_changed(raw: PurchaseItemIn, item: PurchaseItem) -> 
         return True
     if (clean_text(raw.brand) or "") != (clean_text(item.brand) or ""):
         return True
-    if (clean_date(raw.expiry_date) or "") != (clean_date(item.expiry_date) or ""):
-        return True
     if int(raw.rack_number if raw.rack_number is not None else item.rack_number or 0) != int(item.rack_number or 0):
         return True
     if abs(round2(raw.mrp) - round2(item.mrp)) > 0.001:
@@ -660,11 +665,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         if purchase_item_id is None or purchase_item_id not in existing_by_id:
             raise HTTPException(status_code=400, detail="Purchase item identity is missing for in-place edit")
         item = existing_by_id[purchase_item_id]
-        if purchase_item_stock_source(item) != STOCK_SOURCE_CREATED:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Purchase item #{item.id} is linked to existing stock; use full item replacement",
-            )
+        stock_source = purchase_item_stock_source(item)
         if not item.inventory_item_id:
             raise HTTPException(status_code=400, detail=f"Purchase item #{item.id} is missing stock linkage")
         inventory_item = session.get(Item, int(item.inventory_item_id))
@@ -674,23 +675,27 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         qty, free_qty, new_qty = validate_purchase_line_quantities(raw)
         if round2(raw.cost_price) < 0:
             raise HTTPException(status_code=400, detail="rate cannot be negative")
+        if round2(raw.mrp) < 0:
+            raise HTTPException(status_code=400, detail="mrp cannot be negative")
 
         old_qty = purchase_item_total_qty(item)
         delta = int(new_qty - old_qty)
         identity_changed = _purchase_line_identity_changed(raw, item)
-        stock_changed = int(inventory_item.stock or 0) != old_qty
+        old_expiry = clean_date(item.expiry_date)
+        new_expiry = clean_date(raw.expiry_date)
 
         if identity_changed:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"Purchase item #{item.id} cannot change product/batch identity here. "
-                    "Only qty, free, rate, discount, and rounding can be edited in place."
+                    "Only expiry, qty, free, rate, discount, and rounding can be edited in place."
                 ),
             )
 
-        next_stock = int(inventory_item.stock or 0) + delta
-        if next_stock < 0:
+        stock_delta = delta if stock_source == STOCK_SOURCE_CREATED else 0
+        next_stock = int(inventory_item.stock or 0) + stock_delta
+        if stock_source == STOCK_SOURCE_CREATED and next_stock < 0:
             raise HTTPException(
                 status_code=400,
                 detail=f"Purchase item #{item.id} cannot reduce stock below 0",
@@ -711,48 +716,64 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         effective_cost = round2(line_total / new_qty) if new_qty > 0 else round2(raw.cost_price)
         subtotal_amount = round2(subtotal_amount + line_total)
 
-        if delta:
+        inventory_item.expiry_date = new_expiry
+        inventory_item.cost_price = effective_cost
+        inventory_item.mrp = round2(raw.mrp)
+        inventory_item.updated_at = ts
+        session.add(inventory_item)
+
+        lot = session.get(InventoryLot, int(item.lot_id)) if item.lot_id else None
+        if lot:
+            lot.expiry_date = new_expiry
+            lot.cost_price = effective_cost
+            lot.mrp = round2(raw.mrp)
+            lot.updated_at = ts
+            session.add(lot)
+
+        if stock_delta:
             inventory_item.stock = next_stock
             inventory_item.is_archived = bool(next_stock <= 0)
             inventory_item.updated_at = ts
-            inventory_item.cost_price = effective_cost
             session.add(inventory_item)
-            if item.lot_id:
-                lot = session.get(InventoryLot, int(item.lot_id))
-                if lot:
-                    next_lot_qty = int(lot.sealed_qty or 0) + delta
-                    if next_lot_qty < 0:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Purchase item #{item.id} cannot reduce lot stock below 0",
-                        )
-                    lot.sealed_qty = next_lot_qty
-                    lot.loose_qty = int(lot.loose_qty or 0)
-                    lot.cost_price = effective_cost
-                    lot.is_active = bool(next_lot_qty > 0 or int(lot.loose_qty or 0) > 0)
-                    lot.updated_at = ts
-                    session.add(lot)
+            if lot:
+                next_lot_qty = int(lot.sealed_qty or 0) + stock_delta
+                if next_lot_qty < 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Purchase item #{item.id} cannot reduce lot stock below 0",
+                    )
+                lot.sealed_qty = next_lot_qty
+                lot.loose_qty = int(lot.loose_qty or 0)
+                lot.is_active = bool(next_lot_qty > 0 or int(lot.loose_qty or 0) > 0)
+                lot.updated_at = ts
+                session.add(lot)
             add_stock_movement(
                 session,
                 item_id=int(inventory_item.id),
-                delta=delta,
+                delta=stock_delta,
                 reason="PURCHASE_EDIT",
                 ref_type="PURCHASE",
                 ref_id=int(purchase.id),
                 note=f"Edited purchase {purchase.invoice_number}: qty {old_qty} -> {new_qty}",
                 ts=purchase_stock_ts,
             )
-            changed_lines.append({"purchase_item_id": int(item.id), "old_qty": old_qty, "new_qty": new_qty, "delta": delta})
+            changed_lines.append({"purchase_item_id": int(item.id), "old_qty": old_qty, "new_qty": new_qty, "delta": stock_delta})
+        elif delta:
+            changed_lines.append({"purchase_item_id": int(item.id), "old_qty": old_qty, "new_qty": new_qty, "delta": 0})
 
         item.sealed_qty = qty
         item.free_qty = free_qty
+        item.expiry_date = new_expiry
         item.cost_price = round2(raw.cost_price)
         item.effective_cost_price = effective_cost
+        item.mrp = round2(raw.mrp)
         item.gst_percent = 0.0
         item.discount_amount = round2(raw.discount_amount)
         item.rounding_adjustment = line_rounding
         item.line_total = line_total
         session.add(item)
+        if old_expiry != new_expiry:
+            changed_lines.append({"purchase_item_id": int(item.id), "old_expiry": old_expiry, "new_expiry": new_expiry})
 
     purchase.subtotal_amount = subtotal_amount
     purchase.gst_amount = 0.0
@@ -876,6 +897,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
         subtotal_amount = 0.0
         prepared_items: List[Dict[str, Any]] = []
         for raw in payload.items:
+            expiry_date = require_expiry_date(raw.expiry_date, context=raw.product_name or "Purchase item")
             qty, free_qty, total_qty = validate_purchase_line_quantities(raw)
             if round2(raw.cost_price) < 0:
                 raise HTTPException(status_code=400, detail="rate cannot be negative")
@@ -935,7 +957,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     "opening_placeholder_movement": opening_placeholder_movement,
                     "convert_opening_to_purchase": convert_opening_to_purchase,
                     "stock_source": stock_source,
-                    "expiry_date": clean_date(raw.expiry_date),
+                    "expiry_date": expiry_date,
                     "rack_number": rack_number,
                     "sealed_qty": qty,
                     "free_qty": free_qty,

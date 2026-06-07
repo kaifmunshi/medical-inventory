@@ -134,6 +134,10 @@ function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'disc
   return lineGrossTotal(item) - Number(item.discount_amount || 0) + Number(item.rounding_adjustment || 0)
 }
 
+function lineTotalQty(item: Pick<DraftItem, 'sealed_qty' | 'free_qty'>) {
+  return Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
+}
+
 function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
   const totalQty = Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
   if (totalQty <= 0) return 0
@@ -288,6 +292,10 @@ export default function SupplierLedgerPage() {
   const openingBalance = openingForSupplier(selectedSupplier)
   const openPurchases = purchases.filter((purchase) => outstandingOf(purchase) > 0.0001)
   const selectedPurchase = purchases.find((purchase) => Number(purchase.id) === Number(selectedPurchaseId)) || null
+  const editItemsSubtotal = useMemo(
+    () => editItems.reduce((sum, item) => sum + lineBaseTotal(item), 0),
+    [editItems],
+  )
   const editSubtotal = Number(selectedPurchase?.subtotal_amount || 0)
   const editGstAmount = Number(selectedPurchase?.gst_amount || 0)
   const editDiscountValue = Number(editDiscountAmount || 0)
@@ -298,6 +306,12 @@ export default function SupplierLedgerPage() {
   const editCoveredAmount = editPaidAmount + editWriteoffAmount
   const editOutstandingAmount = editBillAmount - editCoveredAmount
   const editBillAmountInvalid = editBillAmount < editCoveredAmount - 0.0001
+  const editItemsBillAmount =
+    editItemsSubtotal -
+    Number(selectedPurchase?.discount_amount || 0) +
+    Number(selectedPurchase?.gst_amount || 0) +
+    Number(selectedPurchase?.rounding_adjustment || 0)
+  const editItemsBillAmountInvalid = Boolean(selectedPurchase) && editItemsBillAmount < editCoveredAmount - 0.0001
 
   const ledgerRows = useMemo(() => {
     const purchaseEvents = purchases.map((purchase) => ({
@@ -380,11 +394,6 @@ export default function SupplierLedgerPage() {
     const closingBalance = openingBalance + totalPurchases - totalPaid - totalWriteoff
     return { totalPurchases, totalPaid, totalWriteoff, closingBalance }
   }, [openingBalance, purchases, supplierPayments])
-
-  const editItemsSubtotal = useMemo(
-    () => editItems.reduce((sum, item) => sum + lineBaseTotal(item), 0),
-    [editItems],
-  )
 
   const allocationTotal = useMemo(
     () => round2(Object.values(allocationDrafts).reduce((sum, value) => sum + Number(value || 0), 0)),
@@ -819,6 +828,7 @@ export default function SupplierLedgerPage() {
     if (!selectedPurchase) return
     setEditItems((selectedPurchase.items || []).map((item) => ({
       key: Math.random().toString(36).slice(2),
+      purchase_item_id: item.id,
       existing_inventory_item_id: item.stock_source === 'ATTACHED' && item.inventory_item_id ? item.inventory_item_id : undefined,
       product_id: item.product_id,
       product_name: item.product_name,
@@ -950,6 +960,18 @@ export default function SupplierLedgerPage() {
     const cleaned = cleanEditItems()
     if (cleaned.some((item) => !item.product_name)) {
       toast.push('Every purchase item needs a product name', 'error')
+      return
+    }
+    if (cleaned.some((item) => Number(item.sealed_qty || 0) < 0 || Number(item.free_qty || 0) < 0)) {
+      toast.push('Qty and free qty cannot be negative', 'error')
+      return
+    }
+    if (cleaned.some((item) => lineTotalQty(item) <= 0)) {
+      toast.push('Each purchase item needs paid qty or free qty greater than 0', 'error')
+      return
+    }
+    if (editItemsBillAmountInvalid) {
+      toast.push('Edited items reduce total below paid/write-off amount', 'error')
       return
     }
     replaceItemsM.mutate({ id: selectedPurchaseId, items: cleaned })
@@ -1124,7 +1146,7 @@ export default function SupplierLedgerPage() {
                     </Typography>
                   </Grid>
                   <Grid item xs={6} md={1.6}>
-                    <TextField size="small" label="Expiry" type="date" value={item.expiry_date || ''} onChange={(e) => patchEditItem(item.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} fullWidth />
+                    <TextField size="small" label="Expiry" type="date" value={item.expiry_date || ''} onChange={(e) => patchEditItem(item.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} required fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1}>
                     <TextField size="small" label="Rack" type="number" value={item.rack_number ?? 0} onChange={(e) => patchEditItem(item.key, { rack_number: Number(e.target.value) })} fullWidth />
@@ -1260,8 +1282,20 @@ export default function SupplierLedgerPage() {
                 const payment = row.paymentId
                   ? supplierPayments.find((entry) => Number(entry.id) === Number(row.paymentId)) || null
                   : null
+                const rowBg =
+                  Number(highlightedPaymentId || 0) > 0 && Number(row.paymentId || 0) === Number(highlightedPaymentId)
+                    ? '#fff8e1'
+                    : row.type === 'PURCHASE'
+                      ? 'rgba(46, 125, 50, 0.07)'
+                      : 'rgba(25, 118, 210, 0.07)'
                 return (
-                  <tr key={row.id}>
+                  <tr
+                    key={row.id}
+                    style={{
+                      backgroundColor: rowBg,
+                      opacity: row.isDeleted ? 0.62 : 1,
+                    }}
+                  >
                     <td>{row.date}</td>
                     <td>
                       <Stack gap={0.2}>
@@ -1925,7 +1959,7 @@ export default function SupplierLedgerPage() {
           <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
             <Box>
               <Typography variant="h6">Edit Purchase Items</Typography>
-              <Typography variant="body2" color="text.secondary">Only allowed while purchase stock is untouched.</Typography>
+              <Typography variant="body2" color="text.secondary">Expiry, quantity, rate, discount, and rounding can be adjusted while stock stays non-negative.</Typography>
             </Box>
             <Chip label={`${editItems.length} item${editItems.length === 1 ? '' : 's'}`} />
           </Stack>
@@ -1937,7 +1971,7 @@ export default function SupplierLedgerPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditItemsOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveItemEdit} disabled={replaceItemsM.isPending}>
+          <Button variant="contained" onClick={saveItemEdit} disabled={replaceItemsM.isPending || editItemsBillAmountInvalid}>
             Save Items
           </Button>
         </DialogActions>

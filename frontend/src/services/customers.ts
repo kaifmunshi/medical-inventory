@@ -30,7 +30,7 @@ export interface CustomerSummary {
   bills: any[]
 }
 
-export async function fetchCustomers(params?: { q?: string }): Promise<Customer[]> {
+export async function fetchCustomers(params?: { q?: string; limit?: number; offset?: number }): Promise<Customer[]> {
   const res = await api.get<Customer[]>('/customers', { params })
   return res.data
 }

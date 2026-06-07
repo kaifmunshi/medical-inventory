@@ -227,6 +227,7 @@ export async function listBillsPaged(params: {
   limit?: number
   offset?: number
   deleted_filter?: 'active' | 'deleted' | 'all'
+  bill_filter?: 'all' | 'credit' | 'unmapped' | 'unmapped_credit'
 }) {
   const res = await api.get('/billing/paged', { params })
   return res.data as { items: any[]; next_offset?: number | null }

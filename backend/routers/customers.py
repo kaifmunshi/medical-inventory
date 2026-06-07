@@ -8,7 +8,7 @@ from sqlmodel import select
 
 from backend.db import get_session
 from backend.inventory_lot_sync import item_stock_meta
-from backend.models import Bill, BillItem, BillItemOut, BillOut, Customer, CustomerCreate, CustomerUpdate, CustomerOut
+from backend.models import Bill, BillItem, BillItemOut, BillOut, Customer, CustomerCreate, CustomerUpdate, CustomerOut, Party
 
 router = APIRouter()
 
@@ -37,6 +37,24 @@ def _customer_note_conditions(customer_name: str):
         note.like(f"{base} |%"),
         note.like(f"{base}\n%"),
     )
+
+
+def _customer_bill_conditions(customer: Customer):
+    return or_(
+        Bill.customer_id == int(customer.id or 0),
+        _customer_note_conditions(customer.name),
+    )
+
+
+def _customer_party_id(session, customer: Customer) -> Optional[int]:
+    if not customer or not customer.id:
+        return None
+    party = session.exec(
+        select(Party)
+        .where(Party.legacy_customer_id == int(customer.id))
+        .order_by(Party.id.asc())
+    ).first()
+    return int(party.id) if party and party.id else None
 
 
 def _extract_free_notes(raw: Optional[str]) -> str:
@@ -69,6 +87,8 @@ def _to_bill_out(session, bill: Bill) -> BillOut:
     return BillOut(
         id=bill.id,
         date_time=bill.date_time,
+        customer_id=getattr(bill, "customer_id", None),
+        party_id=getattr(bill, "party_id", None),
         discount_percent=bill.discount_percent,
         subtotal=bill.subtotal,
         total_amount=bill.total_amount,
@@ -133,12 +153,12 @@ def _name_exists(session, name: str, exclude_customer_id: Optional[int] = None) 
     return session.exec(stmt.limit(1)).first() is not None
 
 
-def _has_bills_for_customer(session, customer_name: str) -> bool:
-    normalized = _normalize_name(customer_name).lower()
-    if not normalized:
+def _has_bills_for_customer(session, customer: Customer) -> bool:
+    normalized = _normalize_name(customer.name).lower()
+    if not normalized and not customer.id:
         return False
 
-    stmt = select(Bill.id).where(_customer_note_conditions(customer_name))
+    stmt = select(Bill.id).where(_customer_bill_conditions(customer))
     return session.exec(stmt.limit(1)).first() is not None
 
 
@@ -236,7 +256,7 @@ def delete_customer(customer_id: int) -> Response:
         row = session.get(Customer, customer_id)
         if not row:
             raise HTTPException(status_code=404, detail="Customer not found")
-        if _has_bills_for_customer(session, row.name):
+        if _has_bills_for_customer(session, row):
             raise HTTPException(
                 status_code=400,
                 detail="Cannot delete customer because bills already exist for this customer",
@@ -255,7 +275,7 @@ def get_customer_summary(customer_id: int) -> CustomerSummaryOut:
 
         bills = session.exec(
             select(Bill)
-            .where(_customer_note_conditions(customer.name))
+            .where(_customer_bill_conditions(customer))
             .where(Bill.is_deleted == False)  # noqa: E712
             .order_by(Bill.id.desc())
         ).all()
@@ -314,7 +334,7 @@ def move_customer_bills(payload: MoveCustomerBillsIn):
 
         bills = session.exec(
             select(Bill)
-            .where(_customer_note_conditions(source.name))
+            .where(_customer_bill_conditions(source))
             .where(Bill.is_deleted == False)  # noqa: E712
         ).all()
         if not bills:
@@ -325,6 +345,8 @@ def move_customer_bills(payload: MoveCustomerBillsIn):
             }
 
         for bill in bills:
+            bill.customer_id = int(destination.id)
+            bill.party_id = _customer_party_id(session, destination)
             bill.notes = _replace_customer_note(bill.notes, destination)
             session.add(bill)
 

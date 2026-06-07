@@ -25,6 +25,7 @@ import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 type ViewMode = 'details' | 'aggregate'
 type GroupBy = 'day' | 'month'
 type DeletedFilter = 'active' | 'deleted' | 'all'
+export type BillReportFilter = 'all' | 'credit' | 'unmapped' | 'unmapped_credit'
 
 function toCSV(rows: string[][]) {
   return rows
@@ -140,11 +141,12 @@ export default function SalesReport(props: {
   viewMode: ViewMode
   groupBy: GroupBy
   deletedFilter: DeletedFilter
+  billFilter: BillReportFilter
   focusBillId?: number | null
   setExportFn: (fn: () => void) => void
   setExportDisabled: (v: boolean) => void
 }) {
-  const { from, to, q, viewMode, groupBy, deletedFilter, focusBillId, setExportFn, setExportDisabled } = props
+  const { from, to, q, viewMode, groupBy, deletedFilter, billFilter, focusBillId, setExportFn, setExportDisabled } = props
   const toast = useToast()
 
   const [debouncedQ, setDebouncedQ] = useState('')
@@ -168,7 +170,7 @@ export default function SalesReport(props: {
 
   // SALES DETAILS (paged)
   const qSales = useInfiniteQuery({
-    queryKey: ['rpt-sales', 'details', from, to, debouncedQ, deletedFilter],
+    queryKey: ['rpt-sales', 'details', from, to, debouncedQ, deletedFilter, billFilter],
     enabled: viewMode === 'details',
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
@@ -177,6 +179,7 @@ export default function SalesReport(props: {
         to_date: to,
         q: debouncedQ,
         deleted_filter: deletedFilter,
+        bill_filter: billFilter,
         limit: LIMIT,
         offset: pageParam,
       })

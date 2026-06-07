@@ -67,7 +67,7 @@ export default function Exchange() {
         return
       }
     }
-    if (Boolean((data as any).is_deleted)) {
+    if ((data as any).is_deleted) {
       toast.push('Deleted bill cannot be used for exchange', 'error')
       return
     }

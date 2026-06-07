@@ -230,7 +230,7 @@ export async function listItemsPage(
   limit: number = 50,
   offset: number = 0,
   rackNumber?: number,
-  filters?: { brand?: string; category_id?: number; include_archived?: boolean; created_from?: string; incoming_from?: string },
+  filters?: { brand?: string; category_id?: number; include_archived?: boolean; created_from?: string; incoming_from?: string; missing_expiry?: boolean },
   requestOptions?: InventoryRequestOptions,
 ): Promise<ItemsPage> {
   const params: Record<string, string | number | boolean> = { q, limit, offset }
@@ -242,6 +242,7 @@ export async function listItemsPage(
   if (typeof filters?.include_archived === 'boolean') params.include_archived = filters.include_archived
   if (filters?.created_from) params.created_from = filters.created_from
   if (filters?.incoming_from) params.incoming_from = filters.incoming_from
+  if (typeof filters?.missing_expiry === 'boolean') params.missing_expiry = filters.missing_expiry
   const { data } = await api.get('/inventory', { params, signal: requestOptions?.signal })
   return data as ItemsPage
 }

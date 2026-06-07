@@ -27,6 +27,7 @@ import {
   receivePayment,
   listBillPayments,
 } from '../services/billing'
+import { fetchCustomers } from '../services/customers'
 import { getExchangeByReturn, listExchangeRecords } from '../services/returns'
 import { todayRange } from '../lib/date'
 import { fetchFinancialYears } from '../services/settings'
@@ -224,8 +225,19 @@ export default function CreditBills() {
     queryKey: ['credit-bills-financial-years'],
     queryFn: fetchFinancialYears,
   })
+  const customersQ = useQuery({
+    queryKey: ['credit-bills-customers'],
+    queryFn: () => fetchCustomers({ limit: 1000 }),
+  })
   const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
   const prevYear = useMemo(() => previousFinancialYear(yearsQ.data || [], activeYear), [activeYear, yearsQ.data])
+  const customerById = useMemo(() => {
+    const map = new Map<number, any>()
+    for (const customer of customersQ.data || []) {
+      map.set(Number(customer.id), customer)
+    }
+    return map
+  }, [customersQ.data])
   const qExchanges = useQuery({
     queryKey: ['credit-bills-exchanges', appliedFrom, appliedTo],
     queryFn: async () => {
@@ -288,7 +300,15 @@ export default function CreditBills() {
       const writeoff = Number(b.writeoff_amount || 0)
       const pendingNum = Math.max(0, total - paid - writeoff)
       const status = pendingNum <= 0.0001 && writeoff > 0 ? 'WRITTEN OFF' : ((b.payment_status || (pendingNum > 0 ? 'UNPAID' : 'PAID')) as string)
-      const customerMeta = extractCustomerMeta(b.notes)
+      const linkedCustomer = Number(b.customer_id || 0) > 0 ? customerById.get(Number(b.customer_id)) : null
+      const customerMeta = linkedCustomer
+        ? {
+            key: `customer:${linkedCustomer.id}`,
+            label: [linkedCustomer.name, linkedCustomer.phone].filter(Boolean).join(' • ') || `Customer #${linkedCustomer.id}`,
+            name: linkedCustomer.name || '',
+            notePreview: extractCustomerMeta(b.notes).notePreview,
+          }
+        : extractCustomerMeta(b.notes)
 
       return {
         raw: b,
@@ -310,7 +330,7 @@ export default function CreditBills() {
         itemsPreview: itemsPreview(b.items || []),
       }
     })
-  }, [qBills.data, qExchanges.data, q])
+  }, [qBills.data, qExchanges.data, q, customerById])
 
   const creditGroups = useMemo(() => {
     const groups = new Map<string, any>()

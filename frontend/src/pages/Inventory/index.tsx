@@ -153,6 +153,7 @@ export default function Inventory() {
   const [debouncedRackQ, setDebouncedRackQ] = useState('')
   const [brandFilter, setBrandFilter] = useState(searchParams.get('brand') || '')
   const [categoryFilter, setCategoryFilter] = useState(searchParams.get('category') || '')
+  const [expiryFilter, setExpiryFilter] = useState(searchParams.get('expiry') === 'missing' ? 'missing' : '')
 
   const [openForm, setOpenForm] = useState(false)
   const [editing, setEditing] = useState<any | null>(null)
@@ -198,6 +199,7 @@ export default function Inventory() {
     setRackQ(searchParams.get('rack') || '')
     setBrandFilter(searchParams.get('brand') || '')
     setCategoryFilter(searchParams.get('category') || '')
+    setExpiryFilter(searchParams.get('expiry') === 'missing' ? 'missing' : '')
   }, [currentSearchParams])
 
   useEffect(() => {
@@ -206,12 +208,13 @@ export default function Inventory() {
     if (debouncedRackQ) next.set('rack', debouncedRackQ)
     if (brandFilter) next.set('brand', brandFilter)
     if (categoryFilter) next.set('category', categoryFilter)
+    if (expiryFilter === 'missing') next.set('expiry', 'missing')
     const nextSearch = next.toString()
     if (nextSearch !== currentSearchParams) {
       inventoryUrlSyncRef.current = nextSearch
       setSearchParams(next, { replace: true })
     }
-  }, [brandFilter, categoryFilter, currentSearchParams, debouncedQ, debouncedRackQ, setSearchParams])
+  }, [brandFilter, categoryFilter, currentSearchParams, debouncedQ, debouncedRackQ, expiryFilter, setSearchParams])
 
   const qc = useQueryClient()
   const LIMIT = 50
@@ -219,11 +222,11 @@ export default function Inventory() {
   const effectiveInventorySearch = debouncedQ.length >= PRODUCT_SEARCH_MIN_CHARS ? debouncedQ : ''
   const hasInventorySearch = effectiveInventorySearch.length >= PRODUCT_SEARCH_MIN_CHARS
   const hasInventoryRackFilter = debouncedRackQ.trim() !== ''
-  const canLoadInventory = hasInventorySearch || hasInventoryRackFilter || brandFilter !== '' || categoryFilter !== ''
+  const canLoadInventory = hasInventorySearch || hasInventoryRackFilter || brandFilter !== '' || categoryFilter !== '' || expiryFilter !== ''
 
   useEffect(() => {
     setPageOffset(0)
-  }, [brandFilter, canLoadInventory, categoryFilter, debouncedRackQ, effectiveInventorySearch])
+  }, [brandFilter, canLoadInventory, categoryFilter, debouncedRackQ, effectiveInventorySearch, expiryFilter])
 
   // ✅ Paged inventory query (keeps each fetch to 50 rows)
   const {
@@ -231,7 +234,7 @@ export default function Inventory() {
     isLoading,
     isFetching,
   } = useQuery({
-    queryKey: ['inventory-items', effectiveInventorySearch, debouncedRackQ, brandFilter, categoryFilter, pageOffset],
+    queryKey: ['inventory-items', effectiveInventorySearch, debouncedRackQ, brandFilter, categoryFilter, expiryFilter, pageOffset],
     enabled: canLoadInventory,
     queryFn: async ({ signal }) => {
       try {
@@ -242,6 +245,7 @@ export default function Inventory() {
         return await listItemsPage(effectiveInventorySearch, LIMIT, pageOffset, rackFilter, {
           brand: brandFilter || undefined,
           category_id: categoryFilter ? Number(categoryFilter) : undefined,
+          missing_expiry: expiryFilter === 'missing' ? true : undefined,
         }, { signal })
       } catch (err: any) {
         if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') throw err
@@ -262,9 +266,9 @@ export default function Inventory() {
   const hasNextPage = canLoadInventory && data?.next_offset != null
   const pageStart = rows.length > 0 ? pageOffset + 1 : 0
   const pageEnd = rows.length > 0 ? pageOffset + rows.length : 0
-  const hasFilters = q.trim() !== '' || rackQ.trim() !== '' || brandFilter !== '' || categoryFilter !== ''
+  const hasFilters = q.trim() !== '' || rackQ.trim() !== '' || brandFilter !== '' || categoryFilter !== '' || expiryFilter !== ''
   const shouldLoadBrandOptions = brandFilterOptionsOpen || productOpen || productBrandOpen || brandFilter !== ''
-  const shouldLoadCategoryOptions = canLoadInventory || categoryFilterOptionsOpen || productOpen || productCategoryOpen || categoryFilter !== ''
+  const shouldLoadCategoryOptions = canLoadInventory || categoryFilterOptionsOpen || productOpen || productCategoryOpen || openForm || categoryFilter !== ''
 
   const brandsQ = useQuery({
     queryKey: ['inventory-brands'],
@@ -394,9 +398,22 @@ export default function Inventory() {
   })
 
   const mUpdate = useMutation({
-    mutationFn: ({ id, payload }: { id: number; payload: ItemFormValues }) => {
-      const { stock: _ignoredStock, ...safePayload } = payload
-      return updateItem(id, safePayload)
+    mutationFn: async ({ id, payload, categoryScopeItemIds, originalCategoryId }: { id: number; payload: ItemFormValues; categoryScopeItemIds?: number[]; originalCategoryId?: number | null }) => {
+      const { stock: _ignoredStock, expiry_date: _ignoredExpiry, mrp: _ignoredMrp, cost_price: _ignoredCostPrice, ...safePayload } = payload
+      const categoryChanged = Object.prototype.hasOwnProperty.call(safePayload, 'category_id')
+        && Number(originalCategoryId || 0) !== Number((safePayload as any).category_id || 0)
+      const updated = await updateItem(id, safePayload)
+
+      if (categoryChanged && Array.isArray(categoryScopeItemIds) && categoryScopeItemIds.length > 1) {
+        const categoryPayload = { category_id: (safePayload as any).category_id ?? null }
+        await Promise.all(
+          categoryScopeItemIds
+            .filter((scopeId) => Number(scopeId) && Number(scopeId) !== Number(id))
+            .map((scopeId) => updateItem(Number(scopeId), categoryPayload))
+        )
+      }
+
+      return updated
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
@@ -554,8 +571,11 @@ export default function Inventory() {
     setEditing(null)
     setOpenForm(true)
   }
-  function handleEdit(row: any) {
-    setEditing(row)
+  function handleEdit(row: any, group?: any) {
+    const scopeIds = Array.isArray(group?.items)
+      ? group.items.map((item: any) => Number(item?.id)).filter(Boolean)
+      : [Number(row?.id)].filter(Boolean)
+    setEditing({ ...row, category_scope_item_ids: scopeIds })
     setOpenForm(true)
   }
   function handleAdjust(row: any) {
@@ -599,6 +619,7 @@ export default function Inventory() {
     if (rackQ.trim()) params.set('rack', rackQ.trim())
     if (brandFilter) params.set('brand', brandFilter)
     if (categoryFilter) params.set('category', categoryFilter)
+    if (expiryFilter === 'missing') params.set('expiry', 'missing')
     const qs = params.toString()
     return qs ? `/inventory?${qs}` : '/inventory'
   }
@@ -773,6 +794,18 @@ export default function Inventory() {
             ))}
           </TextField>
 
+          <TextField
+            select
+            label="Expiry"
+            value={expiryFilter}
+            onChange={(e) => setExpiryFilter(e.target.value)}
+            size="small"
+            sx={{ width: { xs: '100%', md: 190 }, '& .MuiOutlinedInput-root': { borderRadius: 2.5, background: '#fff', minHeight: 46 } }}
+          >
+            <MenuItem value="">All Expiry</MenuItem>
+            <MenuItem value="missing">Without Expiry</MenuItem>
+          </TextField>
+
           <Button variant="contained" onClick={handleAdd} sx={{ minWidth: { md: 132 }, height: 46 }}>
             Add Item
           </Button>
@@ -796,6 +829,7 @@ export default function Inventory() {
                 setRackQ('')
                 setBrandFilter('')
                 setCategoryFilter('')
+                setExpiryFilter('')
               }}
               sx={{ alignSelf: { xs: 'flex-start', sm: 'center' } }}
             >
@@ -991,7 +1025,7 @@ export default function Inventory() {
                             </Tooltip>
 
                             <Tooltip title="Edit (earliest visible batch)">
-                              <IconButton size="small" onClick={() => handleEdit(g.displayItems[0])}>
+                              <IconButton size="small" onClick={() => handleEdit(g.displayItems[0], g)}>
                                 <EditIcon fontSize="small" />
                               </IconButton>
                             </Tooltip>
@@ -1062,7 +1096,7 @@ export default function Inventory() {
                                     </Tooltip>
 
                                     <Tooltip title="Edit this batch">
-                                      <IconButton size="small" onClick={() => handleEdit(it)}>
+                                      <IconButton size="small" onClick={() => handleEdit(it, g)}>
                                         <EditIcon fontSize="small" />
                                       </IconButton>
                                     </Tooltip>
@@ -1101,9 +1135,21 @@ export default function Inventory() {
         open={openForm}
         initial={editing}
         items={rows}
+        categories={categoriesQ.data || []}
         onClose={() => setOpenForm(false)}
         onSubmit={(values) => {
-          if (editing?.id) mUpdate.mutate({ id: editing.id, payload: values })
+          if (!editing?.id && !String(values.expiry_date || '').trim()) {
+            toast.push('Expiry date is required for new inventory items', 'error')
+            return
+          }
+          if (editing?.id) {
+            mUpdate.mutate({
+              id: editing.id,
+              payload: values,
+              categoryScopeItemIds: Array.isArray(editing.category_scope_item_ids) ? editing.category_scope_item_ids : [editing.id],
+              originalCategoryId: editing.category_id ?? null,
+            })
+          }
           else mCreate.mutate(values)
           setOpenForm(false)
         }}

@@ -983,6 +983,10 @@ export default function PurchasesPage() {
       toast.push('Every purchase item needs a product name', 'error')
       return
     }
+    if (cleanedItems.some((item) => !item.expiry_date)) {
+      toast.push('Every purchase item needs an expiry date', 'error')
+      return
+    }
     if (cleanedItems.some((item) => Number(item.sealed_qty || 0) < 0 || Number(item.free_qty || 0) < 0)) {
       toast.push('Qty and free qty cannot be negative', 'error')
       return
@@ -1027,6 +1031,10 @@ export default function PurchasesPage() {
     const cleanedItems = cleanItems(freeStockItems)
     if (cleanedItems.some((item) => !item.product_name)) {
       toast.push('Every free stock item needs a product name', 'error')
+      return
+    }
+    if (cleanedItems.some((item) => !item.expiry_date)) {
+      toast.push('Every free stock item needs an expiry date', 'error')
       return
     }
     if (cleanedItems.some((item) => Number(item.free_qty || 0) <= 0)) {
@@ -1397,7 +1405,7 @@ export default function PurchasesPage() {
                     </Typography>
                   </Grid>
                   <Grid item xs={6} md={1.6}>
-                    <TextField size="small" label="Expiry" type="date" value={item.expiry_date || ''} onChange={(e) => patchItem(item.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} fullWidth />
+                    <TextField size="small" label="Expiry" type="date" value={item.expiry_date || ''} onChange={(e) => patchItem(item.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} required fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1}>
                     <TextField size="small" label="Rack" type="number" value={item.rack_number ?? 0} onChange={(e) => patchItem(item.key, { rack_number: Number(e.target.value) })} fullWidth />
@@ -2475,7 +2483,7 @@ export default function PurchasesPage() {
           <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
             <Box>
               <Typography variant="h6">Edit Purchase Items</Typography>
-              <Typography variant="body2" color="text.secondary">Only allowed while purchase stock is untouched.</Typography>
+              <Typography variant="body2" color="text.secondary">Expiry, quantity, rate, discount, and rounding can be adjusted while stock stays non-negative.</Typography>
             </Box>
             <Stack direction="row" gap={1} alignItems="center">
               <Button variant="outlined" onClick={() => setEditItemsOpen(false)}>Back to Purchase</Button>

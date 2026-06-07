@@ -23,6 +23,7 @@ from backend.models import (
     Item,
     PackOpenEvent,
     Product,
+    Category,
     Purchase,
     PurchaseItem,
     Return,
@@ -58,6 +59,7 @@ class ItemIn(BaseModel):
 class ItemUpdateIn(BaseModel):
     name: Optional[str] = None
     brand: Optional[str] = None
+    category_id: Optional[int] = None
     expiry_date: Optional[str] = None
     mrp: Optional[float] = None
     stock: Optional[int] = None
@@ -1163,6 +1165,7 @@ def list_items(
     rack_number: Optional[int] = Query(None, ge=0, description="Filter by exact rack number"),
     brand: Optional[str] = Query(None, description="Filter by exact brand"),
     category_id: Optional[int] = Query(None, ge=0, description="Filter by product category"),
+    missing_expiry: bool = Query(False, description="If true, show batches with no expiry date"),
     created_from: Optional[str] = Query(
         None,
         description="Filter to batches created from this date or with positive stock movement from this date",
@@ -1268,6 +1271,8 @@ def list_items(
                     lot_product_category_exists,
                 )
             )
+        if missing_expiry:
+            base_stmt = base_stmt.where(func.trim(func.coalesce(Item.expiry_date, "")) == "")
         if incoming_from:
             from_date = incoming_from.strip()[:10]
             try:
@@ -4233,6 +4238,8 @@ def create_item(
     name = _norm_str(payload.name) or ""
     brand = _norm_str(payload.brand)
     expiry = _norm_str(payload.expiry_date)
+    if not expiry:
+        raise HTTPException(status_code=400, detail="Expiry date is required")
     mrp = float(payload.mrp)
     cost_price = float(payload.cost_price or 0)
     delta_stock = int(payload.stock or 0)
@@ -4336,23 +4343,44 @@ def update_item(item_id: int, payload: ItemUpdateIn):
 
         data = payload.model_dump(exclude_unset=True)
 
-        if "mrp" in data and data["mrp"] is not None and data["mrp"] <= 0:
-            raise HTTPException(status_code=400, detail="MRP must be > 0")
         if "stock" in data and data["stock"] is not None and data["stock"] < 0:
             raise HTTPException(status_code=400, detail="Stock cannot be negative")
         if "rack_number" in data and data["rack_number"] is not None and int(data["rack_number"]) < 0:
             raise HTTPException(status_code=400, detail="Rack number cannot be negative")
+        if "category_id" in data and data["category_id"] is not None:
+            category = session.get(Category, int(data["category_id"]))
+            if not category:
+                raise HTTPException(status_code=400, detail="Category not found")
         if "stock" in data:
             raise HTTPException(
                 status_code=400,
                 detail="Direct stock edits are locked. Use Adjust Stock, purchases, billing, returns, exchanges, loose stock, or stock audit.",
             )
+        if "expiry_date" in data:
+            raise HTTPException(
+                status_code=400,
+                detail="Expiry date is batch-specific. Edit expiry from the purchase bill batch instead.",
+            )
+        if "mrp" in data:
+            raise HTTPException(
+                status_code=400,
+                detail="MRP is batch-specific. Edit MRP from the purchase bill batch instead.",
+            )
 
         for k, v in data.items():
             if k == "rack_number" and v is not None:
                 setattr(item, k, int(v))
+            elif k == "category_id":
+                setattr(item, k, int(v) if v is not None else None)
             else:
                 setattr(item, k, v)
+
+        if "category_id" in data and getattr(item, "product_id", None):
+            product = session.get(Product, int(item.product_id))
+            if product:
+                product.category_id = item.category_id
+                product.updated_at = now_ts()
+                session.add(product)
 
         item.updated_at = now_ts()
         session.add(item)

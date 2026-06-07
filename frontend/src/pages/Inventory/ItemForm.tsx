@@ -11,6 +11,7 @@ import {
   Chip,
   Divider,
   FormControlLabel,
+  MenuItem,
   Switch,
 } from '@mui/material'
 import { useForm } from 'react-hook-form'
@@ -30,6 +31,7 @@ type ItemFormProps = {
   onClose: () => void
   onSubmit: (values: ItemFormValues) => void
   items?: any[] // kept for backward compatibility (not used for pagination anymore)
+  categories?: Array<{ id: number; name: string }>
 }
 
 function norm(s: any) {
@@ -59,6 +61,7 @@ export default function ItemForm({
   onClose,
   onSubmit,
   items = [],
+  categories = [],
 }: ItemFormProps) {
   // YYYY-MM-DD for today's date (used to block past expiries for brand-new entries)
   const today = React.useMemo(() => new Date().toISOString().slice(0, 10), [])
@@ -67,6 +70,8 @@ export default function ItemForm({
     register,
     handleSubmit,
     reset,
+    setValue,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<ItemFormValues>({
     resolver: zodResolver(itemSchema),
@@ -77,10 +82,12 @@ export default function ItemForm({
       mrp: Number((initial as any)?.mrp ?? 0),
       stock: Number((initial as any)?.stock ?? 0),
       rack_number: Number((initial as any)?.rack_number ?? 0),
+      category_id: (initial?.category_id as any) ?? null,
     },
   })
 
   const isEditMode = Boolean(initial?.name)
+  const categoryValue = watch('category_id')
 
   // Track selection from picker (Add mode only)
   const [pickedExisting, setPickedExisting] = React.useState<any | null>(null)
@@ -99,6 +106,7 @@ export default function ItemForm({
       mrp: Number((initial as any).mrp ?? 0),
       stock: Number((initial as any).stock ?? 0),
       rack_number: Number((initial as any).rack_number ?? 0),
+      category_id: (initial.category_id as any) ?? null,
     })
   }, [initial, reset])
 
@@ -114,6 +122,7 @@ export default function ItemForm({
         mrp: '' as any,
         stock: '' as any,
         rack_number: 0 as any,
+        category_id: null as any,
       })
     }
   }, [open, initial, reset])
@@ -132,6 +141,7 @@ export default function ItemForm({
       mrp: Number(it.mrp ?? 0),
       stock: '' as any, // user enters quantity
       rack_number: Number(it.rack_number ?? 0),
+      category_id: (it.category_id as any) ?? null,
     })
   }
 
@@ -469,28 +479,50 @@ export default function ItemForm({
           />
 
           <TextField
-            label="Expiry"
-            type="date"
-            {...register('expiry_date')}
-            InputLabelProps={{ shrink: true }}
-            // For totally new entries, block past; for pickedExisting we allow editing freely
-            inputProps={{
-              min: !isEditMode && !pickedExisting ? today : undefined,
+            select
+            label="Category"
+            value={categoryValue == null ? '' : String(categoryValue)}
+            onChange={(event) => {
+              setValue('category_id', (event.target.value ? Number(event.target.value) : null) as any, { shouldDirty: true })
             }}
-            error={!!errors.expiry_date}
-            helperText={errors.expiry_date?.message || 'Select expiry date'}
-          />
-
-          <TextField
-            label="MRP"
-            type="number"
-            inputProps={{ step: 'any' }}
-            {...register('mrp', { valueAsNumber: true })}
             InputLabelProps={{ shrink: true }}
-            error={!!errors.mrp}
-            helperText={errors.mrp?.message}
-            sx={noSpinnerSx}
-          />
+          >
+            <MenuItem value="">No Category</MenuItem>
+            {categories.map((category) => (
+              <MenuItem key={category.id} value={String(category.id)}>
+                {category.name}
+              </MenuItem>
+            ))}
+          </TextField>
+
+          {!isEditMode && (
+            <TextField
+              label="Expiry"
+              type="date"
+              {...register('expiry_date')}
+              required
+              InputLabelProps={{ shrink: true }}
+              // For totally new entries, block past; for pickedExisting we allow editing freely
+              inputProps={{
+                min: !pickedExisting ? today : undefined,
+              }}
+              error={!!errors.expiry_date}
+              helperText={errors.expiry_date?.message || 'Required for new inventory'}
+            />
+          )}
+
+          {!isEditMode && (
+            <TextField
+              label="MRP"
+              type="number"
+              inputProps={{ step: 'any' }}
+              {...register('mrp', { valueAsNumber: true })}
+              InputLabelProps={{ shrink: true }}
+              error={!!errors.mrp}
+              helperText={errors.mrp?.message}
+              sx={noSpinnerSx}
+            />
+          )}
 
           <TextField
             label="Rack Number"

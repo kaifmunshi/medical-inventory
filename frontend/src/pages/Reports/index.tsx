@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 
 import SalesReport from './SalesReport'
+import type { BillReportFilter } from './SalesReport'
 import ReturnsReport from './ReturnsReport'
 import StockLedgerReport from './StockLedgerReport'
 import ItemSalesReport from './ItemSalesReport'
@@ -32,6 +33,7 @@ export default function Reports() {
   const [tab, setTab] = useState<Tab>('sales')
   const [viewMode, setViewMode] = useState<ViewMode>('details')
   const [groupBy, setGroupBy] = useState<GroupBy>('day')
+  const [billFilter, setBillFilter] = useState<BillReportFilter>('all')
 
   const [from, setFrom] = useState(defaultFrom)
   const [to, setTo] = useState(defaultTo)
@@ -210,6 +212,21 @@ export default function Reports() {
 
             {tab === 'sales' && viewMode === 'details' && (
               <TextField
+                select
+                label="Bill Filter"
+                value={billFilter}
+                onChange={(e) => setBillFilter(e.target.value as BillReportFilter)}
+                sx={{ width: 210 }}
+              >
+                <MenuItem value="all">All Bills</MenuItem>
+                <MenuItem value="credit">Credit Bills</MenuItem>
+                <MenuItem value="unmapped">Unmapped Bills</MenuItem>
+                <MenuItem value="unmapped_credit">Unmapped Credit Bills</MenuItem>
+              </TextField>
+            )}
+
+            {tab === 'sales' && viewMode === 'details' && (
+              <TextField
                 label="Search (id/item/notes)"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
@@ -247,6 +264,7 @@ export default function Reports() {
             viewMode={viewMode}
             groupBy={groupBy}
             deletedFilter="active"
+            billFilter={billFilter}
             focusBillId={incomingState.billId}
             setExportFn={setExportFn}
             setExportDisabled={setExportDisabled}

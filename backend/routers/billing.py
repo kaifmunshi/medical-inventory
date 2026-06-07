@@ -463,6 +463,7 @@ def list_bills_paged(
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
     q: Optional[str] = Query(None, description="Search by id/item/notes"),
     deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
+    bill_filter: str = Query("all", pattern="^(all|credit|unmapped|unmapped_credit)$"),
 ):
     """
     ✅ Paged endpoint for Reports infinite scroll.
@@ -480,6 +481,22 @@ def list_bills_paged(
             stmt = stmt.where(Bill.date_time >= f"{from_date}T00:00:00")
         if to_date:
             stmt = stmt.where(Bill.date_time <= f"{to_date}T23:59:59")
+
+        if bill_filter in {"credit", "unmapped_credit"}:
+            stmt = stmt.where(
+                or_(
+                    Bill.is_credit == True,  # noqa: E712
+                    Bill.payment_status != "PAID",
+                    func.lower(func.coalesce(Bill.payment_mode, "")) == "credit",
+                )
+            )
+
+        if bill_filter in {"unmapped", "unmapped_credit"}:
+            note = func.lower(func.ltrim(func.coalesce(Bill.notes, "")))
+            stmt = stmt.where(
+                (Bill.customer_id.is_(None) | (Bill.customer_id <= 0)),
+                ~note.like("customer:%"),
+            )
 
         # ✅ Search filter in SQL (id OR notes OR item_name)
         qq = (q or "").strip()
@@ -1183,7 +1200,44 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
 
         now_iso = now_ts()
         bill_ts = normalize_bill_ts(getattr(payload, "date_time", None), b.date_time or now_iso)
-        assert_financial_year_unlocked(session, bill_ts, context="Bill edit")
+        linked_customer_id, linked_party_id = resolve_bill_party_links(
+            session,
+            customer_id=getattr(payload, "customer_id", None),
+            party_id=getattr(payload, "party_id", None),
+            notes=getattr(payload, "notes", None),
+        )
+
+        def _bill_item_signature() -> List[tuple[int, int, float]]:
+            return sorted(
+                (
+                    as_i(it.item_id),
+                    as_i(it.quantity),
+                    round2(as_f(getattr(it, "mrp", 0.0))),
+                )
+                for it in existing_items
+            )
+
+        def _payload_item_signature() -> List[tuple[int, int, float]]:
+            return sorted(
+                (
+                    as_i(iid),
+                    as_i(qty),
+                    round2(as_f(line_price_by_item.get(iid, db_items[iid].mrp))),
+                )
+                for iid, qty in new_qty_by_item.items()
+            )
+
+        customer_link_only_edit = (
+            _bill_item_signature() == _payload_item_signature()
+            and round2(as_f(payload.discount_percent)) == round2(as_f(b.discount_percent))
+            and round2(total) == round2(as_f(b.total_amount))
+            and round2(cash) == round2(as_f(b.payment_cash))
+            and round2(online) == round2(as_f(b.payment_online))
+            and str(effective_payment_mode or "") == str(b.payment_mode or "")
+            and str(bill_ts or "") == str(b.date_time or "")
+        )
+        if not customer_link_only_edit:
+            assert_financial_year_unlocked(session, bill_ts, context="Bill edit")
         paid_now = round2(cash + online)
         if has_manual_receipts and paid_now > round2(total) + 0.0001:
             raise HTTPException(
@@ -1208,12 +1262,6 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             status = "PAID"
             paid_at = bill_ts
         paid_amount = paid_now
-        linked_customer_id, linked_party_id = resolve_bill_party_links(
-            session,
-            customer_id=getattr(payload, "customer_id", None),
-            party_id=getattr(payload, "party_id", None),
-            notes=getattr(payload, "notes", None),
-        )
 
         try:
             # Update stock and append stock ledger correction entries.

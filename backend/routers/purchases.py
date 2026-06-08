@@ -644,10 +644,6 @@ def _purchase_line_identity_changed(raw: PurchaseItemIn, item: PurchaseItem) -> 
         return True
     if (clean_text(raw.brand) or "") != (clean_text(item.brand) or ""):
         return True
-    if int(raw.rack_number if raw.rack_number is not None else item.rack_number or 0) != int(item.rack_number or 0):
-        return True
-    if abs(round2(raw.mrp) - round2(item.mrp)) > 0.001:
-        return True
     return False
 
 
@@ -671,6 +667,16 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         inventory_item = session.get(Item, int(item.inventory_item_id))
         if not inventory_item:
             raise HTTPException(status_code=400, detail=f"Inventory item #{item.inventory_item_id} not found")
+        if not item.lot_id:
+            raise HTTPException(status_code=400, detail=f"Purchase item #{item.id} is missing lot linkage")
+        lot = session.get(InventoryLot, int(item.lot_id))
+        if not lot:
+            raise HTTPException(status_code=400, detail=f"Inventory lot #{item.lot_id} not found")
+        if lot.legacy_item_id is not None and int(lot.legacy_item_id) != int(inventory_item.id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Purchase item #{item.id} lot does not match linked inventory batch",
+            )
 
         qty, free_qty, new_qty = validate_purchase_line_quantities(raw)
         if round2(raw.cost_price) < 0:
@@ -683,13 +689,14 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         identity_changed = _purchase_line_identity_changed(raw, item)
         old_expiry = clean_date(item.expiry_date)
         new_expiry = clean_date(raw.expiry_date)
+        rack_number = int(raw.rack_number if raw.rack_number is not None else item.rack_number or 0)
 
         if identity_changed:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"Purchase item #{item.id} cannot change product/batch identity here. "
-                    "Only expiry, qty, free, rate, discount, and rounding can be edited in place."
+                    "Only expiry, rack, qty, free, rate, MRP, discount, and rounding can be edited in place."
                 ),
             )
 
@@ -717,36 +724,35 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         subtotal_amount = round2(subtotal_amount + line_total)
 
         inventory_item.expiry_date = new_expiry
+        inventory_item.rack_number = rack_number
         inventory_item.cost_price = effective_cost
         inventory_item.mrp = round2(raw.mrp)
         inventory_item.updated_at = ts
         session.add(inventory_item)
 
-        lot = session.get(InventoryLot, int(item.lot_id)) if item.lot_id else None
-        if lot:
-            lot.expiry_date = new_expiry
-            lot.cost_price = effective_cost
-            lot.mrp = round2(raw.mrp)
-            lot.updated_at = ts
-            session.add(lot)
+        lot.expiry_date = new_expiry
+        lot.rack_number = rack_number
+        lot.cost_price = effective_cost
+        lot.mrp = round2(raw.mrp)
+        lot.updated_at = ts
+        session.add(lot)
 
         if stock_delta:
             inventory_item.stock = next_stock
             inventory_item.is_archived = bool(next_stock <= 0)
             inventory_item.updated_at = ts
             session.add(inventory_item)
-            if lot:
-                next_lot_qty = int(lot.sealed_qty or 0) + stock_delta
-                if next_lot_qty < 0:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Purchase item #{item.id} cannot reduce lot stock below 0",
-                    )
-                lot.sealed_qty = next_lot_qty
-                lot.loose_qty = int(lot.loose_qty or 0)
-                lot.is_active = bool(next_lot_qty > 0 or int(lot.loose_qty or 0) > 0)
-                lot.updated_at = ts
-                session.add(lot)
+            next_lot_qty = int(lot.sealed_qty or 0) + stock_delta
+            if next_lot_qty < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Purchase item #{item.id} cannot reduce lot stock below 0",
+                )
+            lot.sealed_qty = next_lot_qty
+            lot.loose_qty = int(lot.loose_qty or 0)
+            lot.is_active = bool(next_lot_qty > 0 or int(lot.loose_qty or 0) > 0)
+            lot.updated_at = ts
+            session.add(lot)
             add_stock_movement(
                 session,
                 item_id=int(inventory_item.id),
@@ -764,6 +770,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         item.sealed_qty = qty
         item.free_qty = free_qty
         item.expiry_date = new_expiry
+        item.rack_number = rack_number
         item.cost_price = round2(raw.cost_price)
         item.effective_cost_price = effective_cost
         item.mrp = round2(raw.mrp)

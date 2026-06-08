@@ -574,8 +574,20 @@ export default function CashbookPage() {
 
   const day = qDay.data
   const canGoNext = selectedDate < today
-  const canSave = Number(amount) > 0 && !!entryDate && !mCreate.isPending
   const canGoAllNext = allAnchorDate < today
+
+  function saveEntry() {
+    if (mCreate.isPending) return
+    if (!entryDate) {
+      toast.push('Select an entry date before saving', 'warning')
+      return
+    }
+    if (Number(amount) <= 0) {
+      toast.push('Enter an amount greater than 0 before saving', 'warning')
+      return
+    }
+    mCreate.mutate()
+  }
 
   async function openBillDetail(billId: number) {
     if (!Number.isFinite(Number(billId)) || Number(billId) <= 0) return
@@ -1052,8 +1064,8 @@ export default function CashbookPage() {
             />
             <Button
               variant="contained"
-              onClick={() => mCreate.mutate()}
-              disabled={!canSave}
+              onClick={saveEntry}
+              disabled={mCreate.isPending}
             >
               {mCreate.isPending ? 'Saving...' : 'Save Entry'}
             </Button>

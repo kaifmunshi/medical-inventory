@@ -1138,7 +1138,15 @@ export default function Billing() {
 
   // ✅ submit handler with CASH confirm
   const handleCreateBill = () => {
-    if (validLineCount === 0 || !paymentsOk || mBill.isPending) return
+    if (mBill.isPending) return
+    if (validLineCount === 0) {
+      toast.push('Add at least one item before creating the bill.', 'warning')
+      return
+    }
+    if (!paymentsOk) {
+      toast.push('Check payment amounts before creating the bill.', 'warning')
+      return
+    }
 
     if (!notesOkForCredit) {
       toast.push(
@@ -1727,7 +1735,7 @@ export default function Billing() {
         <Box mt={2} textAlign="right">
           <Button
             variant="contained"
-            disabled={validLineCount === 0 || !paymentsOk || mBill.isPending || !notesOkForCredit}
+            disabled={mBill.isPending}
             onClick={handleCreateBill}
           >
             Create Bill

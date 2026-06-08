@@ -411,6 +411,83 @@ def create_data_repair_backup(label: str) -> str:
     return str(backup_path)
 
 
+def repair_purchase_item_lot_links(session) -> tuple[int, int, str | None]:
+    """
+    Relink purchase items to their exact inventory lot when the batch anchor is unambiguous.
+
+    Conservative by design for live data: if there is no single parent lot for the linked
+    inventory item, the row is skipped and purchase edit APIs continue blocking it.
+    """
+    candidates = session.exec(text("""
+        SELECT
+            pi.id AS purchase_item_id,
+            pi.purchase_id AS purchase_id,
+            pi.inventory_item_id AS inventory_item_id,
+            pi.lot_id AS old_lot_id,
+            candidate.id AS candidate_lot_id,
+            (
+                SELECT COUNT(*)
+                FROM inventorylot l
+                WHERE l.legacy_item_id = pi.inventory_item_id
+                  AND l.opened_from_lot_id IS NULL
+            ) AS candidate_count
+        FROM purchaseitem pi
+        JOIN item i ON i.id = pi.inventory_item_id
+        LEFT JOIN inventorylot current_lot ON current_lot.id = pi.lot_id
+        LEFT JOIN inventorylot candidate
+          ON candidate.legacy_item_id = pi.inventory_item_id
+         AND candidate.opened_from_lot_id IS NULL
+        WHERE pi.inventory_item_id IS NOT NULL
+          AND (
+            pi.lot_id IS NULL
+            OR current_lot.id IS NULL
+            OR COALESCE(current_lot.legacy_item_id, -1) != pi.inventory_item_id
+          )
+    """)).all()
+
+    fixed = 0
+    skipped = 0
+    backup_path = None
+    ts = _now_ts()
+    for row in candidates:
+        candidate_count = int(row.candidate_count or 0)
+        candidate_lot_id = int(row.candidate_lot_id or 0) if row.candidate_lot_id is not None else None
+        if candidate_count != 1 or not candidate_lot_id:
+            skipped += 1
+            continue
+        if backup_path is None:
+            backup_path = create_data_repair_backup("before_purchase_item_lot_link_repair")
+        session.exec(text("""
+            UPDATE purchaseitem
+            SET lot_id = :lot_id
+            WHERE id = :purchase_item_id
+        """).bindparams(
+            lot_id=candidate_lot_id,
+            purchase_item_id=int(row.purchase_item_id),
+        ))
+        session.exec(text("""
+            INSERT INTO auditlog (event_ts, entity_type, entity_id, action, note, details_json, actor)
+            VALUES (:ts, 'PURCHASE', :purchase_id, 'REPAIR_LOT_LINK', :note, :details_json, 'SYSTEM')
+        """).bindparams(
+            ts=ts,
+            purchase_id=int(row.purchase_id),
+            note="Repaired purchase item lot link from inventory batch",
+            details_json=json.dumps(
+                {
+                    "purchase_item_id": int(row.purchase_item_id),
+                    "inventory_item_id": int(row.inventory_item_id),
+                    "old_lot_id": int(row.old_lot_id) if row.old_lot_id is not None else None,
+                    "new_lot_id": candidate_lot_id,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        ))
+        fixed += 1
+
+    return fixed, skipped, backup_path
+
+
 def _row_value(row, index: int = 0, default=None):
     if row is None:
         return default
@@ -2883,6 +2960,28 @@ def migrate_db():
             """).bindparams(ts=ts_lot_upkeep),
         )
         session.commit()
+
+        # ---------- one-time data repair: purchase item -> inventory lot linkage ----------
+        # Runs automatically after lot upkeep so client pull-and-run is enough.
+        purchase_lot_link_repair_key = "repair_purchase_item_lot_links_v1"
+        purchase_lot_link_repair_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=purchase_lot_link_repair_key),
+        ).first()
+        if not purchase_lot_link_repair_done:
+            ts_repair = _now_ts()
+            fixed_count, skipped_count, backup_path = repair_purchase_item_lot_links(session)
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=purchase_lot_link_repair_key,
+                    value=f"done:{fixed_count};skipped:{skipped_count};backup:{backup_path or ''}",
+                    ts=ts_repair,
+                ),
+            )
+            session.commit()
 
         # ---------- one-time client repair: loose conversion + credit return bill totals ----------
         client_repair_key = "repair_client_loose_conversion_and_credit_returns_v1"

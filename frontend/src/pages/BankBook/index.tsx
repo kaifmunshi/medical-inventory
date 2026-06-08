@@ -50,6 +50,7 @@ import { fetchReceipts } from '../../services/parties'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
+import { useToast } from '../../components/ui/Toaster'
 import { fetchFinancialYears } from '../../services/settings'
 import { financialYearDisplayName } from '../../lib/financialYear'
 
@@ -368,6 +369,7 @@ const bankDepositDefaultNotes = [
 
 export default function BankBookPage() {
   const qc = useQueryClient()
+  const toast = useToast()
   const today = useMemo(() => toYMD(new Date()), [])
   const [selectedDate, setSelectedDate] = useState(today)
   const [recordsFilter, setRecordsFilter] = useState<'DAY' | 'ALL'>('DAY')
@@ -689,8 +691,20 @@ export default function BankBookPage() {
 
   const day = qDay.data
   const canGoNext = selectedDate < today
-  const canSave = Number(amount) > 0 && !!entryDate && !mCreate.isPending
   const canGoAllNext = allAnchorDate < today
+
+  function saveRecord() {
+    if (mCreate.isPending) return
+    if (!entryDate) {
+      toast.push('Select an entry date before saving', 'warning')
+      return
+    }
+    if (Number(amount) <= 0) {
+      toast.push('Enter an amount greater than 0 before saving', 'warning')
+      return
+    }
+    mCreate.mutate()
+  }
 
   async function openBillDetail(billId: number) {
     if (!Number.isFinite(Number(billId)) || Number(billId) <= 0) return
@@ -1324,8 +1338,8 @@ export default function BankBookPage() {
               />
               <Button
                 variant="contained"
-                onClick={() => mCreate.mutate()}
-                disabled={!canSave}
+                onClick={saveRecord}
+                disabled={mCreate.isPending}
                 sx={{ minWidth: 140, mt: { md: 0.5 } }}
               >
                 {mCreate.isPending ? 'Saving...' : 'Save Record'}

@@ -977,6 +977,19 @@ export default function BillEditDialog({
     },
   })
 
+  function saveEditBill() {
+    if (mEdit.isPending) return
+    if (!editPaymentsOk) {
+      toast.push('Check payment amounts before saving the bill.', 'warning')
+      return
+    }
+    if (!editNotesOkForCredit) {
+      toast.push('Credit mode requires customer details or notes before saving.', 'warning')
+      return
+    }
+    mEdit.mutate()
+  }
+
   const noSpinnerSx = {
     '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': {
       WebkitAppearance: 'none',
@@ -1358,7 +1371,7 @@ export default function BillEditDialog({
         </DialogContent>
         <DialogActions>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="contained" onClick={() => mEdit.mutate()} disabled={mEdit.isPending || !editPaymentsOk || !editNotesOkForCredit}>Save</Button>
+          <Button variant="contained" onClick={saveEditBill} disabled={mEdit.isPending}>Save</Button>
         </DialogActions>
       </Dialog>
 

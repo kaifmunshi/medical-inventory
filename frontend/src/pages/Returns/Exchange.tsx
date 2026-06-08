@@ -301,6 +301,14 @@ export default function Exchange() {
     },
   })
 
+  function submitExchange() {
+    if (ret.every((r) => r.qty === 0) && add.length === 0) {
+      toast.push('Enter at least one return quantity or add one exchange item', 'warning')
+      return
+    }
+    if (!mEx.isPending) mEx.mutate()
+  }
+
   return (
     <Stack gap={2}>
       <Typography variant="h5">Exchange</Typography>
@@ -643,8 +651,8 @@ export default function Exchange() {
           <Box textAlign="right" mt={2}>
             <Button
               variant="contained"
-              disabled={(ret.every((r) => r.qty === 0) && add.length === 0) || mEx.isPending}
-              onClick={() => mEx.mutate()}
+              disabled={mEx.isPending}
+              onClick={submitExchange}
             >
               {mEx.isPending ? 'Submitting…' : 'Submit Exchange'}
             </Button>

@@ -477,7 +477,7 @@ export default function Returns() {
 
             <Button
               variant="contained"
-              disabled={rows.every(r => r.qty === 0) || mCreate.isPending}
+              disabled={mCreate.isPending}
               onClick={handleSubmitReturn}
             >
               Submit Return

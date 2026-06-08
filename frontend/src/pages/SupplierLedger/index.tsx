@@ -728,6 +728,10 @@ export default function SupplierLedgerPage() {
   }
 
   function savePayment() {
+    if (!canSavePayment) {
+      toast.push('Check supplier, amount, allocations, split payment, and bank charges before saving', 'error')
+      return
+    }
     if (editingPayment) {
       if (!partyId) return
       updatePaymentM.mutate({
@@ -941,6 +945,10 @@ export default function SupplierLedgerPage() {
 
   function saveHeaderEdit() {
     if (!selectedPurchaseId || !editPartyId) return
+    if (editBillAmountInvalid) {
+      toast.push('Bill amount is below paid/write-off total', 'error')
+      return
+    }
     updateM.mutate({
       id: selectedPurchaseId,
       payload: {
@@ -1646,7 +1654,7 @@ export default function SupplierLedgerPage() {
           <Button
             variant="contained"
             onClick={savePayment}
-            disabled={!canSavePayment || addPaymentM.isPending || updatePaymentM.isPending}
+            disabled={addPaymentM.isPending || updatePaymentM.isPending}
           >
             {editingPayment ? 'Save Changes' : 'Save'}
           </Button>
@@ -1948,7 +1956,7 @@ export default function SupplierLedgerPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditHeaderOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveHeaderEdit} disabled={updateM.isPending || !editPartyId || editBillAmountInvalid}>
+          <Button variant="contained" onClick={saveHeaderEdit} disabled={updateM.isPending}>
             Save Changes
           </Button>
         </DialogActions>
@@ -1971,7 +1979,7 @@ export default function SupplierLedgerPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditItemsOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveItemEdit} disabled={replaceItemsM.isPending || editItemsBillAmountInvalid}>
+          <Button variant="contained" onClick={saveItemEdit} disabled={replaceItemsM.isPending}>
             Save Items
           </Button>
         </DialogActions>

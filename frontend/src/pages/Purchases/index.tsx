@@ -1052,6 +1052,10 @@ export default function PurchasesPage() {
 
   function saveHeaderEdit() {
     if (!selectedPurchaseId || !editPartyId) return
+    if (editBillAmountInvalid) {
+      toast.push('Bill amount is below paid/write-off total', 'error')
+      return
+    }
     updateM.mutate({
       id: selectedPurchaseId,
       payload: {
@@ -1961,7 +1965,7 @@ export default function PurchasesPage() {
         </Box>
         <Stack direction="row" justifyContent="flex-end" gap={1} sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}>
           <Button onClick={() => setAddOpen(false)}>Back to Purchases</Button>
-          <Button variant="contained" onClick={submit} disabled={createM.isPending || draftPaymentTotal > total + 0.01}>Save Purchase</Button>
+          <Button variant="contained" onClick={submit} disabled={createM.isPending}>Save Purchase</Button>
         </Stack>
       </Paper>
       ) : null}
@@ -2314,7 +2318,7 @@ export default function PurchasesPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setEditHeaderOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveHeaderEdit} disabled={updateM.isPending || editBillAmountInvalid}>Save Changes</Button>
+          <Button variant="contained" onClick={saveHeaderEdit} disabled={updateM.isPending}>Save Changes</Button>
         </DialogActions>
       </Dialog>
 
@@ -2439,7 +2443,7 @@ export default function PurchasesPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={resetPaymentForm}>Cancel</Button>
-          <Button variant="contained" onClick={savePayment} disabled={addPaymentM.isPending || updatePaymentM.isPending || Boolean(purchasePaymentError)}>
+          <Button variant="contained" onClick={savePayment} disabled={addPaymentM.isPending || updatePaymentM.isPending}>
             {editingPayment || editingDraftPaymentKey ? 'Save Changes' : 'Save'}
           </Button>
         </DialogActions>
@@ -2499,7 +2503,7 @@ export default function PurchasesPage() {
         </Box>
         <Stack direction="row" justifyContent="flex-end" gap={1} sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}>
           <Button onClick={() => setEditItemsOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveItemReplacement} disabled={replaceItemsM.isPending || editItemsBillAmountInvalid}>Save Items</Button>
+          <Button variant="contained" onClick={saveItemReplacement} disabled={replaceItemsM.isPending}>Save Items</Button>
         </Stack>
       </Paper>
       ) : null}

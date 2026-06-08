@@ -575,10 +575,6 @@ export default function PurchasesPage() {
   const editWriteoffAmount = Number(selectedPurchase?.writeoff_amount || 0)
   const editCoveredAmount = editPaidAmount + editWriteoffAmount
   const editOutstandingAmount = editBillAmount - editCoveredAmount
-  const editBillAmountInvalid = editBillAmount < editCoveredAmount - 0.0001
-  const editItemsSubtotal = editItems.reduce((sum, item) => sum + lineBaseTotal(item), 0)
-  const editItemsBillAmount = editItemsSubtotal - Number(selectedPurchase?.discount_amount || 0) + Number(selectedPurchase?.gst_amount || 0) + Number(selectedPurchase?.rounding_adjustment || 0)
-  const editItemsBillAmountInvalid = Boolean(selectedPurchase) && editItemsBillAmount < editCoveredAmount - 0.0001
   const selectedSupplierName = selectedPurchase
     ? suppliers.find((s) => Number(s.id) === Number(selectedPurchase.party_id))?.name || `Supplier #${selectedPurchase.party_id}`
     : ''
@@ -873,9 +869,8 @@ export default function PurchasesPage() {
       setPaymentOnline('0')
       return
     }
-    const cappedCash = Math.min(cash, paymentAvailableAmount)
-    setPaymentCash(cash > paymentAvailableAmount ? money(paymentAvailableAmount) : value)
-    setPaymentOnline(money(paymentAvailableAmount - cappedCash))
+    setPaymentCash(value)
+    setPaymentOnline(money(Math.max(0, paymentAvailableAmount - cash)))
   }
 
   function setPaymentSplitOnlineAmount(value: string) {
@@ -885,9 +880,8 @@ export default function PurchasesPage() {
       setPaymentCash('0')
       return
     }
-    const cappedOnline = Math.min(online, paymentAvailableAmount)
-    setPaymentOnline(online > paymentAvailableAmount ? money(paymentAvailableAmount) : value)
-    setPaymentCash(money(paymentAvailableAmount - cappedOnline))
+    setPaymentOnline(value)
+    setPaymentCash(money(Math.max(0, paymentAvailableAmount - online)))
   }
 
   function openEditHeader() {
@@ -995,10 +989,6 @@ export default function PurchasesPage() {
       toast.push('Each purchase item needs paid qty or free qty greater than 0', 'error')
       return
     }
-    if (draftPaymentTotal > total + 0.01) {
-      toast.push('Payments and write-offs exceed purchase total', 'error')
-      return
-    }
     createM.mutate({
       party_id: partyId,
       invoice_number: invoiceNumber.trim(),
@@ -1052,10 +1042,6 @@ export default function PurchasesPage() {
 
   function saveHeaderEdit() {
     if (!selectedPurchaseId || !editPartyId) return
-    if (editBillAmountInvalid) {
-      toast.push('Bill amount is below paid/write-off total', 'error')
-      return
-    }
     updateM.mutate({
       id: selectedPurchaseId,
       payload: {
@@ -1127,10 +1113,6 @@ export default function PurchasesPage() {
     }
     if (cleanedItems.some((item) => lineTotalQty(item) <= 0)) {
       toast.push('Each replacement purchase item needs paid qty or free qty greater than 0', 'error')
-      return
-    }
-    if (editItemsBillAmountInvalid) {
-      toast.push('Edited items reduce total below paid/write-off amount', 'error')
       return
     }
     replaceItemsM.mutate({
@@ -1528,11 +1510,6 @@ export default function PurchasesPage() {
                 </Typography>
               </Grid>
             </Grid>
-            {draftBillTotal < draftCovered - 0.0001 ? (
-              <Typography variant="body2" color="error" sx={{ mt: 1 }}>
-                Edited items reduce the bill below paid/write-off total of {money(draftCovered)}.
-              </Typography>
-            ) : null}
           </Box>
         ) : null}
       </Paper>
@@ -1663,10 +1640,9 @@ export default function PurchasesPage() {
                 <Button
                   variant="contained"
                   size="small"
-                  startIcon={<PaymentsIcon />}
-                  onClick={() => openPaymentDialog(paymentHistoryPurchase)}
-                  disabled={Math.max(0, Number(paymentHistoryPurchase.total_amount || 0) - Number(paymentHistoryPurchase.paid_amount || 0) - Number(paymentHistoryPurchase.writeoff_amount || 0)) <= 0}
-                >
+	                  startIcon={<PaymentsIcon />}
+	                  onClick={() => openPaymentDialog(paymentHistoryPurchase)}
+	                >
                   Add Payment / Write-off
                 </Button>
               </Stack>
@@ -1901,11 +1877,10 @@ export default function PurchasesPage() {
                       <Chip label={`Outstanding ${money(Math.max(0, total - draftPaymentTotal))}`} color="warning" variant="outlined" />
                     </Stack>
                     <Button
-                      variant="contained"
-                      startIcon={<PaymentsIcon />}
-                      onClick={openDraftPaymentDialog}
-                      disabled={Math.max(0, total - draftPaymentTotal) <= 0}
-                    >
+	                      variant="contained"
+	                      startIcon={<PaymentsIcon />}
+	                      onClick={openDraftPaymentDialog}
+	                    >
                       Add Payment / Write-off
                     </Button>
                   </Stack>
@@ -1957,11 +1932,6 @@ export default function PurchasesPage() {
                       </tbody>
                     </table>
                   </Box>
-                  {draftPaymentTotal > total + 0.01 ? (
-                    <Typography variant="body2" color="error" sx={{ mt: 1 }}>
-                      Payments and write-offs exceed purchase total by {money(draftPaymentTotal - total)}.
-                    </Typography>
-                  ) : null}
                 </Grid>
               </Grid>
             </Paper>
@@ -2297,7 +2267,7 @@ export default function PurchasesPage() {
                 </Grid>
                 <Grid item xs={12} md={3}>
                   <Typography variant="caption" color="text.secondary">Bill Amount</Typography>
-                  <Typography variant="h5" fontWeight={800} color={editBillAmountInvalid ? 'error.main' : 'primary.main'}>{money(editBillAmount)}</Typography>
+                  <Typography variant="h5" fontWeight={800} color="primary.main">{money(editBillAmount)}</Typography>
                 </Grid>
                 <Grid item xs={4} md={3}>
                   <Typography variant="caption" color="text.secondary">Paid</Typography>
@@ -2312,11 +2282,6 @@ export default function PurchasesPage() {
                   <Typography fontWeight={800} color={editOutstandingAmount < -0.0001 ? 'error.main' : 'text.primary'}>{money(editOutstandingAmount)}</Typography>
                 </Grid>
               </Grid>
-              {editBillAmountInvalid ? (
-                <Typography variant="body2" color="error" sx={{ mt: 1.5 }}>
-                  Bill amount is below paid/write-off total of {money(editCoveredAmount)}.
-                </Typography>
-              ) : null}
             </Paper>
           </Stack>
         </DialogContent>
@@ -2378,7 +2343,7 @@ export default function PurchasesPage() {
 		                    else setPaymentCash(e.target.value)
 		                  }}
 		                  disabled={paymentMode === 'online'}
-		                  inputProps={{ min: 0, max: money(paymentAvailableAmount), step: '0.01' }}
+			                  inputProps={{ min: 0, step: '0.01' }}
 		                  fullWidth
 	                />
 	                <TextField
@@ -2390,7 +2355,7 @@ export default function PurchasesPage() {
 		                    else setPaymentOnline(e.target.value)
 		                  }}
 		                  disabled={paymentMode === 'cash'}
-		                  inputProps={{ min: 0, max: money(paymentAvailableAmount), step: '0.01' }}
+			                  inputProps={{ min: 0, step: '0.01' }}
 		                  fullWidth
 	                />
 	              </>
@@ -2400,7 +2365,7 @@ export default function PurchasesPage() {
 	                type="number"
 	                value={paymentAmount}
 	                onChange={(e) => setPaymentAmount(e.target.value)}
-	                inputProps={{ min: 0, max: money(paymentAvailableAmount), step: '0.01' }}
+		                inputProps={{ min: 0, step: '0.01' }}
 	                fullWidth
 	              />
 	            )}

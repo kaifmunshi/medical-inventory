@@ -305,14 +305,6 @@ export default function SupplierLedgerPage() {
   const editWriteoffAmount = Number(selectedPurchase?.writeoff_amount || 0)
   const editCoveredAmount = editPaidAmount + editWriteoffAmount
   const editOutstandingAmount = editBillAmount - editCoveredAmount
-  const editBillAmountInvalid = editBillAmount < editCoveredAmount - 0.0001
-  const editItemsBillAmount =
-    editItemsSubtotal -
-    Number(selectedPurchase?.discount_amount || 0) +
-    Number(selectedPurchase?.gst_amount || 0) +
-    Number(selectedPurchase?.rounding_adjustment || 0)
-  const editItemsBillAmountInvalid = Boolean(selectedPurchase) && editItemsBillAmount < editCoveredAmount - 0.0001
-
   const ledgerRows = useMemo(() => {
     const purchaseEvents = purchases.map((purchase) => ({
         id: `purchase-${purchase.id}`,
@@ -406,13 +398,10 @@ export default function SupplierLedgerPage() {
     for (const [purchaseId, value] of Object.entries(allocationDrafts)) {
       const id = Number(purchaseId)
       const amount = Number(value || 0)
-      const purchase = purchases.find((row) => Number(row.id) === id)
       if (Number.isNaN(amount)) {
         issues[id] = 'Invalid amount'
       } else if (amount < 0) {
         issues[id] = 'Cannot be negative'
-      } else if (purchase && amount > outstandingOf(purchase) + 0.01) {
-        issues[id] = `Max ${money(outstandingOf(purchase))}`
       }
     }
     return issues
@@ -785,9 +774,8 @@ export default function SupplierLedgerPage() {
       setPaymentOnline('0')
       return
     }
-    const cappedCash = Math.min(cash, supplierPaymentBaseTotal)
-    setPaymentCash(cash > supplierPaymentBaseTotal ? money(supplierPaymentBaseTotal) : value)
-    setPaymentOnline(money(supplierPaymentBaseTotal - cappedCash))
+    setPaymentCash(value)
+    setPaymentOnline(money(Math.max(0, supplierPaymentBaseTotal - cash)))
   }
 
   function setSplitOnlineAmount(value: string) {
@@ -797,9 +785,8 @@ export default function SupplierLedgerPage() {
       setPaymentCash('0')
       return
     }
-    const cappedOnline = Math.min(online, supplierPaymentBaseTotal)
-    setPaymentOnline(online > supplierPaymentBaseTotal ? money(supplierPaymentBaseTotal) : value)
-    setPaymentCash(money(supplierPaymentBaseTotal - cappedOnline))
+    setPaymentOnline(value)
+    setPaymentCash(money(Math.max(0, supplierPaymentBaseTotal - online)))
   }
 
   function applyFullOutstanding(purchase: Purchase) {
@@ -945,10 +932,6 @@ export default function SupplierLedgerPage() {
 
   function saveHeaderEdit() {
     if (!selectedPurchaseId || !editPartyId) return
-    if (editBillAmountInvalid) {
-      toast.push('Bill amount is below paid/write-off total', 'error')
-      return
-    }
     updateM.mutate({
       id: selectedPurchaseId,
       payload: {
@@ -980,10 +963,6 @@ export default function SupplierLedgerPage() {
     }
     if (cleaned.some((item) => lineTotalQty(item) <= 0)) {
       toast.push('Each purchase item needs paid qty or free qty greater than 0', 'error')
-      return
-    }
-    if (editItemsBillAmountInvalid) {
-      toast.push('Edited items reduce total below paid/write-off amount', 'error')
       return
     }
     replaceItemsM.mutate({ id: selectedPurchaseId, items: cleaned })
@@ -1290,7 +1269,7 @@ export default function SupplierLedgerPage() {
             <tbody>
               {ledgerRows.map((row) => {
                 const purchase = purchases.find((entry) => Number(entry.id) === Number(row.purchaseId)) || null
-                const canAddForRow = row.type === 'PURCHASE' && purchase && outstandingOf(purchase) > 0.0001
+	                const canAddForRow = row.type === 'PURCHASE' && purchase
                 const payment = row.paymentId
                   ? supplierPayments.find((entry) => Number(entry.id) === Number(row.paymentId)) || null
                   : null
@@ -1545,9 +1524,9 @@ export default function SupplierLedgerPage() {
                               type="number"
                               value={allocationDrafts[Number(purchase.id)] ?? '0'}
                               onChange={(e) => setDraft(Number(purchase.id), e.target.value)}
-                              inputProps={{ min: 0, max: money(outstandingOf(purchase)), step: '0.01' }}
-                              error={Boolean(allocationIssueByPurchaseId[Number(purchase.id)])}
-                              helperText={allocationIssueByPurchaseId[Number(purchase.id)] || `Max ${money(outstandingOf(purchase))}`}
+	                              inputProps={{ min: 0, step: '0.01' }}
+	                              error={Boolean(allocationIssueByPurchaseId[Number(purchase.id)])}
+	                              helperText={allocationIssueByPurchaseId[Number(purchase.id)] || 'Backend verifies current outstanding on save'}
                               sx={{ width: 140 }}
                             />
                           </td>
@@ -1578,7 +1557,7 @@ export default function SupplierLedgerPage() {
                   type="number"
                   value={paymentCash}
                   onChange={(e) => setSplitCashAmount(e.target.value)}
-                  inputProps={{ min: 0, max: money(supplierPaymentBaseTotal), step: '0.01' }}
+	                  inputProps={{ min: 0, step: '0.01' }}
 	                  error={splitPaymentInvalid || Math.abs(allocationDifference) > 0.01}
 	                  fullWidth
 	                />
@@ -1587,7 +1566,7 @@ export default function SupplierLedgerPage() {
                   type="number"
                   value={paymentOnline}
                   onChange={(e) => setSplitOnlineAmount(e.target.value)}
-                  inputProps={{ min: 0, max: money(supplierPaymentBaseTotal), step: '0.01' }}
+	                  inputProps={{ min: 0, step: '0.01' }}
 	                  error={splitPaymentInvalid || Math.abs(allocationDifference) > 0.01}
 	                  fullWidth
 	                />
@@ -1935,7 +1914,7 @@ export default function SupplierLedgerPage() {
                 </Grid>
                 <Grid item xs={12} md={3}>
                   <Typography variant="caption" color="text.secondary">Bill Amount</Typography>
-                  <Typography variant="h5" fontWeight={800} color={editBillAmountInvalid ? 'error.main' : 'primary.main'}>{money(editBillAmount)}</Typography>
+                  <Typography variant="h5" fontWeight={800} color="primary.main">{money(editBillAmount)}</Typography>
                 </Grid>
                 <Grid item xs={4} md={3}>
                   <Typography variant="caption" color="text.secondary">Paid</Typography>
@@ -1950,11 +1929,6 @@ export default function SupplierLedgerPage() {
                   <Typography fontWeight={800} color={editOutstandingAmount < -0.0001 ? 'error.main' : 'text.primary'}>{money(editOutstandingAmount)}</Typography>
                 </Grid>
               </Grid>
-              {editBillAmountInvalid ? (
-                <Typography variant="body2" color="error" sx={{ mt: 1.5 }}>
-                  Bill amount is below paid/write-off total of {money(editCoveredAmount)}.
-                </Typography>
-              ) : null}
             </Paper>
           </Stack>
         </DialogContent>

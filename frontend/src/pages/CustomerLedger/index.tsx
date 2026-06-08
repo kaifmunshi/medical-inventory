@@ -754,7 +754,7 @@ export default function CustomerLedgerPage() {
     }, 0)
     const remaining = Math.max(0, receiptTotal - usedElsewhere)
     if (remaining <= 0) return
-    setDraft(billId, String(Math.min(Number(bill.outstanding_amount || 0), remaining)))
+    setDraft(billId, String(remaining))
   }
 
   function clampBillAdjustment(bill: OpenBill) {
@@ -764,7 +764,7 @@ export default function CustomerLedgerPage() {
       setDraft(billId, '0')
       return
     }
-    setDraft(billId, String(Math.min(raw, Number(bill.outstanding_amount || 0))))
+    setDraft(billId, String(raw))
   }
 
   function fillAdjustmentsFromReceipt() {
@@ -826,7 +826,7 @@ export default function CustomerLedgerPage() {
     }, 0)
     const remaining = Math.max(0, applyAvailable - usedElsewhere)
     if (remaining <= 0) return
-    setApplyDraft(billId, String(Math.min(Number(bill.outstanding_amount || 0), remaining)))
+    setApplyDraft(billId, String(remaining))
   }
 
   function clampApplyAdjustment(bill: OpenBill) {
@@ -836,11 +836,7 @@ export default function CustomerLedgerPage() {
       setApplyDraft(billId, '0')
       return
     }
-    const usedElsewhere = Object.entries(applyDrafts).reduce((sum, [id, value]) => {
-      return Number(id) === billId ? sum : sum + Number(value || 0)
-    }, 0)
-    const remaining = Math.max(0, applyAvailable - usedElsewhere)
-    setApplyDraft(billId, String(Math.min(raw, Number(bill.outstanding_amount || 0), remaining)))
+    setApplyDraft(billId, String(raw))
   }
 
   function fillApplyFromAdvance() {
@@ -930,10 +926,6 @@ export default function CustomerLedgerPage() {
       toast.push('Receipt amount must be greater than 0', 'warning')
       return
     }
-    if (adjustmentTotal > receiptTotal) {
-      toast.push('Bill adjustments cannot exceed receipt amount', 'warning')
-      return
-    }
     receiptM.mutate({
       partyId: Number(selectedParty.id),
       payload: {
@@ -965,10 +957,6 @@ export default function CustomerLedgerPage() {
       toast.push('Enter at least one bill adjustment', 'warning')
       return
     }
-    if (applyAdjustmentTotal > applyAvailable) {
-      toast.push('Bill adjustments cannot exceed available advance', 'warning')
-      return
-    }
     applyReceiptM.mutate({
       partyId: Number(selectedParty.id),
       receiptId: Number(applyTarget.receiptId),
@@ -996,10 +984,6 @@ export default function CustomerLedgerPage() {
     }
     if (editReceiptTotal <= 0) {
       toast.push('Receipt amount must be greater than 0', 'warning')
-      return
-    }
-    if (editReceiptTotal + 0.0001 < editReceiptApplied) {
-      toast.push('Receipt amount cannot be less than already applied bill amount', 'warning')
       return
     }
     editReceiptM.mutate({

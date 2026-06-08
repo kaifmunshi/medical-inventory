@@ -1117,6 +1117,10 @@ export default function PurchasesPage() {
       toast.push('Every replacement purchase item needs a product name', 'error')
       return
     }
+    if (cleanedItems.some((item) => !item.expiry_date)) {
+      toast.push('Every replacement purchase item needs an expiry date', 'error')
+      return
+    }
     if (cleanedItems.some((item) => Number(item.sealed_qty || 0) < 0 || Number(item.free_qty || 0) < 0)) {
       toast.push('Qty and free qty cannot be negative', 'error')
       return

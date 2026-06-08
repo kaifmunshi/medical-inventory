@@ -790,6 +790,15 @@ export default function StockCardPage() {
     },
   })
 
+  function saveProductMaster() {
+    if (mSaveProduct.isPending || mDeleteProduct.isPending) return
+    if (!productForm.name.trim()) {
+      toast.push('Product name is required', 'warning')
+      return
+    }
+    mSaveProduct.mutate()
+  }
+
   const mDeleteProduct = useMutation({
     mutationFn: (id: number) => deleteProduct(id),
     onSuccess: () => {
@@ -1782,11 +1791,11 @@ export default function StockCardPage() {
         ) : null}
         <Box sx={{ flex: 1 }} />
         <Button onClick={() => setProductOpen(false)}>Cancel</Button>
-        <Button
-          variant="contained"
-          onClick={() => mSaveProduct.mutate()}
-          disabled={!productForm.name.trim() || mSaveProduct.isPending || mDeleteProduct.isPending}
-        >
+          <Button
+            variant="contained"
+            onClick={saveProductMaster}
+            disabled={mSaveProduct.isPending || mDeleteProduct.isPending}
+          >
           {mSaveProduct.isPending ? 'Saving...' : 'Save Product'}
         </Button>
       </DialogActions>

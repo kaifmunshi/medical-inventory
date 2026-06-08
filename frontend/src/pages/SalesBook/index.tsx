@@ -36,6 +36,7 @@ import { listCashbookEntries, updateCashbookEntry, type CashbookType } from '../
 import { listBankbookEntries, updateBankbookEntry, type BankbookMode, type BankbookType } from '../../services/bankbook'
 import { fetchPurchases, listPurchasePayments } from '../../services/purchases'
 import BillEditDialog from '../../components/billing/BillEditDialog'
+import { useToast } from '../../components/ui/Toaster'
 
 type DayRow = {
   date: string
@@ -228,6 +229,7 @@ async function fetchAllPurchases(from_date: string, to_date: string) {
 }
 
 export default function SalesBookPage() {
+  const toast = useToast()
   const qc = useQueryClient()
   const r = useMemo(() => last15DaysRange(), [])
   const [from, setFrom] = useState(r.from)
@@ -683,6 +685,27 @@ export default function SalesBookPage() {
       qc.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
     },
   })
+
+  function saveBookEdit() {
+    if (mUpdateBook.isPending) return
+    if (!bookEdit) {
+      toast.push('Select an entry before saving', 'warning')
+      return
+    }
+    if (!bookDate) {
+      toast.push('Select an entry date before saving', 'warning')
+      return
+    }
+    if (Number(bookAmount) <= 0) {
+      toast.push('Enter an amount greater than 0 before saving', 'warning')
+      return
+    }
+    if (Number(bookCharges || 0) < 0) {
+      toast.push('Txn charges cannot be negative', 'warning')
+      return
+    }
+    mUpdateBook.mutate()
+  }
 
   const pnlTooltip =
     'P&L = Sales billed - Returns - Cashbook/Bankbook expenses - Purchases. Withdrawals and contra entries affect cash flow, not profit/loss.'
@@ -1156,8 +1179,8 @@ export default function SalesBookPage() {
           <Button onClick={() => setBookEdit(null)}>Cancel</Button>
           <Button
             variant="contained"
-            onClick={() => mUpdateBook.mutate()}
-            disabled={!bookEdit || !bookDate || Number(bookAmount) <= 0 || mUpdateBook.isPending}
+            onClick={saveBookEdit}
+            disabled={mUpdateBook.isPending}
           >
             {mUpdateBook.isPending ? 'Saving...' : 'Save Changes'}
           </Button>

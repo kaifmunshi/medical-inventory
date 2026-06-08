@@ -589,6 +589,23 @@ export default function CashbookPage() {
     mCreate.mutate()
   }
 
+  function saveEditEntry() {
+    if (mUpdate.isPending) return
+    if (!editRow) {
+      toast.push('Select an entry before saving', 'warning')
+      return
+    }
+    if (!editDate) {
+      toast.push('Select an entry date before saving', 'warning')
+      return
+    }
+    if (Number(editAmount) <= 0) {
+      toast.push('Enter an amount greater than 0 before saving', 'warning')
+      return
+    }
+    mUpdate.mutate()
+  }
+
   async function openBillDetail(billId: number) {
     if (!Number.isFinite(Number(billId)) || Number(billId) <= 0) return
     setBillOpen(true)
@@ -1551,8 +1568,8 @@ export default function CashbookPage() {
           <Button onClick={() => setEditRow(null)}>Cancel</Button>
           <Button
             variant="contained"
-            onClick={() => mUpdate.mutate()}
-            disabled={!editRow || Number(editAmount) <= 0 || !editDate || mUpdate.isPending}
+            onClick={saveEditEntry}
+            disabled={mUpdate.isPending}
           >
             {mUpdate.isPending ? 'Saving...' : 'Save Changes'}
           </Button>

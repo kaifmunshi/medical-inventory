@@ -922,7 +922,18 @@ export default function CustomerLedgerPage() {
   }
 
   function saveReceipt() {
-    if (!selectedParty?.id) return
+    if (!selectedParty?.id) {
+      toast.push('Select a customer before saving receipt', 'warning')
+      return
+    }
+    if (receiptTotal <= 0) {
+      toast.push('Receipt amount must be greater than 0', 'warning')
+      return
+    }
+    if (adjustmentTotal > receiptTotal) {
+      toast.push('Bill adjustments cannot exceed receipt amount', 'warning')
+      return
+    }
     receiptM.mutate({
       partyId: Number(selectedParty.id),
       payload: {
@@ -942,7 +953,22 @@ export default function CustomerLedgerPage() {
   }
 
   function saveApplyAdvance() {
-    if (!selectedParty?.id || !applyTarget?.receiptId) return
+    if (!selectedParty?.id || !applyTarget?.receiptId) {
+      toast.push('Select an advance receipt before applying', 'warning')
+      return
+    }
+    if (!applyDate) {
+      toast.push('Select an apply date', 'warning')
+      return
+    }
+    if (applyAdjustmentTotal <= 0) {
+      toast.push('Enter at least one bill adjustment', 'warning')
+      return
+    }
+    if (applyAdjustmentTotal > applyAvailable) {
+      toast.push('Bill adjustments cannot exceed available advance', 'warning')
+      return
+    }
     applyReceiptM.mutate({
       partyId: Number(selectedParty.id),
       receiptId: Number(applyTarget.receiptId),
@@ -960,7 +986,22 @@ export default function CustomerLedgerPage() {
   }
 
   function saveEditReceipt() {
-    if (!selectedParty?.id || !editReceiptTarget?.receiptId) return
+    if (!selectedParty?.id || !editReceiptTarget?.receiptId) {
+      toast.push('Select a receipt before saving changes', 'warning')
+      return
+    }
+    if (!editReceiptDate) {
+      toast.push('Select a receipt date', 'warning')
+      return
+    }
+    if (editReceiptTotal <= 0) {
+      toast.push('Receipt amount must be greater than 0', 'warning')
+      return
+    }
+    if (editReceiptTotal + 0.0001 < editReceiptApplied) {
+      toast.push('Receipt amount cannot be less than already applied bill amount', 'warning')
+      return
+    }
     editReceiptM.mutate({
       partyId: Number(selectedParty.id),
       receiptId: Number(editReceiptTarget.receiptId),
@@ -1665,7 +1706,7 @@ export default function CustomerLedgerPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setReceiptOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveReceipt} disabled={receiptM.isPending || !selectedParty || receiptTotal <= 0 || adjustmentTotal > receiptTotal}>
+          <Button variant="contained" onClick={saveReceipt} disabled={receiptM.isPending}>
             Save Receipt
           </Button>
         </DialogActions>
@@ -1780,7 +1821,7 @@ export default function CustomerLedgerPage() {
           <Button
             variant="contained"
             onClick={saveApplyAdvance}
-            disabled={!applyTarget || !selectedParty || !applyDate || applyReceiptM.isPending || applyAdjustmentTotal <= 0 || applyAdjustmentTotal > applyAvailable}
+            disabled={applyReceiptM.isPending}
           >
             Apply Advance
           </Button>
@@ -1861,7 +1902,7 @@ export default function CustomerLedgerPage() {
           <Button
             variant="contained"
             onClick={saveEditReceipt}
-            disabled={!editReceiptTarget || !selectedParty || !editReceiptDate || editReceiptM.isPending || editReceiptTotal <= 0 || editReceiptTotal + 0.0001 < editReceiptApplied}
+            disabled={editReceiptM.isPending}
           >
             Save Changes
           </Button>

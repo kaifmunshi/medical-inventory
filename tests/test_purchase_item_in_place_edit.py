@@ -154,10 +154,13 @@ class PurchaseItemInPlaceEditTest(unittest.TestCase):
         )
 
         self.session.refresh(purchase_item)
+        self.session.refresh(purchase)
         self.session.refresh(item)
         self.session.refresh(lot)
         self.session.refresh(other_batch)
 
+        self.assertEqual(purchase.subtotal_amount, 154)
+        self.assertEqual(purchase.total_amount, 154)
         self.assertEqual(purchase_item.expiry_date, "2027-12-31")
         self.assertEqual(purchase_item.rack_number, 4)
         self.assertEqual(purchase_item.sealed_qty, 9)
@@ -189,6 +192,83 @@ class PurchaseItemInPlaceEditTest(unittest.TestCase):
         self.assertEqual(len(movements), 1)
         self.assertEqual(movements[0].delta, 1)
         self.assertEqual(movements[0].reason, "PURCHASE_EDIT")
+
+    def test_expiry_only_edit_recomputes_stale_line_total_before_paid_validation(self):
+        _product, purchase, purchase_item, item, lot, _other_batch = self.seed_purchase_batch()
+        purchase_item.line_total = 0
+        purchase.subtotal_amount = 160
+        purchase.total_amount = 160
+        purchase.paid_amount = 160
+        purchase.payment_status = "PAID"
+        self.session.add(purchase_item)
+        self.session.add(purchase)
+        self.session.commit()
+
+        purchases.update_purchase_items_in_place(
+            self.session,
+            purchase,
+            [self.edit_payload(purchase_item, expiry_date="2027-10-31")],
+        )
+
+        self.session.refresh(purchase)
+        self.session.refresh(purchase_item)
+        self.session.refresh(item)
+        self.session.refresh(lot)
+        self.assertEqual(purchase_item.expiry_date, "2027-10-31")
+        self.assertEqual(purchase_item.line_total, 160)
+        self.assertEqual(purchase.subtotal_amount, 160)
+        self.assertEqual(purchase.total_amount, 160)
+        self.assertEqual(item.expiry_date, "2027-10-31")
+        self.assertEqual(lot.expiry_date, "2027-10-31")
+
+    def test_rate_reduction_below_paid_amount_is_rejected_without_commit(self):
+        _product, purchase, purchase_item, item, lot, _other_batch = self.seed_purchase_batch()
+        purchase.subtotal_amount = 160
+        purchase.total_amount = 160
+        purchase.paid_amount = 150
+        purchase.payment_status = "PARTIAL"
+        self.session.add(purchase)
+        self.session.commit()
+
+        with self.assertRaises(HTTPException) as err:
+            purchases.update_purchase_items_in_place(
+                self.session,
+                purchase,
+                [self.edit_payload(purchase_item, cost_price=10)],
+            )
+
+        self.assertEqual(err.exception.status_code, 400)
+        self.assertIn("reduce total below settled amount", err.exception.detail)
+        self.session.rollback()
+        self.session.refresh(purchase)
+        self.session.refresh(purchase_item)
+        self.session.refresh(item)
+        self.session.refresh(lot)
+        self.assertEqual(purchase.total_amount, 160)
+        self.assertEqual(purchase_item.cost_price, 20)
+        self.assertEqual(purchase_item.line_total, 160)
+        self.assertEqual(item.cost_price, 20)
+        self.assertEqual(lot.cost_price, 20)
+
+    def test_in_place_edit_rejects_blank_expiry(self):
+        _product, purchase, purchase_item, item, lot, _other_batch = self.seed_purchase_batch()
+
+        with self.assertRaises(HTTPException) as err:
+            purchases.update_purchase_items_in_place(
+                self.session,
+                purchase,
+                [self.edit_payload(purchase_item, expiry_date="")],
+            )
+
+        self.assertEqual(err.exception.status_code, 400)
+        self.assertIn("expiry date is required", err.exception.detail)
+        self.session.rollback()
+        self.session.refresh(purchase_item)
+        self.session.refresh(item)
+        self.session.refresh(lot)
+        self.assertEqual(purchase_item.expiry_date, "2027-01-31")
+        self.assertEqual(item.expiry_date, "2027-01-31")
+        self.assertEqual(lot.expiry_date, "2027-01-31")
 
     def test_in_place_edit_rejects_product_identity_change(self):
         _product, purchase, purchase_item, _item, _lot, _other_batch = self.seed_purchase_batch()

@@ -507,6 +507,15 @@ export default function Inventory() {
     },
   })
 
+  function saveProductMaster() {
+    if (mSaveProduct.isPending || mDeleteProduct.isPending) return
+    if (!productForm.name.trim()) {
+      toast.push('Product name is required', 'warning')
+      return
+    }
+    mSaveProduct.mutate()
+  }
+
   const mDeleteProduct = useMutation({
     mutationFn: (id: number) => deleteProduct(id),
     onSuccess: () => {
@@ -1274,8 +1283,8 @@ export default function Inventory() {
           <Button onClick={() => setProductOpen(false)}>Cancel</Button>
           <Button
             variant="contained"
-            onClick={() => mSaveProduct.mutate()}
-            disabled={!productForm.name.trim() || mSaveProduct.isPending || mDeleteProduct.isPending}
+            onClick={saveProductMaster}
+            disabled={mSaveProduct.isPending || mDeleteProduct.isPending}
           >
             {mSaveProduct.isPending ? 'Saving...' : 'Save Product'}
           </Button>

@@ -1170,8 +1170,9 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         if has_manual_receipts:
             total_cash = round2(sum(as_f(getattr(p, "cash_amount", 0.0)) for p in pays))
             total_online = round2(sum(as_f(getattr(p, "online_amount", 0.0)) for p in pays))
+            total_writeoff = round2(sum(as_f(getattr(p, "writeoff_amount", 0.0)) for p in pays if bool(getattr(p, "is_writeoff", False))))
             cash, online = total_cash, total_online
-            credit = round2(max(0.0, total - (cash + online)))
+            credit = round2(max(0.0, total - (cash + online + total_writeoff)))
             if cash > 0 and online > 0:
                 effective_payment_mode = "split"
             elif cash > 0:
@@ -1239,23 +1240,27 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         if not customer_link_only_edit:
             assert_financial_year_unlocked(session, bill_ts, context="Bill edit")
         paid_now = round2(cash + online)
-        if has_manual_receipts and paid_now > round2(total) + 0.0001:
+        writeoff_now = round2(
+            sum(as_f(getattr(p, "writeoff_amount", 0.0)) for p in pays if bool(getattr(p, "is_writeoff", False)))
+        ) if has_manual_receipts else 0.0
+        covered_now = round2(paid_now + writeoff_now)
+        if has_manual_receipts and covered_now > round2(total) + 0.0001:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Cannot reduce bill total below received amount. "
-                    f"Received={paid_now:.2f}, New total={round2(total):.2f}"
+                    f"Cannot reduce bill total below received/write-off amount. "
+                    f"Settled={covered_now:.2f}, New total={round2(total):.2f}"
                 ),
             )
-        has_credit_component = round2(total - paid_now) > 0
-        is_credit = False if total <= 0 else effective_payment_mode == "credit" or has_credit_component
+        has_credit_component = round2(total - covered_now) > 0
+        is_credit = False if total <= 0 else (has_credit_component if has_manual_receipts else effective_payment_mode == "credit" or has_credit_component)
         if total <= 0:
             status = "PAID"
             paid_at = bill_ts
-        elif paid_now <= 0:
+        elif covered_now <= 0:
             status = "UNPAID"
             paid_at = None
-        elif paid_now + 0.0001 < total:
+        elif covered_now + 0.0001 < total:
             status = "PARTIAL"
             paid_at = None if has_manual_receipts else bill_ts
         else:
@@ -1330,9 +1335,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             b.is_credit = is_credit
             b.payment_status = status
             b.paid_amount = paid_amount
-            b.writeoff_amount = round2(
-                sum(as_f(getattr(p, "writeoff_amount", 0.0)) for p in pays if not bool(getattr(p, "is_deleted", False)))
-            ) if has_manual_receipts else 0.0
+            b.writeoff_amount = writeoff_now if has_manual_receipts else 0.0
             b.paid_at = paid_at
 
             session.add(b)

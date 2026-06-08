@@ -688,7 +688,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         delta = int(new_qty - old_qty)
         identity_changed = _purchase_line_identity_changed(raw, item)
         old_expiry = clean_date(item.expiry_date)
-        new_expiry = clean_date(raw.expiry_date)
+        new_expiry = require_expiry_date(raw.expiry_date, context=raw.product_name or "Purchase item")
         rack_number = int(raw.rack_number if raw.rack_number is not None else item.rack_number or 0)
 
         if identity_changed:
@@ -709,17 +709,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
             )
 
         line_rounding = round2(raw.rounding_adjustment)
-        financial_inputs_changed = (
-            qty != int(item.sealed_qty or 0)
-            or abs(round2(raw.cost_price) - round2(item.cost_price)) > 0.001
-            or abs(round2(raw.discount_amount) - round2(item.discount_amount)) > 0.001
-            or abs(line_rounding - round2(item.rounding_adjustment)) > 0.001
-        )
-        line_total = (
-            round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
-            if financial_inputs_changed
-            else round2(item.line_total)
-        )
+        line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
         effective_cost = round2(line_total / new_qty) if new_qty > 0 else round2(raw.cost_price)
         subtotal_amount = round2(subtotal_amount + line_total)
 
@@ -791,7 +781,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         + float(purchase.rounding_adjustment or 0)
     )
     if float(purchase.paid_amount or 0) + float(purchase.writeoff_amount or 0) > float(purchase.total_amount or 0) + 0.0001:
-        raise HTTPException(status_code=400, detail="Edited items reduce total below received amount")
+        raise HTTPException(status_code=400, detail="Edited items reduce total below settled amount")
 
     purchase.updated_at = ts
     session.add(purchase)
@@ -2312,7 +2302,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     "opening_placeholder_movement": opening_placeholder_movement,
                     "convert_opening_to_purchase": convert_opening_to_purchase,
                     "stock_source": stock_source,
-                    "expiry_date": clean_date(raw.expiry_date),
+                    "expiry_date": require_expiry_date(raw.expiry_date, context=raw.product_name or "Purchase item"),
                     "rack_number": rack_number,
                     "sealed_qty": qty,
                     "free_qty": free_qty,
@@ -2487,7 +2477,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             + float(purchase.rounding_adjustment or 0)
         )
         if float(purchase.paid_amount or 0) + float(purchase.writeoff_amount or 0) > float(purchase.total_amount or 0) + 0.0001:
-            raise HTTPException(status_code=400, detail="Edited items reduce total below received amount")
+            raise HTTPException(status_code=400, detail="Edited items reduce total below settled amount")
 
         session.add(purchase)
         log_audit(

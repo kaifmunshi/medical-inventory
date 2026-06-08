@@ -312,6 +312,19 @@ export default function JournalEntryPage() {
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Ledger creation failed'), 'error'),
   })
 
+  function saveLedgerFromDialog() {
+    if (createLedgerM.isPending) return
+    if (!newLedgerName.trim()) {
+      toast.push('Ledger name is required', 'warning')
+      return
+    }
+    if (!Number(newLedgerGroupId || 0)) {
+      toast.push('Select a ledger group before saving', 'warning')
+      return
+    }
+    createLedgerM.mutate()
+  }
+
   function startEdit(voucher: PostedVoucher) {
     setEditingId(Number(voucher.id))
     setVoucherDate(String(voucher.voucher_date || '').slice(0, 10) || todayYmd())
@@ -486,12 +499,12 @@ export default function JournalEntryPage() {
                 Credit
               </Button>
               {editingId ? <Button variant="outlined" onClick={resetForm}>New</Button> : null}
-              <Button
-                startIcon={<SaveIcon />}
-                variant="contained"
-                onClick={() => saveM.mutate()}
-                disabled={saveM.isPending || !isBalanced}
-              >
+	              <Button
+	                startIcon={<SaveIcon />}
+	                variant="contained"
+	                onClick={() => saveM.mutate()}
+	                disabled={saveM.isPending}
+	              >
                 {saveM.isPending ? 'Saving...' : editingId ? 'Update' : 'Save'}
               </Button>
             </Stack>
@@ -644,12 +657,12 @@ export default function JournalEntryPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={resetLedgerDialog} disabled={createLedgerM.isPending}>Cancel</Button>
-          <Button
-            startIcon={<SaveIcon />}
-            variant="contained"
-            onClick={() => createLedgerM.mutate()}
-            disabled={createLedgerM.isPending || !newLedgerName.trim() || !Number(newLedgerGroupId || 0)}
-          >
+	          <Button
+	            startIcon={<SaveIcon />}
+	            variant="contained"
+	            onClick={saveLedgerFromDialog}
+	            disabled={createLedgerM.isPending}
+	          >
             {createLedgerM.isPending ? 'Saving...' : 'Save'}
           </Button>
         </DialogActions>

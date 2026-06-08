@@ -938,13 +938,14 @@ def create_exchange(payload: ExchangeCreate):
         )
 
         session.add(ret)
-        session.commit()
+        session.flush()
         session.refresh(ret)
 
         # return items: stock IN + ledger
         for itm, qty in ret_items_map.values():
             itm.stock += qty
             session.add(itm)
+            apply_archive_rules(session, itm)
             sync_lot_quantity_for_item(session, itm)
 
             add_movement(
@@ -971,7 +972,7 @@ def create_exchange(payload: ExchangeCreate):
                 return_id=ret.id, item_id=itm.id, item_name=itm.name,
                 mrp=itm.mrp, quantity=qty, line_total=round2(line_total)
             ))
-        session.commit()
+        session.flush()
 
         # create new bill (exchange)
         # In exchange, part of bill value can be settled by returned items.
@@ -1006,7 +1007,7 @@ def create_exchange(payload: ExchangeCreate):
             paid_at=paid_at,
         )
         session.add(b)
-        session.commit()
+        session.flush()
         session.refresh(b)
 
         # new items: stock OUT + ledger
@@ -1015,6 +1016,7 @@ def create_exchange(payload: ExchangeCreate):
                 raise HTTPException(status_code=400, detail=f"Insufficient stock during exchange for {itm.name}")
             itm.stock -= qty
             session.add(itm)
+            apply_archive_rules(session, itm)
             sync_lot_quantity_for_item(session, itm)
 
             add_movement(
@@ -1031,7 +1033,7 @@ def create_exchange(payload: ExchangeCreate):
                 bill_id=b.id, item_id=itm.id, item_name=itm.name,
                 mrp=itm.mrp, quantity=qty, line_total=round2(qty * itm.mrp)
             ))
-        session.commit()
+        session.flush()
 
         ret_items = session.exec(select(ReturnItem).where(ReturnItem.return_id == ret.id)).all()
         bill_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()

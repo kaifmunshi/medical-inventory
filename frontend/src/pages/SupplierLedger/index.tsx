@@ -970,6 +970,10 @@ export default function SupplierLedgerPage() {
       toast.push('Every purchase item needs a product name', 'error')
       return
     }
+    if (cleaned.some((item) => !item.expiry_date)) {
+      toast.push('Every purchase item needs an expiry date', 'error')
+      return
+    }
     if (cleaned.some((item) => Number(item.sealed_qty || 0) < 0 || Number(item.free_qty || 0) < 0)) {
       toast.push('Qty and free qty cannot be negative', 'error')
       return

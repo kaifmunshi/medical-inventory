@@ -32,6 +32,7 @@ import {
   listCashbookEntries,
   type CashbookEntry,
 } from '../services/cashbook'
+import { useToast } from '../components/ui/Toaster'
 
 function formatExpiry(exp?: string | null) {
   if (!exp) return '-'
@@ -66,6 +67,7 @@ async function fetchAllInventoryRows() {
 export default function Dashboard() {
   const { from, to } = todayRange()
   const qc = useQueryClient()
+  const toast = useToast()
 
   const [openLow, setOpenLow] = useState(false)
   const [openExp, setOpenExp] = useState(false)
@@ -431,9 +433,19 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
     },
+    onError: (err: any) => {
+      toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to add cashbook entry'), 'error')
+    },
   })
 
-  const canAddCashbook = Number(cbAmount || 0) > 0 && !mAddCashbook.isPending
+  function saveCashbookShortcut() {
+    if (mAddCashbook.isPending) return
+    if (Number(cbAmount || 0) <= 0) {
+      toast.push('Enter an amount greater than 0 before saving', 'warning')
+      return
+    }
+    mAddCashbook.mutate()
+  }
 
   return (
     <Stack gap={2}>
@@ -779,7 +791,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
 
             <Stack direction="row" justifyContent="flex-end" gap={1} mt={1}>
               <Button onClick={() => setOpenCashbook(false)}>Cancel</Button>
-              <Button variant="contained" onClick={() => mAddCashbook.mutate()} disabled={!canAddCashbook}>
+              <Button variant="contained" onClick={saveCashbookShortcut} disabled={mAddCashbook.isPending}>
                 {mAddCashbook.isPending ? 'Saving...' : 'Save'}
               </Button>
             </Stack>

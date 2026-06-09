@@ -48,6 +48,11 @@ export async function updateBill(id: number, payload: BillUpdate) {
   return data as Bill
 }
 
+export async function mapBillCustomer(id: number, payload: { customer_id?: number; party_id?: number; notes?: string }) {
+  const { data } = await api.patch(`/billing/${id}/customer`, payload)
+  return data as Bill
+}
+
 // ---------- Read single Bill (response) ----------
 export interface BillItem {
   item_id: number

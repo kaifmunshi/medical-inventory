@@ -998,6 +998,84 @@ class BillUpdateIn(BaseModel):
     notes: Optional[str] = None
 
 
+class BillCustomerMapIn(BaseModel):
+    customer_id: Optional[int] = None
+    party_id: Optional[int] = None
+    notes: Optional[str] = None
+
+
+def bill_to_out(session, b: Bill) -> BillOut:
+    items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+    return BillOut(
+        id=b.id,
+        date_time=b.date_time,
+        customer_id=getattr(b, "customer_id", None),
+        party_id=getattr(b, "party_id", None),
+        discount_percent=b.discount_percent,
+        subtotal=b.subtotal,
+        total_amount=b.total_amount,
+        payment_mode=b.payment_mode,
+        payment_cash=b.payment_cash,
+        payment_online=b.payment_online,
+        notes=b.notes,
+        is_credit=b.is_credit,
+        payment_status=b.payment_status,
+        paid_amount=b.paid_amount,
+        writeoff_amount=getattr(b, "writeoff_amount", 0.0),
+        paid_at=b.paid_at,
+        is_deleted=b.is_deleted,
+        deleted_at=b.deleted_at,
+        items=[bill_item_to_out(session, i) for i in items],
+    )
+
+
+@router.patch("/{bill_id}/customer", response_model=BillOut)
+def map_unmapped_credit_bill_customer(bill_id: int, payload: BillCustomerMapIn):
+    require_min_role("MANAGER", context="Credit bill customer mapping")
+    if not (int(payload.customer_id or 0) > 0 or int(payload.party_id or 0) > 0):
+        raise HTTPException(status_code=400, detail="Customer is required")
+
+    with get_session() as session:
+        b = session.get(Bill, bill_id)
+        if not b:
+            raise HTTPException(status_code=404, detail="Bill not found")
+        if is_deleted_bill(b):
+            raise HTTPException(status_code=400, detail="Deleted bill cannot be mapped")
+        if int(getattr(b, "customer_id", 0) or 0) > 0 or int(getattr(b, "party_id", 0) or 0) > 0:
+            raise HTTPException(status_code=400, detail="Bill is already mapped to a customer")
+
+        status = str(getattr(b, "payment_status", "") or "").upper()
+        is_credit_bill = (
+            bool(getattr(b, "is_credit", False))
+            or str(getattr(b, "payment_mode", "") or "").lower() == "credit"
+            or status in {"UNPAID", "PARTIAL"}
+            or bill_outstanding_amount(b) > 0.0001
+        )
+        if not is_credit_bill:
+            raise HTTPException(status_code=400, detail="Only unmapped credit bills can be mapped here")
+
+        linked_customer_id, linked_party_id = resolve_bill_party_links(
+            session,
+            customer_id=payload.customer_id,
+            party_id=payload.party_id,
+            notes=payload.notes if payload.notes is not None else b.notes,
+        )
+        if not (int(linked_customer_id or 0) > 0 or int(linked_party_id or 0) > 0):
+            raise HTTPException(status_code=400, detail="Customer not found")
+
+        b.customer_id = linked_customer_id
+        b.party_id = linked_party_id
+        if payload.notes is not None:
+            b.notes = payload.notes
+        session.add(b)
+        session.commit()
+        session.refresh(b)
+        sync_bill_vouchers(session, b)
+        session.commit()
+        session.refresh(b)
+        return bill_to_out(session, b)
+
+
 @router.put("/{bill_id}", response_model=BillOut)
 def update_bill(bill_id: int, payload: BillUpdateIn):
     require_min_role("MANAGER", context="Bill edit")

@@ -20,7 +20,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useToast } from '../ui/Toaster'
 import { listItemsPage } from '../../services/inventory'
 import { createCustomer, fetchCustomers } from '../../services/customers'
-import { updateBill } from '../../services/billing'
+import { mapBillCustomer, updateBill } from '../../services/billing'
 import { openPack } from '../../services/lots'
 import type { Customer } from '../../lib/types'
 import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
@@ -230,6 +230,25 @@ function customerIdentity(c: Customer | null | undefined): string {
   const idNum = Number((c as any).id)
   if (Number.isFinite(idNum) && idNum > 0) return `id:${idNum}`
   return `tmp:${normText(c.name)}|${normText(c.phone)}|${normText(c.address_line)}`
+}
+
+function billIsCreditLike(bill: any) {
+  const status = String(bill?.payment_status || '').toUpperCase()
+  const pending = Number(bill?.total_amount || 0) - Number(bill?.paid_amount || 0) - Number(bill?.writeoff_amount || 0)
+  return Boolean(bill?.is_credit) || String(bill?.payment_mode || '').toLowerCase() === 'credit' || status === 'UNPAID' || status === 'PARTIAL' || pending > 0.0001
+}
+
+function billItemsMatchPayload(bill: any, payloadItems: Array<{ item_id: number; quantity: number; custom_unit_price?: number }>) {
+  const fromBill = (bill?.items || []).map((it: any) => ({
+    item_id: Number(it.item_id),
+    quantity: Number(it.quantity || 0),
+    custom_unit_price: round2(Number(it.quantity || 0) > 0 ? Number(it.line_total || 0) / Number(it.quantity || 0) : Number(it.mrp || 0)),
+  }))
+  const normalize = (rows: Array<{ item_id: number; quantity: number; custom_unit_price?: number }>) =>
+    rows
+      .map((it) => [Number(it.item_id), Number(it.quantity || 0), round2(Number(it.custom_unit_price || 0))] as const)
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2])
+  return JSON.stringify(normalize(fromBill)) === JSON.stringify(normalize(payloadItems))
 }
 
 const GRID_INPUT_SX = {
@@ -962,6 +981,27 @@ export default function BillEditDialog({
         payload.payment_cash = 0
         payload.payment_credit = round2(finalForSubmit - Number(payload.payment_online || 0))
         if (payload.payment_credit < 0) throw new Error('Online amount cannot be greater than final amount')
+      }
+
+      const selectedCustomerId = Number(editSelectedCustomer?.id || 0)
+      const originalDateOnly = normalizeDateInput(toLocalDateInput(bill?.date_time || bill?.created_at))
+      const customerOnlyMapping = (
+        selectedCustomerId > 0 &&
+        Number(bill?.customer_id || 0) <= 0 &&
+        Number(bill?.party_id || 0) <= 0 &&
+        billIsCreditLike(bill) &&
+        billItemsMatchPayload(bill, cleanedItems) &&
+        round2(finalForSubmit) === round2(Number(bill?.total_amount || 0)) &&
+        normalizeDateInput(editDateTime) === originalDateOnly &&
+        String(editPaymentMode || '') === String(editOriginalPaymentMode || '') &&
+        round2(Number(payload.payment_cash || 0)) === round2(Number(bill?.payment_cash || 0)) &&
+        round2(Number(payload.payment_online || 0)) === round2(Number(bill?.payment_online || 0))
+      )
+      if (customerOnlyMapping) {
+        return mapBillCustomer(editBillId, {
+          customer_id: selectedCustomerId,
+          notes: editEffectiveNotes || undefined,
+        })
       }
 
       return updateBill(editBillId, payload)

@@ -16,6 +16,7 @@ import {
   Stack,
   TableSortLabel,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
@@ -119,6 +120,31 @@ function MoneyCell({
   )
 }
 
+function formatLedgerDateTime(raw: string | undefined | null) {
+  const text = String(raw || '').trim()
+  if (!text) return { date: '-', time: '' }
+  const normalized = text.replace(' ', 'T')
+  const datePart = normalized.slice(0, 10)
+  const timePart = normalized.includes('T') ? normalized.split('T')[1]?.slice(0, 5) || '' : ''
+  let date = datePart
+  try {
+    const parsed = new Date(`${datePart}T00:00:00`)
+    if (!Number.isNaN(parsed.getTime())) {
+      date = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(parsed)
+    }
+  } catch {
+    date = datePart
+  }
+  let time = timePart
+  if (/^\d{2}:\d{2}$/.test(timePart)) {
+    const [hh, mm] = timePart.split(':').map(Number)
+    const suffix = hh >= 12 ? 'PM' : 'AM'
+    const hour = hh % 12 || 12
+    time = `${hour}:${String(mm).padStart(2, '0')} ${suffix}`
+  }
+  return { date, time }
+}
+
 function CollapsibleLedgerSection({
   title,
   open,
@@ -133,7 +159,7 @@ function CollapsibleLedgerSection({
   children: ReactNode
 }) {
   return (
-    <Paper sx={{ p: 2 }}>
+    <Paper sx={{ p: 2, minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
       <Stack
         direction={{ xs: 'column', sm: 'row' }}
         justifyContent="space-between"
@@ -156,7 +182,7 @@ function CollapsibleLedgerSection({
           </Stack>
         ) : null}
       </Stack>
-      <Collapse in={open} timeout="auto" unmountOnExit={false}>
+      <Collapse in={open} timeout="auto" unmountOnExit sx={{ minWidth: 0, maxWidth: '100%' }}>
         {children}
       </Collapse>
     </Paper>
@@ -165,8 +191,13 @@ function CollapsibleLedgerSection({
 
 const billGridSx = {
   overflowX: 'auto',
+  width: '100%',
+  maxWidth: '100%',
+  minWidth: 0,
   '& .customer-ledger-grid': {
     minWidth: 960,
+    width: '100%',
+    maxWidth: '100%',
     tableLayout: 'fixed',
   },
   '& .customer-ledger-grid th': {
@@ -198,15 +229,15 @@ const billGridSx = {
 const receiptGridSx = {
   ...billGridSx,
   '& .customer-ledger-grid': {
-    minWidth: 1040,
+    minWidth: 980,
     tableLayout: 'fixed',
   },
-  '& .receipt-col': { width: 126 },
-  '& .date-col': { width: 118 },
-  '& .mode-col': { width: 88 },
-  '& .amount-col': { width: 92, textAlign: 'right' },
-  '& .allocation-col': { width: 188, whiteSpace: 'normal', wordBreak: 'break-word' },
-  '& .action-col': { width: 180, textAlign: 'right' },
+  '& .receipt-col': { width: 118 },
+  '& .date-col': { width: 98 },
+  '& .mode-col': { width: 78 },
+  '& .amount-col': { width: 82, textAlign: 'right' },
+  '& .allocation-col': { width: 150, maxWidth: 150, minWidth: 0 },
+  '& .action-col': { width: 136, textAlign: 'right' },
 } as const
 
 type ReceiptHistoryRow = {
@@ -1440,6 +1471,7 @@ export default function CustomerLedgerPage() {
             <tbody>
               {sortedReceiptHistory.map((receipt) => {
                 const isExpanded = Boolean(expandedReceipts[receipt.id])
+                const whenParts = formatLedgerDateTime(receipt.when)
                 const rowClass = receipt.isDeleted
                   ? 'receipt-deleted'
                   : Number(receipt.onAccount || 0) > 0
@@ -1458,12 +1490,17 @@ export default function CustomerLedgerPage() {
                       </td>
                       <td>
                         <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
-                          <Typography fontWeight={800}>{receipt.source} #{receipt.receiptId}</Typography>
+                          <Typography variant="body2" fontWeight={700} lineHeight={1.2}>{receipt.source} #{receipt.receiptId}</Typography>
                           {receipt.isDeleted ? <Chip size="small" color="error" variant="outlined" label="Deleted" /> : null}
                         </Stack>
                       </td>
                       <td className="date-col">
-                        <Typography variant="body2">{receipt.when || '-'}</Typography>
+                        <Stack gap={0.1}>
+                          <Typography variant="body2" fontWeight={700} lineHeight={1.15}>{whenParts.date}</Typography>
+                          {whenParts.time ? (
+                            <Typography variant="caption" color="text.secondary" lineHeight={1.1}>{whenParts.time}</Typography>
+                          ) : null}
+                        </Stack>
                       </td>
                       <td>
                         {modeChip(receipt.mode)}
@@ -1474,49 +1511,90 @@ export default function CustomerLedgerPage() {
                       <td className="amount-col"><MoneyCell value={receipt.adjusted} tone="paid" /></td>
                       <td className="amount-col"><MoneyCell value={receipt.onAccount} tone={Number(receipt.onAccount || 0) > 0 ? 'total' : 'paid'} /></td>
                       <td className="allocation-col">
-                        <Typography variant="body2" className="clip-text">{receipt.allocation}</Typography>
+                        <Tooltip title={receipt.allocation || '-'} placement="top" arrow>
+                          <Typography
+                            variant="body2"
+                            className="clip-text"
+                            sx={{ maxWidth: '100%', minWidth: 0 }}
+                          >
+                            {receipt.allocation}
+                          </Typography>
+                        </Tooltip>
                       </td>
                       <td align="right">
                         <Stack direction="row" gap={0.5} justifyContent="flex-end" alignItems="center">
+                          {receipt.sourceType === 'party_receipt' && !receipt.isDeleted && Number(receipt.adjusted || 0) <= 0 && Number(receipt.onAccount || 0) > 0 ? (
+                            <Tooltip title="Delete advance payment" arrow>
+                              <span>
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  color="error"
+                                  onClick={() => setDeleteTarget(receipt)}
+                                  disabled={deleteReceiptM.isPending}
+                                  sx={{ minWidth: 58, px: 1 }}
+                                >
+                                  Delete
+                                </Button>
+                              </span>
+                            </Tooltip>
+                          ) : null}
                           {receipt.sourceType === 'party_receipt' && receipt.isDeleted ? (
-                            <IconButton
-                              size="small"
-                              color="success"
-                              onClick={() => setRecoverReceiptTarget(receipt)}
-                              disabled={recoverReceiptM.isPending}
-                            >
-                              <RestoreIcon fontSize="small" />
-                            </IconButton>
+                            <Tooltip title="Recover receipt" arrow>
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  color="success"
+                                  onClick={() => setRecoverReceiptTarget(receipt)}
+                                  disabled={recoverReceiptM.isPending}
+                                >
+                                  <RestoreIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
                           ) : null}
                           {receipt.sourceType === 'party_receipt' && !receipt.isDeleted ? (
-                            <IconButton
-                              size="small"
-                              color="primary"
-                              onClick={() => openEditReceipt(receipt)}
-                              disabled={editReceiptM.isPending}
-                            >
-                              <EditIcon fontSize="small" />
-                            </IconButton>
+                            <Tooltip title="Edit receipt" arrow>
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  color="primary"
+                                  onClick={() => openEditReceipt(receipt)}
+                                  disabled={editReceiptM.isPending}
+                                >
+                                  <EditIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
                           ) : null}
                           {receipt.sourceType === 'party_receipt' && !receipt.isDeleted && Number(receipt.onAccount || 0) > 0 ? (
-                            <Button
-                              size="small"
-                              variant="outlined"
-                              onClick={() => openApplyAdvance(receipt)}
-                              disabled={applyReceiptM.isPending}
-                            >
-                              Apply
-                            </Button>
+                            <Tooltip title="Apply advance to open bills" arrow>
+                              <span>
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  onClick={() => openApplyAdvance(receipt)}
+                                  disabled={applyReceiptM.isPending}
+                                  sx={{ minWidth: 54, px: 1 }}
+                                >
+                                  Apply
+                                </Button>
+                              </span>
+                            </Tooltip>
                           ) : null}
-                          {!receipt.isDeleted ? (
-                            <IconButton
-                              size="small"
-                              color="error"
-                              onClick={() => setDeleteTarget(receipt)}
-                              disabled={deleteReceiptM.isPending}
-                            >
-                              <DeleteIcon fontSize="small" />
-                            </IconButton>
+                          {!receipt.isDeleted && !(receipt.sourceType === 'party_receipt' && Number(receipt.adjusted || 0) <= 0 && Number(receipt.onAccount || 0) > 0) ? (
+                            <Tooltip title={receipt.sourceType === 'party_receipt' ? 'Delete receipt' : 'Delete bill payment'} arrow>
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  color="error"
+                                  onClick={() => setDeleteTarget(receipt)}
+                                  disabled={deleteReceiptM.isPending}
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
                           ) : null}
                         </Stack>
                       </td>
@@ -1922,17 +2000,27 @@ export default function CustomerLedgerPage() {
       </Dialog>
 
       <Dialog open={Boolean(deleteTarget)} onClose={() => !deleteReceiptM.isPending && setDeleteTarget(null)} fullWidth maxWidth="xs">
-        <DialogTitle>{deleteTarget?.sourceType === 'party_receipt' ? 'Delete Receipt' : 'Delete Bill Payment'}</DialogTitle>
+        <DialogTitle>
+          {deleteTarget?.sourceType === 'party_receipt' && Number(deleteTarget?.adjusted || 0) <= 0 && Number(deleteTarget?.onAccount || 0) > 0
+            ? 'Delete Advance Payment'
+            : deleteTarget?.sourceType === 'party_receipt'
+              ? 'Delete Receipt'
+              : 'Delete Bill Payment'}
+        </DialogTitle>
         <DialogContent dividers>
           <Stack gap={1}>
             <Typography>
               {deleteTarget?.source || 'Receipt'} #{deleteTarget?.receiptId} for Rs {money(Number(deleteTarget?.total || 0))}
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              Linked bill balances and statuses will be recalculated.
+              {deleteTarget?.sourceType === 'party_receipt' && Number(deleteTarget?.adjusted || 0) <= 0 && Number(deleteTarget?.onAccount || 0) > 0
+                ? 'This removes the unused advance from the customer ledger and cash/bank receipt history.'
+                : deleteTarget?.sourceType === 'party_receipt'
+                  ? 'This deletes the full receipt. Any bill allocations from this receipt will be reversed, and bill balances/statuses will be recalculated.'
+                  : 'This deletes the direct bill payment, and the bill balance/status will be recalculated.'}
             </Typography>
             {deleteReceiptM.isError ? (
-              <Typography color="error">{(deleteReceiptM.error as any)?.message || 'Delete failed'}</Typography>
+              <Typography color="error">{(deleteReceiptM.error as any)?.response?.data?.detail || (deleteReceiptM.error as any)?.message || 'Delete failed'}</Typography>
             ) : null}
           </Stack>
         </DialogContent>

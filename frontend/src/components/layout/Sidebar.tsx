@@ -87,7 +87,8 @@ export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed =
         component="aside"
         sx={{
           width: isCollapsed ? 88 : 252,
-          height: '100%',
+          height: { xs: '100%', md: '100dvh' },
+          minHeight: { xs: '100%', md: '100dvh' },
           display: 'flex',
           flexDirection: 'column',
           py: 1.5,
@@ -266,7 +267,8 @@ export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed =
           top: 0,
           width: collapsed ? 88 : 252,
           minWidth: collapsed ? 88 : 252,
-          height: '100vh',
+          height: '100dvh',
+          minHeight: '100dvh',
           alignSelf: 'flex-start',
           flexShrink: 0,
           overflow: 'hidden',

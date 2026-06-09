@@ -647,6 +647,28 @@ def _purchase_line_identity_changed(raw: PurchaseItemIn, item: PurchaseItem) -> 
     return False
 
 
+def purchase_item_matches_raw(raw: PurchaseItemIn, item: PurchaseItem) -> bool:
+    raw_product_id = int(raw.product_id or 0)
+    if raw_product_id and raw_product_id != int(item.product_id or 0):
+        return False
+    try:
+        raw_expiry = require_expiry_date(raw.expiry_date, context=raw.product_name or "Purchase item")
+    except HTTPException:
+        return False
+    return (
+        (clean_text(raw.product_name) or "") == (clean_text(item.product_name) or "")
+        and (clean_text(raw.brand) or "") == (clean_text(item.brand) or "")
+        and raw_expiry == (clean_date(item.expiry_date) or "")
+        and int(raw.rack_number if raw.rack_number is not None else item.rack_number or 0) == int(item.rack_number or 0)
+        and int(raw.sealed_qty or 0) == int(item.sealed_qty or 0)
+        and int(raw.free_qty or 0) == int(item.free_qty or 0)
+        and round2(raw.cost_price) == round2(item.cost_price)
+        and round2(raw.mrp) == round2(item.mrp)
+        and round2(raw.discount_amount) == round2(item.discount_amount)
+        and round2(raw.rounding_adjustment) == round2(item.rounding_adjustment)
+    )
+
+
 def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[PurchaseItemIn]) -> PurchaseOut:
     """Safely adjust existing purchase lines without recreating sold batches."""
     existing_items = get_purchase_items(session, int(purchase.id))
@@ -2227,8 +2249,30 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
         if can_update_purchase_items_in_place(existing_items, payload.items):
             return update_purchase_items_in_place(session, purchase, payload.items)
 
+        existing_by_id = {int(item.id or 0): item for item in existing_items}
+        raw_existing_ids: List[int] = []
+        for raw in payload.items:
+            raw_id = _purchase_item_edit_id(raw)
+            if raw_id is None:
+                continue
+            if raw_id not in existing_by_id:
+                raise HTTPException(status_code=400, detail=f"Purchase item #{raw_id} does not belong to this purchase")
+            if raw_id in raw_existing_ids:
+                raise HTTPException(status_code=400, detail=f"Purchase item #{raw_id} was submitted more than once")
+            if not purchase_item_matches_raw(raw, existing_by_id[raw_id]):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Purchase item #{raw_id} has changes. Save edits to existing rows separately "
+                        "before adding or removing purchase rows."
+                    ),
+                )
+            raw_existing_ids.append(raw_id)
+        raw_existing_id_set = set(raw_existing_ids)
+        removed_existing_items = [item for item in existing_items if int(item.id or 0) not in raw_existing_id_set]
+
         touched: List[tuple[PurchaseItem, Item]] = []
-        for item in existing_items:
+        for item in removed_existing_items:
             if purchase_item_stock_source(item) == STOCK_SOURCE_ATTACHED:
                 if not item.inventory_item_id:
                     raise HTTPException(status_code=400, detail=f"Purchase item #{item.id} is missing stock linkage")
@@ -2242,6 +2286,11 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
         subtotal_amount = 0.0
         prepared_items: List[Dict[str, Any]] = []
         for raw in payload.items:
+            purchase_item_id = _purchase_item_edit_id(raw)
+            if purchase_item_id is not None:
+                subtotal_amount = round2(subtotal_amount + float(existing_by_id[purchase_item_id].line_total or 0))
+                continue
+
             qty, free_qty, total_qty = validate_purchase_line_quantities(raw)
             if round2(raw.cost_price) < 0:
                 raise HTTPException(status_code=400, detail="rate cannot be negative")

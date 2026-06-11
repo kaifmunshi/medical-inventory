@@ -411,6 +411,115 @@ def create_data_repair_backup(label: str) -> str:
     return str(backup_path)
 
 
+def auto_repair_credit_return_bill_lines() -> tuple[int, str | None]:
+    """Reconstruct legacy bill lines that were reduced or zeroed after credit returns."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    try:
+        exchange_return_ids = {
+            int(row["return_id"])
+            for row in conn.execute("SELECT return_id FROM exchangerecord").fetchall()
+            if row["return_id"] is not None
+        }
+        credit_returns_by_bill: dict[int, list[sqlite3.Row]] = {}
+        for row in conn.execute(
+            'SELECT id, source_bill_id, subtotal_return FROM "return" '
+            'WHERE source_bill_id IS NOT NULL AND COALESCE(refund_cash, 0) = 0 AND COALESCE(refund_online, 0) = 0'
+        ).fetchall():
+            if int(row["id"]) in exchange_return_ids:
+                continue
+            credit_returns_by_bill.setdefault(int(row["source_bill_id"]), []).append(row)
+
+        plans: list[tuple[int, list[tuple[int, float]]]] = []
+        for bill_id, returns in credit_returns_by_bill.items():
+            bill = conn.execute("SELECT total_amount FROM bill WHERE id = ?", (bill_id,)).fetchone()
+            rows = conn.execute(
+                "SELECT id, item_id, quantity, mrp, line_total FROM billitem WHERE bill_id = ? ORDER BY id",
+                (bill_id,),
+            ).fetchall()
+            if not bill or not rows:
+                continue
+
+            credit_total = round(sum(float(row["subtotal_return"] or 0) for row in returns), 2)
+            target_total = round(float(bill["total_amount"] or 0) + credit_total, 2)
+            saved_total = round(sum(float(row["line_total"] or 0) for row in rows), 2)
+            if abs(saved_total - target_total) <= 0.011:
+                continue
+
+            return_ids = [int(row["id"]) for row in returns]
+            placeholders = ",".join("?" for _ in return_ids)
+            returned_rows = conn.execute(
+                f"SELECT item_id, SUM(quantity) AS qty, SUM(line_total) AS value "
+                f"FROM returnitem WHERE return_id IN ({placeholders}) GROUP BY item_id",
+                return_ids,
+            ).fetchall()
+            credited_value = {int(row["item_id"]): float(row["value"] or 0) for row in returned_rows}
+            credited_qty = {int(row["item_id"]): int(row["qty"] or 0) for row in returned_rows}
+
+            saved_by_item: dict[int, float] = {}
+            qty_by_item: dict[int, int] = {}
+            mrp_by_item: dict[int, float] = {}
+            rows_by_item: dict[int, list[sqlite3.Row]] = {}
+            for row in rows:
+                iid = int(row["item_id"])
+                rows_by_item.setdefault(iid, []).append(row)
+                saved_by_item[iid] = saved_by_item.get(iid, 0.0) + float(row["line_total"] or 0)
+                qty_by_item[iid] = qty_by_item.get(iid, 0) + int(row["quantity"] or 0)
+                mrp_by_item[iid] = mrp_by_item.get(iid, 0.0) + float(row["mrp"] or 0) * int(row["quantity"] or 0)
+
+            item_ids = list(rows_by_item)
+            remaining_ids = [iid for iid in item_ids if qty_by_item[iid] > credited_qty.get(iid, 0)]
+            allocation_ids = remaining_ids or item_ids
+            residual = round(max(0.0, target_total - sum(credited_value.values())), 2)
+            weights = {iid: max(0.0, saved_by_item[iid] - credited_value.get(iid, 0.0)) for iid in allocation_ids}
+            if sum(weights.values()) <= 0.0001:
+                weights = {iid: max(0.0, mrp_by_item[iid]) for iid in allocation_ids}
+            weight_total = sum(weights.values())
+            allocated = {iid: 0.0 for iid in item_ids}
+            running = 0.0
+            for iid in allocation_ids[:-1]:
+                amount = round(residual * weights.get(iid, 0.0) / weight_total, 2) if weight_total > 0 else 0.0
+                allocated[iid] = amount
+                running = round(running + amount, 2)
+            if allocation_ids:
+                allocated[allocation_ids[-1]] = round(max(0.0, residual - running), 2)
+
+            updates: list[tuple[int, float]] = []
+            for iid in item_ids:
+                item_total = round(credited_value.get(iid, 0.0) + allocated.get(iid, 0.0), 2)
+                item_rows = rows_by_item[iid]
+                row_weight_total = sum(max(0.0, float(row["mrp"] or 0) * int(row["quantity"] or 0)) for row in item_rows)
+                row_running = 0.0
+                for row in item_rows[:-1]:
+                    weight = max(0.0, float(row["mrp"] or 0) * int(row["quantity"] or 0))
+                    amount = round(item_total * weight / row_weight_total, 2) if row_weight_total > 0 else 0.0
+                    updates.append((int(row["id"]), amount))
+                    row_running = round(row_running + amount, 2)
+                updates.append((int(item_rows[-1]["id"]), round(max(0.0, item_total - row_running), 2)))
+            plans.append((bill_id, updates))
+
+        if not plans:
+            return 0, None
+
+        backup_path = create_data_repair_backup("credit_return_bill_lines_v1")
+        ts = _now_ts()
+        for bill_id, updates in plans:
+            for bill_item_id, line_total in updates:
+                conn.execute("UPDATE billitem SET line_total = ? WHERE id = ?", (line_total, bill_item_id))
+            conn.execute(
+                "INSERT INTO auditlog (event_ts, entity_type, entity_id, action, note, details_json, actor) "
+                "VALUES (?, 'BILL', ?, 'DATA_REPAIR', ?, ?, 'migration')",
+                (ts, bill_id, f"Reconstructed bill #{bill_id} lines after legacy credit returns", json.dumps({"backup": backup_path})),
+            )
+        conn.commit()
+        return len(plans), backup_path
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def repair_purchase_item_lot_links(session) -> tuple[int, int, str | None]:
     """
     Relink purchase items to their exact inventory lot when the batch anchor is unambiguous.
@@ -2989,6 +3098,27 @@ def migrate_db():
             text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=client_repair_key),
         ).first()
         if not client_repair_done:
+            session.commit()
+
+        # ---------- one-time repair: legacy bill lines after credit returns ----------
+        credit_line_repair_key = "repair_credit_return_bill_lines_v1"
+        credit_line_repair_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=credit_line_repair_key),
+        ).first()
+        if not credit_line_repair_done:
+            session.commit()
+            fixed_count, backup_path = auto_repair_credit_return_bill_lines()
+            session.exec(
+                text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=credit_line_repair_key,
+                    value=f"done;fixed:{fixed_count};backup:{backup_path or ''}",
+                    ts=_now_ts(),
+                ),
+            )
             session.commit()
             ts_repair = _now_ts()
             loose_syncs, loose_stock_repairs, bill_total_repairs, voucher_syncs, backup_path, warning_count = (

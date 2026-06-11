@@ -111,7 +111,7 @@ function typeChipProps(type: string) {
     return { label: 'Opening', sx: { ...baseSx, bgcolor: 'info.light', color: 'info.dark' } }
   }
   if (t === 'RETURN') {
-    return { label: 'Return', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
+    return { label: 'Sales Return', sx: { ...baseSx, bgcolor: 'warning.light', color: 'warning.dark' } }
   }
   if (t === 'SPLIT') {
     return { label: 'Split', sx: { ...baseSx, bgcolor: '#9fe3b0', color: '#124b19' } }
@@ -139,7 +139,7 @@ const typeFilterOptions = [
   { value: 'WITHDRAWAL', label: 'Withdrawal' },
   { value: 'PAYMENT', label: 'Payment' },
   { value: 'CONTRA', label: 'Contra' },
-  { value: 'RETURN', label: 'Return' },
+  { value: 'RETURN', label: 'Sales Return' },
   { value: 'SPLIT', label: 'Split' },
 ]
 
@@ -310,12 +310,10 @@ function computeBillProration(bill: any) {
   return { discPct, taxPct, factor }
 }
 
-function chargedLine(bill: any, mrp: number, qty: number) {
-  const { discPct, taxPct, factor } = computeBillProration(bill)
-  const lineSub = Number(mrp) * Number(qty)
-  const afterDisc = lineSub * (1 - discPct / 100)
-  const afterTax = afterDisc * (1 + taxPct / 100)
-  return round2(afterTax * factor)
+function chargedLine(bill: any, item: any) {
+  if (item?.line_total !== undefined && item?.line_total !== null) return round2(Number(item.line_total || 0))
+  const { factor } = computeBillProration(bill)
+  return round2(Number(item?.mrp || 0) * Number(item?.quantity || 0) * factor)
 }
 
 function currentFinancialYearStart(ymd: string) {
@@ -667,7 +665,7 @@ export default function CashbookPage() {
         amount: Number(r.refund_cash || 0),
         note: exchangeByReturnId.has(Number(r.id))
           ? `Cash refund in exchange #${exchangeByReturnId.get(Number(r.id))?.id ?? ''}`
-          : `Cash return #${r.id}`,
+          : `Cash sales return #${r.id}`,
         source: 'RETURN' as const,
       }))
   }, [qDayReturns.data, qDayExchanges.data])
@@ -688,7 +686,7 @@ export default function CashbookPage() {
         amount: Number(r.refund_cash || 0),
         note: exchangeByReturnId.has(Number(r.id))
           ? `Cash refund in exchange #${exchangeByReturnId.get(Number(r.id))?.id ?? ''}`
-          : `Cash return #${r.id}`,
+          : `Cash sales return #${r.id}`,
         source: 'RETURN' as const,
       }))
   }, [qAllReturns.data, qAllExchanges.data])
@@ -1286,7 +1284,7 @@ export default function CashbookPage() {
                         >
                           {t === 'OPENING' ? '' : isIn ? '+' : '-'}Rs {money(row.amount)}
                         </TableCell>
-                        <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'PARTY_RECEIPT' ? 'Customer receipt' : row.source === 'PURCHASE_PAYMENT' ? 'Purchase' : row.source === 'RETURN' ? 'Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
+                        <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'PARTY_RECEIPT' ? 'Customer receipt' : row.source === 'PURCHASE_PAYMENT' ? 'Purchase' : row.source === 'RETURN' ? 'Sales Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
                         <TableCell align="right">
                           {row.source === 'CASHBOOK' ? (
                             <Stack direction="row" spacing={0.5} justifyContent="flex-end">
@@ -1413,6 +1411,7 @@ export default function CashbookPage() {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
+                      <th>SP</th>
                       <th>Line Total</th>
                     </tr>
                   </thead>
@@ -1421,6 +1420,7 @@ export default function CashbookPage() {
                       const name = it.item_name || it.name || it.item?.name || `#${it.item_id}`
                       const qty = Number(it.quantity)
                       const mrp = Number(it.mrp)
+                      const lineTotal = chargedLine(billDetail, it)
                       return (
                         <tr key={idx}>
                           <td>
@@ -1433,14 +1433,15 @@ export default function CashbookPage() {
                           </td>
                           <td>{qty}</td>
                           <td>{money(mrp)}</td>
-                          <td>{money(chargedLine(billDetail, mrp, qty))}</td>
+                          <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>
+                          <td>{money(lineTotal)}</td>
                         </tr>
                       )
                     })}
 
                     {(billDetail.items || []).length === 0 && (
                       <tr>
-                        <td colSpan={4}>
+                        <td colSpan={5}>
                           <Box p={2} color="text.secondary">
                             No items.
                           </Box>

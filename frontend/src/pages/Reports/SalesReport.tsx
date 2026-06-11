@@ -124,14 +124,10 @@ function computeBillProration(bill: any) {
   return { discPct, taxPct, computedTotal, finalTotal, factor }
 }
 
-function chargedLine(bill: any, mrp: number, qty: number) {
-  const { discPct, taxPct, factor } = computeBillProration(bill)
-
-  const lineSub = Number(mrp) * Number(qty)
-  const afterDisc = lineSub * (1 - discPct / 100)
-  const afterTax = afterDisc * (1 + taxPct / 100)
-
-  return round2(afterTax * factor)
+function chargedLine(bill: any, item: any) {
+  if (item?.line_total !== undefined && item?.line_total !== null) return round2(Number(item.line_total || 0))
+  const { factor } = computeBillProration(bill)
+  return round2(Number(item?.mrp || 0) * Number(item?.quantity || 0) * factor)
 }
 
 export default function SalesReport(props: {
@@ -574,6 +570,7 @@ export default function SalesReport(props: {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
+                      <th>SP</th>
                       <th>Line Total</th>
                     </tr>
                   </thead>
@@ -582,6 +579,7 @@ export default function SalesReport(props: {
                       const name = it.item_name || it.name || it.item?.name || `#${it.item_id}`
                       const qty = Number(it.quantity)
                       const mrp = Number(it.mrp)
+                      const lineTotal = chargedLine(detail, it)
                       return (
                         <tr key={idx}>
                           <td>
@@ -594,16 +592,15 @@ export default function SalesReport(props: {
                           </td>
                           <td>{qty} {itemUnitLabel(it)}</td>
                           <td>{money(mrp)}</td>
-
-                          {/* ✅ FIX: show charged share, not raw mrp*qty */}
-                          <td>{money(chargedLine(detail, mrp, qty))}</td>
+                          <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>
+                          <td>{money(lineTotal)}</td>
                         </tr>
                       )
                     })}
 
                     {(detail.items || []).length === 0 && (
                       <tr>
-                        <td colSpan={4}>
+                        <td colSpan={5}>
                           <Box p={2} color="text.secondary">
                             No items.
                           </Box>

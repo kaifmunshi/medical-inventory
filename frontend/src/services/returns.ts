@@ -1,6 +1,7 @@
 // src/services/returns.ts
 import api from './api'
 import { PRODUCT_SEARCH_MIN_CHARS } from '../lib/constants'
+import type { AuditLog } from '../lib/types'
 
 // --- Types (match backend schema exactly) ---
 export type ReturnLine = { item_id: number; quantity: number }
@@ -72,6 +73,8 @@ export type ReturnSummaryRow = {
   item_name: string
   brand?: string | null
   mrp: number
+  charged_unit_price?: number
+  remaining_value?: number
   sold: number
   already_returned: number
   remaining: number
@@ -162,6 +165,11 @@ export async function updateReturnRefundMode(
 ) {
   const { data } = await api.patch(`/returns/${id}/refund`, body)
   return data as ReturnRecord
+}
+
+export async function getReturnHistory(id: number) {
+  const { data } = await api.get<AuditLog[]>(`/returns/${id}/history`)
+  return data
 }
 
 export async function getExchangeByReturn(returnId: number) {

@@ -8,16 +8,20 @@ import {
   Divider,
   IconButton,
   Link,
+  MenuItem,
+  Paper,
   Stack,
+  TextField,
   Tooltip,
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { listReturns, getReturn, getExchangeByReturn, updateReturnRefundMode } from '../../services/returns'
+import { listReturns, getReturn, getExchangeByReturn, getReturnHistory, updateReturnRefundMode } from '../../services/returns'
 import { getBill } from '../../services/billing'
 import { useToast } from '../../components/ui/Toaster'
+import { useUserSession } from '../../components/session/UserSessionProvider'
 
 function toCSV(rows: string[][]) {
   return rows
@@ -97,14 +101,11 @@ function discountPerUnit(it: any) {
   return Math.max(0, Number(it?.mrp || 0) - soldUnitPrice(it))
 }
 
-function billMrpSum(bill: any) {
-  return (bill?.items || []).reduce((sum: number, it: any) => sum + Number(it?.mrp || 0) * Number(it?.quantity || 0), 0)
-}
-
 function billSoldUnitPrice(bill: any, it: any) {
-  const mrpSum = billMrpSum(bill)
-  const total = Number(bill?.total_amount || 0)
-  if (mrpSum > 0 && total > 0) return Number(it?.mrp || 0) * (total / mrpSum)
+  const source = (bill?.items || []).find((item: any) => Number(item?.item_id) === Number(it?.item_id))
+  const qty = Number(source?.quantity || 0)
+  const lineTotal = Number(source?.line_total || 0)
+  if (qty > 0 && lineTotal > 0) return lineTotal / qty
   return soldUnitPrice(it)
 }
 
@@ -116,6 +117,19 @@ function actualRefundTotal(row: any) {
   const cashOnline = Number(row?.refund_cash || 0) + Number(row?.refund_online || 0)
   if (cashOnline > 0) return cashOnline
   return Number(row?.subtotal_return || 0)
+}
+
+function auditPaymentSummary(detailsJson?: string | null) {
+  try {
+    const details = JSON.parse(String(detailsJson || '{}'))
+    const before = details?.before
+    const after = details?.after
+    if (!before || !after) return null
+    const summary = (value: any) => `${String(value?.refund_mode || '-').toUpperCase()} | Cash ₹${money(value?.refund_cash)} | Online ₹${money(value?.refund_online)}`
+    return `${summary(before)} → ${summary(after)}`
+  } catch {
+    return null
+  }
 }
 
 function adjustedLineRefund(row: any, items: any[], it: any, salePrice: number) {
@@ -139,6 +153,8 @@ export default function ReturnsReport(props: {
   const { from, to, setExportFn, setExportDisabled } = props
   const toast = useToast()
   const queryClient = useQueryClient()
+  const { hasMinRole } = useUserSession()
+  const canEditPayment = hasMinRole('MANAGER')
 
   // dialog
   const [open, setOpen] = useState(false)
@@ -146,6 +162,10 @@ export default function ReturnsReport(props: {
   const [billDetail, setBillDetail] = useState<any | null>(null)
   const [billReturnItems, setBillReturnItems] = useState<any[]>([])
   const [billOpen, setBillOpen] = useState(false)
+  const [paymentEditOpen, setPaymentEditOpen] = useState(false)
+  const [editMode, setEditMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
+  const [editCash, setEditCash] = useState('0')
+  const [editOnline, setEditOnline] = useState('0')
 
   const qRets = useInfiniteQuery({
     queryKey: ['rpt-returns', from, to],
@@ -155,6 +175,12 @@ export default function ReturnsReport(props: {
       return await listReturns({ from_date: from, to_date: to, limit: 500 })
     },
     getNextPageParam: () => undefined,
+  })
+
+  const historyQ = useQuery({
+    queryKey: ['sales-return-history', detail?.id],
+    queryFn: () => getReturnHistory(Number(detail?.id)),
+    enabled: open && detail?.kind === 'return' && Number(detail?.id) > 0,
   })
 
   const returnsRaw = useMemo(() => {
@@ -234,26 +260,35 @@ export default function ReturnsReport(props: {
       .reduce((sum, ret) => sum + Number(ret?.quantity || 0), 0)
   }
 
-  const mMoveRefundToCredit = useMutation({
-    mutationFn: async (returnId: number) =>
-      updateReturnRefundMode(returnId, {
-        refund_mode: 'credit',
-        refund_cash: 0,
-        refund_online: 0,
-      }),
+  function openPaymentEditor() {
+    if (!detail || detail.kind !== 'return') return
+    const mode = inferReturnRefundMode(detail) as 'cash' | 'online' | 'split' | 'credit'
+    const returnValue = Number(detail.subtotal_return || 0)
+    setEditMode(mode)
+    setEditCash(String(mode === 'cash' ? Number(detail.refund_cash || returnValue) : Number(detail.refund_cash || 0)))
+    setEditOnline(String(mode === 'online' ? Number(detail.refund_online || returnValue) : Number(detail.refund_online || 0)))
+    setPaymentEditOpen(true)
+  }
+
+  const mUpdatePayment = useMutation({
+    mutationFn: async () => {
+      if (!detail?.id) throw new Error('Sales return is not loaded')
+      return updateReturnRefundMode(Number(detail.id), {
+        refund_mode: editMode,
+        refund_cash: editMode === 'cash' || editMode === 'split' ? Number(editCash || 0) : 0,
+        refund_online: editMode === 'online' || editMode === 'split' ? Number(editOnline || 0) : 0,
+      })
+    },
     onSuccess: async (updated) => {
-      setDetail({ kind: 'return', ...updated })
+      setDetail((current: any) => ({ ...current, ...updated, kind: 'return' }))
+      setPaymentEditOpen(false)
       await qRets.refetch()
-      queryClient.invalidateQueries({ queryKey: ['rpt-sales'] })
-      queryClient.invalidateQueries({ queryKey: ['cashbook-day'] })
-      queryClient.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
-      queryClient.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
-      queryClient.invalidateQueries({ queryKey: ['bankbook-day'] })
-      queryClient.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
-      toast.push('Return refund moved to credit', 'success')
+      await historyQ.refetch()
+      queryClient.invalidateQueries()
+      toast.push('Sales return customer payment updated', 'success')
     },
     onError: (err: any) => {
-      toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to move refund to credit'), 'error')
+      toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to update customer payment'), 'error')
     },
   })
 
@@ -261,7 +296,7 @@ export default function ReturnsReport(props: {
   useEffect(() => {
     setExportDisabled(detailRows.length === 0)
     setExportFn(() => () => {
-      const header = ['Return ID', 'Date/Time', 'Lines', 'Refund', 'Refund Mode', 'Notes']
+      const header = ['Sales Return ID', 'Date/Time', 'Lines', 'Refund', 'Refund Mode', 'Notes']
       const body = detailRows.map((r: any) => [r.id, r.date, r.linesCount, r.refund, r.refundMode, r.notes])
 
       const csv = toCSV([header, ...body])
@@ -269,7 +304,7 @@ export default function ReturnsReport(props: {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `returns-report_${from}_to_${to}.csv`
+      a.download = `sales-returns-report_${from}_to_${to}.csv`
       a.click()
       URL.revokeObjectURL(url)
     })
@@ -281,7 +316,7 @@ export default function ReturnsReport(props: {
         <table className="table">
           <thead>
             <tr>
-              <th>Return ID</th>
+              <th>Sales Return ID</th>
               <th>Date/Time</th>
               <th>Lines</th>
               <th>Refund</th>
@@ -338,7 +373,7 @@ export default function ReturnsReport(props: {
       {/* Return detail dialog */}
       <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          {detail?.kind === 'exchange' ? 'Exchange Details' : 'Return Details'}
+          {detail?.kind === 'exchange' ? 'Exchange Details' : 'Sales Return Details'}
           <IconButton onClick={() => setOpen(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -351,7 +386,7 @@ export default function ReturnsReport(props: {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  Return ID: <b>{detail.return_id}</b>
+                  Sales Return ID: <b>{detail.return_id}</b>
                   {' '}| Source Bill:{' '}
                   {detail.source_bill_id ? (
                     <Link component="button" underline="hover" onClick={() => openBillDetail(detail.source_bill_id, detail.return?.items || [])}>
@@ -452,12 +487,15 @@ export default function ReturnsReport(props: {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
+                      <th>SP</th>
                       <th>Line Total</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(detail.bill?.items || []).map((it: any, idx: number) => (
-                      <tr key={`bill-${idx}`}>
+                    {(detail.bill?.items || []).map((it: any, idx: number) => {
+                      const qty = Number(it.quantity || 0)
+                      const lineTotal = Number(it.line_total ?? qty * Number(it.mrp || 0))
+                      return <tr key={`bill-${idx}`}>
                         <td>
                           <Stack gap={0.25}>
                             <Typography variant="body2">{it.item_name || `#${it.item_id}`}</Typography>
@@ -466,11 +504,12 @@ export default function ReturnsReport(props: {
                             </Typography>
                           </Stack>
                         </td>
-                        <td>{Number(it.quantity || 0)} {itemUnitLabel(it)}</td>
+                        <td>{qty} {itemUnitLabel(it)}</td>
                         <td>{money(it.mrp)}</td>
-                        <td>{money(it.line_total ?? Number(it.quantity || 0) * Number(it.mrp || 0))}</td>
+                        <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>
+                        <td>{money(lineTotal)}</td>
                       </tr>
-                    ))}
+                    })}
                   </tbody>
                 </table>
               </Box>
@@ -479,7 +518,7 @@ export default function ReturnsReport(props: {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  Return ID: <b>{detail.id}</b>
+                  Sales Return ID: <b>{detail.id}</b>
                   {' '}| Bill:{' '}
                   {detail.source_bill_id ? (
                     <Link component="button" underline="hover" onClick={() => openBillDetail(detail.source_bill_id, detail.items || [])}>
@@ -491,7 +530,7 @@ export default function ReturnsReport(props: {
                 </Typography>
                 <Stack gap={0.25} alignItems={{ md: 'flex-end' }}>
                   <Typography variant="subtitle1">
-                    Return Date: <b>{formatDateTime(detail.date_time || detail.created_at)}</b>
+                    Sales Return Date: <b>{formatDateTime(detail.date_time || detail.created_at)}</b>
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
                     Bill Date: <b>{formatDateTime(detail.source_bill?.date_time)}</b>
@@ -500,19 +539,24 @@ export default function ReturnsReport(props: {
               </Stack>
 
               <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
+                {(() => {
+                  const mode = inferReturnRefundMode(detail)
+                  const paid = Number(detail.refund_cash || 0) + Number(detail.refund_online || 0)
+                  const credited = mode === 'credit' ? Number(detail.subtotal_return || 0) : 0
+                  return <>
                 <Typography>
-                  Refund Mode: <b>{String(inferReturnRefundMode(detail)).toUpperCase()}</b>
+                  Settlement Mode: <b>{String(mode).toUpperCase()}</b>
                 </Typography>
-                {inferReturnRefundMode(detail) !== 'credit' && detail.source_bill_id ? (
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    onClick={() => mMoveRefundToCredit.mutate(Number(detail.id))}
-                    disabled={mMoveRefundToCredit.isPending}
-                  >
-                    Move Refund To Credit
-                  </Button>
-                ) : null}
+                <Typography>
+                  {mode === 'credit' ? 'Credited to Source Bill' : 'Paid to Customer'}: <b>₹{money(mode === 'credit' ? credited : paid)}</b>
+                  {' '}| Cash ₹{money(detail.refund_cash)} | Online ₹{money(detail.refund_online)}
+                </Typography>
+                  </>
+                })()}
+                <Button size="small" variant="outlined" onClick={openPaymentEditor} disabled={!canEditPayment}>
+                  Edit Customer Payment
+                </Button>
+                {!canEditPayment ? <Typography variant="caption" color="text.secondary">Manager access required to edit.</Typography> : null}
               </Stack>
 
               <Divider />
@@ -574,7 +618,7 @@ export default function ReturnsReport(props: {
 
               <Stack gap={0.5} sx={{ ml: 'auto', maxWidth: 360 }}>
                 <Typography>
-                  Refund:{' '}
+                  {inferReturnRefundMode(detail) === 'credit' ? 'Credit Applied:' : 'Customer Refund:'}{' '}
                   <b>
                     {money(
                       actualRefundTotal(detail) ||
@@ -592,8 +636,79 @@ export default function ReturnsReport(props: {
                   </Typography>
                 ) : null}
               </Stack>
+
+              <Divider />
+              <Stack gap={0.75}>
+                <Typography variant="subtitle2">History</Typography>
+                {historyQ.isLoading ? <Typography color="text.secondary">Loading history…</Typography> : null}
+                {(historyQ.data || []).map((entry) => {
+                  const paymentSummary = auditPaymentSummary(entry.details_json)
+                  return (
+                    <Paper key={entry.id} variant="outlined" sx={{ p: 1.25 }}>
+                      <Typography variant="body2" fontWeight={700}>{entry.note || entry.action}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {formatDateTime(entry.event_ts)} | {entry.actor || 'SYSTEM'}
+                      </Typography>
+                      {paymentSummary ? <Typography variant="body2" sx={{ mt: 0.5 }}>{paymentSummary}</Typography> : null}
+                    </Paper>
+                  )
+                })}
+                {!historyQ.isLoading && (historyQ.data || []).length === 0 ? (
+                  <Typography color="text.secondary">No recorded changes yet.</Typography>
+                ) : null}
+              </Stack>
             </Stack>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={paymentEditOpen} onClose={() => setPaymentEditOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Edit Customer Payment</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} sx={{ pt: 0.5 }}>
+            <Typography variant="body2" color="text.secondary">
+              Sales return value: ₹{money(detail?.subtotal_return)}. Amounts may differ by up to ₹5 for manual rounding.
+            </Typography>
+            <TextField
+              select
+              label="Settlement Mode"
+              value={editMode}
+              onChange={(event) => {
+                const next = event.target.value as 'cash' | 'online' | 'split' | 'credit'
+                const returnValue = String(Number(detail?.subtotal_return || 0))
+                setEditMode(next)
+                if (next === 'cash') { setEditCash(returnValue); setEditOnline('0') }
+                if (next === 'online') { setEditCash('0'); setEditOnline(returnValue) }
+                if (next === 'credit') { setEditCash('0'); setEditOnline('0') }
+              }}
+            >
+              <MenuItem value="cash">Cash</MenuItem>
+              <MenuItem value="online">Online</MenuItem>
+              <MenuItem value="split">Split</MenuItem>
+              {detail?.source_bill_id ? <MenuItem value="credit">Credit to Source Bill</MenuItem> : null}
+            </TextField>
+            {editMode === 'cash' || editMode === 'split' ? (
+              <TextField label="Cash Paid to Customer" type="number" value={editCash} onChange={(event) => setEditCash(event.target.value)} inputProps={{ min: 0, step: 0.01 }} />
+            ) : null}
+            {editMode === 'online' || editMode === 'split' ? (
+              <TextField label="Online Paid to Customer" type="number" value={editOnline} onChange={(event) => setEditOnline(event.target.value)} inputProps={{ min: 0, step: 0.01 }} />
+            ) : null}
+            <Typography variant="body2">
+              Total paid now:{' '}
+              <b>
+                ₹{money(
+                  (editMode === 'cash' || editMode === 'split' ? Number(editCash || 0) : 0)
+                  + (editMode === 'online' || editMode === 'split' ? Number(editOnline || 0) : 0)
+                )}
+              </b>
+            </Typography>
+            <Stack direction="row" justifyContent="flex-end" gap={1}>
+              <Button onClick={() => setPaymentEditOpen(false)} disabled={mUpdatePayment.isPending}>Cancel</Button>
+              <Button variant="contained" onClick={() => mUpdatePayment.mutate()} disabled={mUpdatePayment.isPending}>
+                Save Payment
+              </Button>
+            </Stack>
+          </Stack>
         </DialogContent>
       </Dialog>
 

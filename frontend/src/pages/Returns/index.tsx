@@ -14,6 +14,8 @@ type BillLine = {
   brand?: string | null
   soldQty: number
   mrp: number
+  charged_unit_price?: number
+  remaining_value?: number
 }
 
 type Row = {
@@ -23,6 +25,8 @@ type Row = {
   qty: number
   max: number
   mrp: number
+  charged_unit_price?: number
+  remaining_value?: number
 }
 
 type RefundMode = 'cash' | 'online' | 'credit'
@@ -57,9 +61,6 @@ export default function Returns() {
     enabled: false,
   })
 
-  // full vs partial return detection
-  const isFullReturn = !!bill && rows.length > 0 && rows.every(r => r.qty === r.max)
-
   // proration context from saved bill (used only when partial)
   const proration = useMemo(() => {
     if (!bill) return { computedTotal: 0, finalTotal: 0, factor: 1 }
@@ -71,61 +72,52 @@ export default function Returns() {
     const taxAmt = (afterDisc * Number(bill.tax_percent || 0)) / 100
     const computedTotal = afterDisc + taxAmt
 
-    const finalTotal = Number(bill.total_amount ?? computedTotal)
+    const finalTotal = Number(bill.original_total_amount ?? bill.total_amount ?? computedTotal)
     const factor = computedTotal > 0 ? finalTotal / computedTotal : 1
 
     return { computedTotal, finalTotal, factor }
   }, [bill])
 
-  // charged share for a line (partial only / also used for per-line display always)
-  const chargedLine = (mrp: number, qty: number) => {
+  const savedBillLineTotal = useMemo(() => {
+    const items = (bill?.items || []) as any[]
+    return items.reduce((sum, item) => sum + Number(item.line_total || 0), 0)
+  }, [bill])
+
+  // The saved bill line is the accounting source of truth for a partial return.
+  const chargedLine = (itemId: number, mrp: number, qty: number, chargedUnitPrice?: number, remainingValue?: number, remainingQty?: number) => {
     if (!bill) return 0
-    const sub = Number(mrp) * Number(qty)
-    const afterDisc = sub * (1 - Number(bill.discount_percent || 0) / 100)
-    const afterTax = afterDisc * (1 + Number(bill.tax_percent || 0) / 100)
-    return round2(afterTax * proration.factor)
+    if (remainingValue != null && Number(remainingQty || 0) > 0) {
+      return qty === Number(remainingQty)
+        ? round2(Number(remainingValue))
+        : round2(Number(remainingValue) * Number(qty) / Number(remainingQty))
+    }
+    if (chargedUnitPrice != null && Number.isFinite(Number(chargedUnitPrice))) {
+      return round2(Number(chargedUnitPrice) * Number(qty))
+    }
+    const saved = (bill.items || []).find((item: any) => Number(item.item_id) === Number(itemId))
+    const soldQty = Number(saved?.quantity || 0)
+    const savedTotal = Number(saved?.line_total || 0)
+    if (soldQty > 0 && savedTotal > 0) {
+      const legacyTarget = Number(bill.original_total_amount ?? bill.total_amount ?? savedBillLineTotal)
+      const legacyFactor = savedBillLineTotal > 0
+        ? Math.min(1, legacyTarget / savedBillLineTotal)
+        : 1
+      return round2((savedTotal / soldQty) * Number(qty) * legacyFactor)
+    }
+    return round2(Number(mrp) * Number(qty) * proration.factor)
   }
 
   // refund computation (TOTAL)
-  const refund = isFullReturn
-    ? Number(proration.finalTotal)
-    : rows.reduce((s, r) => s + chargedLine(r.mrp, r.qty), 0)
+  const refund = rows.reduce((s, r) => s + chargedLine(r.item_id, r.mrp, r.qty, r.charged_unit_price, r.remaining_value, r.max), 0)
   const computedRefund = clamp2(refund)
 
-  // ✅ FIX: always compute per-line refund values (even for full return)
-  // If full return, adjust last non-zero line so sum(lines) == finalTotal exactly.
   const lineRefunds = useMemo(() => {
     if (!bill || rows.length === 0) return rows.map(() => 0)
-
-    const base = rows.map(r => (r.qty > 0 ? chargedLine(r.mrp, r.qty) : 0))
-
-    if (!isFullReturn) return base
-
-    const target = round2(Number(proration.finalTotal))
-    const sum = round2(base.reduce((a, b) => a + b, 0))
-    const diff = round2(target - sum)
-
-    if (diff === 0) return base
-
-    // add diff to the last non-zero line (so totals match exactly)
-    const lastIdx = (() => {
-      for (let i = base.length - 1; i >= 0; i--) {
-        if (base[i] !== 0) return i
-      }
-      return -1
-    })()
-
-    if (lastIdx >= 0) {
-      const copy = [...base]
-      copy[lastIdx] = round2(copy[lastIdx] + diff)
-      return copy
-    }
-
-    return base
-  }, [bill, rows, isFullReturn, proration.finalTotal])
+    return rows.map(r => (r.qty > 0 ? chargedLine(r.item_id, r.mrp, r.qty, r.charged_unit_price, r.remaining_value, r.max) : 0))
+  }, [bill, rows])
 
   useEffect(() => {
-    if (!finalTouched) setFinalRefund(round5Nearest(refund))
+    if (!finalTouched) setFinalRefund(clamp2(refund))
   }, [refund, finalTouched])
 
   // ---------- BILL LOADER (NO TOAST HERE) ----------
@@ -182,6 +174,8 @@ export default function Returns() {
           brand: it.brand || it.item_brand || it.item?.brand || summaryById[itemId]?.brand || null,
           soldQty: Number(it.quantity),
           mrp: Number(it.mrp),
+          charged_unit_price: Number(summaryById[itemId]?.charged_unit_price ?? 0) || undefined,
+          remaining_value: Number(summaryById[itemId]?.remaining_value ?? 0),
         }
       })
 
@@ -196,6 +190,8 @@ export default function Returns() {
             qty: 0,
             max: remaining,
             mrp: l.mrp,
+            charged_unit_price: l.charged_unit_price,
+            remaining_value: l.remaining_value,
           }
         })
       )
@@ -251,7 +247,7 @@ export default function Returns() {
       })
     },
     onSuccess: () => {
-      toast.push('Return created', 'success')
+      toast.push('Sales return created', 'success')
 
       setRows(prev => prev.map(r => ({ ...r, qty: 0 })))
       setFinalRefund(0)
@@ -265,7 +261,7 @@ export default function Returns() {
         err?.response?.data?.message ||
         err?.message ||
         'Unknown error'
-      toast.push('Return failed: ' + msg, 'error')
+      toast.push('Sales return failed: ' + msg, 'error')
     },
   })
 
@@ -296,7 +292,7 @@ export default function Returns() {
   }
 
   function soldUnitPrice(row: Row) {
-    return chargedLine(row.mrp, 1)
+    return chargedLine(row.item_id, row.mrp, 1, row.charged_unit_price, row.remaining_value, row.max)
   }
 
   function discountPerUnit(row: Row) {
@@ -305,7 +301,7 @@ export default function Returns() {
 
   return (
     <Stack gap={2}>
-      <Typography variant="h5">Returns</Typography>
+      <Typography variant="h5">Sales Returns</Typography>
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
@@ -468,7 +464,7 @@ export default function Returns() {
                 variant="text"
                 onClick={() => {
                   setFinalTouched(false)
-                  setFinalRefund(round5Nearest(refund))
+                  setFinalRefund(clamp2(refund))
                 }}
               >
                 Reset

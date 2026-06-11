@@ -12,7 +12,7 @@ from backend.controls import assert_financial_year_unlocked
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
-    Item, Bill, BillItem, BillPayment,
+    Item, Bill, BillItem, BillPayment, Return, ExchangeRecord,
     BillCreate, BillOut, BillItemOut,
     Customer, Party, PartyReceipt, ReceiptBillAdjustment,
     StockMovement,  # ✅ NEW
@@ -59,6 +59,63 @@ def bill_line_unit_price(line: Any, item: Item) -> float:
     if price < 0:
         raise HTTPException(status_code=400, detail="custom_unit_price cannot be negative")
     return price
+
+
+def allocate_bill_line_totals(
+    quantities: Dict[int, int],
+    unit_prices: Dict[int, float],
+    target_total: float,
+    requested_line_totals: Optional[Dict[int, float]] = None,
+) -> Dict[int, float]:
+    """Allocate the saved bill total across lines while preserving their price weights."""
+    item_ids = [iid for iid, qty in quantities.items() if as_i(qty) > 0]
+    if not item_ids:
+        return {}
+
+    raw_by_item: Dict[int, float] = {}
+    for iid in item_ids:
+        requested = None if requested_line_totals is None else requested_line_totals.get(iid)
+        raw_by_item[iid] = (
+            max(0.0, as_f(requested))
+            if requested is not None
+            else max(0.0, as_f(unit_prices.get(iid, 0.0))) * as_i(quantities[iid])
+        )
+    raw_total = sum(raw_by_item.values())
+    safe_target = round2(max(0.0, as_f(target_total)))
+    if raw_total <= 0:
+        return {iid: 0.0 for iid in item_ids}
+
+    out: Dict[int, float] = {}
+    running = 0.0
+    for iid in item_ids[:-1]:
+        amount = round2(safe_target * raw_by_item[iid] / raw_total)
+        out[iid] = amount
+        running = round2(running + amount)
+    out[item_ids[-1]] = round2(max(0.0, safe_target - running))
+    return out
+
+
+def bill_credit_return_total(session, bill_id: int) -> float:
+    exchange_return_ids = {
+        int(return_id)
+        for return_id in session.exec(
+            select(ExchangeRecord.return_id).where(ExchangeRecord.source_bill_id == bill_id)
+        ).all()
+        if return_id is not None
+    }
+    total = 0.0
+    for row in session.exec(select(Return).where(Return.source_bill_id == bill_id)).all():
+        if row.id is None or int(row.id) in exchange_return_ids:
+            continue
+        cash = round2(as_f(getattr(row, "refund_cash", 0.0)))
+        online = round2(as_f(getattr(row, "refund_online", 0.0)))
+        if cash <= 0 and online <= 0:
+            total += as_f(getattr(row, "subtotal_return", 0.0))
+    return round2(total)
+
+
+def bill_original_total(session, bill: Bill) -> float:
+    return round2(as_f(bill.total_amount) + bill_credit_return_total(session, int(bill.id or 0)))
 
 
 def iso_date(s: Optional[str]) -> str:
@@ -744,6 +801,8 @@ def get_bill(bill_id: int):
             discount_percent=b.discount_percent,
             subtotal=b.subtotal,
             total_amount=b.total_amount,
+            original_total_amount=bill_original_total(session, b),
+            credit_return_total=bill_credit_return_total(session, int(b.id or 0)),
             payment_mode=b.payment_mode,
             payment_cash=b.payment_cash,
             payment_online=b.payment_online,
@@ -786,6 +845,7 @@ def create_bill(payload: BillCreate):
         # 1) Load items and validate stock
         db_items: Dict[int, Item] = {}
         line_price_by_item: Dict[int, float] = {}
+        requested_line_total_by_item: Dict[int, float] = {}
         subtotal = 0.0
 
         for line in payload.items:
@@ -800,6 +860,11 @@ def create_bill(payload: BillCreate):
             db_items[line.item_id] = itm
             line_price = bill_line_unit_price(line, itm)
             line_price_by_item[line.item_id] = line_price
+            requested_line_total = getattr(line, "line_total", None)
+            if requested_line_total is not None:
+                if as_f(requested_line_total) < 0:
+                    raise HTTPException(status_code=400, detail="line_total cannot be negative")
+                requested_line_total_by_item[line.item_id] = round2(as_f(requested_line_total))
             subtotal += (as_i(line.quantity) * line_price)
 
         subtotal = round2(subtotal)
@@ -807,6 +872,12 @@ def create_bill(payload: BillCreate):
 
         # 2) Use manual override if provided; else computed total
         total = manual_final if manual_final is not None else computed_total
+        saved_line_totals = allocate_bill_line_totals(
+            {line.item_id: as_i(line.quantity) for line in payload.items},
+            line_price_by_item,
+            total,
+            requested_line_total_by_item,
+        )
 
         # 3) Validate payment split (against chosen total) — hardened for None inputs
         pay_cash_in = round2(as_f(getattr(payload, "payment_cash", 0.0)))
@@ -911,7 +982,7 @@ def create_bill(payload: BillCreate):
                     item_name=itm.name,
                     mrp=as_f(itm.mrp),
                     quantity=qty,
-                    line_total=round2(qty * as_f(line_price_by_item.get(itm.id, itm.mrp)))
+                    line_total=saved_line_totals.get(itm.id, round2(qty * as_f(line_price_by_item.get(itm.id, itm.mrp))))
                 )
                 session.add(bi)
 
@@ -982,6 +1053,7 @@ class BillEditItemIn(BaseModel):
     item_id: int
     quantity: int
     custom_unit_price: Optional[float] = None
+    line_total: Optional[float] = None
 
 
 class BillUpdateIn(BaseModel):
@@ -1014,6 +1086,8 @@ def bill_to_out(session, b: Bill) -> BillOut:
         discount_percent=b.discount_percent,
         subtotal=b.subtotal,
         total_amount=b.total_amount,
+        original_total_amount=bill_original_total(session, b),
+        credit_return_total=bill_credit_return_total(session, int(b.id or 0)),
         payment_mode=b.payment_mode,
         payment_cash=b.payment_cash,
         payment_online=b.payment_online,
@@ -1138,6 +1212,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         requested_qty_by_group: Dict[str, int] = {}
         seed_item_by_group: Dict[str, Item] = {}
         unit_price_by_group: Dict[str, float] = {}
+        requested_line_total_by_group: Dict[str, float] = {}
         for line in payload.items:
             qty = as_i(line.quantity)
             if qty <= 0:
@@ -1151,9 +1226,17 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             custom_price = bill_line_unit_price(line, seed)
             if gk not in unit_price_by_group:
                 unit_price_by_group[gk] = custom_price
+            requested_line_total = getattr(line, "line_total", None)
+            if requested_line_total is not None:
+                if as_f(requested_line_total) < 0:
+                    raise HTTPException(status_code=400, detail="line_total cannot be negative")
+                requested_line_total_by_group[gk] = round2(
+                    requested_line_total_by_group.get(gk, 0.0) + as_f(requested_line_total)
+                )
 
         new_qty_by_item: Dict[int, int] = {}
         line_price_by_item: Dict[int, float] = {}
+        requested_line_total_by_item: Dict[int, float] = {}
 
         for gk, requested_qty in requested_qty_by_group.items():
             seed = seed_item_by_group[gk]
@@ -1180,6 +1263,12 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                 take = min(remaining, avail)
                 new_qty_by_item[iid] = new_qty_by_item.get(iid, 0) + as_i(take)
                 line_price_by_item[iid] = as_f(unit_price_by_group.get(gk, getattr(seed, "mrp", 0.0)))
+                if gk in requested_line_total_by_group:
+                    group_total = requested_line_total_by_group[gk]
+                    requested_line_total_by_item[iid] = round2(
+                        requested_line_total_by_item.get(iid, 0.0)
+                        + (group_total * take / requested_qty)
+                    )
                 db_items[iid] = it
                 remaining -= take
 
@@ -1206,7 +1295,15 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             subtotal += unit * as_i(qty)
         subtotal = round2(subtotal)
         computed_total = round2(subtotal * (1 - as_f(payload.discount_percent) / 100.0))
-        total = manual_final if manual_final is not None else computed_total
+        gross_total = manual_final if manual_final is not None else computed_total
+        credit_return_total = bill_credit_return_total(session, int(b.id or 0))
+        total = round2(max(0.0, gross_total - credit_return_total))
+        saved_line_totals = allocate_bill_line_totals(
+            new_qty_by_item,
+            line_price_by_item,
+            gross_total,
+            requested_line_total_by_item,
+        )
 
         pay_cash_in = round2(as_f(payload.payment_cash))
         pay_online_in = round2(as_f(payload.payment_online))
@@ -1291,7 +1388,11 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                 (
                     as_i(it.item_id),
                     as_i(it.quantity),
-                    round2(as_f(getattr(it, "mrp", 0.0))),
+                    round2(
+                        as_f(getattr(it, "line_total", 0.0)) / as_i(it.quantity)
+                        if as_i(it.quantity) > 0
+                        else as_f(getattr(it, "mrp", 0.0))
+                    ),
                 )
                 for it in existing_items
             )
@@ -1382,7 +1483,10 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                     item_name=itm.name,
                     mrp=as_f(itm.mrp),
                     quantity=as_i(qty),
-                    line_total=round2(as_f(line_price_by_item.get(iid, itm.mrp)) * as_i(qty)),
+                    line_total=saved_line_totals.get(
+                        iid,
+                        round2(as_f(line_price_by_item.get(iid, itm.mrp)) * as_i(qty)),
+                    ),
                 ))
 
             if not has_manual_receipts:
@@ -1429,27 +1533,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             raise HTTPException(status_code=500, detail=f"Failed to edit bill: {e}")
 
         items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
-        return BillOut(
-            id=b.id,
-            date_time=b.date_time,
-            customer_id=getattr(b, "customer_id", None),
-            party_id=getattr(b, "party_id", None),
-            discount_percent=b.discount_percent,
-            subtotal=b.subtotal,
-            total_amount=b.total_amount,
-            payment_mode=b.payment_mode,
-            payment_cash=b.payment_cash,
-            payment_online=b.payment_online,
-            notes=b.notes,
-            is_credit=b.is_credit,
-            payment_status=b.payment_status,
-            paid_amount=b.paid_amount,
-            writeoff_amount=getattr(b, "writeoff_amount", 0.0),
-            paid_at=b.paid_at,
-            is_deleted=b.is_deleted,
-            deleted_at=b.deleted_at,
-            items=[bill_item_to_out(session, i) for i in items]
-        )
+        return bill_to_out(session, b)
 
 
 @router.delete("/{bill_id}")

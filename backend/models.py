@@ -257,6 +257,7 @@ class BillItemIn(SQLModel):
     item_id: int
     quantity: int
     custom_unit_price: Optional[float] = None
+    line_total: Optional[float] = None
 
 
 class BillCreate(SQLModel):
@@ -300,6 +301,8 @@ class BillOut(SQLModel):
     discount_percent: float
     subtotal: float
     total_amount: float
+    original_total_amount: Optional[float] = None
+    credit_return_total: float = 0.0
     payment_mode: str
     payment_cash: float
     payment_online: float

@@ -72,14 +72,10 @@ function computeBillProration(bill: any) {
   return { discPct, taxPct, computedTotal, finalTotal, factor }
 }
 
-function chargedLine(bill: any, mrp: number, qty: number) {
-  const { discPct, taxPct, factor } = computeBillProration(bill)
-
-  const lineSub = Number(mrp) * Number(qty)
-  const afterDisc = lineSub * (1 - discPct / 100)
-  const afterTax = afterDisc * (1 + taxPct / 100)
-
-  return round2(afterTax * factor)
+function chargedLine(bill: any, item: any) {
+  if (item?.line_total !== undefined && item?.line_total !== null) return round2(Number(item.line_total || 0))
+  const { factor } = computeBillProration(bill)
+  return round2(Number(item?.mrp || 0) * Number(item?.quantity || 0) * factor)
 }
 
 function lineDiscountPercent(mrp: number, sp: number) {
@@ -904,7 +900,7 @@ export default function CreditBills() {
                       const name = it.item_name || it.name || it.item?.name || `#${it.item_id}`
                       const qty = Number(it.quantity)
                       const mrp = Number(it.mrp)
-                      const lineCharged = chargedLine(detail, mrp, qty)
+                      const lineCharged = chargedLine(detail, it)
                       const sp = qty > 0 ? round2(lineCharged / qty) : 0
                       const lineDiscPct = lineDiscountPercent(mrp, sp)
                       return (
@@ -1275,7 +1271,7 @@ export default function CreditBills() {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  Return ID: <b>{exchangeDetail.return_id}</b> | New Bill ID: <b>{exchangeDetail.new_bill_id}</b>
+                  Sales Return ID: <b>{exchangeDetail.return_id}</b> | New Bill ID: <b>{exchangeDetail.new_bill_id}</b>
                 </Typography>
                 <Typography variant="subtitle1">
                   Date/Time: <b>{exchangeDetail.created_at || exchangeDetail.return?.date_time || '-'}</b>
@@ -1334,18 +1330,22 @@ export default function CreditBills() {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
+                      <th>SP</th>
                       <th>Line Total</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(exchangeDetail.bill?.items || []).map((it: any, idx: number) => (
-                      <tr key={`ex-bill-${idx}`}>
+                    {(exchangeDetail.bill?.items || []).map((it: any, idx: number) => {
+                      const qty = Number(it.quantity || 0)
+                      const lineTotal = Number(it.line_total ?? qty * Number(it.mrp || 0))
+                      return <tr key={`ex-bill-${idx}`}>
                         <td>{it.item_name || `#${it.item_id}`}</td>
-                        <td>{Number(it.quantity || 0)}</td>
+                        <td>{qty}</td>
                         <td>{money(it.mrp)}</td>
-                        <td>{money(it.line_total ?? Number(it.quantity || 0) * Number(it.mrp || 0))}</td>
+                        <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>
+                        <td>{money(lineTotal)}</td>
                       </tr>
-                    ))}
+                    })}
                   </tbody>
                 </table>
               </Box>

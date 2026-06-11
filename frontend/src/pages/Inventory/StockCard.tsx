@@ -179,12 +179,10 @@ function computeBillProration(bill: any) {
   return { discPct, taxPct, factor }
 }
 
-function chargedLine(bill: any, mrp: number, qty: number) {
-  const { discPct, taxPct, factor } = computeBillProration(bill)
-  const lineSub = Number(mrp) * Number(qty)
-  const afterDisc = lineSub * (1 - discPct / 100)
-  const afterTax = afterDisc * (1 + taxPct / 100)
-  return round2(afterTax * factor)
+function chargedLine(bill: any, item: any) {
+  if (item?.line_total !== undefined && item?.line_total !== null) return round2(Number(item.line_total || 0))
+  const { factor } = computeBillProration(bill)
+  return round2(Number(item?.mrp || 0) * Number(item?.quantity || 0) * factor)
 }
 
 function reasonLabel(reason: string) {
@@ -200,7 +198,7 @@ function reasonLabel(reason: string) {
     SALE: 'Sale Out',
     BILL_DELETE: 'Sale Cancel',
     BILL_RECOVER: 'Sale Restore',
-    RETURN: 'Return In',
+    RETURN: 'Sales Return In',
     EXCHANGE_IN: 'Exchange Return',
     EXCHANGE_OUT: 'Exchange Sale',
     ADJUST: 'Stock Adjust',
@@ -1403,7 +1401,7 @@ export default function StockCardPage() {
               <MenuItem value="SALE">Sale</MenuItem>
               <MenuItem value="BILL_DELETE">Sale Cancel</MenuItem>
               <MenuItem value="BILL_RECOVER">Sale Restore</MenuItem>
-              <MenuItem value="RETURN">Return</MenuItem>
+              <MenuItem value="RETURN">Sales Return</MenuItem>
               <MenuItem value="EXCHANGE_IN">Exchange Return</MenuItem>
               <MenuItem value="EXCHANGE_OUT">Exchange Sale</MenuItem>
               <MenuItem value="ADJUST">Adjust</MenuItem>
@@ -1889,6 +1887,7 @@ export default function StockCardPage() {
                     <th style={{ minWidth: 220 }}>Item</th>
                     <th>Qty</th>
                     <th>MRP</th>
+                    <th>SP</th>
                     <th>Line Total</th>
                   </tr>
                 </thead>
@@ -1897,18 +1896,20 @@ export default function StockCardPage() {
                     const itemName = item.item_name || item.name || item.item?.name || `#${item.item_id}`
                     const qty = Number(item.quantity || 0)
                     const mrp = Number(item.mrp || 0)
+                    const lineTotal = chargedLine(billDetail, item)
                     return (
                       <tr key={`bill-item-${index}`}>
                         <td>{itemName}</td>
                         <td>{qty}</td>
                         <td>{money(mrp)}</td>
-                        <td>{money(chargedLine(billDetail, mrp, qty))}</td>
+                        <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>
+                        <td>{money(lineTotal)}</td>
                       </tr>
                     )
                   })}
                   {(billDetail.items || []).length === 0 ? (
                     <tr>
-                      <td colSpan={4}>
+                      <td colSpan={5}>
                         <Box p={2} color="text.secondary">No items.</Box>
                       </td>
                     </tr>

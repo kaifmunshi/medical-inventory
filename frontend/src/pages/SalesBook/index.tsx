@@ -561,10 +561,10 @@ export default function SalesBookPage() {
       for (const r0 of (qReturns.data || []) as any[]) {
         if (!inRange(r0?.date_time, row)) continue
         lines.push({
-          source: 'Return',
+          source: 'Sales Return',
           id: r0.id,
           ts: r0.date_time,
-          note: r0.notes || `Return #${r0.id}`,
+          note: r0.notes || `Sales Return #${r0.id}`,
           amount: Number(r0.refund_cash || 0) + Number(r0.refund_online || 0),
           direction: -1,
         })
@@ -708,7 +708,7 @@ export default function SalesBookPage() {
   }
 
   const pnlTooltip =
-    'P&L = Sales billed - Returns - Cashbook/Bankbook expenses - Purchases. Withdrawals and contra entries affect cash flow, not profit/loss.'
+    'P&L = Sales billed - Sales Returns - Cashbook/Bankbook expenses - Purchases. Withdrawals and contra entries affect cash flow, not profit/loss.'
 
   return (
     <Stack spacing={2}>
@@ -879,7 +879,7 @@ export default function SalesBookPage() {
                         compact={density === 'compact'}
                         onClick={() => setDetail({ row: r0, kind: 'outflow' })}
                         lines={[
-                          { label: 'Returns', value: r0.returns },
+                          { label: 'Sales Returns', value: r0.returns },
                           { label: 'Purchases', value: r0.purchases },
                           { label: 'Expenses', value: r0.expenses },
                           { label: 'Withdrawals', value: r0.withdrawals },
@@ -942,7 +942,7 @@ export default function SalesBookPage() {
                       total={totals.outflow}
                       compact={density === 'compact'}
                       lines={[
-                        { label: 'Returns', value: totals.returns },
+                        { label: 'Sales Returns', value: totals.returns },
                         { label: 'Purchases', value: totals.purchases },
                         { label: 'Expenses', value: totals.expenses },
                         { label: 'Withdrawals', value: totals.withdrawals },

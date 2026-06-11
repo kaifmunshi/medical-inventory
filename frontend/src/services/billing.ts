@@ -81,6 +81,8 @@ export interface Bill {
   discount_percent: number
   subtotal: number
   total_amount: number
+  original_total_amount?: number | null
+  credit_return_total?: number
   payment_mode: 'cash' | 'online' | 'split' | 'credit'
   payment_cash: number
   payment_online: number

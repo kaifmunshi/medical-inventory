@@ -510,10 +510,10 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
             <Grid item xs={12} sm={6} md={3}>
               <Paper sx={cardBase}>
                 <Typography variant="subtitle2" color="text.secondary">
-                  Returns Today
+                  Sales Returns Today
                 </Typography>
                 <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                  ₹{returnsTodayTotal.toFixed(2)}
+                  ₹{(returnsTodayTotal + returnsTodayCredit).toFixed(2)}
                 </Typography>
                 <Typography variant="caption" color="text.secondary">
                   Refunds: Cash ₹{returnsTodayCash.toFixed(2)} • Online ₹{returnsTodayOnline.toFixed(2)} • Credit ₹{(returnsTodayCredit || 0).toFixed(2)}
@@ -910,19 +910,19 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
 
             <Stack direction="row" justifyContent="space-between" mt={1}>
               <Typography variant="body2" color="text.secondary">
-                Returns Today (Refunds)
+                Sales Returns Today (Refunds)
               </Typography>
               <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                ₹{(returnsTodayCredit || 0).toFixed(2)}
+                ₹{returnsTodayTotal.toFixed(2)}
               </Typography>
             </Stack>
 
             <Stack direction="row" justifyContent="space-between" mt={1}>
               <Typography variant="body2" color="text.secondary">
-                Returns Today (Refunds + Credit)
+                Sales Returns Today (Refunds + Credit)
               </Typography>
               <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                ₹{returnsTodayTotal.toFixed(2)}
+                ₹{(returnsTodayTotal + returnsTodayCredit).toFixed(2)}
               </Typography>
             </Stack>
 

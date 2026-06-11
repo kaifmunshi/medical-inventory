@@ -8,7 +8,7 @@ import ItemPicker from '../../components/billing/ItemPicker'
 import BillPickerDialog from '../../components/billing/BillPickerDialog'
 import { useToast } from '../../components/ui/Toaster'
 
-type RetRow = { item_id:number; name:string; brand?: string | null; qty:number; max:number; mrp:number }
+type RetRow = { item_id:number; name:string; brand?: string | null; qty:number; max:number; mrp:number; charged_unit_price?: number; remaining_value?: number }
 type AddRow = { item_id:number; name:string; brand?: string | null; qty:number; mrp:number }
 
 function round2(n:number){ return Math.round(n*100)/100 }
@@ -103,6 +103,8 @@ export default function Exchange() {
         qty: 0,
         max: remaining,
         mrp,
+        charged_unit_price: Number(summaryById[item_id]?.charged_unit_price ?? 0) || undefined,
+        remaining_value: Number(summaryById[item_id]?.remaining_value ?? 0),
       }
     })
 
@@ -118,9 +120,7 @@ export default function Exchange() {
     setRefundOnlineSplit('')
   }
 
-  // ====== full/partial detection and proration context ======
-  const isFullReturn = !!bill && ret.length > 0 && ret.every(r => r.qty === r.max)
-
+  // ====== return pricing context ======
   const pricing = useMemo(() => {
     if (!bill) return { factor: 1, disc: 0, tax: 0, final: 0, computed: 0 }
     const items = (bill.items || []) as any[]
@@ -129,7 +129,7 @@ export default function Exchange() {
     const afterDisc = sub - discAmt
     const taxAmt = afterDisc * Number(bill.tax_percent || 0) / 100
     const computed = afterDisc + taxAmt
-    const final = Number(bill.total_amount ?? computed)
+    const final = Number(bill.original_total_amount ?? bill.total_amount ?? computed)
     const factor = computed > 0 ? final / computed : 1
     return {
       factor,
@@ -140,19 +140,34 @@ export default function Exchange() {
     }
   }, [bill])
 
-  const chargedLine = (mrp:number, qty:number) => {
-    const sub = Number(mrp) * Number(qty)
-    const afterDisc = sub * (1 - pricing.disc/100)
-    const afterTax  = afterDisc * (1 + pricing.tax/100)
-    return round2(afterTax * pricing.factor)
+  const savedBillLineTotal = useMemo(
+    () => (bill?.items || []).reduce((sum: number, item: any) => sum + Number(item.line_total || 0), 0),
+    [bill]
+  )
+
+  const chargedLine = (itemId:number, mrp:number, qty:number, chargedUnitPrice?:number, remainingValue?:number, remainingQty?:number) => {
+    if (remainingValue != null && Number(remainingQty || 0) > 0) {
+      return qty === Number(remainingQty)
+        ? round2(Number(remainingValue))
+        : round2(Number(remainingValue) * Number(qty) / Number(remainingQty))
+    }
+    if (chargedUnitPrice != null && Number.isFinite(Number(chargedUnitPrice))) {
+      return round2(Number(chargedUnitPrice) * Number(qty))
+    }
+    const saved = (bill?.items || []).find((item: any) => Number(item.item_id) === Number(itemId))
+    const soldQty = Number(saved?.quantity || 0)
+    const savedTotal = Number(saved?.line_total || 0)
+    if (soldQty > 0 && savedTotal > 0) {
+      const legacyFactor = savedBillLineTotal > 0 ? Math.min(1, Number(pricing.final || savedBillLineTotal) / savedBillLineTotal) : 1
+      return round2((savedTotal / soldQty) * Number(qty) * legacyFactor)
+    }
+    return round2(Number(mrp) * Number(qty) * pricing.factor)
   }
 
   const returnAmt = useMemo(() => {
     if (!bill) return 0
-    return isFullReturn
-      ? Number(pricing.final)
-      : ret.reduce((s, r) => s + chargedLine(r.mrp, r.qty), 0)
-  }, [bill, isFullReturn, pricing.final, ret])
+    return ret.reduce((s, r) => s + chargedLine(r.item_id, r.mrp, r.qty, r.charged_unit_price, r.remaining_value, r.max), 0)
+  }, [bill, ret])
 
   const newAmt = useMemo(
     () => add.reduce((s, r) => s + r.qty * r.mrp, 0),
@@ -368,10 +383,7 @@ export default function Exchange() {
                     </td>
                     <td>{r.mrp}</td>
                     <td>
-                      {isFullReturn
-                        ? (r.qty ? Number(pricing.final).toFixed(2) : '0.00')
-                        : chargedLine(r.mrp, r.qty).toFixed(2)
-                      }
+                      {chargedLine(r.item_id, r.mrp, r.qty, r.charged_unit_price, r.remaining_value, r.max).toFixed(2)}
                     </td>
                   </tr>
                 ))}

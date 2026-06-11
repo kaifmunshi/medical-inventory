@@ -148,7 +148,7 @@ export default function DayBookPage() {
             <Typography>Journals: {money(summary.journal_total)}</Typography>
             <Typography>Receipts: {money(summary.receipt_total)}</Typography>
             <Typography>Payments: {money(summary.payment_total)}</Typography>
-            <Typography>Returns: {money(summary.return_total)}</Typography>
+            <Typography>Sales Returns: {money(summary.return_total)}</Typography>
             <Typography>Exchanges: {money(summary.exchange_total)}</Typography>
             <Typography>Expenses: {money(summary.expense_total)}</Typography>
             <Typography>Withdrawals: {money(summary.withdrawal_total)}</Typography>

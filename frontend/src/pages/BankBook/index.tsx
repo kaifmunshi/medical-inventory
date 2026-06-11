@@ -319,12 +319,10 @@ function computeBillProration(bill: any) {
   return { discPct, taxPct, factor }
 }
 
-function chargedLine(bill: any, mrp: number, qty: number) {
-  const { discPct, taxPct, factor } = computeBillProration(bill)
-  const lineSub = Number(mrp) * Number(qty)
-  const afterDisc = lineSub * (1 - discPct / 100)
-  const afterTax = afterDisc * (1 + taxPct / 100)
-  return round2(afterTax * factor)
+function chargedLine(bill: any, item: any) {
+  if (item?.line_total !== undefined && item?.line_total !== null) return round2(Number(item.line_total || 0))
+  const { factor } = computeBillProration(bill)
+  return round2(Number(item?.mrp || 0) * Number(item?.quantity || 0) * factor)
 }
 
 const manualModes: Array<{ value: BankbookMode; label: string }> = [
@@ -801,7 +799,7 @@ export default function BankBookPage() {
         mode: 'ONLINE',
         note: exchangeByReturnId.has(Number(r.id))
           ? `Online refund in exchange #${exchangeByReturnId.get(Number(r.id))?.id ?? ''}`
-          : `Online return #${r.id}`,
+          : `Online sales return #${r.id}`,
         source: 'RETURN' as const,
       }))
   }, [qDayReturns.data, qDayExchanges.data])
@@ -822,7 +820,7 @@ export default function BankBookPage() {
         mode: 'ONLINE',
         note: exchangeByReturnId.has(Number(r.id))
           ? `Online refund in exchange #${exchangeByReturnId.get(Number(r.id))?.id ?? ''}`
-          : `Online return #${r.id}`,
+          : `Online sales return #${r.id}`,
         source: 'RETURN' as const,
       }))
   }, [qAllReturns.data, qAllExchanges.data])
@@ -1600,7 +1598,7 @@ export default function BankBookPage() {
                                 : row.source === 'PURCHASE_PAYMENT_CHARGE'
                                   ? 'Bank charges'
                             : row.source === 'RETURN'
-                              ? 'Return'
+                              ? 'Sales Return'
                               : row.source === 'EXCHANGE'
                                 ? 'Exchange'
                                 : row.source === 'CASHBOOK_CONTRA'
@@ -1742,6 +1740,7 @@ export default function BankBookPage() {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
+                      <th>SP</th>
                       <th>Line Total</th>
                     </tr>
                   </thead>
@@ -1750,6 +1749,7 @@ export default function BankBookPage() {
                       const name = it.item_name || it.name || it.item?.name || `#${it.item_id}`
                       const qty = Number(it.quantity)
                       const mrp = Number(it.mrp)
+                      const lineTotal = chargedLine(billDetail, it)
                       return (
                         <tr key={idx}>
                           <td>
@@ -1762,14 +1762,15 @@ export default function BankBookPage() {
                           </td>
                           <td>{qty}</td>
                           <td>{money(mrp)}</td>
-                          <td>{money(chargedLine(billDetail, mrp, qty))}</td>
+                          <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>
+                          <td>{money(lineTotal)}</td>
                         </tr>
                       )
                     })}
 
                     {(billDetail.items || []).length === 0 && (
                       <tr>
-                        <td colSpan={4}>
+                        <td colSpan={5}>
                           <Box p={2} color="text.secondary">
                             No items.
                           </Box>

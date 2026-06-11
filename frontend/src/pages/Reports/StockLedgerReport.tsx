@@ -76,7 +76,7 @@ function reasonLabel(reason: string) {
     SALE: 'Sale',
     BILL_DELETE: 'Sale Cancel',
     BILL_RECOVER: 'Sale Restore',
-    RETURN: 'Return',
+    RETURN: 'Sales Return',
     EXCHANGE_IN: 'Exchange Return',
     EXCHANGE_OUT: 'Exchange Sale',
     ADJUST: 'Stock Adjust',
@@ -401,7 +401,7 @@ export default function StockLedgerReport(props: {
           <MenuItem value="BILL">BILL</MenuItem>
           <MenuItem value="BILL_DELETE">BILL_DELETE</MenuItem>
           <MenuItem value="BILL_RECOVER">BILL_RECOVER</MenuItem>
-          <MenuItem value="RETURN">RETURN</MenuItem>
+          <MenuItem value="RETURN">SALES RETURN</MenuItem>
           <MenuItem value="EXCHANGE_IN">EXCHANGE_IN</MenuItem>
           <MenuItem value="EXCHANGE_OUT">EXCHANGE_OUT</MenuItem>
           <MenuItem value="PACK_OPEN_IN">PACK_OPEN_IN</MenuItem>

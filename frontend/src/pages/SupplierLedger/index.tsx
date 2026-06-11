@@ -165,7 +165,7 @@ function movementReasonLabel(reason?: string | null) {
     OPENING: 'Opening',
     PURCHASE: 'Purchase',
     ADJUST: 'Stock Adjust',
-    RETURN: 'Return',
+    RETURN: 'Sales Return',
     EXCHANGE_IN: 'Exchange Return',
     PACK_OPEN_IN: 'Pack Open In',
   }

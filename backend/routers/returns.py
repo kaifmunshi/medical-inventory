@@ -6,13 +6,15 @@ from pydantic import BaseModel
 from sqlmodel import select
 from datetime import datetime
 from backend.accounting import sync_bill_vouchers
-from backend.controls import assert_financial_year_unlocked
+from backend.controls import assert_financial_year_unlocked, log_audit
+from backend.security import require_min_role
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
     Item, Bill, BillItem,
     Return, ReturnItem,
     ReturnCreate, ReturnOut, ReturnItemOut,
+    AuditLog, AuditLogOut,
     ExchangeCreate,
     ExchangeRecord,
     StockMovement,
@@ -228,35 +230,102 @@ def already_returned_map_for_bill(session, bill_id: int) -> Dict[int, int]:
     return out
 
 
-def charged_unit_map_for_bill(session, bill_id: int) -> Dict[int, float]:
-    """
-    item_id -> effective charged per-unit from the saved bill snapshot.
-    The return UI treats a manual final bill total as a bill-level adjustment,
-    so mirror that here instead of reading old line_total distributions literally.
-    """
+def charged_total_map_for_bill(session, bill_id: int) -> Dict[int, float]:
+    """Item-level charged totals reconciled exactly to the original bill value."""
     bill = session.get(Bill, bill_id)
-    final_total = round2(float(getattr(bill, "total_amount", 0.0) or 0.0)) if bill else 0.0
-    totals: Dict[int, float] = {}
-    qtys: Dict[int, int] = {}
+    current_total = round2(float(getattr(bill, "total_amount", 0.0) or 0.0)) if bill else 0.0
+    credit_total = bill_credit_return_total(session, bill_id)
+    final_total = round2(current_total + credit_total)
     rows = session.exec(select(BillItem).where(BillItem.bill_id == bill_id)).all()
-    mrp_total = round2(
-        sum(
-            float(getattr(bi, "mrp", 0.0) or 0.0) * int(getattr(bi, "quantity", 0) or 0)
-            for bi in rows
-        )
-    )
-    factor = (final_total / mrp_total) if mrp_total > MONEY_EPSILON and final_total > MONEY_EPSILON else 1.0
-
+    saved_by_item: Dict[int, float] = {}
+    qty_by_item: Dict[int, int] = {}
+    mrp_value_by_item: Dict[int, float] = {}
     for bi in rows:
         iid = int(bi.item_id)
         q = int(getattr(bi, "quantity", 0) or 0)
-        totals[iid] = float(totals.get(iid, 0.0)) + (float(getattr(bi, "mrp", 0.0) or 0.0) * q * factor)
-        qtys[iid] = int(qtys.get(iid, 0)) + q
+        line_total = float(getattr(bi, "line_total", 0.0) or 0.0)
+        if line_total <= MONEY_EPSILON:
+            line_total = float(getattr(bi, "mrp", 0.0) or 0.0) * q
+        saved_by_item[iid] = saved_by_item.get(iid, 0.0) + line_total
+        qty_by_item[iid] = qty_by_item.get(iid, 0) + q
+        mrp_value_by_item[iid] = mrp_value_by_item.get(iid, 0.0) + float(getattr(bi, "mrp", 0.0) or 0.0) * q
+
+    saved_line_total = round2(sum(saved_by_item.values()))
+    if abs(saved_line_total - final_total) <= MONEY_EPSILON:
+        return {iid: round2(value) for iid, value in saved_by_item.items()}
+
+    # Legacy credit returns sometimes left bill lines at the post-return value (or zero).
+    # Preserve the exact credited value per item, then allocate only the remaining bill
+    # balance. This never inflates an existing saved SP merely because a return exists.
+    credited_by_item: Dict[int, float] = {}
+    credited_qty_by_item: Dict[int, int] = {}
+    exchange_return_ids = exchange_return_ids_for_bill(session, bill_id)
+    for ret in session.exec(select(Return).where(Return.source_bill_id == bill_id)).all():
+        if ret.id is None or int(ret.id) in exchange_return_ids or infer_refund_mode(ret) != "credit":
+            continue
+        for item in session.exec(select(ReturnItem).where(ReturnItem.return_id == ret.id)).all():
+            iid = int(item.item_id)
+            credited_by_item[iid] = credited_by_item.get(iid, 0.0) + float(item.line_total or 0.0)
+            credited_qty_by_item[iid] = credited_qty_by_item.get(iid, 0) + int(item.quantity or 0)
+
+    floor_total = round2(sum(credited_by_item.values()))
+    residual_target = round2(max(0.0, final_total - floor_total))
+    item_ids = list(saved_by_item.keys())
+    remaining_ids = [
+        iid for iid in item_ids
+        if qty_by_item.get(iid, 0) > credited_qty_by_item.get(iid, 0)
+    ]
+    allocation_ids = remaining_ids or item_ids
+    weights = {
+        iid: max(0.0, saved_by_item.get(iid, 0.0) - credited_by_item.get(iid, 0.0))
+        for iid in allocation_ids
+    }
+    if sum(weights.values()) <= MONEY_EPSILON:
+        weights = {iid: max(0.0, mrp_value_by_item.get(iid, 0.0)) for iid in allocation_ids}
+
+    allocated: Dict[int, float] = {iid: 0.0 for iid in item_ids}
+    weight_total = sum(weights.values())
+    running = 0.0
+    for iid in allocation_ids[:-1]:
+        amount = round2(residual_target * weights.get(iid, 0.0) / weight_total) if weight_total > 0 else 0.0
+        allocated[iid] = amount
+        running = round2(running + amount)
+    if allocation_ids:
+        allocated[allocation_ids[-1]] = round2(max(0.0, residual_target - running))
+
+    totals = {
+        iid: round2(credited_by_item.get(iid, 0.0) + allocated.get(iid, 0.0))
+        for iid in item_ids
+    }
     out: Dict[int, float] = {}
-    for iid, q in qtys.items():
-        if q > 0:
-            out[iid] = round2(float(totals.get(iid, 0.0)) / float(q))
+    running = 0.0
+    for iid in item_ids[:-1]:
+        out[iid] = round2(totals[iid])
+        running = round2(running + out[iid])
+    if item_ids:
+        out[item_ids[-1]] = round2(max(0.0, final_total - running))
     return out
+
+
+def charged_unit_map_for_bill(session, bill_id: int) -> Dict[int, float]:
+    totals = charged_total_map_for_bill(session, bill_id)
+    sold = sold_map_for_bill(session, bill_id)
+    return {
+        iid: round2(total / sold[iid])
+        for iid, total in totals.items()
+        if sold.get(iid, 0) > 0
+    }
+
+
+def remaining_value_map_for_bill(session, bill_id: int) -> Dict[int, float]:
+    remaining = charged_total_map_for_bill(session, bill_id)
+    rows = session.exec(select(Return).where(Return.source_bill_id == bill_id)).all()
+    for row in rows:
+        items = session.exec(select(ReturnItem).where(ReturnItem.return_id == row.id)).all()
+        for item in items:
+            iid = int(item.item_id)
+            remaining[iid] = round2(max(0.0, remaining.get(iid, 0.0) - float(item.line_total or 0.0)))
+    return remaining
 
 
 # -------------------- RETURNS --------------------
@@ -337,6 +406,8 @@ def bill_return_summary(bill_id: int):
 
         sold = sold_map_for_bill(session, bill_id)
         already = already_returned_map_for_bill(session, bill_id)
+        charged_units = charged_unit_map_for_bill(session, bill_id)
+        remaining_values = remaining_value_map_for_bill(session, bill_id)
 
         rows = session.exec(select(BillItem).where(BillItem.bill_id == bill_id)).all()
         out = []
@@ -349,6 +420,8 @@ def bill_return_summary(bill_id: int):
                 "item_name": bi.item_name,
                 "brand": (str(item.brand) if (item := session.get(Item, int(bi.item_id or 0))) and item.brand else None),
                 "mrp": bi.mrp,
+                "charged_unit_price": charged_units.get(int(bi.item_id), round2(float(bi.mrp or 0.0))),
+                "remaining_value": remaining_values.get(int(bi.item_id), 0.0),
                 "sold": s,
                 "already_returned": a,
                 "remaining": remaining,
@@ -399,8 +472,22 @@ def get_return(return_id: int):
         return return_to_out(session, r)
 
 
+@router.get("/{return_id}/history", response_model=List[AuditLogOut])
+def get_return_history(return_id: int):
+    with get_session() as session:
+        if not session.get(Return, return_id):
+            raise HTTPException(status_code=404, detail="Sales return not found")
+        rows = session.exec(
+            select(AuditLog)
+            .where(AuditLog.entity_type == "SALES_RETURN", AuditLog.entity_id == return_id)
+            .order_by(AuditLog.id.desc())
+        ).all()
+        return [AuditLogOut(**row.model_dump()) for row in rows]
+
+
 @router.patch("/{return_id}/refund", response_model=ReturnOut)
 def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
+    require_min_role("MANAGER", context="Sales return payment edit")
     mode = str(payload.refund_mode or "").strip().lower()
     if mode not in {"cash", "online", "split", "credit"}:
         raise HTTPException(status_code=400, detail="Invalid refund_mode")
@@ -418,7 +505,10 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
             raise HTTPException(status_code=400, detail="Exchange return refunds cannot be edited here")
 
         subtotal = round2(float(getattr(r, "subtotal_return", 0.0) or 0.0))
-        old_credit_amount = subtotal if infer_refund_mode(r) == "credit" else 0.0
+        old_mode = infer_refund_mode(r)
+        old_cash = round2(float(getattr(r, "refund_cash", 0.0) or 0.0))
+        old_online = round2(float(getattr(r, "refund_online", 0.0) or 0.0))
+        old_credit_amount = subtotal if old_mode == "credit" else 0.0
 
         if mode == "credit":
             rc, ro = 0.0, 0.0
@@ -441,11 +531,37 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
             if abs(round2(rc + ro) - subtotal) > ROUND_TOLERANCE:
                 raise HTTPException(status_code=400, detail="cash+online deviates from return subtotal")
 
+        if old_mode == mode and old_cash == rc and old_online == ro:
+            return return_to_out(session, r)
+
         r.refund_cash = rc
         r.refund_online = ro
         session.add(r)
         session.flush()
         apply_return_credit_to_bill(session, r, old_credit_amount, new_credit_amount)
+        log_audit(
+            session,
+            entity_type="SALES_RETURN",
+            entity_id=int(r.id or return_id),
+            action="PAYMENT_UPDATE",
+            note=f"Updated customer refund for sales return #{return_id}",
+            details={
+                "before": {
+                    "refund_mode": old_mode,
+                    "refund_cash": old_cash,
+                    "refund_online": old_online,
+                    "total_paid": round2(old_cash + old_online),
+                },
+                "after": {
+                    "refund_mode": mode,
+                    "refund_cash": rc,
+                    "refund_online": ro,
+                    "total_paid": round2(rc + ro),
+                },
+                "return_value": subtotal,
+                "source_bill_id": r.source_bill_id,
+            },
+        )
         session.commit()
         session.refresh(r)
         return return_to_out(session, r)
@@ -552,6 +668,7 @@ def create_return(payload: ReturnCreate):
         sold_lookup: Dict[int, int] = {}
         returned_lookup: Dict[int, int] = {}
         charged_unit_lookup: Dict[int, float] = {}
+        remaining_value_lookup: Dict[int, float] = {}
         bill = None
         disc_pct = 0.0
         tax_pct = 0.0
@@ -567,6 +684,7 @@ def create_return(payload: ReturnCreate):
             sold_lookup = sold_map_for_bill(session, bill.id)
             returned_lookup = already_returned_map_for_bill(session, bill.id)
             charged_unit_lookup = charged_unit_map_for_bill(session, bill.id)
+            remaining_value_lookup = remaining_value_map_for_bill(session, bill.id)
 
             # bill-level proration (mirror frontend)
             try:
@@ -596,6 +714,7 @@ def create_return(payload: ReturnCreate):
         # ----- compute subtotal_return using remaining qty -----
         subtotal_return = 0.0
         db_items: Dict[int, Item] = {}
+        return_line_total_by_item: Dict[int, float] = {}
 
         for line in payload.items:
             if line.quantity <= 0:
@@ -621,8 +740,16 @@ def create_return(payload: ReturnCreate):
 
             qty = int(line.quantity)
             base = float(itm.mrp) * qty
-            if bill and itm.id in charged_unit_lookup:
-                subtotal_return += float(charged_unit_lookup[itm.id]) * qty
+            remaining_qty = max(0, sold_lookup.get(itm.id, 0) - returned_lookup.get(itm.id, 0))
+            if bill and itm.id in remaining_value_lookup and remaining_qty > 0:
+                remaining_value = remaining_value_lookup[itm.id]
+                line_value = remaining_value if qty == remaining_qty else round2(remaining_value * qty / remaining_qty)
+                return_line_total_by_item[itm.id] = line_value
+                subtotal_return += line_value
+            elif bill and itm.id in charged_unit_lookup:
+                line_value = round2(float(charged_unit_lookup[itm.id]) * qty)
+                return_line_total_by_item[itm.id] = line_value
+                subtotal_return += line_value
             elif bill:
                 after_disc = base * (1 - disc_pct / 100.0)
                 after_tax = after_disc * (1 + tax_pct / 100.0)
@@ -702,7 +829,9 @@ def create_return(payload: ReturnCreate):
                     note=f"Return #{r.id}",
                 )
 
-                if bill and itm.id in charged_unit_lookup:
+                if itm.id in return_line_total_by_item:
+                    line_total = return_line_total_by_item[itm.id]
+                elif bill and itm.id in charged_unit_lookup:
                     line_total = float(charged_unit_lookup[itm.id]) * qty
                 else:
                     line_total = float(itm.mrp) * qty
@@ -723,6 +852,25 @@ def create_return(payload: ReturnCreate):
             # If refund was credited to the source bill, adjust that bill's outstanding.
             if payload.refund_mode == "credit" and payload.source_bill_id:
                 apply_return_credit_to_bill(session, r, 0.0, subtotal_return)
+
+            log_audit(
+                session,
+                entity_type="SALES_RETURN",
+                entity_id=int(r.id or 0),
+                action="CREATE",
+                note=f"Created sales return #{r.id}",
+                details={
+                    "source_bill_id": r.source_bill_id,
+                    "return_value": subtotal_return,
+                    "refund_mode": infer_refund_mode(r),
+                    "refund_cash": rc,
+                    "refund_online": ro,
+                    "items": [
+                        {"item_id": int(line.item_id), "quantity": int(line.quantity)}
+                        for line in payload.items
+                    ],
+                },
+            )
 
             session.commit()
             session.refresh(r)
@@ -768,6 +916,7 @@ def create_exchange(payload: ExchangeCreate):
         sold_lookup = {}
         returned_lookup = {}
         charged_unit_lookup = {}
+        remaining_value_lookup = {}
         bill = None
         disc_pct = 0.0
         tax_pct = 0.0
@@ -783,6 +932,7 @@ def create_exchange(payload: ExchangeCreate):
             sold_lookup = sold_map_for_bill(session, bill.id)
             returned_lookup = already_returned_map_for_bill(session, bill.id)
             charged_unit_lookup = charged_unit_map_for_bill(session, bill.id)
+            remaining_value_lookup = remaining_value_map_for_bill(session, bill.id)
 
             try:
                 disc_pct = float(getattr(bill, "discount_percent", 0.0) or 0.0)
@@ -811,6 +961,7 @@ def create_exchange(payload: ExchangeCreate):
         # 1) Compute return subtotal using remaining qty
         return_subtotal = 0.0
         ret_items_map = {}  # item_id -> (Item, qty)
+        return_line_total_by_item: Dict[int, float] = {}
         for line in payload.return_items:
             itm = session.get(Item, line.item_id)
             if not itm:
@@ -834,8 +985,14 @@ def create_exchange(payload: ExchangeCreate):
 
             qty = int(line.quantity)
             base = float(itm.mrp) * qty
-            if bill and itm.id in charged_unit_lookup:
-                charged = float(charged_unit_lookup[itm.id]) * qty
+            remaining_qty = max(0, sold_lookup.get(itm.id, 0) - returned_lookup.get(itm.id, 0))
+            if bill and itm.id in remaining_value_lookup and remaining_qty > 0:
+                remaining_value = remaining_value_lookup[itm.id]
+                charged = remaining_value if qty == remaining_qty else round2(remaining_value * qty / remaining_qty)
+                return_line_total_by_item[itm.id] = charged
+            elif bill and itm.id in charged_unit_lookup:
+                charged = round2(float(charged_unit_lookup[itm.id]) * qty)
+                return_line_total_by_item[itm.id] = charged
             elif bill:
                 after_disc = base * (1 - disc_pct / 100.0)
                 after_tax = after_disc * (1 + tax_pct / 100.0)
@@ -958,7 +1115,9 @@ def create_exchange(payload: ExchangeCreate):
                 note=f"Exchange return #{ret.id}",
             )
 
-            if bill and itm.id in charged_unit_lookup:
+            if itm.id in return_line_total_by_item:
+                line_total = return_line_total_by_item[itm.id]
+            elif bill and itm.id in charged_unit_lookup:
                 line_total = float(charged_unit_lookup[itm.id]) * qty
             else:
                 base = float(itm.mrp) * qty
@@ -1038,21 +1197,36 @@ def create_exchange(payload: ExchangeCreate):
         ret_items = session.exec(select(ReturnItem).where(ReturnItem.return_id == ret.id)).all()
         bill_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
 
-        session.add(
-            ExchangeRecord(
-                source_bill_id=payload.source_bill_id,
-                return_id=int(ret.id),
-                new_bill_id=int(b.id),
-                theoretical_net=theoretical_net,
-                net_due=net_due,
-                rounding_adjustment=rounding_adjustment,
-                payment_mode=payload.payment_mode,
-                payment_cash=b_cash,
-                payment_online=b_online,
-                refund_cash=r_cash,
-                refund_online=r_online,
-                notes=merged_notes,
-            )
+        exchange = ExchangeRecord(
+            source_bill_id=payload.source_bill_id,
+            return_id=int(ret.id),
+            new_bill_id=int(b.id),
+            theoretical_net=theoretical_net,
+            net_due=net_due,
+            rounding_adjustment=rounding_adjustment,
+            payment_mode=payload.payment_mode,
+            payment_cash=b_cash,
+            payment_online=b_online,
+            refund_cash=r_cash,
+            refund_online=r_online,
+            notes=merged_notes,
+        )
+        session.add(exchange)
+        session.flush()
+        log_audit(
+            session,
+            entity_type="SALES_RETURN",
+            entity_id=int(ret.id or 0),
+            action="CREATE_EXCHANGE",
+            note=f"Created sales return #{ret.id} through exchange #{exchange.id}",
+            details={
+                "exchange_id": exchange.id,
+                "source_bill_id": ret.source_bill_id,
+                "new_bill_id": b.id,
+                "return_value": return_subtotal,
+                "refund_cash": r_cash,
+                "refund_online": r_online,
+            },
         )
         session.commit()
 

@@ -36,6 +36,9 @@ type EditLine = {
   quantity: number
   custom_unit_price: number
   item_discount_percent: number
+  persisted_line_total?: number
+  persisted_quantity?: number
+  persisted_unit_price?: number
   stock?: number
   inventory_lot_id?: number | null
   opened_from_lot_id?: number | null
@@ -251,6 +254,19 @@ function billItemsMatchPayload(bill: any, payloadItems: Array<{ item_id: number;
   return JSON.stringify(normalize(fromBill)) === JSON.stringify(normalize(payloadItems))
 }
 
+function editLineTotal(line: EditLine) {
+  const qty = Number(line.quantity || 0)
+  const unit = round2(Number(line.custom_unit_price || 0))
+  if (
+    line.persisted_line_total != null
+    && Number(line.persisted_quantity || 0) === qty
+    && round2(Number(line.persisted_unit_price || 0)) === unit
+  ) {
+    return round2(Number(line.persisted_line_total || 0))
+  }
+  return round2(unit * qty)
+}
+
 const GRID_INPUT_SX = {
   '& .MuiInputBase-root': {
     height: 38,
@@ -290,6 +306,9 @@ function distributeEditLinesByFinal(lines: EditLine[], targetFinal: number): Edi
       ...row,
       custom_unit_price: unit,
       item_discount_percent: round2(safePct),
+      persisted_line_total: undefined,
+      persisted_quantity: undefined,
+      persisted_unit_price: undefined,
     }
   })
 
@@ -306,8 +325,34 @@ function distributeEditLinesByFinal(lines: EditLine[], targetFinal: number): Edi
       ...lastRow,
       custom_unit_price: adjusted,
       item_discount_percent: round2(safePct),
+      persisted_line_total: undefined,
+      persisted_quantity: undefined,
+      persisted_unit_price: undefined,
     }
   }
+
+  const weightedTotal = next.reduce(
+    (sum, row, idx) => active.some((entry) => entry.idx === idx)
+      ? sum + Number(row.custom_unit_price || 0) * Number(row.quantity || 0)
+      : sum,
+    0
+  )
+  let allocated = 0
+  active.forEach(({ idx }, activeIndex) => {
+    const row = next[idx]
+    const exactLineTotal = activeIndex === active.length - 1
+      ? round2(Math.max(0, safeTarget - allocated))
+      : weightedTotal > 0
+        ? round2(safeTarget * (Number(row.custom_unit_price || 0) * Number(row.quantity || 0)) / weightedTotal)
+        : 0
+    allocated = round2(allocated + exactLineTotal)
+    next[idx] = {
+      ...row,
+      persisted_line_total: exactLineTotal,
+      persisted_quantity: Number(row.quantity || 0),
+      persisted_unit_price: Number(row.custom_unit_price || 0),
+    }
+  })
 
   return next
 }
@@ -348,6 +393,7 @@ export default function BillEditDialog({
   const [editNotes, setEditNotes] = useState<string>('')
   const [editDateTime, setEditDateTime] = useState<string>(nowLocalDateInput())
   const [editFinalAmount, setEditFinalAmount] = useState<number>(0)
+  const [editCreditReturnTotal, setEditCreditReturnTotal] = useState<number>(0)
   const [editFinalManuallyEdited, setEditFinalManuallyEdited] = useState(false)
   const [editItemQuery, setEditItemQuery] = useState('')
   const [debouncedEditItemQuery, setDebouncedEditItemQuery] = useState('')
@@ -394,6 +440,9 @@ export default function BillEditDialog({
         quantity: qty,
         custom_unit_price: custom,
         item_discount_percent: Number(Math.min(100, Math.max(0, pct)).toFixed(2)),
+        persisted_line_total: round2(Number(it.line_total || 0)),
+        persisted_quantity: qty,
+        persisted_unit_price: custom,
         inventory_lot_id: it.inventory_lot_id ?? null,
         opened_from_lot_id: it.opened_from_lot_id ?? null,
         is_loose_stock: Boolean(it.is_loose_stock),
@@ -405,8 +454,21 @@ export default function BillEditDialog({
         existed_in_bill: true,
       }
     })
+    const savedLinesTotal = round2(lines.reduce((sum, line) => sum + editLineTotal(line), 0))
+    const creditReturnTotal = round2(Math.max(0, Number(bill.credit_return_total || 0)))
+    const hasApiOriginalTotal = bill.original_total_amount != null && Number.isFinite(Number(bill.original_total_amount))
+    const apiOriginalTotal = Number(bill.original_total_amount)
+    const billedTotal = hasApiOriginalTotal
+      ? round2(apiOriginalTotal)
+      : creditReturnTotal > 0
+        ? round2(Number(bill.total_amount || 0) + creditReturnTotal)
+        : Number.isFinite(Number(bill.total_amount)) ? Number(bill.total_amount) : savedLinesTotal
+    const legacyDifference = Math.abs(round2(billedTotal - savedLinesTotal))
+    const reconciledLines = legacyDifference > 0.009 && legacyDifference <= 10.01
+      ? distributeEditLinesByFinal(lines, billedTotal)
+      : lines
     setEditBillId(Number(bill.id))
-    setEditItems(lines)
+    setEditItems(reconciledLines)
     const paymentShape = inferEditPaymentShape(bill)
     setEditPaymentMode(paymentShape.mode)
     setEditOriginalPaymentMode(paymentShape.mode)
@@ -423,9 +485,9 @@ export default function BillEditDialog({
     setEditNewCustomerName('')
     setEditNewCustomerPhone('')
     setEditNewCustomerAddress('')
-    const sumByRows = round2(lines.reduce((s, it) => s + Number(it.custom_unit_price || 0) * Number(it.quantity || 0), 0))
-    const billedTotal = Number.isFinite(Number(bill.total_amount)) ? Number(bill.total_amount) : sumByRows
+    const sumByRows = round2(reconciledLines.reduce((s, it) => s + editLineTotal(it), 0))
     setEditFinalAmount(billedTotal)
+    setEditCreditReturnTotal(creditReturnTotal)
     setEditFinalManuallyEdited(Math.abs(round2(billedTotal - sumByRows)) > 0.009)
     setEditItemQuery('')
     setDebouncedEditItemQuery('')
@@ -657,7 +719,13 @@ export default function BillEditDialog({
     setEditItems((prev) => {
       const ix = prev.findIndex((x) => Number(x.item_id) === itemId)
       if (ix >= 0) {
-        return prev.map((x, i) => (i === ix ? { ...x, quantity: Number(x.quantity || 0) + 1 } : x))
+        return prev.map((x, i) => (i === ix ? {
+          ...x,
+          quantity: Number(x.quantity || 0) + 1,
+          persisted_line_total: undefined,
+          persisted_quantity: undefined,
+          persisted_unit_price: undefined,
+        } : x))
       }
       return [
         ...prev,
@@ -710,6 +778,9 @@ export default function BillEditDialog({
           ...x,
           custom_unit_price: nextPrice,
           item_discount_percent: Number(Math.min(100, Math.max(0, pct)).toFixed(2)),
+          persisted_line_total: undefined,
+          persisted_quantity: undefined,
+          persisted_unit_price: undefined,
         }
       })
     )
@@ -759,6 +830,9 @@ export default function BillEditDialog({
           ...x,
           item_discount_percent: Number(safePct.toFixed(2)),
           custom_unit_price: Number(nextPrice.toFixed(2)),
+          persisted_line_total: undefined,
+          persisted_quantity: undefined,
+          persisted_unit_price: undefined,
         }
       })
     )
@@ -796,7 +870,7 @@ export default function BillEditDialog({
   }
 
   const editSubtotal = useMemo(() => round2(editItems.reduce((s, it) => s + Number(it.mrp || 0) * Number(it.quantity || 0), 0)), [editItems])
-  const editFinalByRows = useMemo(() => round2(editItems.reduce((s, it) => s + Number(it.custom_unit_price || 0) * Number(it.quantity || 0), 0)), [editItems])
+  const editFinalByRows = useMemo(() => round2(editItems.reduce((s, it) => s + editLineTotal(it), 0)), [editItems])
 
   function applyEditFinalAmountToRows(targetFinal: number) {
     const safeTarget = round2(Math.max(0, Number(targetFinal || 0)))
@@ -815,41 +889,42 @@ export default function BillEditDialog({
   }, [open, editFinalByRows, editFinalManuallyEdited])
 
   const editChosenFinal = round2(Number(editFinalAmount || 0))
+  const editSettlementTotal = round2(Math.max(0, editChosenFinal - editCreditReturnTotal))
   const editDiscountAmount = useMemo(() => Math.max(0, round2(editSubtotal - editFinalByRows)), [editSubtotal, editFinalByRows])
   const editEffectiveDiscountPercent = useMemo(() => (editSubtotal > 0 ? (editDiscountAmount / editSubtotal) * 100 : 0), [editSubtotal, editDiscountAmount])
   const editSplitCreditAmount = useMemo(
-    () => round2(editSplitCombination === 'cash-credit' ? editChosenFinal - Number(editCash || 0) : editSplitCombination === 'online-credit' ? editChosenFinal - Number(editOnline || 0) : 0),
-    [editSplitCombination, editChosenFinal, editCash, editOnline]
+    () => round2(editSplitCombination === 'cash-credit' ? editSettlementTotal - Number(editCash || 0) : editSplitCombination === 'online-credit' ? editSettlementTotal - Number(editOnline || 0) : 0),
+    [editSplitCombination, editSettlementTotal, editCash, editOnline]
   )
   const editPartialCreditAmount = useMemo(
     () =>
       round2(
         editPaymentMode === 'cash'
-          ? Math.max(0, editChosenFinal - Number(editCash || 0))
+          ? Math.max(0, editSettlementTotal - Number(editCash || 0))
           : editPaymentMode === 'online'
-            ? Math.max(0, editChosenFinal - Number(editOnline || 0))
+            ? Math.max(0, editSettlementTotal - Number(editOnline || 0))
             : 0
       ),
-    [editPaymentMode, editChosenFinal, editCash, editOnline]
+    [editPaymentMode, editSettlementTotal, editCash, editOnline]
   )
   const editPaymentsOk = useMemo(() => {
     const c = Number(editCash || 0)
     const o = Number(editOnline || 0)
-    if (editChosenFinal <= 0) return round2(c) === 0 && round2(o) === 0
+    if (editSettlementTotal <= 0) return round2(c) === 0 && round2(o) === 0
     if (editPaymentMode === 'credit') return true
-    if (editPaymentMode === 'cash') return c > 0 && round2(c) <= round2(editChosenFinal)
-    if (editPaymentMode === 'online') return o > 0 && round2(o) <= round2(editChosenFinal)
-    if (editSplitCombination === 'cash-online') return round2(c + o) === round2(editChosenFinal)
-    if (editSplitCombination === 'cash-credit') return c >= 0 && c <= editChosenFinal
-    return o >= 0 && o <= editChosenFinal
-  }, [editPaymentMode, editCash, editOnline, editChosenFinal, editSplitCombination])
+    if (editPaymentMode === 'cash') return c > 0 && round2(c) <= editSettlementTotal
+    if (editPaymentMode === 'online') return o > 0 && round2(o) <= editSettlementTotal
+    if (editSplitCombination === 'cash-online') return round2(c + o) === editSettlementTotal
+    if (editSplitCombination === 'cash-credit') return c >= 0 && c <= editSettlementTotal
+    return o >= 0 && o <= editSettlementTotal
+  }, [editPaymentMode, editCash, editOnline, editSettlementTotal, editSplitCombination])
 
   function handleEditCashAmountChange(raw: string) {
     const n = Number(parseNumText(raw) || 0)
     if (editPaymentMode === 'split' && editSplitCombination === 'cash-online') {
-      const c = Math.min(editChosenFinal, Math.max(0, round2(n)))
+      const c = Math.min(editSettlementTotal, Math.max(0, round2(n)))
       setEditCash(c)
-      setEditOnline(round2(Math.max(0, editChosenFinal - c)))
+      setEditOnline(round2(Math.max(0, editSettlementTotal - c)))
       return
     }
     setEditCash(round2(Math.max(0, n)))
@@ -858,9 +933,9 @@ export default function BillEditDialog({
   function handleEditOnlineAmountChange(raw: string) {
     const n = Number(parseNumText(raw) || 0)
     if (editPaymentMode === 'split' && editSplitCombination === 'cash-online') {
-      const o = Math.min(editChosenFinal, Math.max(0, round2(n)))
+      const o = Math.min(editSettlementTotal, Math.max(0, round2(n)))
       setEditOnline(o)
-      setEditCash(round2(Math.max(0, editChosenFinal - o)))
+      setEditCash(round2(Math.max(0, editSettlementTotal - o)))
       return
     }
     setEditOnline(round2(Math.max(0, n)))
@@ -888,21 +963,21 @@ export default function BillEditDialog({
       return
     }
     if (editPaymentMode === 'cash') {
-      setEditCash(editChosenFinal)
+      setEditCash(editSettlementTotal)
       setEditOnline(0)
       return
     }
     if (editPaymentMode === 'online') {
       setEditCash(0)
-      setEditOnline(editChosenFinal)
+      setEditOnline(editSettlementTotal)
       return
     }
     if (editPaymentMode === 'split' && editSplitCombination === 'cash-online') {
-      const c = Math.min(editChosenFinal, Math.max(0, round2(Number(editCash || 0))))
+      const c = Math.min(editSettlementTotal, Math.max(0, round2(Number(editCash || 0))))
       setEditCash(c)
-      setEditOnline(round2(Math.max(0, editChosenFinal - c)))
+      setEditOnline(round2(Math.max(0, editSettlementTotal - c)))
     }
-  }, [open, editPaymentMode, editChosenFinal, editSplitCombination])
+  }, [open, editPaymentMode, editSettlementTotal, editSplitCombination])
 
   const mEdit = useMutation({
     mutationFn: async () => {
@@ -919,13 +994,14 @@ export default function BillEditDialog({
           ? distributeEditLinesByFinal(editItems, editChosenFinal)
           : editItems
       const finalForSubmit = round2(
-        itemsForSubmit.reduce((s, it) => s + Number(it.custom_unit_price || 0) * Number(it.quantity || 0), 0)
+        itemsForSubmit.reduce((s, it) => s + editLineTotal(it), 0)
       )
       const cleanedItems = itemsForSubmit
         .map((it) => ({
           item_id: Number(it.item_id),
           quantity: Number(it.quantity || 0),
           custom_unit_price: Number(it.custom_unit_price ?? it.mrp ?? 0),
+          line_total: editLineTotal(it),
         }))
         .filter((it) => it.quantity > 0)
       if (cleanedItems.length === 0) throw new Error('At least one item quantity must be > 0')
@@ -1122,8 +1198,11 @@ export default function BillEditDialog({
                 <Stack gap={0.5} sx={{ minWidth: 240 }}>
                   <Typography variant="body2" color="text.secondary">Subtotal: ₹{money(editSubtotal)}</Typography>
                   <Typography variant="body2" color="text.secondary">Discount: ₹{money(editDiscountAmount)}</Typography>
-                  <Typography variant="body2" color="text.secondary">Computed Total: ₹{money(editFinalByRows)}</Typography>
-                  <Typography variant="h6">Final Amount: ₹{money(editChosenFinal)}</Typography>
+                  <Typography variant="body2" color="text.secondary">Original Line Total: ₹{money(editFinalByRows)}</Typography>
+                  {editCreditReturnTotal > 0.009 ? (
+                    <Typography variant="body2" color="text.secondary">Less Credit Returns: ₹{money(editCreditReturnTotal)}</Typography>
+                  ) : null}
+                  <Typography variant="h6">Current Bill Balance: ₹{money(editSettlementTotal)}</Typography>
                 </Stack>
               </Stack>
 
@@ -1243,7 +1322,13 @@ export default function BillEditDialog({
                             onChange={(e) => {
                               const qty = Number(e.target.value || 0)
                               setEditFinalManuallyEdited(false)
-                              setEditItems((prev) => prev.map((x, i) => (i === idx ? { ...x, quantity: qty } : x)))
+                              setEditItems((prev) => prev.map((x, i) => (i === idx ? {
+                                ...x,
+                                quantity: qty,
+                                persisted_line_total: undefined,
+                                persisted_quantity: undefined,
+                                persisted_unit_price: undefined,
+                              } : x)))
                             }}
                             onWheel={blurOnWheel}
                             onFocus={(e) => e.target.select()}
@@ -1277,7 +1362,7 @@ export default function BillEditDialog({
                             inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
                           />
                         </td>
-                        <td>{money(Number(it.custom_unit_price || 0) * Number(it.quantity || 0))}</td>
+                        <td>{money(editLineTotal(it))}</td>
                         <td>
                           <Button size="small" color="error" onClick={() => removeEditItem(idx)}>Remove</Button>
                         </td>
@@ -1352,7 +1437,7 @@ export default function BillEditDialog({
                 <Typography variant="caption" color="text.secondary">Final Amount (sum of line totals): ₹{money(editFinalByRows)}</Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
                   <TextField
-                    label="Final Amount (you charge)"
+                    label="Original Sale Amount"
                     type="text"
                     value={String(editFinalAmount)}
                     onChange={(e) => {

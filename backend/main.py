@@ -78,7 +78,7 @@ def on_startup():
 # Routers
 app.include_router(inventory.router, prefix="/inventory", tags=["Inventory"])
 app.include_router(billing.router,   prefix="/billing",   tags=["Billing"])
-app.include_router(returns_router.router, prefix="/returns", tags=["Returns"])
+app.include_router(returns_router.router, prefix="/returns", tags=["Sales Returns"])
 app.include_router(cashbook.router, prefix="/cashbook", tags=["Cashbook"])  # 👈 NEW
 app.include_router(bankbook.router, prefix="/bankbook", tags=["Bankbook"])
 app.include_router(products.router, prefix="/products", tags=["Products"])

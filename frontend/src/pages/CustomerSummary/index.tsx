@@ -336,12 +336,15 @@ export default function CustomerSummaryPage() {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
+                      <th>SP</th>
                       <th>Line Total</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(billDetail.items || []).map((it: any, idx: number) => (
-                      <tr key={idx}>
+                    {(billDetail.items || []).map((it: any, idx: number) => {
+                      const qty = Number(it.quantity || 0)
+                      const lineTotal = Number(it.line_total || 0)
+                      return <tr key={idx}>
                         <td>
                           <Stack gap={0.25}>
                             <Typography variant="body2">{it.item_name || it.name || it.item?.name || `#${it.item_id}`}</Typography>
@@ -350,11 +353,12 @@ export default function CustomerSummaryPage() {
                             </Typography>
                           </Stack>
                         </td>
-                        <td>{Number(it.quantity || 0)}</td>
+                        <td>{qty}</td>
                         <td>{money(it.mrp)}</td>
-                        <td>{money(it.line_total)}</td>
+                        <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>
+                        <td>{money(lineTotal)}</td>
                       </tr>
-                    ))}
+                    })}
                   </tbody>
                 </table>
               </Box>

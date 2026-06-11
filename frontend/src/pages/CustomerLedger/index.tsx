@@ -1082,8 +1082,8 @@ export default function CustomerLedgerPage() {
             <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
               <Chip color={totalOutstanding > 0 ? 'error' : 'success'} label={`Outstanding Rs ${money(totalOutstanding)}`} sx={{ fontWeight: 900 }} />
               <Chip color="primary" variant="outlined" label={`Open Bills ${openBills.length}`} sx={{ fontWeight: 800 }} />
-              <Chip color="warning" variant="outlined" label={`Return Credit Rs ${money(totalReturnCredit)}`} sx={{ fontWeight: 800 }} />
-              <Chip color="secondary" variant="outlined" label={`Return Refund Rs ${money(totalReturnRefund)}`} sx={{ fontWeight: 800 }} />
+              <Chip color="warning" variant="outlined" label={`Sales Return Credit Rs ${money(totalReturnCredit)}`} sx={{ fontWeight: 800 }} />
+              <Chip color="secondary" variant="outlined" label={`Sales Return Refund Rs ${money(totalReturnRefund)}`} sx={{ fontWeight: 800 }} />
               <Chip color="success" variant="outlined" label={`Receipts Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
               <Chip color="info" variant="outlined" label={`Advance Rs ${money(receiptHistoryOnAccountTotal)}`} sx={{ fontWeight: 800 }} />
             </Stack>
@@ -1293,7 +1293,7 @@ export default function CustomerLedgerPage() {
       </CollapsibleLedgerSection>
 
       <CollapsibleLedgerSection
-        title="Return History"
+        title="Sales Return History"
         open={sectionOpen.returns}
         onToggle={() => toggleSection('returns')}
         summary={
@@ -1309,14 +1309,14 @@ export default function CustomerLedgerPage() {
             <thead>
               <tr>
                 <th className="expand-col"></th>
-                <SortableHeader label="Return" sortKey="return_id" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="receipt-col" />
+                <SortableHeader label="Sales Return" sortKey="return_id" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="receipt-col" />
                 <SortableHeader label="Date" sortKey="date_time" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="date-col" />
                 <SortableHeader label="Source Bill" sortKey="source_bill_id" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="bill-col" />
                 <SortableHeader label="Mode" sortKey="refund_mode" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="mode-col" />
                 <SortableHeader label="Credit" sortKey="credit_amount" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <SortableHeader label="Cash Refund" sortKey="refund_cash" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <SortableHeader label="Online Refund" sortKey="refund_online" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
-                <SortableHeader label="Return Total" sortKey="subtotal_return" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Sales Return Total" sortKey="subtotal_return" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <th className="allocation-col">Exchange</th>
                 <th className="allocation-col">Notes</th>
               </tr>
@@ -1339,7 +1339,7 @@ export default function CustomerLedgerPage() {
                       </td>
                       <td>
                         <Stack gap={0.25}>
-                          <Typography fontWeight={800}>Return #{row.return_id}</Typography>
+                          <Typography fontWeight={800}>Sales Return #{row.return_id}</Typography>
                           <Typography variant="caption" color="text.secondary">
                             {items.length} item{items.length === 1 ? '' : 's'}
                           </Typography>
@@ -1382,7 +1382,7 @@ export default function CustomerLedgerPage() {
                         <td colSpan={11}>
                           <Stack gap={1}>
                             <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap" useFlexGap>
-                              <Typography variant="caption">Return total: <b>Rs {money(row.subtotal_return)}</b></Typography>
+                              <Typography variant="caption">Sales return total: <b>Rs {money(row.subtotal_return)}</b></Typography>
                               <Typography variant="caption">Credit: <b>Rs {money(row.credit_amount)}</b></Typography>
                               <Typography variant="caption">Refund: <b>Rs {money(Number(row.refund_cash || 0) + Number(row.refund_online || 0))}</b></Typography>
                               <Typography variant="caption">Notes: <b>{row.notes || '-'}</b></Typography>
@@ -1395,22 +1395,26 @@ export default function CustomerLedgerPage() {
                                     <th>Brand</th>
                                     <th className="amount-col">Qty</th>
                                     <th className="amount-col">MRP</th>
+                                    <th className="amount-col">SP</th>
                                     <th className="amount-col">Line Total</th>
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {items.map((item, idx) => (
-                                    <tr key={`${row.return_id}-${item.item_id}-${idx}`}>
+                                  {items.map((item, idx) => {
+                                    const qty = Number(item.quantity || 0)
+                                    const lineTotal = Number(item.line_total || 0)
+                                    return <tr key={`${row.return_id}-${item.item_id}-${idx}`}>
                                       <td>{item.item_name || `Item #${item.item_id}`}</td>
                                       <td>{item.brand || '-'}</td>
-                                      <td className="amount-col">{Number(item.quantity || 0)}</td>
+                                      <td className="amount-col">{qty}</td>
                                       <td className="amount-col">{money(item.mrp)}</td>
-                                      <td className="amount-col">{money(item.line_total)}</td>
+                                      <td className="amount-col">{money(qty > 0 ? lineTotal / qty : 0)}</td>
+                                      <td className="amount-col">{money(lineTotal)}</td>
                                     </tr>
-                                  ))}
+                                  })}
                                   {items.length === 0 ? (
                                     <tr>
-                                      <td colSpan={5}>
+                                      <td colSpan={6}>
                                         <Box p={1} color="text.secondary">No item lines found for this return.</Box>
                                       </td>
                                     </tr>
@@ -2069,12 +2073,15 @@ export default function CustomerLedgerPage() {
                       <th style={{ minWidth: 220 }}>Item</th>
                       <th>Qty</th>
                       <th>MRP</th>
+                      <th>SP</th>
                       <th>Line Total</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(billDetail.items || []).map((it: any, idx: number) => (
-                      <tr key={idx}>
+                    {(billDetail.items || []).map((it: any, idx: number) => {
+                      const qty = Number(it.quantity || 0)
+                      const lineTotal = Number(it.line_total || 0)
+                      return <tr key={idx}>
                         <td>
                           <Stack gap={0.25}>
                             <Typography variant="body2">
@@ -2085,14 +2092,15 @@ export default function CustomerLedgerPage() {
                             </Typography>
                           </Stack>
                         </td>
-                        <td>{Number(it.quantity || 0)}</td>
+                        <td>{qty}</td>
                         <td>{money(it.mrp)}</td>
-                        <td>{money(it.line_total)}</td>
+                        <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>
+                        <td>{money(lineTotal)}</td>
                       </tr>
-                    ))}
+                    })}
                     {(billDetail.items || []).length === 0 ? (
                       <tr>
-                        <td colSpan={4}>
+                        <td colSpan={5}>
                           <Box p={2} color="text.secondary">
                             No items.
                           </Box>

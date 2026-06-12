@@ -114,6 +114,8 @@ function billDiscountPerUnit(bill: any, it: any) {
 }
 
 function actualRefundTotal(row: any) {
+  const explicit = Number(row?.actual_refund_total)
+  if (Number.isFinite(explicit) && explicit >= 0) return explicit
   const cashOnline = Number(row?.refund_cash || 0) + Number(row?.refund_online || 0)
   if (cashOnline > 0) return cashOnline
   return Number(row?.subtotal_return || 0)
@@ -193,11 +195,7 @@ export default function ReturnsReport(props: {
   const detailRows = useMemo(() => {
     const rets = (returnsRaw || []) as any[]
     return rets.map((r) => {
-      const refundCalc = (r.items || []).reduce(
-        (s: number, it: any) => s + Number(it.mrp) * Number(it.quantity),
-        0
-      )
-      const refund = r.subtotal_return ?? refundCalc
+      const refund = actualRefundTotal(r)
       return {
         raw: r,
         id: r.id,
@@ -450,6 +448,7 @@ export default function ReturnsReport(props: {
                         source_bill: detail.source_bill,
                         refund_cash: detail.refund_cash,
                         refund_online: detail.refund_online,
+                        actual_refund_total: Number(detail.refund_cash || 0) + Number(detail.refund_online || 0),
                       }
                       const sale = detail.source_bill ? billSoldUnitPrice(detail.source_bill, it) : soldUnitPrice(it)
                       const discount = detail.source_bill ? billDiscountPerUnit(detail.source_bill, it) : discountPerUnit(it)

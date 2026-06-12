@@ -59,6 +59,27 @@ function money(n: number | string | undefined | null) {
   return Number(n || 0).toFixed(2)
 }
 
+function actualReturnSettlement(row: CustomerReturnLedgerRow) {
+  const refund = Number(row.refund_cash || 0) + Number(row.refund_online || 0)
+  if (refund > 0) return refund
+  return String(row.refund_mode || '').toLowerCase() === 'credit' ? Number(row.credit_amount || 0) : 0
+}
+
+function allocatedLineRefunds(row: CustomerReturnLedgerRow) {
+  const items = row.items || []
+  const settlement = actualReturnSettlement(row)
+  const returnValue = items.reduce((sum, item) => sum + Number(item.line_total || 0), 0)
+  if (items.length === 0 || settlement <= 0 || returnValue <= 0) return items.map(() => 0)
+
+  let allocated = 0
+  return items.map((item, index) => {
+    if (index === items.length - 1) return Math.max(0, Number((settlement - allocated).toFixed(2)))
+    const amount = Number((settlement * Number(item.line_total || 0) / returnValue).toFixed(2))
+    allocated = Number((allocated + amount).toFixed(2))
+    return amount
+  })
+}
+
 function billStatusClass(status: string) {
   const normalized = String(status || 'UNPAID').toUpperCase()
   if (normalized === 'PAID') return 'status-paid'
@@ -69,7 +90,7 @@ function billStatusClass(status: string) {
 type SortDirection = 'asc' | 'desc'
 type SortState<Key extends string> = { key: Key; direction: SortDirection }
 type BillSortKey = 'bill_id' | 'bill_date' | 'total_amount' | 'paid_amount' | 'writeoff_amount' | 'outstanding_amount' | 'payment_status'
-type ReturnSortKey = 'return_id' | 'date_time' | 'source_bill_id' | 'refund_mode' | 'credit_amount' | 'refund_cash' | 'refund_online' | 'subtotal_return'
+type ReturnSortKey = 'return_id' | 'date_time' | 'source_bill_id' | 'refund_mode' | 'credit_amount' | 'refund_cash' | 'refund_online' | 'settlement_total'
 type ReceiptSortKey = 'receiptId' | 'when' | 'mode' | 'cash' | 'online' | 'total' | 'adjusted' | 'onAccount'
 type LedgerSectionKey = 'openBills' | 'billLedger' | 'returns' | 'receipts'
 
@@ -635,6 +656,7 @@ export default function CustomerLedgerPage() {
 
   function returnSortValue(row: CustomerReturnLedgerRow, key: ReturnSortKey): string | number {
     if (key === 'date_time' || key === 'refund_mode') return String(row[key] || '')
+    if (key === 'settlement_total') return actualReturnSettlement(row)
     return Number(row[key] || 0)
   }
 
@@ -1316,7 +1338,7 @@ export default function CustomerLedgerPage() {
                 <SortableHeader label="Credit" sortKey="credit_amount" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <SortableHeader label="Cash Refund" sortKey="refund_cash" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <SortableHeader label="Online Refund" sortKey="refund_online" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
-                <SortableHeader label="Sales Return Total" sortKey="subtotal_return" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
+                <SortableHeader label="Sales Return Total" sortKey="settlement_total" sort={returnSort} onSort={(key) => setReturnSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <th className="allocation-col">Exchange</th>
                 <th className="allocation-col">Notes</th>
               </tr>
@@ -1325,6 +1347,7 @@ export default function CustomerLedgerPage() {
               {sortedReturnRows.map((row) => {
                 const returnId = Number(row.return_id)
                 const items = row.items || []
+                const lineRefunds = allocatedLineRefunds(row)
                 const isExpanded = Boolean(expandedReturns[returnId])
                 return (
                   <Fragment key={row.return_id}>
@@ -1364,7 +1387,7 @@ export default function CustomerLedgerPage() {
                       <td className="amount-col"><MoneyCell value={row.credit_amount} strong={Number(row.credit_amount || 0) > 0} /></td>
                       <td className="amount-col"><MoneyCell value={row.refund_cash} /></td>
                       <td className="amount-col"><MoneyCell value={row.refund_online} /></td>
-                      <td className="amount-col"><MoneyCell value={row.subtotal_return} strong /></td>
+                      <td className="amount-col"><MoneyCell value={actualReturnSettlement(row)} strong /></td>
                       <td className="allocation-col">
                         {row.exchange_id ? (
                           <Typography variant="body2" className="clip-text">
@@ -1382,7 +1405,7 @@ export default function CustomerLedgerPage() {
                         <td colSpan={11}>
                           <Stack gap={1}>
                             <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap" useFlexGap>
-                              <Typography variant="caption">Sales return total: <b>Rs {money(row.subtotal_return)}</b></Typography>
+                              <Typography variant="caption">Return value: <b>Rs {money(row.subtotal_return)}</b></Typography>
                               <Typography variant="caption">Credit: <b>Rs {money(row.credit_amount)}</b></Typography>
                               <Typography variant="caption">Refund: <b>Rs {money(Number(row.refund_cash || 0) + Number(row.refund_online || 0))}</b></Typography>
                               <Typography variant="caption">Notes: <b>{row.notes || '-'}</b></Typography>
@@ -1396,7 +1419,8 @@ export default function CustomerLedgerPage() {
                                     <th className="amount-col">Qty</th>
                                     <th className="amount-col">MRP</th>
                                     <th className="amount-col">SP</th>
-                                    <th className="amount-col">Line Total</th>
+                                    <th className="amount-col">Return Value</th>
+                                    <th className="amount-col">Line Refund</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -1410,11 +1434,12 @@ export default function CustomerLedgerPage() {
                                       <td className="amount-col">{money(item.mrp)}</td>
                                       <td className="amount-col">{money(qty > 0 ? lineTotal / qty : 0)}</td>
                                       <td className="amount-col">{money(lineTotal)}</td>
+                                      <td className="amount-col">{money(lineRefunds[idx])}</td>
                                     </tr>
                                   })}
                                   {items.length === 0 ? (
                                     <tr>
-                                      <td colSpan={6}>
+                                      <td colSpan={7}>
                                         <Box p={1} color="text.secondary">No item lines found for this return.</Box>
                                       </td>
                                     </tr>

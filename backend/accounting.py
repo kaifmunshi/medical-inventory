@@ -13,6 +13,7 @@ from backend.models import (
     PartyReceipt,
     Purchase,
     PurchasePayment,
+    PurchaseReturn,
     ReceiptBillAdjustment,
     Voucher,
     VoucherEntry,
@@ -50,6 +51,7 @@ SYSTEM_LEDGERS = {
     "BANK_ACCOUNT": ("Bank Account", "CASH_BANK"),
     "SALES_ACCOUNT": ("Sales Account", "SALES"),
     "PURCHASE_ACCOUNT": ("Purchase Account", "PURCHASES"),
+    "PURCHASE_RETURN_ACCOUNT": ("Purchase Returns", "PURCHASES"),
     "SALES_RECEIVABLE_CONTROL": ("Sales Receivable Control", "SUNDRY_DEBTORS"),
     "CUSTOMER_WRITE_OFF": ("Customer Write-off", "INDIRECT_EXPENSE"),
     "PURCHASE_WRITE_OFF": ("Purchase Write-off", "INDIRECT_INCOME"),
@@ -326,6 +328,26 @@ def post_purchase_voucher(session, purchase: Purchase, party: Party) -> Voucher:
     )
 
 
+def post_purchase_return_voucher(session, purchase_return: PurchaseReturn, party: Party) -> Voucher:
+    ledgers = ensure_accounting_setup(session)
+    creditor_ledger = ensure_party_ledger(session, party)
+    total = round2(getattr(purchase_return, "total_amount", 0.0))
+    return upsert_voucher(
+        session,
+        voucher_type="PURCHASE_RETURN",
+        source_type="PURCHASE_RETURN",
+        source_id=int(purchase_return.id),
+        voucher_date=str(purchase_return.return_date or "")[:10],
+        voucher_no=purchase_return.return_number,
+        narration=purchase_return.notes or f"Purchase return {purchase_return.return_number}",
+        total_amount=total,
+        lines=[
+            {"ledger_id": int(creditor_ledger.id), "entry_type": "DR", "amount": total, "narration": "Supplier credit note"},
+            {"ledger_id": int(ledgers["PURCHASE_RETURN_ACCOUNT"].id), "entry_type": "CR", "amount": total, "narration": "Purchase return"},
+        ],
+    )
+
+
 def post_purchase_payment_voucher(
     session,
     purchase: Optional[Purchase],
@@ -489,6 +511,14 @@ def sync_existing_vouchers(session) -> None:
         post_purchase_voucher(session, purchase, party)
         if bool(getattr(purchase, "is_deleted", False)):
             mark_voucher_deleted(session, source_type="PURCHASE", source_id=int(purchase.id or 0))
+
+    for purchase_return in session.exec(select(PurchaseReturn)).all():
+        party = party_map.get(int(purchase_return.party_id or 0))
+        if not party or round2(purchase_return.total_amount) <= 0:
+            continue
+        post_purchase_return_voucher(session, purchase_return, party)
+        if bool(getattr(purchase_return, "is_deleted", False)):
+            mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(purchase_return.id or 0))
 
     for payment in session.exec(select(PurchasePayment)).all():
         purchase = session.get(Purchase, payment.purchase_id) if int(payment.purchase_id or 0) > 0 else None

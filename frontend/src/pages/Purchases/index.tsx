@@ -1566,8 +1566,9 @@ export default function PurchasesPage() {
         </Stack>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
           <Chip label={`Purchase Value ${money(purchases.reduce((sum, row) => sum + Number(row.total_amount || 0), 0))}`} />
+          <Chip label={`Returns ${money(purchases.reduce((sum, row) => sum + Number(row.return_total || 0), 0))}`} color="secondary" />
           <Chip label={`Paid ${money(purchases.reduce((sum, row) => sum + Number(row.paid_amount || 0), 0))}`} color="success" />
-          <Chip label={`Outstanding ${money(purchases.reduce((sum, row) => sum + (Number(row.total_amount || 0) - Number(row.paid_amount || 0) - Number(row.writeoff_amount || 0)), 0))}`} color="warning" />
+          <Chip label={`Outstanding ${money(purchases.reduce((sum, row) => sum + (Number(row.net_amount ?? row.total_amount ?? 0) - Number(row.paid_amount || 0) - Number(row.writeoff_amount || 0)), 0))}`} color="warning" />
         </Stack>
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
@@ -1578,6 +1579,8 @@ export default function PurchasesPage() {
                 <th>Invoice</th>
                 <th>Date</th>
                 <th>Total</th>
+                <th>Returns</th>
+                <th>Net</th>
                 <th>Paid</th>
                 <th>Write-off</th>
                 <th>Status</th>
@@ -1595,6 +1598,8 @@ export default function PurchasesPage() {
                     <td>{purchase.invoice_number}</td>
                     <td>{purchase.invoice_date}</td>
                     <td>{money(purchase.total_amount)}</td>
+                    <td>{money(purchase.return_total || 0)}</td>
+                    <td>{money(purchase.net_amount ?? purchase.total_amount)}</td>
                     <td>{money(purchase.paid_amount)}</td>
                     <td>{money(purchase.writeoff_amount)}</td>
                     <td>{purchase.payment_status}</td>
@@ -1770,6 +1775,7 @@ export default function PurchasesPage() {
                     {ledgerQ.data ? (
                       <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
                         <Chip label={`Purchases ${money(ledgerQ.data.total_purchases)}`} />
+                        <Chip label={`Returns ${money(ledgerQ.data.total_returns || 0)}`} color="secondary" variant="outlined" />
                         <Chip label={`Paid ${money(ledgerQ.data.total_paid)}`} color="success" variant="outlined" />
                         <Chip label={`Write-off ${money(ledgerQ.data.total_writeoff)}`} variant="outlined" />
                         <Chip label={`Outstanding ${money(ledgerQ.data.outstanding_amount)}`} color="warning" />
@@ -1787,6 +1793,8 @@ export default function PurchasesPage() {
                             <th>Recent Invoice</th>
                             <th>Date</th>
                             <th>Total</th>
+                            <th>Returns</th>
+                            <th>Net</th>
                             <th>Paid</th>
                             <th>Outstanding</th>
                             <th>Status</th>
@@ -1798,6 +1806,8 @@ export default function PurchasesPage() {
                               <td>{row.invoice_number}</td>
                               <td>{row.invoice_date}</td>
                               <td>{money(row.total_amount)}</td>
+                              <td>{money(row.return_amount || 0)}</td>
+                              <td>{money(row.net_amount ?? row.total_amount)}</td>
                               <td>{money(row.paid_amount + row.writeoff_amount)}</td>
                               <td>{money(row.outstanding_amount)}</td>
                               <td>{row.payment_status}</td>
@@ -2055,19 +2065,29 @@ export default function PurchasesPage() {
                   <Typography color="text.secondary">{selectedSupplierName} | {selectedPurchase.invoice_date}</Typography>
                 </Box>
                 <Stack direction="row" gap={1}>
-                  <Button variant="outlined" onClick={openEditHeader}>Edit Header</Button>
-                  <Button variant="outlined" onClick={openEditItems}>Edit Items</Button>
-	                  <Button variant="contained" startIcon={<PaymentsIcon />} onClick={() => openPaymentDialog()}>Add Payment / Write-off</Button>
-                  <Button color="error" variant="outlined" onClick={() => setCancelConfirmOpen(true)}>Cancel Purchase</Button>
+                  <Button variant="outlined" disabled={selectedPurchase.return_total > 0} onClick={openEditHeader}>Edit Header</Button>
+                  <Button variant="outlined" disabled={selectedPurchase.return_total > 0} onClick={openEditItems}>Edit Items</Button>
+	                  <Button
+                    variant="contained"
+                    startIcon={<PaymentsIcon />}
+                    disabled={(selectedPurchase.net_amount ?? selectedPurchase.total_amount) - selectedPurchase.paid_amount - selectedPurchase.writeoff_amount <= 0.0001}
+                    onClick={() => openPaymentDialog()}
+                  >
+                    Add Payment / Write-off
+                  </Button>
+                  <Button color="error" variant="outlined" disabled={selectedPurchase.return_total > 0} onClick={() => setCancelConfirmOpen(true)}>Cancel Purchase</Button>
+                  <Button component="a" href={`/purchase-returns`} variant="outlined" color="secondary">Purchase Returns</Button>
                 </Stack>
               </Stack>
 
               <Paper variant="outlined" sx={{ p: 2 }}>
                 <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
                   <Typography>Total: {money(selectedPurchase.total_amount)}</Typography>
+                  <Typography color="secondary.main">Returns: {money(selectedPurchase.return_total || 0)}</Typography>
+                  <Typography>Net: {money(selectedPurchase.net_amount ?? selectedPurchase.total_amount)}</Typography>
                   <Typography>Paid: {money(selectedPurchase.paid_amount)}</Typography>
                   <Typography>Write-off: {money(selectedPurchase.writeoff_amount)}</Typography>
-                  <Typography fontWeight={700}>Outstanding: {money(selectedPurchase.total_amount - selectedPurchase.paid_amount - selectedPurchase.writeoff_amount)}</Typography>
+                  <Typography fontWeight={700}>Outstanding: {money((selectedPurchase.net_amount ?? selectedPurchase.total_amount) - selectedPurchase.paid_amount - selectedPurchase.writeoff_amount)}</Typography>
                   <Typography>Status: {selectedPurchase.payment_status}</Typography>
                 </Stack>
                 {selectedPurchase.notes ? <Typography mt={2} color="text.secondary">Notes: {selectedPurchase.notes}</Typography> : null}

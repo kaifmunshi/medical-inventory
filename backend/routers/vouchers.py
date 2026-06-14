@@ -23,6 +23,7 @@ from backend.models import (
     PartyReceipt,
     Purchase,
     PurchasePayment,
+    PurchaseReturn,
     ReceiptBillAdjustment,
     Return,
     Voucher,
@@ -515,7 +516,7 @@ def daybook(
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     voucher_type: Optional[str] = Query(
         None,
-        description="SALE | PURCHASE | JOURNAL | RECEIPT | PAYMENT | RETURN | EXCHANGE | EXPENSE | WITHDRAWAL | STOCK_JOURNAL | WRITE_OFF",
+        description="SALE | PURCHASE | PURCHASE_RETURN | JOURNAL | RECEIPT | PAYMENT | RETURN | EXCHANGE | EXPENSE | WITHDRAWAL | STOCK_JOURNAL | WRITE_OFF",
     ),
     q: Optional[str] = Query(None, description="Search by voucher no, party, narration"),
     deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
@@ -635,6 +636,32 @@ def daybook(
                     online_amount=0.0,
                     status=purchase.payment_status,
                     is_deleted=bool(purchase.is_deleted),
+                )
+            )
+
+        purchase_return_stmt = select(PurchaseReturn).where(
+            PurchaseReturn.return_date >= start_date,
+            PurchaseReturn.return_date <= end_date,
+        )
+        if deleted_filter == "active":
+            purchase_return_stmt = purchase_return_stmt.where(PurchaseReturn.is_deleted == False)  # noqa: E712
+        elif deleted_filter == "deleted":
+            purchase_return_stmt = purchase_return_stmt.where(PurchaseReturn.is_deleted == True)  # noqa: E712
+        for purchase_return in session.exec(purchase_return_stmt).all():
+            rows.append(
+                VoucherDayBookRow(
+                    ts=f"{purchase_return.return_date}T00:00:00",
+                    voucher_type="PURCHASE_RETURN",
+                    source_type="PURCHASE_RETURN",
+                    source_id=int(purchase_return.id or 0),
+                    voucher_no=purchase_return.return_number,
+                    party_name=party_map.get(int(purchase_return.party_id or 0)),
+                    narration=purchase_return.notes or f"Purchase return {purchase_return.return_number}",
+                    amount=_round2(purchase_return.total_amount),
+                    cash_amount=0.0,
+                    online_amount=0.0,
+                    status="DELETED" if purchase_return.is_deleted else "POSTED",
+                    is_deleted=bool(purchase_return.is_deleted),
                 )
             )
 
@@ -856,7 +883,7 @@ def daybook(
                 summary.receipt_total = _round2(summary.receipt_total + amount)
             elif row.voucher_type == "PAYMENT":
                 summary.payment_total = _round2(summary.payment_total + amount)
-            elif row.voucher_type == "RETURN":
+            elif row.voucher_type in {"RETURN", "PURCHASE_RETURN"}:
                 summary.return_total = _round2(summary.return_total + amount)
             elif row.voucher_type == "EXCHANGE":
                 summary.exchange_total = _round2(summary.exchange_total + amount)

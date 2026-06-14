@@ -785,6 +785,33 @@ class PurchasePayment(SQLModel, table=True):
     deleted_at: Optional[str] = None
 
 
+class PurchaseReturn(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    purchase_id: int = Field(default=0, index=True)
+    party_id: int = Field(index=True)
+    return_number: str = Field(index=True)
+    return_date: str = Field(sa_column=Column(String(10), index=True))
+    notes: Optional[str] = None
+    total_amount: float = 0.0
+    is_deleted: bool = Field(default=False, index=True)
+    deleted_at: Optional[str] = None
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    updated_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+
+
+class PurchaseReturnItem(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    purchase_return_id: int = Field(index=True)
+    purchase_item_id: int = Field(default=0, index=True)
+    inventory_item_id: int = Field(index=True)
+    lot_id: Optional[int] = Field(default=None, index=True)
+    product_id: int = Field(index=True)
+    product_name: str
+    quantity: int = 0
+    unit_cost: float = 0.0
+    line_total: float = 0.0
+
+
 class PackOpenEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     source_lot_id: int = Field(index=True)
@@ -1120,6 +1147,61 @@ class PurchaseOut(SQLModel):
     updated_at: str
     items: List[PurchaseItemOut]
     payments: List[PurchasePaymentOut]
+    return_total: float = 0.0
+    net_amount: float = 0.0
+
+
+class PurchaseReturnItemIn(SQLModel):
+    purchase_item_id: Optional[int] = None
+    inventory_item_id: Optional[int] = None
+    lot_id: Optional[int] = None
+    quantity: int
+    unit_cost: Optional[float] = None
+
+
+class PurchaseReturnCreate(SQLModel):
+    purchase_id: Optional[int] = None
+    party_id: Optional[int] = None
+    return_date: str
+    return_number: Optional[str] = None
+    notes: Optional[str] = None
+    items: List[PurchaseReturnItemIn]
+
+
+class PurchaseReturnUpdate(SQLModel):
+    party_id: Optional[int] = None
+    return_date: Optional[str] = None
+    return_number: Optional[str] = None
+    notes: Optional[str] = None
+    items: List[PurchaseReturnItemIn]
+
+
+class PurchaseReturnItemOut(SQLModel):
+    id: int
+    purchase_return_id: int
+    purchase_item_id: Optional[int] = None
+    inventory_item_id: int
+    lot_id: Optional[int] = None
+    product_id: int
+    product_name: str
+    quantity: int
+    unit_cost: float
+    line_total: float
+
+
+class PurchaseReturnOut(SQLModel):
+    id: int
+    purchase_id: Optional[int] = None
+    party_id: int
+    return_number: str
+    return_date: str
+    notes: Optional[str] = None
+    total_amount: float
+    is_deleted: bool
+    deleted_at: Optional[str] = None
+    created_at: str
+    updated_at: str
+    items: List[PurchaseReturnItemOut]
 
 
 class PurchaseLedgerRow(SQLModel):
@@ -1129,6 +1211,8 @@ class PurchaseLedgerRow(SQLModel):
     total_amount: float
     paid_amount: float
     writeoff_amount: float
+    return_amount: float = 0.0
+    net_amount: float = 0.0
     outstanding_amount: float
     payment_status: str
     notes: Optional[str] = None
@@ -1139,6 +1223,7 @@ class SupplierLedgerSummary(SQLModel):
     total_purchases: float
     total_paid: float
     total_writeoff: float
+    total_returns: float = 0.0
     outstanding_amount: float
 
 

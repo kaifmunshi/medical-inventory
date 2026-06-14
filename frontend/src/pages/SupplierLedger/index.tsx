@@ -27,6 +27,7 @@ import PaymentsIcon from '@mui/icons-material/Payments'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { fetchParties } from '../../services/parties'
+import { fetchPurchaseReturns } from '../../services/purchaseReturns'
 import { listIncomingStockEntries, type IncomingStockEntry } from '../../services/inventory'
 import { createBrand, createCategory, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
 import {
@@ -107,7 +108,7 @@ function outstandingOf(purchase: Purchase) {
   return round2(
     Math.max(
       0,
-      Number(purchase.total_amount || 0) -
+      Number(purchase.net_amount ?? purchase.total_amount ?? 0) -
         Number(purchase.paid_amount || 0) -
         Number(purchase.writeoff_amount || 0),
     ),
@@ -256,6 +257,12 @@ export default function SupplierLedgerPage() {
     enabled: Boolean(partyId),
   })
 
+  const purchaseReturnsQ = useQuery({
+    queryKey: ['supplier-ledger-purchase-returns', partyId],
+    queryFn: () => fetchPurchaseReturns({ party_id: Number(partyId), include_deleted: true, limit: 1000 }),
+    enabled: Boolean(partyId),
+  })
+
   const categoriesQ = useQuery<Category[], Error>({
     queryKey: ['purchase-categories'],
     queryFn: () => fetchCategories(),
@@ -289,6 +296,7 @@ export default function SupplierLedgerPage() {
   const selectedSupplier = suppliers.find((supplier) => Number(supplier.id) === Number(partyId)) || null
   const purchases = purchasesQ.data || []
   const supplierPayments = supplierPaymentsQ.data || []
+  const purchaseReturns = purchaseReturnsQ.data || []
   const openingBalance = openingForSupplier(selectedSupplier)
   const openPurchases = purchases.filter((purchase) => outstandingOf(purchase) > 0.0001)
   const selectedPurchase = purchases.find((purchase) => Number(purchase.id) === Number(selectedPurchaseId)) || null
@@ -317,6 +325,7 @@ export default function SupplierLedgerPage() {
         date: purchase.invoice_date || dateOnly(purchase.created_at),
         particulars: `Purchase ${purchase.invoice_number || `#${purchase.id}`}`,
         purchaseAmount: Number(purchase.total_amount || 0),
+        returnAmount: 0,
         paidAmount: 0,
         writeoffAmount: 0,
         mode: '',
@@ -344,6 +353,7 @@ export default function SupplierLedgerPage() {
           ? `${isWriteoff ? 'Write-off' : 'Payment'} for ${purchaseLabel}`
           : `${isWriteoff ? 'Supplier write-off' : 'Supplier payment'} without bill`,
         purchaseAmount: 0,
+        returnAmount: 0,
         paidAmount: isWriteoff ? 0 : Number(payment.amount || 0),
         writeoffAmount: isWriteoff ? Number(payment.amount || 0) : 0,
         mode: `${paymentModeLabel(payment.mode)}${bankDetail}`,
@@ -351,7 +361,28 @@ export default function SupplierLedgerPage() {
       }
     })
 
-    const events = [...purchaseEvents, ...paymentEvents]
+    const returnEvents = purchaseReturns.map((purchaseReturn) => {
+      const sourcePurchase = purchases.find((row) => Number(row.id) === Number(purchaseReturn.purchase_id))
+      return {
+        id: `purchase-return-${purchaseReturn.id}`,
+        sortTs: `${purchaseReturn.return_date}T00:00:00`,
+        sortOrder: 2,
+        type: 'PURCHASE_RETURN' as const,
+        purchaseId: Number(purchaseReturn.purchase_id),
+        paymentId: null as number | null,
+        isDeleted: Boolean(purchaseReturn.is_deleted),
+        date: purchaseReturn.return_date,
+        particulars: `Purchase return ${purchaseReturn.return_number}${sourcePurchase ? ` for ${sourcePurchase.invoice_number}` : ''}`,
+        purchaseAmount: 0,
+        returnAmount: Number(purchaseReturn.total_amount || 0),
+        paidAmount: 0,
+        writeoffAmount: 0,
+        mode: 'Supplier credit',
+        note: purchaseReturn.notes || '',
+      }
+    })
+
+    const events = [...purchaseEvents, ...paymentEvents, ...returnEvents]
 
     events.sort((a, b) => {
       const byDate = dateValue(a.sortTs) - dateValue(b.sortTs)
@@ -367,6 +398,7 @@ export default function SupplierLedgerPage() {
         event.isDeleted
           ? 0
           : Number(event.purchaseAmount || 0) -
+            Number(event.returnAmount || 0) -
             Number(event.paidAmount || 0) -
             Number(event.writeoffAmount || 0)
       balance = round2(balance + delta)
@@ -376,16 +408,17 @@ export default function SupplierLedgerPage() {
         balanceAfter: balance,
       }
     }).reverse()
-  }, [openingBalance, purchases, supplierPayments, today])
+  }, [openingBalance, purchaseReturns, purchases, supplierPayments, today])
 
   const totals = useMemo(() => {
     const totalPurchases = purchases.reduce((sum, purchase) => sum + Number(purchase.total_amount || 0), 0)
+    const totalReturns = purchaseReturns.filter((row) => !row.is_deleted).reduce((sum, row) => sum + Number(row.total_amount || 0), 0)
     const activePayments = supplierPayments.filter((payment) => !payment.is_deleted)
     const totalPaid = activePayments.reduce((sum, payment) => sum + (payment.is_writeoff ? 0 : Number(payment.amount || 0)), 0)
     const totalWriteoff = activePayments.reduce((sum, payment) => sum + (payment.is_writeoff ? Number(payment.amount || 0) : 0), 0)
-    const closingBalance = openingBalance + totalPurchases - totalPaid - totalWriteoff
-    return { totalPurchases, totalPaid, totalWriteoff, closingBalance }
-  }, [openingBalance, purchases, supplierPayments])
+    const closingBalance = openingBalance + totalPurchases - totalReturns - totalPaid - totalWriteoff
+    return { totalPurchases, totalReturns, totalPaid, totalWriteoff, closingBalance }
+  }, [openingBalance, purchaseReturns, purchases, supplierPayments])
 
   const allocationTotal = useMemo(
     () => round2(Object.values(allocationDrafts).reduce((sum, value) => sum + Number(value || 0), 0)),
@@ -1243,6 +1276,7 @@ export default function SupplierLedgerPage() {
           <Stack direction="row" gap={1} flexWrap="wrap">
             <Chip label={`Opening: Rs ${money(openingBalance)}`} />
             <Chip label={`Purchases: Rs ${money(totals.totalPurchases)}`} variant="outlined" />
+            <Chip label={`Returns: Rs ${money(totals.totalReturns)}`} color="secondary" variant="outlined" />
             <Chip label={`Paid: Rs ${money(totals.totalPaid)}`} color="success" variant="outlined" />
             <Chip label={`Write-off: Rs ${money(totals.totalWriteoff)}`} variant="outlined" />
             <Chip label={`Closing: Rs ${money(totals.closingBalance)}`} color="primary" />
@@ -1259,6 +1293,7 @@ export default function SupplierLedgerPage() {
                 <th>Particulars</th>
                 <th>Op Bal</th>
                 <th>Purchase</th>
+                <th>Return</th>
                 <th>Paid</th>
                 <th>Write-off</th>
                 <th>Cl Bal</th>
@@ -1331,6 +1366,7 @@ export default function SupplierLedgerPage() {
                     </td>
                     <td>{money(row.balanceBefore)}</td>
                     <td>{row.purchaseAmount ? money(row.purchaseAmount) : '-'}</td>
+                    <td>{row.returnAmount ? money(row.returnAmount) : '-'}</td>
                     <td>{row.paidAmount ? money(row.paidAmount) : '-'}</td>
                     <td>{row.writeoffAmount ? money(row.writeoffAmount) : '-'}</td>
                     <td>{money(row.balanceAfter)}</td>
@@ -1698,10 +1734,10 @@ export default function SupplierLedgerPage() {
                   <Typography color="text.secondary">{selectedSupplier?.name || `Supplier #${selectedPurchase.party_id}`} | {selectedPurchase.invoice_date}</Typography>
                 </Box>
                 <Stack direction="row" gap={1} flexWrap="wrap">
-                  <Button variant="outlined" startIcon={<EditIcon />} onClick={openEditHeader}>
+                  <Button variant="outlined" disabled={selectedPurchase.return_total > 0} startIcon={<EditIcon />} onClick={openEditHeader}>
                     Edit Header
                   </Button>
-                  <Button variant="outlined" startIcon={<EditIcon />} onClick={openEditItems}>
+                  <Button variant="outlined" disabled={selectedPurchase.return_total > 0} startIcon={<EditIcon />} onClick={openEditItems}>
                     Edit Items
                   </Button>
                   {outstandingOf(selectedPurchase) > 0.0001 ? (
@@ -1715,6 +1751,8 @@ export default function SupplierLedgerPage() {
               <Paper variant="outlined" sx={{ p: 2 }}>
                 <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
                   <Typography>Total: {money(selectedPurchase.total_amount)}</Typography>
+                  <Typography color="secondary.main">Returns: {money(selectedPurchase.return_total || 0)}</Typography>
+                  <Typography>Net: {money(selectedPurchase.net_amount ?? selectedPurchase.total_amount)}</Typography>
                   <Typography>Paid: {money(selectedPurchase.paid_amount)}</Typography>
                   <Typography>Write-off: {money(selectedPurchase.writeoff_amount)}</Typography>
                   <Typography fontWeight={700}>Outstanding: {money(outstandingOf(selectedPurchase))}</Typography>

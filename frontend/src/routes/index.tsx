@@ -25,6 +25,7 @@ import BrandMasterPage from '../pages/BrandMaster'
 import CustomerSummaryPage from '../pages/CustomerSummary'
 import SuppliersPage from '../pages/Suppliers'
 import PurchasesPage from '../pages/Purchases'
+import PurchaseReturnsPage from '../pages/PurchaseReturns'
 import StockAuditPage from '../pages/StockAudit'
 import DayBookPage from '../pages/DayBook'
 import JournalEntryPage from '../pages/JournalEntry'
@@ -63,6 +64,7 @@ export default function AppRoutes() {
         <Route path="suppliers" element={<SuppliersPage />} />
         <Route path="billing" element={<Billing />} />
         <Route path="purchases" element={<PurchasesPage />} />
+        <Route path="purchase-returns" element={<PurchaseReturnsPage />} />
         <Route path="returns" element={<Returns />} />
         <Route path="exchange" element={<Exchange />} />
         <Route path="reports" element={<Reports />} />

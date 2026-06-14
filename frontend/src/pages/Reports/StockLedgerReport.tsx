@@ -73,6 +73,8 @@ function reasonLabel(reason: string) {
     OPENING: 'Opening',
     PURCHASE: 'Purchase',
     PURCHASE_CANCEL: 'Purchase Cancel',
+    PURCHASE_RETURN: 'Purchase Return',
+    PURCHASE_RETURN_CANCEL: 'Purchase Return Cancel',
     SALE: 'Sale',
     BILL_DELETE: 'Sale Cancel',
     BILL_RECOVER: 'Sale Restore',
@@ -394,6 +396,8 @@ export default function StockLedgerReport(props: {
           <MenuItem value="INVENTORY_ADD">Inventory Add</MenuItem>
           <MenuItem value="PURCHASE">PURCHASE</MenuItem>
           <MenuItem value="PURCHASE_CANCEL">PURCHASE_CANCEL</MenuItem>
+          <MenuItem value="PURCHASE_RETURN">PURCHASE RETURN</MenuItem>
+          <MenuItem value="PURCHASE_RETURN_CANCEL">PURCHASE RETURN CANCEL</MenuItem>
           <MenuItem value="SALE">SALE</MenuItem>
 
           <MenuItem value="OPENING">OPENING</MenuItem>

@@ -75,6 +75,7 @@ export const appMenuGroups: AppMenuGroup[] = [
     items: [
       { to: '/billing', label: 'Billing', icon: <PointOfSale fontSize="small" />, hint: 'Sales and billing' },
       { to: '/purchases', label: 'Purchase', icon: <ShoppingCart fontSize="small" />, hint: 'Supplier purchases and inward stock' },
+      { to: '/purchase-returns', label: 'Purchase Returns', icon: <AssignmentReturn fontSize="small" />, hint: 'Return purchase stock and post supplier credits' },
       { to: '/returns', label: 'Sales Returns', icon: <AssignmentReturn fontSize="small" />, hint: 'Customer sales returns and refunds' },
       { to: '/exchange', label: 'Exchange', icon: <SwapHoriz fontSize="small" />, hint: 'Exchange workflow' },
     ],

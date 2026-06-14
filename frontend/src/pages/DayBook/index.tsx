@@ -25,6 +25,7 @@ function todayYmd() {
 function rowChipColor(type: VoucherDayBookRow['voucher_type']) {
   if (type === 'SALE') return 'success'
   if (type === 'PURCHASE') return 'primary'
+  if (type === 'PURCHASE_RETURN') return 'secondary'
   if (type === 'JOURNAL') return 'default'
   if (type === 'RECEIPT') return 'info'
   if (type === 'PAYMENT') return 'warning'
@@ -37,6 +38,7 @@ const voucherTypes = [
   '',
   'SALE',
   'PURCHASE',
+  'PURCHASE_RETURN',
   'JOURNAL',
   'RECEIPT',
   'PAYMENT',
@@ -148,7 +150,7 @@ export default function DayBookPage() {
             <Typography>Journals: {money(summary.journal_total)}</Typography>
             <Typography>Receipts: {money(summary.receipt_total)}</Typography>
             <Typography>Payments: {money(summary.payment_total)}</Typography>
-            <Typography>Sales Returns: {money(summary.return_total)}</Typography>
+            <Typography>Returns: {money(summary.return_total)}</Typography>
             <Typography>Exchanges: {money(summary.exchange_total)}</Typography>
             <Typography>Expenses: {money(summary.expense_total)}</Typography>
             <Typography>Withdrawals: {money(summary.withdrawal_total)}</Typography>

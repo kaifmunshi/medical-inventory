@@ -19,6 +19,7 @@ from backend.routers import products
 from backend.routers import audit
 from backend.routers import parties
 from backend.routers import purchases
+from backend.routers import purchase_returns
 from backend.routers import settings
 from backend.routers import lots
 from backend.routers import vouchers
@@ -84,6 +85,7 @@ app.include_router(bankbook.router, prefix="/bankbook", tags=["Bankbook"])
 app.include_router(products.router, prefix="/products", tags=["Products"])
 app.include_router(parties.router, prefix="/parties", tags=["Parties"])
 app.include_router(purchases.router, prefix="/purchases", tags=["Purchases"])
+app.include_router(purchase_returns.router, prefix="/purchase-returns", tags=["Purchase Returns"])
 app.include_router(audit.router, prefix="/audits", tags=["Stock Audit"])
 app.include_router(settings.router, prefix="/settings", tags=["Settings"])
 app.include_router(lots.router, prefix="/lots", tags=["Lots"])

@@ -254,6 +254,8 @@ export interface Purchase {
   updated_at: string
   items: PurchaseItem[]
   payments: PurchasePayment[]
+  return_total: number
+  net_amount: number
 }
 
 export interface PurchaseLedgerRow {
@@ -263,6 +265,8 @@ export interface PurchaseLedgerRow {
   total_amount: number
   paid_amount: number
   writeoff_amount: number
+  return_amount: number
+  net_amount: number
   outstanding_amount: number
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID'
   notes?: string | null
@@ -273,7 +277,36 @@ export interface SupplierLedgerSummary {
   total_purchases: number
   total_paid: number
   total_writeoff: number
+  total_returns: number
   outstanding_amount: number
+}
+
+export interface PurchaseReturnItem {
+  id: ID
+  purchase_return_id: ID
+  purchase_item_id?: ID | null
+  inventory_item_id: ID
+  lot_id?: ID | null
+  product_id: ID
+  product_name: string
+  quantity: number
+  unit_cost: number
+  line_total: number
+}
+
+export interface PurchaseReturn {
+  id: ID
+  purchase_id?: ID | null
+  party_id: ID
+  return_number: string
+  return_date: string
+  notes?: string | null
+  total_amount: number
+  is_deleted: boolean
+  deleted_at?: string | null
+  created_at: string
+  updated_at: string
+  items: PurchaseReturnItem[]
 }
 
 export interface InventoryLotBrowse {
@@ -389,6 +422,7 @@ export interface VoucherDayBookRow {
   voucher_type:
     | 'SALE'
     | 'PURCHASE'
+    | 'PURCHASE_RETURN'
     | 'JOURNAL'
     | 'RECEIPT'
     | 'PAYMENT'

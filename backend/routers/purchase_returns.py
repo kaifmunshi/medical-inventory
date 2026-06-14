@@ -38,6 +38,12 @@ def round2(value: float) -> float:
     return float(f"{float(value or 0):.2f}")
 
 
+def _linked_return_basis(purchase: Purchase, item: PurchaseItem) -> tuple[float, float]:
+    subtotal = float(purchase.subtotal_amount or 0)
+    discount_factor = max(0.0, subtotal - float(purchase.discount_amount or 0)) / subtotal if subtotal > 0 else 0.0
+    return round2(float(item.effective_cost_price or 0) * discount_factor), round2(item.gst_percent)
+
+
 def _supplier(session, party_id: int) -> Party:
     party = session.get(Party, party_id)
     if not party or party.party_group != "SUNDRY_CREDITOR":
@@ -76,6 +82,8 @@ def _snapshot(session, row: PurchaseReturn, items: Optional[List[PurchaseReturnI
             "return_number": row.return_number,
             "return_date": row.return_date,
             "notes": row.notes,
+            "taxable_amount": round2(row.taxable_amount),
+            "gst_amount": round2(row.gst_amount),
             "total_amount": round2(row.total_amount),
             "is_deleted": bool(row.is_deleted),
         },
@@ -88,6 +96,9 @@ def _snapshot(session, row: PurchaseReturn, items: Optional[List[PurchaseReturnI
                 "product_name": item.product_name,
                 "quantity": int(item.quantity),
                 "unit_cost": round2(item.unit_cost),
+                "gst_percent": round2(item.gst_percent),
+                "taxable_amount": round2(item.taxable_amount),
+                "gst_amount": round2(item.gst_amount),
                 "line_total": round2(item.line_total),
             }
             for item in items
@@ -212,6 +223,8 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             return_number=requested_number or "PENDING",
             return_date=return_date,
             notes=(str(payload.notes).strip() or None) if payload.notes else None,
+            taxable_amount=0,
+            gst_amount=0,
             total_amount=0,
         )
         session.add(row)
@@ -220,6 +233,8 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             row.return_number = f"PR-{int(row.id):06d}"
 
         seen = set()
+        taxable_total = 0.0
+        gst_total = 0.0
         total = 0.0
         movement_ts = f"{return_date}T00:00:00"
         for raw in payload.items:
@@ -235,7 +250,7 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
                 lot = session.get(InventoryLot, purchase_item.lot_id) if purchase_item.lot_id else None
                 product_id = int(purchase_item.product_id)
                 product_name = purchase_item.product_name
-                default_cost = purchase_item.effective_cost_price
+                default_cost, default_gst = _linked_return_basis(purchase, purchase_item)
                 purchased_qty = int(purchase_item.sealed_qty or 0) + int(purchase_item.free_qty or 0)
                 remaining_returnable = purchased_qty - active_return_qty(session, purchase_item_id)
             else:
@@ -252,6 +267,7 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
                 product_id = int(inventory_item.product_id or 0) if inventory_item else 0
                 product_name = str(inventory_item.name or "") if inventory_item else "Inventory item"
                 default_cost = float(lot.cost_price or inventory_item.cost_price or 0) if lot and inventory_item else 0
+                default_gst = 0.0
                 remaining_returnable = min(int(inventory_item.stock or 0), int(lot.sealed_qty or 0)) if inventory_item and lot else 0
 
             if key in seen:
@@ -278,7 +294,12 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             unit_cost = round2(raw.unit_cost if raw.unit_cost is not None else default_cost)
             if unit_cost < 0:
                 raise HTTPException(status_code=400, detail="Return unit cost cannot be negative")
-            line_total = round2(quantity * unit_cost)
+            gst_percent = round2(default_gst if purchase else (raw.gst_percent if raw.gst_percent is not None else default_gst))
+            if gst_percent < 0 or gst_percent > 100:
+                raise HTTPException(status_code=400, detail="GST percent must be between 0 and 100")
+            taxable_amount = round2(quantity * unit_cost)
+            gst_amount = round2(taxable_amount * gst_percent / 100.0)
+            line_total = round2(taxable_amount + gst_amount)
             inventory_item.stock = int(inventory_item.stock or 0) - quantity
             inventory_item.is_archived = inventory_item.stock <= 0
             inventory_item.updated_at = now_ts()
@@ -297,6 +318,9 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
                     product_name=product_name,
                     quantity=quantity,
                     unit_cost=unit_cost,
+                    gst_percent=gst_percent,
+                    taxable_amount=taxable_amount,
+                    gst_amount=gst_amount,
                     line_total=line_total,
                 )
             )
@@ -316,6 +340,8 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
                     actor="SYSTEM",
                 )
             )
+            taxable_total = round2(taxable_total + taxable_amount)
+            gst_total = round2(gst_total + gst_amount)
             total = round2(total + line_total)
 
         if purchase:
@@ -328,6 +354,8 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             ).one() or 0)
             if round2(prior_total + total) > float(purchase.total_amount or 0) + 0.0001:
                 raise HTTPException(status_code=400, detail="Purchase return value cannot exceed the original purchase total")
+        row.taxable_amount = taxable_total
+        row.gst_amount = gst_total
         row.total_amount = total
         row.updated_at = now_ts()
         session.add(row)
@@ -421,6 +449,8 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
         session.flush()
 
         seen = set()
+        taxable_total = 0.0
+        gst_total = 0.0
         total = 0.0
         for raw in payload.items:
             purchase_item_id = int(raw.purchase_item_id or 0)
@@ -435,7 +465,7 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
                 lot = session.get(InventoryLot, purchase_item.lot_id) if purchase_item.lot_id else None
                 product_id = int(purchase_item.product_id)
                 product_name = purchase_item.product_name
-                default_cost = purchase_item.effective_cost_price
+                default_cost, default_gst = _linked_return_basis(purchase, purchase_item)
                 purchased_qty = int(purchase_item.sealed_qty or 0) + int(purchase_item.free_qty or 0)
                 remaining_returnable = purchased_qty - active_return_qty(session, purchase_item_id, exclude_return_id=int(row.id))
             else:
@@ -452,6 +482,7 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
                 product_id = int(inventory_item.product_id or 0) if inventory_item else 0
                 product_name = str(inventory_item.name or "") if inventory_item else "Inventory item"
                 default_cost = float(lot.cost_price or inventory_item.cost_price or 0) if lot and inventory_item else 0
+                default_gst = 0.0
                 remaining_returnable = min(int(inventory_item.stock or 0), int(lot.sealed_qty or 0)) if inventory_item and lot else 0
 
             if key in seen:
@@ -475,7 +506,12 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
             unit_cost = round2(raw.unit_cost if raw.unit_cost is not None else default_cost)
             if unit_cost < 0:
                 raise HTTPException(status_code=400, detail="Return unit cost cannot be negative")
-            line_total = round2(quantity * unit_cost)
+            gst_percent = round2(default_gst if purchase else (raw.gst_percent if raw.gst_percent is not None else default_gst))
+            if gst_percent < 0 or gst_percent > 100:
+                raise HTTPException(status_code=400, detail="GST percent must be between 0 and 100")
+            taxable_amount = round2(quantity * unit_cost)
+            gst_amount = round2(taxable_amount * gst_percent / 100.0)
+            line_total = round2(taxable_amount + gst_amount)
             inventory_item.stock = int(inventory_item.stock or 0) - quantity
             inventory_item.is_archived = inventory_item.stock <= 0
             inventory_item.updated_at = now_ts()
@@ -493,6 +529,9 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
                 product_name=product_name,
                 quantity=quantity,
                 unit_cost=unit_cost,
+                gst_percent=gst_percent,
+                taxable_amount=taxable_amount,
+                gst_amount=gst_amount,
                 line_total=line_total,
             ))
             session.add(StockMovement(
@@ -505,6 +544,8 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
                 note=f"Edited purchase return {return_number}",
                 actor="SYSTEM",
             ))
+            taxable_total = round2(taxable_total + taxable_amount)
+            gst_total = round2(gst_total + gst_amount)
             total = round2(total + line_total)
 
         if purchase:
@@ -522,6 +563,8 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
         row.return_date = return_date
         row.return_number = return_number
         row.notes = (str(payload.notes).strip() or None) if payload.notes else None
+        row.taxable_amount = taxable_total
+        row.gst_amount = gst_total
         row.total_amount = total
         row.updated_at = now_ts()
         session.add(row)

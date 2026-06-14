@@ -10,6 +10,8 @@ from backend.accounting import mark_voucher_deleted, post_purchase_payment_vouch
 from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import (
+    AuditLog,
+    AuditLogOut,
     Brand,
     Category,
     InventoryLot,
@@ -35,6 +37,56 @@ from backend.models import (
 from backend.security import require_min_role
 
 router = APIRouter()
+
+
+def purchase_gst_amount(subtotal: float, discount: float, items: List[PurchaseItem]) -> float:
+    subtotal = round2(subtotal)
+    taxable_after_header_discount = max(0.0, round2(subtotal - round2(discount)))
+    factor = taxable_after_header_discount / subtotal if subtotal > 0 else 0.0
+    return round2(sum(round2(max(0.0, float(item.line_total or 0)) * float(item.gst_percent or 0) / 100.0) for item in items) * factor)
+
+
+def raw_purchase_gst_amount(subtotal: float, discount: float, items: List[Dict[str, Any]]) -> float:
+    subtotal = round2(subtotal)
+    taxable_after_header_discount = max(0.0, round2(subtotal - round2(discount)))
+    factor = taxable_after_header_discount / subtotal if subtotal > 0 else 0.0
+    return round2(sum(round2(max(0.0, float(item["line_total"])) * float(item["gst_percent"]) / 100.0) for item in items) * factor)
+
+
+def purchase_snapshot(session, purchase: Purchase) -> dict:
+    items = get_purchase_items(session, int(purchase.id))
+    return {
+        "purchase": {
+            "id": int(purchase.id),
+            "party_id": int(purchase.party_id),
+            "invoice_number": purchase.invoice_number,
+            "invoice_date": purchase.invoice_date,
+            "notes": purchase.notes,
+            "subtotal_amount": round2(purchase.subtotal_amount),
+            "discount_amount": round2(purchase.discount_amount),
+            "gst_amount": round2(purchase.gst_amount),
+            "rounding_adjustment": round2(purchase.rounding_adjustment),
+            "total_amount": round2(purchase.total_amount),
+            "is_deleted": bool(purchase.is_deleted),
+        },
+        "items": [
+            {
+                "id": int(item.id),
+                "product_id": int(item.product_id),
+                "inventory_item_id": int(item.inventory_item_id) if item.inventory_item_id else None,
+                "lot_id": int(item.lot_id) if item.lot_id else None,
+                "product_name": item.product_name,
+                "sealed_qty": int(item.sealed_qty),
+                "free_qty": int(item.free_qty),
+                "cost_price": round2(item.cost_price),
+                "gst_percent": round2(item.gst_percent),
+                "discount_amount": round2(item.discount_amount),
+                "rounding_adjustment": round2(item.rounding_adjustment),
+                "line_total": round2(item.line_total),
+            }
+            for item in items
+        ],
+    }
 
 
 class PurchaseItemsReplace(SQLModel):
@@ -684,6 +736,7 @@ def purchase_item_matches_raw(raw: PurchaseItemIn, item: PurchaseItem) -> bool:
         and int(raw.free_qty or 0) == int(item.free_qty or 0)
         and round2(raw.cost_price) == round2(item.cost_price)
         and round2(raw.mrp) == round2(item.mrp)
+        and round2(raw.gst_percent) == round2(item.gst_percent)
         and round2(raw.discount_amount) == round2(item.discount_amount)
         and round2(raw.rounding_adjustment) == round2(item.rounding_adjustment)
     )
@@ -691,6 +744,7 @@ def purchase_item_matches_raw(raw: PurchaseItemIn, item: PurchaseItem) -> bool:
 
 def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[PurchaseItemIn]) -> PurchaseOut:
     """Safely adjust existing purchase lines without recreating sold batches."""
+    before_snapshot = purchase_snapshot(session, purchase)
     existing_items = get_purchase_items(session, int(purchase.id))
     existing_by_id = {int(item.id or 0): item for item in existing_items}
     subtotal_amount = 0.0
@@ -725,6 +779,8 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
             raise HTTPException(status_code=400, detail="rate cannot be negative")
         if round2(raw.mrp) < 0:
             raise HTTPException(status_code=400, detail="mrp cannot be negative")
+        if round2(raw.gst_percent) < 0 or round2(raw.gst_percent) > 100:
+            raise HTTPException(status_code=400, detail="GST percent must be between 0 and 100")
 
         old_qty = purchase_item_total_qty(item)
         delta = int(new_qty - old_qty)
@@ -806,7 +862,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         item.cost_price = round2(raw.cost_price)
         item.effective_cost_price = effective_cost
         item.mrp = round2(raw.mrp)
-        item.gst_percent = 0.0
+        item.gst_percent = round2(raw.gst_percent)
         item.discount_amount = round2(raw.discount_amount)
         item.rounding_adjustment = line_rounding
         item.line_total = line_total
@@ -815,7 +871,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
             changed_lines.append({"purchase_item_id": int(item.id), "old_expiry": old_expiry, "new_expiry": new_expiry})
 
     purchase.subtotal_amount = subtotal_amount
-    purchase.gst_amount = 0.0
+    purchase.gst_amount = purchase_gst_amount(subtotal_amount, purchase.discount_amount, list(existing_by_id.values()))
     purchase.total_amount = round2(
         float(subtotal_amount or 0)
         - float(purchase.discount_amount or 0)
@@ -827,13 +883,18 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
 
     purchase.updated_at = ts
     session.add(purchase)
+    session.flush()
     log_audit(
         session,
         entity_type="PURCHASE",
         entity_id=int(purchase.id),
         action="UPDATE_ITEMS",
         note=f"Updated purchase item quantities on purchase #{purchase.id}",
-        details={"total_amount": purchase.total_amount, "item_count": len(raw_items), "changed_lines": changed_lines},
+        details={
+            "before": before_snapshot,
+            "after": purchase_snapshot(session, purchase),
+            "changed_lines": changed_lines,
+        },
     )
     session.commit()
     recompute_purchase_payment_state(session, purchase)
@@ -952,6 +1013,8 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 raise HTTPException(status_code=400, detail="rate cannot be negative")
             if round2(raw.mrp) < 0:
                 raise HTTPException(status_code=400, detail="mrp cannot be negative")
+            if round2(raw.gst_percent) < 0 or round2(raw.gst_percent) > 100:
+                raise HTTPException(status_code=400, detail="GST percent must be between 0 and 100")
 
             existing_inventory_item = None
             stock_source = STOCK_SOURCE_CREATED
@@ -1013,7 +1076,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     "cost_price": round2(raw.cost_price),
                     "effective_cost_price": effective_cost,
                     "mrp": round2(raw.mrp),
-                    "gst_percent": 0.0,
+                    "gst_percent": round2(raw.gst_percent),
                     "discount_amount": round2(raw.discount_amount),
                     "rounding_adjustment": line_rounding,
                     "line_total": line_total,
@@ -1021,7 +1084,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             )
 
         discount_amount = round2(payload.discount_amount)
-        gst_amount = 0.0
+        gst_amount = raw_purchase_gst_amount(subtotal_amount, discount_amount, prepared_items)
         rounding_adjustment = round2(payload.rounding_adjustment)
         total_amount = round2(subtotal_amount - discount_amount + gst_amount + rounding_adjustment)
         if total_amount < 0:
@@ -1235,13 +1298,14 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             )
             session.add(payment_row)
 
+        session.flush()
         log_audit(
             session,
             entity_type="PURCHASE",
             entity_id=int(purchase.id),
             action="CREATE",
             note=f"Created purchase #{purchase.id}",
-            details={"invoice_number": purchase.invoice_number, "total_amount": purchase.total_amount, "party_id": purchase.party_id},
+            details={"after": purchase_snapshot(session, purchase)},
         )
         session.commit()
         session.refresh(purchase)
@@ -1445,6 +1509,19 @@ def get_purchase(purchase_id: int) -> PurchaseOut:
         return make_purchase_out(session, row)
 
 
+@router.get("/{purchase_id}/history", response_model=List[AuditLogOut])
+def get_purchase_history(purchase_id: int) -> List[AuditLogOut]:
+    with get_session() as session:
+        if not session.get(Purchase, purchase_id):
+            raise HTTPException(status_code=404, detail="Purchase not found")
+        return session.exec(
+            select(AuditLog).where(
+                AuditLog.entity_type == "PURCHASE",
+                AuditLog.entity_id == purchase_id,
+            ).order_by(AuditLog.id.desc())
+        ).all()
+
+
 @router.get("/ledger/{party_id}", response_model=List[PurchaseLedgerRow])
 def supplier_ledger(party_id: int) -> List[PurchaseLedgerRow]:
     with get_session() as session:
@@ -1491,6 +1568,7 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
             raise HTTPException(status_code=404, detail="Purchase not found")
         assert_purchase_has_no_active_returns(session, purchase_id, context="Purchase update")
         assert_financial_year_unlocked(session, row.invoice_date, context="Purchase update")
+        before_snapshot = purchase_snapshot(session, row)
 
         data = payload.dict(exclude_unset=True)
         if "party_id" in data:
@@ -1515,12 +1593,17 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
             invoice_date = clean_date(data["invoice_date"])
             if not invoice_date:
                 raise HTTPException(status_code=400, detail="invoice_date is required")
+            assert_financial_year_unlocked(session, invoice_date, context="Purchase update")
             row.invoice_date = invoice_date
         if "notes" in data:
             row.notes = clean_text(data["notes"])
         if "discount_amount" in data:
             row.discount_amount = round2(data["discount_amount"])
-        row.gst_amount = 0.0
+        row.gst_amount = purchase_gst_amount(
+            row.subtotal_amount,
+            row.discount_amount,
+            get_purchase_items(session, int(row.id)),
+        )
         if "rounding_adjustment" in data:
             row.rounding_adjustment = round2(data["rounding_adjustment"])
 
@@ -1542,13 +1625,14 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
 
         row.updated_at = now_ts()
         session.add(row)
+        session.flush()
         log_audit(
             session,
             entity_type="PURCHASE",
             entity_id=int(row.id),
             action="UPDATE",
             note=f"Updated purchase #{row.id}",
-            details={"invoice_number": row.invoice_number, "total_amount": row.total_amount, "party_id": row.party_id},
+            details={"before": before_snapshot, "after": purchase_snapshot(session, row)},
         )
         session.commit()
         recompute_purchase_payment_state(session, row)
@@ -2287,6 +2371,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
         assert_financial_year_unlocked(session, purchase.invoice_date, context="Purchase item replacement")
 
         existing_items = get_purchase_items(session, purchase_id)
+        before_snapshot = purchase_snapshot(session, purchase)
         if can_update_purchase_items_in_place(existing_items, payload.items):
             return update_purchase_items_in_place(session, purchase, payload.items)
 
@@ -2335,6 +2420,8 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             qty, free_qty, total_qty = validate_purchase_line_quantities(raw)
             if round2(raw.cost_price) < 0:
                 raise HTTPException(status_code=400, detail="rate cannot be negative")
+            if round2(raw.gst_percent) < 0 or round2(raw.gst_percent) > 100:
+                raise HTTPException(status_code=400, detail="GST percent must be between 0 and 100")
 
             existing_inventory_item = None
             stock_source = STOCK_SOURCE_CREATED
@@ -2399,7 +2486,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     "cost_price": round2(raw.cost_price),
                     "effective_cost_price": effective_cost,
                     "mrp": round2(raw.mrp),
-                    "gst_percent": 0.0,
+                    "gst_percent": round2(raw.gst_percent),
                     "discount_amount": round2(raw.discount_amount),
                     "rounding_adjustment": line_rounding,
                     "line_total": line_total,
@@ -2559,7 +2646,12 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             )
 
         purchase.subtotal_amount = subtotal_amount
-        purchase.gst_amount = 0.0
+        session.flush()
+        purchase.gst_amount = purchase_gst_amount(
+            subtotal_amount,
+            purchase.discount_amount,
+            get_purchase_items(session, int(purchase.id)),
+        )
         purchase.total_amount = round2(
             float(subtotal_amount or 0)
             - float(purchase.discount_amount or 0)
@@ -2570,13 +2662,14 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             raise HTTPException(status_code=400, detail="Edited items reduce total below settled amount")
 
         session.add(purchase)
+        session.flush()
         log_audit(
             session,
             entity_type="PURCHASE",
             entity_id=int(purchase.id),
             action="UPDATE_ITEMS",
             note=f"Replaced items on purchase #{purchase.id}",
-            details={"total_amount": purchase.total_amount, "item_count": len(payload.items)},
+            details={"before": before_snapshot, "after": purchase_snapshot(session, purchase)},
         )
         session.commit()
         recompute_purchase_payment_state(session, purchase)
@@ -2596,6 +2689,7 @@ def cancel_purchase(purchase_id: int) -> PurchaseOut:
             raise HTTPException(status_code=404, detail="Purchase not found")
         assert_purchase_has_no_active_returns(session, purchase_id, context="Purchase cancel")
         assert_financial_year_unlocked(session, purchase.invoice_date, context="Purchase cancel")
+        before_snapshot = purchase_snapshot(session, purchase)
 
         purchase_stock_ts = f"{purchase.invoice_date}T00:00:00"
         items = get_purchase_items(session, purchase_id)
@@ -2646,13 +2740,14 @@ def cancel_purchase(purchase_id: int) -> PurchaseOut:
         purchase.deleted_at = now_ts()
         purchase.updated_at = purchase.deleted_at
         session.add(purchase)
+        session.flush()
         log_audit(
             session,
             entity_type="PURCHASE",
             entity_id=int(purchase.id),
             action="DELETE",
             note=f"Cancelled purchase #{purchase.id}",
-            details={"invoice_number": purchase.invoice_number},
+            details={"before": before_snapshot, "after": purchase_snapshot(session, purchase)},
         )
         session.commit()
         mark_voucher_deleted(session, source_type="PURCHASE", source_id=int(purchase.id))

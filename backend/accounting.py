@@ -39,6 +39,7 @@ SYSTEM_GROUPS = {
     "CASH_BANK": ("Cash & Bank", "ASSET"),
     "SUNDRY_DEBTORS": ("Sundry Debtors", "ASSET"),
     "SUNDRY_CREDITORS": ("Sundry Creditors", "LIABILITY"),
+    "DUTIES_TAXES": ("Duties & Taxes", "ASSET"),
     "SALES": ("Sales Accounts", "INCOME"),
     "PURCHASES": ("Purchase Accounts", "EXPENSE"),
     "INDIRECT_INCOME": ("Indirect Incomes", "INCOME"),
@@ -52,6 +53,7 @@ SYSTEM_LEDGERS = {
     "SALES_ACCOUNT": ("Sales Account", "SALES"),
     "PURCHASE_ACCOUNT": ("Purchase Account", "PURCHASES"),
     "PURCHASE_RETURN_ACCOUNT": ("Purchase Returns", "PURCHASES"),
+    "INPUT_GST": ("Input GST", "DUTIES_TAXES"),
     "SALES_RECEIVABLE_CONTROL": ("Sales Receivable Control", "SUNDRY_DEBTORS"),
     "CUSTOMER_WRITE_OFF": ("Customer Write-off", "INDIRECT_EXPENSE"),
     "PURCHASE_WRITE_OFF": ("Purchase Write-off", "INDIRECT_INCOME"),
@@ -312,6 +314,14 @@ def post_purchase_voucher(session, purchase: Purchase, party: Party) -> Voucher:
     ledgers = ensure_accounting_setup(session)
     creditor_ledger = ensure_party_ledger(session, party)
     total = round2(getattr(purchase, "total_amount", 0.0))
+    gst = round2(getattr(purchase, "gst_amount", 0.0))
+    purchase_value = round2(total - gst)
+    lines = [
+        {"ledger_id": int(ledgers["PURCHASE_ACCOUNT"].id), "entry_type": "DR", "amount": purchase_value, "narration": "Purchases"},
+    ]
+    if gst > 0:
+        lines.append({"ledger_id": int(ledgers["INPUT_GST"].id), "entry_type": "DR", "amount": gst, "narration": "Input GST"})
+    lines.append({"ledger_id": int(creditor_ledger.id), "entry_type": "CR", "amount": total, "narration": "Supplier payable"})
     return upsert_voucher(
         session,
         voucher_type="PURCHASE",
@@ -321,10 +331,7 @@ def post_purchase_voucher(session, purchase: Purchase, party: Party) -> Voucher:
         voucher_no=f"P-{purchase.id}",
         narration=purchase.notes or f"Purchase invoice {purchase.invoice_number}",
         total_amount=total,
-        lines=[
-            {"ledger_id": int(ledgers["PURCHASE_ACCOUNT"].id), "entry_type": "DR", "amount": total, "narration": "Purchases"},
-            {"ledger_id": int(creditor_ledger.id), "entry_type": "CR", "amount": total, "narration": "Supplier payable"},
-        ],
+        lines=lines,
     )
 
 
@@ -332,6 +339,14 @@ def post_purchase_return_voucher(session, purchase_return: PurchaseReturn, party
     ledgers = ensure_accounting_setup(session)
     creditor_ledger = ensure_party_ledger(session, party)
     total = round2(getattr(purchase_return, "total_amount", 0.0))
+    gst = round2(getattr(purchase_return, "gst_amount", 0.0))
+    taxable = round2(total - gst)
+    lines = [
+        {"ledger_id": int(creditor_ledger.id), "entry_type": "DR", "amount": total, "narration": "Supplier credit note"},
+        {"ledger_id": int(ledgers["PURCHASE_RETURN_ACCOUNT"].id), "entry_type": "CR", "amount": taxable, "narration": "Purchase return"},
+    ]
+    if gst > 0:
+        lines.append({"ledger_id": int(ledgers["INPUT_GST"].id), "entry_type": "CR", "amount": gst, "narration": "Input GST reversal"})
     return upsert_voucher(
         session,
         voucher_type="PURCHASE_RETURN",
@@ -341,10 +356,7 @@ def post_purchase_return_voucher(session, purchase_return: PurchaseReturn, party
         voucher_no=purchase_return.return_number,
         narration=purchase_return.notes or f"Purchase return {purchase_return.return_number}",
         total_amount=total,
-        lines=[
-            {"ledger_id": int(creditor_ledger.id), "entry_type": "DR", "amount": total, "narration": "Supplier credit note"},
-            {"ledger_id": int(ledgers["PURCHASE_RETURN_ACCOUNT"].id), "entry_type": "CR", "amount": total, "narration": "Purchase return"},
-        ],
+        lines=lines,
     )
 
 

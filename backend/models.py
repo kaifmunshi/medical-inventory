@@ -792,6 +792,8 @@ class PurchaseReturn(SQLModel, table=True):
     return_number: str = Field(index=True)
     return_date: str = Field(sa_column=Column(String(10), index=True))
     notes: Optional[str] = None
+    taxable_amount: float = 0.0
+    gst_amount: float = 0.0
     total_amount: float = 0.0
     is_deleted: bool = Field(default=False, index=True)
     deleted_at: Optional[str] = None
@@ -809,6 +811,9 @@ class PurchaseReturnItem(SQLModel, table=True):
     product_name: str
     quantity: int = 0
     unit_cost: float = 0.0
+    gst_percent: float = 0.0
+    taxable_amount: float = 0.0
+    gst_amount: float = 0.0
     line_total: float = 0.0
 
 
@@ -1157,6 +1162,7 @@ class PurchaseReturnItemIn(SQLModel):
     lot_id: Optional[int] = None
     quantity: int
     unit_cost: Optional[float] = None
+    gst_percent: Optional[float] = None
 
 
 class PurchaseReturnCreate(SQLModel):
@@ -1186,6 +1192,9 @@ class PurchaseReturnItemOut(SQLModel):
     product_name: str
     quantity: int
     unit_cost: float
+    gst_percent: float
+    taxable_amount: float
+    gst_amount: float
     line_total: float
 
 
@@ -1196,6 +1205,8 @@ class PurchaseReturnOut(SQLModel):
     return_number: str
     return_date: str
     notes: Optional[str] = None
+    taxable_amount: float
+    gst_amount: float
     total_amount: float
     is_deleted: bool
     deleted_at: Optional[str] = None

@@ -1,5 +1,5 @@
 import api from './api'
-import type { Purchase, PurchaseItemPayload, PurchaseLedgerRow, PurchasePaymentPayload, SupplierLedgerSummary } from '../lib/types'
+import type { AuditLog, Purchase, PurchaseItemPayload, PurchaseLedgerRow, PurchasePaymentPayload, SupplierLedgerSummary } from '../lib/types'
 
 export type PurchaseBankMode = 'UPI' | 'NEFT' | 'RTGS' | 'IMPS'
 
@@ -105,6 +105,11 @@ export async function fetchPurchases(params?: {
 
 export async function fetchPurchase(id: number): Promise<Purchase> {
   const res = await api.get<Purchase>(`/purchases/${id}`)
+  return res.data
+}
+
+export async function fetchPurchaseHistory(id: number): Promise<AuditLog[]> {
+  const res = await api.get<AuditLog[]>(`/purchases/${id}/history`)
   return res.data
 }
 

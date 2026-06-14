@@ -35,6 +35,7 @@ import {
   createPurchase,
   deletePurchasePayment,
   fetchPurchase,
+  fetchPurchaseHistory,
   fetchPurchases,
   fetchSupplierLedger,
   replacePurchaseItems,
@@ -44,7 +45,7 @@ import {
   updatePurchase,
   type PurchaseBankMode,
 } from '../../services/purchases'
-import type { Category, Party, Product, Purchase, PurchaseItemPayload, PurchasePayment, PurchasePaymentPayload } from '../../lib/types'
+import type { AuditLog, Category, Party, Product, Purchase, PurchaseItemPayload, PurchasePayment, PurchasePaymentPayload } from '../../lib/types'
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
 
@@ -121,6 +122,42 @@ function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'co
   const totalQty = Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
   if (totalQty <= 0) return 0
   return lineBaseTotal(item) / totalQty
+}
+
+function invoiceGst(
+  items: Array<Pick<PurchaseItemPayload, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment' | 'gst_percent'>>,
+  discountAmount: number,
+) {
+  const subtotal = items.reduce((sum, item) => sum + lineBaseTotal(item), 0)
+  if (subtotal <= 0) return 0
+  const factor = Math.max(0, subtotal - Number(discountAmount || 0)) / subtotal
+  return items.reduce((sum, item) => sum + Math.max(0, lineBaseTotal(item)) * Number(item.gst_percent || 0) / 100, 0) * factor
+}
+
+type PurchaseSnapshot = {
+  purchase: {
+    invoice_number: string
+    invoice_date: string
+    subtotal_amount: number
+    discount_amount: number
+    gst_amount: number
+    total_amount: number
+    is_deleted: boolean
+  }
+  items: Array<{ product_name: string; sealed_qty: number; free_qty: number; gst_percent: number; line_total: number }>
+}
+
+function purchaseHistoryDetails(entry: AuditLog): { before?: PurchaseSnapshot; after?: PurchaseSnapshot } {
+  try {
+    return entry.details_json ? JSON.parse(entry.details_json) : {}
+  } catch {
+    return {}
+  }
+}
+
+function purchaseSnapshotItems(snapshot?: PurchaseSnapshot) {
+  if (!snapshot?.items.length) return 'No item lines'
+  return snapshot.items.map((item) => `${item.product_name} ${item.sealed_qty}+${item.free_qty} free, GST ${money(item.gst_percent)}%`).join(', ')
 }
 
 function lineTotalQty(item: Pick<DraftItem, 'sealed_qty' | 'free_qty'>) {
@@ -220,6 +257,7 @@ export default function PurchasesPage() {
   const [productSearch, setProductSearch] = useState('')
   const [inventorySearch, setInventorySearch] = useState('')
   const [selectedPurchaseId, setSelectedPurchaseId] = useState<number | null>(null)
+  const [purchaseHistoryOpen, setPurchaseHistoryOpen] = useState(false)
   const [editHeaderOpen, setEditHeaderOpen] = useState(false)
   const [editItemsOpen, setEditItemsOpen] = useState(false)
   const [editItems, setEditItems] = useState<DraftItem[]>([makeEmptyItem()])
@@ -305,6 +343,11 @@ export default function PurchasesPage() {
     queryKey: ['purchase-detail', selectedPurchaseId],
     queryFn: () => fetchPurchase(Number(selectedPurchaseId)),
     enabled: Boolean(selectedPurchaseId),
+  })
+  const purchaseHistoryQ = useQuery({
+    queryKey: ['purchase-history', selectedPurchaseId],
+    queryFn: () => fetchPurchaseHistory(Number(selectedPurchaseId)),
+    enabled: Boolean(selectedPurchaseId && purchaseHistoryOpen),
   })
 
   const ledgerQ = useQuery({
@@ -548,9 +591,10 @@ export default function PurchasesPage() {
   const freeStockTotalQty = freeStockItems.reduce((sum, item) => sum + Number(item.free_qty || 0), 0)
 
   const total = useMemo(
-    () => subtotal - Number(discountAmount || 0) + Number(roundingAdjustment || 0),
-    [subtotal, discountAmount, roundingAdjustment],
+    () => subtotal - Number(discountAmount || 0) + invoiceGst(items, Number(discountAmount || 0)) + Number(roundingAdjustment || 0),
+    [subtotal, discountAmount, items, roundingAdjustment],
   )
+  const gstTotal = useMemo(() => invoiceGst(items, Number(discountAmount || 0)), [discountAmount, items])
   const draftPaymentTotal = draftPayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)
   const draftPaidTotal = draftPayments.reduce((sum, payment) => sum + (payment.is_writeoff ? 0 : Number(payment.amount || 0)), 0)
   const draftWriteoffTotal = draftPayments.reduce((sum, payment) => sum + (payment.is_writeoff ? Number(payment.amount || 0) : 0), 0)
@@ -567,8 +611,8 @@ export default function PurchasesPage() {
   const purchases = purchasesQ.data || []
   const selectedPurchase = selectedPurchaseQ.data || null
   const editSubtotal = Number(selectedPurchase?.subtotal_amount || 0)
-  const editGstAmount = Number(selectedPurchase?.gst_amount || 0)
   const editDiscountValue = Number(editDiscountAmount || 0)
+  const editGstAmount = invoiceGst(selectedPurchase?.items || [], editDiscountValue)
   const editRoundingValue = Number(editRoundingAdjustment || 0)
   const editBillAmount = editSubtotal - editDiscountValue + editGstAmount + editRoundingValue
   const editPaidAmount = Number(selectedPurchase?.paid_amount || 0)
@@ -934,7 +978,7 @@ export default function PurchasesPage() {
       alias: item.alias?.trim() || undefined,
       brand: item.brand?.trim() || undefined,
       expiry_date: item.expiry_date?.trim() || undefined,
-      gst_percent: 0,
+      gst_percent: Number(item.gst_percent || 0),
       rounding_adjustment: Number(item.rounding_adjustment || 0),
       parent_unit_name: item.parent_unit_name?.trim() || undefined,
       child_unit_name: item.child_unit_name?.trim() || undefined,
@@ -995,7 +1039,7 @@ export default function PurchasesPage() {
       invoice_date: invoiceDate,
       notes: notes.trim() || undefined,
       discount_amount: Number(discountAmount || 0),
-      gst_amount: 0,
+      gst_amount: gstTotal,
       rounding_adjustment: Number(roundingAdjustment || 0),
       items: purchasePayloadItems(items),
       payments: draftPayments.map((payment) => ({
@@ -1050,7 +1094,7 @@ export default function PurchasesPage() {
         invoice_date: editInvoiceDate,
         notes: editNotes.trim() || undefined,
         discount_amount: Number(editDiscountAmount || 0),
-        gst_amount: 0,
+        gst_amount: Number(selectedPurchase?.gst_amount || 0),
         rounding_adjustment: Number(editRoundingAdjustment || 0),
       },
     })
@@ -1183,7 +1227,7 @@ export default function PurchasesPage() {
       0,
     )
     const headerDiscount = editMode ? Number(selectedPurchase?.discount_amount || 0) : 0
-    const headerGst = editMode ? Number(selectedPurchase?.gst_amount || 0) : 0
+    const headerGst = freeOnly ? 0 : invoiceGst(draftItems, headerDiscount)
     const headerRoundOff = editMode ? Number(selectedPurchase?.rounding_adjustment || 0) : 0
     const draftBillTotal = draftSubtotal - headerDiscount + headerGst + headerRoundOff
     const draftCovered = editMode ? Number(selectedPurchase?.paid_amount || 0) + Number(selectedPurchase?.writeoff_amount || 0) : 0
@@ -1415,6 +1459,9 @@ export default function PurchasesPage() {
                     <>
                       <Grid item xs={6} md={1.2}>
                         <TextField size="small" label="Rate" type="number" value={item.cost_price} onChange={(e) => patchItem(item.key, { cost_price: Number(e.target.value) })} fullWidth />
+                      </Grid>
+                      <Grid item xs={6} md={1.2}>
+                        <TextField size="small" label="GST %" type="number" value={item.gst_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(item.key, { gst_percent: Number(e.target.value) })} fullWidth />
                       </Grid>
                       <Grid item xs={6} md={1.2}>
                         <TextField size="small" label="Discount (Rs)" type="number" value={item.discount_amount || 0} onChange={(e) => patchItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
@@ -1863,6 +1910,10 @@ export default function PurchasesPage() {
                   <TextField label="Invoice Discount (Rs)" type="number" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} fullWidth />
                 </Grid>
                 <Grid item xs={12} md={3}>
+                  <Typography variant="caption" color="text.secondary">Input GST</Typography>
+                  <Typography variant="h6">{money(gstTotal)}</Typography>
+                </Grid>
+                <Grid item xs={12} md={3}>
                   <TextField label="Final Round Off (+/-)" type="number" value={roundingAdjustment} onChange={(e) => setRoundingAdjustment(e.target.value)} fullWidth />
                 </Grid>
                 <Grid item xs={12} md={3}>
@@ -2067,6 +2118,7 @@ export default function PurchasesPage() {
                 <Stack direction="row" gap={1}>
                   <Button variant="outlined" disabled={selectedPurchase.return_total > 0} onClick={openEditHeader}>Edit Header</Button>
                   <Button variant="outlined" disabled={selectedPurchase.return_total > 0} onClick={openEditItems}>Edit Items</Button>
+                  <Button variant="outlined" onClick={() => setPurchaseHistoryOpen(true)}>History</Button>
 	                  <Button
                     variant="contained"
                     startIcon={<PaymentsIcon />}
@@ -2083,6 +2135,7 @@ export default function PurchasesPage() {
               <Paper variant="outlined" sx={{ p: 2 }}>
                 <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
                   <Typography>Total: {money(selectedPurchase.total_amount)}</Typography>
+                  <Typography>GST: {money(selectedPurchase.gst_amount)}</Typography>
                   <Typography color="secondary.main">Returns: {money(selectedPurchase.return_total || 0)}</Typography>
                   <Typography>Net: {money(selectedPurchase.net_amount ?? selectedPurchase.total_amount)}</Typography>
                   <Typography>Paid: {money(selectedPurchase.paid_amount)}</Typography>
@@ -2108,6 +2161,7 @@ export default function PurchasesPage() {
                       <th>Rate</th>
                       <th>Avg Rate</th>
                       <th>MRP</th>
+                      <th>GST %</th>
                       <th>Discount (Rs)</th>
                       <th>Round Off (+/-)</th>
                       <th>Item Total</th>
@@ -2130,6 +2184,7 @@ export default function PurchasesPage() {
                         <td>{money(item.cost_price)}</td>
                         <td>{money(item.effective_cost_price)}</td>
                         <td>{money(item.mrp)}</td>
+                        <td>{money(item.gst_percent)}</td>
                         <td>{money(item.discount_amount)}</td>
                         <td>{money(item.rounding_adjustment || 0)}</td>
                         <td>{money(item.line_total)}</td>
@@ -2496,6 +2551,43 @@ export default function PurchasesPage() {
         </Stack>
       </Paper>
       ) : null}
+
+      <Dialog open={purchaseHistoryOpen} onClose={() => setPurchaseHistoryOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>Purchase History: {selectedPurchase?.invoice_number || ''}</DialogTitle>
+        <DialogContent dividers>
+          {purchaseHistoryQ.isLoading && <Typography color="text.secondary">Loading history...</Typography>}
+          <Stack gap={1.5}>
+            {(purchaseHistoryQ.data || []).map((entry) => {
+              const details = purchaseHistoryDetails(entry)
+              return (
+                <Paper key={entry.id} variant="outlined" sx={{ p: 1.5 }}>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between">
+                    <Typography fontWeight={800}>{entry.action}</Typography>
+                    <Typography variant="body2" color="text.secondary">{entry.event_ts}{entry.actor ? ` | ${entry.actor}` : ''}</Typography>
+                  </Stack>
+                  {entry.note && <Typography variant="body2" mb={1}>{entry.note}</Typography>}
+                  {details.before && (
+                    <Box mb={1}>
+                      <Typography variant="caption" color="text.secondary">BEFORE</Typography>
+                      <Typography variant="body2">{details.before.purchase.invoice_date} | GST {money(details.before.purchase.gst_amount)} | Total {money(details.before.purchase.total_amount)} | {details.before.purchase.is_deleted ? 'Cancelled' : 'Posted'}</Typography>
+                      <Typography variant="body2">{purchaseSnapshotItems(details.before)}</Typography>
+                    </Box>
+                  )}
+                  {details.after && (
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">AFTER</Typography>
+                      <Typography variant="body2">{details.after.purchase.invoice_date} | GST {money(details.after.purchase.gst_amount)} | Total {money(details.after.purchase.total_amount)} | {details.after.purchase.is_deleted ? 'Cancelled' : 'Posted'}</Typography>
+                      <Typography variant="body2">{purchaseSnapshotItems(details.after)}</Typography>
+                    </Box>
+                  )}
+                </Paper>
+              )
+            })}
+            {!purchaseHistoryQ.isLoading && (purchaseHistoryQ.data || []).length === 0 && <Typography color="text.secondary">No purchase revisions recorded.</Typography>}
+          </Stack>
+        </DialogContent>
+        <DialogActions><Button onClick={() => setPurchaseHistoryOpen(false)}>Close</Button></DialogActions>
+      </Dialog>
 
       <Dialog open={cancelConfirmOpen} onClose={() => setCancelConfirmOpen(false)} fullWidth maxWidth="xs">
         <DialogTitle>Cancel Purchase?</DialogTitle>

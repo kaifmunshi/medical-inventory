@@ -2352,6 +2352,70 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchaseitem ADD COLUMN rounding_adjustment REAL NOT NULL DEFAULT 0"))
 
         session.exec(text("""
+            CREATE TABLE IF NOT EXISTS purchasereturn (
+                id INTEGER PRIMARY KEY,
+                purchase_id INTEGER NOT NULL DEFAULT 0,
+                party_id INTEGER NOT NULL,
+                return_number TEXT NOT NULL,
+                return_date TEXT NOT NULL,
+                notes TEXT,
+                taxable_amount REAL NOT NULL DEFAULT 0,
+                gst_amount REAL NOT NULL DEFAULT 0,
+                total_amount REAL NOT NULL DEFAULT 0,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """))
+        purchase_return_cols = session.exec(text("PRAGMA table_info(purchasereturn)")).all()
+        purchase_return_col_names = {c[1] for c in purchase_return_cols}
+        if "taxable_amount" not in purchase_return_col_names:
+            session.exec(text("ALTER TABLE purchasereturn ADD COLUMN taxable_amount REAL NOT NULL DEFAULT 0"))
+        if "gst_amount" not in purchase_return_col_names:
+            session.exec(text("ALTER TABLE purchasereturn ADD COLUMN gst_amount REAL NOT NULL DEFAULT 0"))
+
+        session.exec(text("""
+            CREATE TABLE IF NOT EXISTS purchasereturnitem (
+                id INTEGER PRIMARY KEY,
+                purchase_return_id INTEGER NOT NULL,
+                purchase_item_id INTEGER NOT NULL DEFAULT 0,
+                inventory_item_id INTEGER NOT NULL,
+                lot_id INTEGER,
+                product_id INTEGER NOT NULL,
+                product_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 0,
+                unit_cost REAL NOT NULL DEFAULT 0,
+                gst_percent REAL NOT NULL DEFAULT 0,
+                taxable_amount REAL NOT NULL DEFAULT 0,
+                gst_amount REAL NOT NULL DEFAULT 0,
+                line_total REAL NOT NULL DEFAULT 0
+            )
+        """))
+        purchase_return_item_cols = session.exec(text("PRAGMA table_info(purchasereturnitem)")).all()
+        purchase_return_item_col_names = {c[1] for c in purchase_return_item_cols}
+        if "gst_percent" not in purchase_return_item_col_names:
+            session.exec(text("ALTER TABLE purchasereturnitem ADD COLUMN gst_percent REAL NOT NULL DEFAULT 0"))
+        if "taxable_amount" not in purchase_return_item_col_names:
+            session.exec(text("ALTER TABLE purchasereturnitem ADD COLUMN taxable_amount REAL NOT NULL DEFAULT 0"))
+        if "gst_amount" not in purchase_return_item_col_names:
+            session.exec(text("ALTER TABLE purchasereturnitem ADD COLUMN gst_amount REAL NOT NULL DEFAULT 0"))
+        session.exec(text("""
+            UPDATE purchasereturnitem
+            SET taxable_amount = line_total
+            WHERE COALESCE(taxable_amount, 0) = 0
+              AND COALESCE(gst_amount, 0) = 0
+              AND COALESCE(line_total, 0) != 0
+        """))
+        session.exec(text("""
+            UPDATE purchasereturn
+            SET taxable_amount = total_amount
+            WHERE COALESCE(taxable_amount, 0) = 0
+              AND COALESCE(gst_amount, 0) = 0
+              AND COALESCE(total_amount, 0) != 0
+        """))
+
+        session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchasepayment (
                 id INTEGER PRIMARY KEY,
                 purchase_id INTEGER NOT NULL,

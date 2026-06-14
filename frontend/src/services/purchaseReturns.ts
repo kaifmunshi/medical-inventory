@@ -13,6 +13,7 @@ export interface PurchaseReturnCreatePayload {
     lot_id?: number
     quantity: number
     unit_cost?: number
+    gst_percent?: number
   }>
 }
 

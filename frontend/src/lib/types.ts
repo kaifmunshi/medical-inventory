@@ -291,6 +291,9 @@ export interface PurchaseReturnItem {
   product_name: string
   quantity: number
   unit_cost: number
+  gst_percent: number
+  taxable_amount: number
+  gst_amount: number
   line_total: number
 }
 
@@ -301,6 +304,8 @@ export interface PurchaseReturn {
   return_number: string
   return_date: string
   notes?: string | null
+  taxable_amount: number
+  gst_amount: number
   total_amount: number
   is_deleted: boolean
   deleted_at?: string | null

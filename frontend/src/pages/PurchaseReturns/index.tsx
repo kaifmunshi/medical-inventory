@@ -32,16 +32,18 @@ import { useToast } from '../../components/ui/Toaster'
 import { useUserSession } from '../../components/session/UserSessionProvider'
 
 type LineDraft = { quantity: string; unitCost: string }
-type LegacyLine = { lot: InventoryLotBrowse; quantity: string; unitCost: string }
+type LegacyLine = { lot: InventoryLotBrowse; quantity: string; unitCost: string; gstPercent: string }
 type ReturnSnapshot = {
   purchase_return: {
     return_number: string
     return_date: string
     party_id: number
+    taxable_amount: number
+    gst_amount: number
     total_amount: number
     is_deleted: boolean
   }
-  items: Array<{ product_name: string; quantity: number; unit_cost: number; line_total: number }>
+  items: Array<{ product_name: string; quantity: number; unit_cost: number; gst_percent: number; taxable_amount: number; gst_amount: number; line_total: number }>
 }
 
 function historyDetails(entry: AuditLog): { before?: ReturnSnapshot; after?: ReturnSnapshot } {
@@ -64,6 +66,12 @@ function todayYmd() {
 
 function money(value: number) {
   return Number(value || 0).toFixed(2)
+}
+
+function linkedUnitCost(purchase: Purchase, item: Purchase['items'][number]) {
+  const subtotal = Number(purchase.subtotal_amount || 0)
+  const factor = subtotal > 0 ? Math.max(0, subtotal - Number(purchase.discount_amount || 0)) / subtotal : 0
+  return Number(item.effective_cost_price || 0) * factor
 }
 
 function errorMessage(error: unknown) {
@@ -134,7 +142,7 @@ export default function PurchaseReturnsPage() {
       const existing = editingReturn?.items.find((returned) => Number(returned.purchase_item_id) === Number(item.id))
       return [Number(item.id), {
         quantity: existing ? String(existing.quantity) : '0',
-        unitCost: String(Number(existing?.unit_cost ?? item.effective_cost_price ?? 0).toFixed(2)),
+        unitCost: String(Number(existing?.unit_cost ?? linkedUnitCost(purchase, item)).toFixed(2)),
       }]
     })))
     setReturnDate((current) => current < purchase.invoice_date ? purchase.invoice_date : current)
@@ -144,7 +152,7 @@ export default function PurchaseReturnsPage() {
     const draft = lines[Number(item.id)]
     const quantity = Number(draft?.quantity || 0)
     const unitCost = Number(draft?.unitCost || 0)
-    return quantity > 0 ? [{ purchase_item_id: Number(item.id), quantity, unit_cost: unitCost }] : []
+    return quantity > 0 ? [{ purchase_item_id: Number(item.id), quantity, unit_cost: unitCost, gst_percent: Number(item.gst_percent || 0) }] : []
   }), [purchase, lines])
   const selectedLegacyLines = useMemo(() => legacyLines.flatMap((line) => {
     const quantity = Number(line.quantity || 0)
@@ -154,11 +162,15 @@ export default function PurchaseReturnsPage() {
       lot_id: Number(line.lot.id),
       quantity,
       unit_cost: unitCost,
+      gst_percent: Number(line.gstPercent || 0),
     }] : []
   }), [legacyLines])
   const activeLines = sourceMode === 'invoice' ? selectedLines : selectedLegacyLines
   const returnTotal = useMemo(
-    () => activeLines.reduce((sum, item) => sum + item.quantity * Number(item.unit_cost || 0), 0),
+    () => activeLines.reduce((sum, item) => {
+      const taxable = item.quantity * Number(item.unit_cost || 0)
+      return sum + taxable + taxable * Number(item.gst_percent || 0) / 100
+    }, 0),
     [activeLines],
   )
 
@@ -263,6 +275,7 @@ export default function PurchaseReturnsPage() {
           },
           quantity: String(item.quantity),
           unitCost: String(item.unit_cost),
+          gstPercent: String(item.gst_percent || 0),
         }
       }))
     }
@@ -291,6 +304,7 @@ export default function PurchaseReturnsPage() {
       lot: selectedLot,
       quantity: '1',
       unitCost: String(Number(selectedLot.cost_price || 0).toFixed(2)),
+      gstPercent: '0',
     }])
     setSelectedLot(null)
     setLotSearch('')
@@ -380,7 +394,7 @@ export default function PurchaseReturnsPage() {
                     const purchased = Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
                     const alreadyReturned = activeReturnedByItem.get(Number(item.id)) || 0
                     const remaining = Math.max(0, purchased - alreadyReturned)
-                    const draft = lines[Number(item.id)] || { quantity: '0', unitCost: String(item.effective_cost_price || 0) }
+                    const draft = lines[Number(item.id)] || { quantity: '0', unitCost: String(linkedUnitCost(purchase, item)) }
                     return (
                       <Paper key={item.id} variant="outlined" sx={{ p: 1.5 }}>
                         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
@@ -406,9 +420,10 @@ export default function PurchaseReturnsPage() {
                             onChange={(event) => setLines((current) => ({ ...current, [Number(item.id)]: { ...draft, unitCost: event.target.value } }))}
                             sx={{ width: 145 }}
                           />
-                          <Typography sx={{ minWidth: 110, textAlign: 'right' }} fontWeight={700}>
-                            {money(Number(draft.quantity || 0) * Number(draft.unitCost || 0))}
-                          </Typography>
+                        <Typography sx={{ minWidth: 110, textAlign: 'right' }} fontWeight={700}>
+                            {money(Number(draft.quantity || 0) * Number(draft.unitCost || 0) * (1 + Number(item.gst_percent || 0) / 100))}
+                        </Typography>
+                        <Chip size="small" label={`GST ${money(item.gst_percent)}%`} variant="outlined" />
                         </Stack>
                       </Paper>
                     )
@@ -438,8 +453,16 @@ export default function PurchaseReturnsPage() {
                           onChange={(event) => setLegacyLines((current) => current.map((entry) => entry.lot.id === line.lot.id ? { ...entry, unitCost: event.target.value } : entry))}
                           sx={{ width: 145 }}
                         />
+                        <TextField
+                          label="GST %"
+                          type="number"
+                          value={line.gstPercent}
+                          inputProps={{ min: 0, max: 100, step: 0.01 }}
+                          onChange={(event) => setLegacyLines((current) => current.map((entry) => entry.lot.id === line.lot.id ? { ...entry, gstPercent: event.target.value } : entry))}
+                          sx={{ width: 110 }}
+                        />
                         <Typography sx={{ minWidth: 110, textAlign: 'right' }} fontWeight={700}>
-                          {money(Number(line.quantity || 0) * Number(line.unitCost || 0))}
+                          {money(Number(line.quantity || 0) * Number(line.unitCost || 0) * (1 + Number(line.gstPercent || 0) / 100))}
                         </Typography>
                         <Button color="error" onClick={() => setLegacyLines((current) => current.filter((entry) => entry.lot.id !== line.lot.id))}>Remove</Button>
                       </Stack>
@@ -447,7 +470,7 @@ export default function PurchaseReturnsPage() {
                   ))}
                 </Stack>
                 <Stack direction="row" justifyContent="flex-end" alignItems="center" spacing={2}>
-                  <Typography variant="h6">Credit total: {money(returnTotal)}</Typography>
+                  <Typography variant="h6">Credit total incl. GST: {money(returnTotal)}</Typography>
                   <Button variant="contained" disabled={!canManage || saveM.isPending || activeLines.length === 0} onClick={submit}>
                     {editingReturn ? 'Save Return Changes' : 'Create Purchase Return'}
                   </Button>
@@ -475,7 +498,10 @@ export default function PurchaseReturnsPage() {
                       </Typography>
                       <Typography variant="body2">{row.items.map((item) => `${item.product_name} x ${item.quantity}`).join(', ')}</Typography>
                     </Box>
-                    <Typography variant="h6">{money(row.total_amount)}</Typography>
+                    <Box sx={{ textAlign: { md: 'right' } }}>
+                      <Typography variant="h6">{money(row.total_amount)}</Typography>
+                      <Typography variant="caption" color="text.secondary">GST {money(row.gst_amount)}</Typography>
+                    </Box>
                     <Stack direction="row" spacing={1}>
                       <Button variant="text" onClick={() => setHistoryTarget(row)}>History</Button>
                       {!row.is_deleted && canManage && (
@@ -526,7 +552,7 @@ export default function PurchaseReturnsPage() {
                     <Box sx={{ mb: 1 }}>
                       <Typography variant="caption" color="text.secondary">BEFORE</Typography>
                       <Typography variant="body2">
-                        {before.purchase_return.return_date} | {before.purchase_return.is_deleted ? 'Cancelled' : 'Posted'} | {money(before.purchase_return.total_amount)}
+                        {before.purchase_return.return_date} | {before.purchase_return.is_deleted ? 'Cancelled' : 'Posted'} | GST {money(before.purchase_return.gst_amount)} | {money(before.purchase_return.total_amount)}
                       </Typography>
                       <Typography variant="body2">{snapshotItems(before)}</Typography>
                     </Box>
@@ -535,7 +561,7 @@ export default function PurchaseReturnsPage() {
                     <Box>
                       <Typography variant="caption" color="text.secondary">AFTER</Typography>
                       <Typography variant="body2">
-                        {after.purchase_return.return_date} | {after.purchase_return.is_deleted ? 'Cancelled' : 'Posted'} | {money(after.purchase_return.total_amount)}
+                        {after.purchase_return.return_date} | {after.purchase_return.is_deleted ? 'Cancelled' : 'Posted'} | GST {money(after.purchase_return.gst_amount)} | {money(after.purchase_return.total_amount)}
                       </Typography>
                       <Typography variant="body2">{snapshotItems(after)}</Typography>
                     </Box>

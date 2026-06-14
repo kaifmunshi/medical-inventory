@@ -306,6 +306,7 @@ export interface PurchaseReturn {
   notes?: string | null
   taxable_amount: number
   gst_amount: number
+  rounding_adjustment: number
   total_amount: number
   is_deleted: boolean
   deleted_at?: string | null

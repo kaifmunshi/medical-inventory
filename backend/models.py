@@ -794,6 +794,7 @@ class PurchaseReturn(SQLModel, table=True):
     notes: Optional[str] = None
     taxable_amount: float = 0.0
     gst_amount: float = 0.0
+    rounding_adjustment: float = 0.0
     total_amount: float = 0.0
     is_deleted: bool = Field(default=False, index=True)
     deleted_at: Optional[str] = None
@@ -1171,6 +1172,7 @@ class PurchaseReturnCreate(SQLModel):
     return_date: str
     return_number: Optional[str] = None
     notes: Optional[str] = None
+    rounding_adjustment: float = 0.0
     items: List[PurchaseReturnItemIn]
 
 
@@ -1179,6 +1181,7 @@ class PurchaseReturnUpdate(SQLModel):
     return_date: Optional[str] = None
     return_number: Optional[str] = None
     notes: Optional[str] = None
+    rounding_adjustment: Optional[float] = None
     items: List[PurchaseReturnItemIn]
 
 
@@ -1207,6 +1210,7 @@ class PurchaseReturnOut(SQLModel):
     notes: Optional[str] = None
     taxable_amount: float
     gst_amount: float
+    rounding_adjustment: float
     total_amount: float
     is_deleted: bool
     deleted_at: Optional[str] = None

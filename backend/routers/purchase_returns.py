@@ -84,6 +84,7 @@ def _snapshot(session, row: PurchaseReturn, items: Optional[List[PurchaseReturnI
             "notes": row.notes,
             "taxable_amount": round2(row.taxable_amount),
             "gst_amount": round2(row.gst_amount),
+            "rounding_adjustment": round2(row.rounding_adjustment),
             "total_amount": round2(row.total_amount),
             "is_deleted": bool(row.is_deleted),
         },
@@ -225,6 +226,7 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             notes=(str(payload.notes).strip() or None) if payload.notes else None,
             taxable_amount=0,
             gst_amount=0,
+            rounding_adjustment=round2(payload.rounding_adjustment),
             total_amount=0,
         )
         session.add(row)
@@ -344,6 +346,10 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             gst_total = round2(gst_total + gst_amount)
             total = round2(total + line_total)
 
+        rounding_adjustment = round2(payload.rounding_adjustment)
+        total = round2(total + rounding_adjustment)
+        if total < 0:
+            raise HTTPException(status_code=400, detail="Purchase return total cannot be negative after round off")
         if purchase:
             prior_total = float(session.exec(
                 select(func.coalesce(func.sum(PurchaseReturn.total_amount), 0)).where(
@@ -356,6 +362,7 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
                 raise HTTPException(status_code=400, detail="Purchase return value cannot exceed the original purchase total")
         row.taxable_amount = taxable_total
         row.gst_amount = gst_total
+        row.rounding_adjustment = rounding_adjustment
         row.total_amount = total
         row.updated_at = now_ts()
         session.add(row)
@@ -548,6 +555,12 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
             gst_total = round2(gst_total + gst_amount)
             total = round2(total + line_total)
 
+        rounding_adjustment = round2(
+            payload.rounding_adjustment if payload.rounding_adjustment is not None else row.rounding_adjustment
+        )
+        total = round2(total + rounding_adjustment)
+        if total < 0:
+            raise HTTPException(status_code=400, detail="Purchase return total cannot be negative after round off")
         if purchase:
             prior_total = float(session.exec(
                 select(func.coalesce(func.sum(PurchaseReturn.total_amount), 0)).where(
@@ -565,6 +578,7 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
         row.notes = (str(payload.notes).strip() or None) if payload.notes else None
         row.taxable_amount = taxable_total
         row.gst_amount = gst_total
+        row.rounding_adjustment = rounding_adjustment
         row.total_amount = total
         row.updated_at = now_ts()
         session.add(row)

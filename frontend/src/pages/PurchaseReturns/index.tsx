@@ -40,6 +40,7 @@ type ReturnSnapshot = {
     party_id: number
     taxable_amount: number
     gst_amount: number
+    rounding_adjustment: number
     total_amount: number
     is_deleted: boolean
   }
@@ -93,6 +94,7 @@ export default function PurchaseReturnsPage() {
   const [returnDate, setReturnDate] = useState(todayYmd())
   const [returnNumber, setReturnNumber] = useState('')
   const [notes, setNotes] = useState('')
+  const [roundingAdjustment, setRoundingAdjustment] = useState('0')
   const [lines, setLines] = useState<Record<number, LineDraft>>({})
   const [cancelTarget, setCancelTarget] = useState<PurchaseReturn | null>(null)
   const [editingReturn, setEditingReturn] = useState<PurchaseReturn | null>(null)
@@ -166,13 +168,14 @@ export default function PurchaseReturnsPage() {
     }] : []
   }), [legacyLines])
   const activeLines = sourceMode === 'invoice' ? selectedLines : selectedLegacyLines
-  const returnTotal = useMemo(
+  const returnSubtotal = useMemo(
     () => activeLines.reduce((sum, item) => {
       const taxable = item.quantity * Number(item.unit_cost || 0)
       return sum + taxable + taxable * Number(item.gst_percent || 0) / 100
     }, 0),
     [activeLines],
   )
+  const returnTotal = returnSubtotal + Number(roundingAdjustment || 0)
 
   const saveM = useMutation({
     mutationFn: ({ payload, id }: { payload: PurchaseReturnCreatePayload; id?: number }) => (
@@ -186,6 +189,7 @@ export default function PurchaseReturnsPage() {
       setEditingReturn(null)
       setReturnNumber('')
       setNotes('')
+      setRoundingAdjustment('0')
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['purchase-returns'] }),
         queryClient.invalidateQueries({ queryKey: ['purchases-list'] }),
@@ -224,6 +228,10 @@ export default function PurchaseReturnsPage() {
       toast.push('Enter a return quantity for at least one item', 'warning')
       return
     }
+    if (returnTotal < 0) {
+      toast.push('Credit total cannot be negative after round off', 'warning')
+      return
+    }
     saveM.mutate({
       id: editingReturn ? Number(editingReturn.id) : undefined,
       payload: {
@@ -232,6 +240,7 @@ export default function PurchaseReturnsPage() {
       return_date: returnDate,
       return_number: returnNumber.trim() || undefined,
       notes: notes.trim() || undefined,
+      rounding_adjustment: Number(roundingAdjustment || 0),
       items: activeLines,
       },
     })
@@ -243,6 +252,7 @@ export default function PurchaseReturnsPage() {
     setReturnDate(row.return_date)
     setReturnNumber(row.return_number)
     setNotes(row.notes || '')
+    setRoundingAdjustment(String(row.rounding_adjustment || 0))
     setEditingReturn(row)
     if (row.purchase_id) {
       setSourceMode('invoice')
@@ -289,6 +299,7 @@ export default function PurchaseReturnsPage() {
     setSelectedLot(null)
     setReturnNumber('')
     setNotes('')
+    setRoundingAdjustment('0')
   }
 
   function addLegacyLot() {
@@ -469,8 +480,17 @@ export default function PurchaseReturnsPage() {
                     </Paper>
                   ))}
                 </Stack>
-                <Stack direction="row" justifyContent="flex-end" alignItems="center" spacing={2}>
-                  <Typography variant="h6">Credit total incl. GST: {money(returnTotal)}</Typography>
+                <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="flex-end" alignItems={{ sm: 'center' }} spacing={2}>
+                  <Typography>Taxable + GST: {money(returnSubtotal)}</Typography>
+                  <TextField
+                    label="Round Off (+/-)"
+                    type="number"
+                    value={roundingAdjustment}
+                    inputProps={{ step: 0.01 }}
+                    onChange={(event) => setRoundingAdjustment(event.target.value)}
+                    sx={{ width: 160 }}
+                  />
+                  <Typography variant="h6">Credit total: {money(returnTotal)}</Typography>
                   <Button variant="contained" disabled={!canManage || saveM.isPending || activeLines.length === 0} onClick={submit}>
                     {editingReturn ? 'Save Return Changes' : 'Create Purchase Return'}
                   </Button>
@@ -500,7 +520,7 @@ export default function PurchaseReturnsPage() {
                     </Box>
                     <Box sx={{ textAlign: { md: 'right' } }}>
                       <Typography variant="h6">{money(row.total_amount)}</Typography>
-                      <Typography variant="caption" color="text.secondary">GST {money(row.gst_amount)}</Typography>
+                      <Typography variant="caption" color="text.secondary">GST {money(row.gst_amount)} | Round off {money(row.rounding_adjustment)}</Typography>
                     </Box>
                     <Stack direction="row" spacing={1}>
                       <Button variant="text" onClick={() => setHistoryTarget(row)}>History</Button>
@@ -552,7 +572,7 @@ export default function PurchaseReturnsPage() {
                     <Box sx={{ mb: 1 }}>
                       <Typography variant="caption" color="text.secondary">BEFORE</Typography>
                       <Typography variant="body2">
-                        {before.purchase_return.return_date} | {before.purchase_return.is_deleted ? 'Cancelled' : 'Posted'} | GST {money(before.purchase_return.gst_amount)} | {money(before.purchase_return.total_amount)}
+                        {before.purchase_return.return_date} | {before.purchase_return.is_deleted ? 'Cancelled' : 'Posted'} | GST {money(before.purchase_return.gst_amount)} | Round off {money(before.purchase_return.rounding_adjustment)} | {money(before.purchase_return.total_amount)}
                       </Typography>
                       <Typography variant="body2">{snapshotItems(before)}</Typography>
                     </Box>
@@ -561,7 +581,7 @@ export default function PurchaseReturnsPage() {
                     <Box>
                       <Typography variant="caption" color="text.secondary">AFTER</Typography>
                       <Typography variant="body2">
-                        {after.purchase_return.return_date} | {after.purchase_return.is_deleted ? 'Cancelled' : 'Posted'} | GST {money(after.purchase_return.gst_amount)} | {money(after.purchase_return.total_amount)}
+                        {after.purchase_return.return_date} | {after.purchase_return.is_deleted ? 'Cancelled' : 'Posted'} | GST {money(after.purchase_return.gst_amount)} | Round off {money(after.purchase_return.rounding_adjustment)} | {money(after.purchase_return.total_amount)}
                       </Typography>
                       <Typography variant="body2">{snapshotItems(after)}</Typography>
                     </Box>

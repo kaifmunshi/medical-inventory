@@ -2361,6 +2361,7 @@ def migrate_db():
                 notes TEXT,
                 taxable_amount REAL NOT NULL DEFAULT 0,
                 gst_amount REAL NOT NULL DEFAULT 0,
+                rounding_adjustment REAL NOT NULL DEFAULT 0,
                 total_amount REAL NOT NULL DEFAULT 0,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT,
@@ -2374,6 +2375,8 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN taxable_amount REAL NOT NULL DEFAULT 0"))
         if "gst_amount" not in purchase_return_col_names:
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN gst_amount REAL NOT NULL DEFAULT 0"))
+        if "rounding_adjustment" not in purchase_return_col_names:
+            session.exec(text("ALTER TABLE purchasereturn ADD COLUMN rounding_adjustment REAL NOT NULL DEFAULT 0"))
 
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchasereturnitem (

@@ -7,6 +7,7 @@ export interface PurchaseReturnCreatePayload {
   return_date: string
   return_number?: string
   notes?: string
+  rounding_adjustment?: number
   items: Array<{
     purchase_item_id?: number
     inventory_item_id?: number

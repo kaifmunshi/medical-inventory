@@ -121,11 +121,13 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
     const amount = Number(item?.line_total || 0)
     const rate = qty > 0 ? amount / qty : 0
     const name = item?.item_name || item?.name || item?.item?.name || `Item #${item?.item_id || ''}`
+    const categoryName = String(item?.category_name || '').trim()
+    const printedName = categoryName ? `${categoryName} - ${name}` : name
     return `
       <tr>
         <td class="center">${index + 1}</td>
         <td>
-          <div class="item-name">${escapeHtml(name)}</div>
+          <div class="item-name">${escapeHtml(printedName)}</div>
           <div class="muted small">${escapeHtml(packLine(item))}</div>
         </td>
         <td class="num">${escapeHtml(money(item?.mrp))}</td>

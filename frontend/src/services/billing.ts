@@ -57,6 +57,7 @@ export async function mapBillCustomer(id: number, payload: { customer_id?: numbe
 export interface BillItem {
   item_id: number
   item_name: string
+  category_name?: string | null
   brand?: string | null
   batch_number?: string | null
   expiry_date?: string | null

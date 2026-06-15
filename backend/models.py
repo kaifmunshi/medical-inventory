@@ -277,6 +277,7 @@ class BillCreate(SQLModel):
 class BillItemOut(SQLModel):
     item_id: int
     item_name: str
+    category_name: Optional[str] = None
     brand: Optional[str] = None
     batch_number: Optional[str] = None
     expiry_date: Optional[str] = None

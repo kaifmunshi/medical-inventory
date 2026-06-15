@@ -12,7 +12,7 @@ from backend.controls import assert_financial_year_unlocked
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
-    Item, Bill, BillItem, BillPayment, Return, ExchangeRecord,
+    Item, Category, Bill, BillItem, BillPayment, Return, ExchangeRecord,
     BillCreate, BillOut, BillItemOut,
     Customer, Party, PartyReceipt, ReceiptBillAdjustment,
     StockMovement,  # ✅ NEW
@@ -415,9 +415,11 @@ def add_movement(
 
 def bill_item_to_out(session, row: BillItem) -> BillItemOut:
     item = session.get(Item, int(row.item_id or 0)) if row.item_id else None
+    category = session.get(Category, int(item.category_id)) if item and item.category_id else None
     return BillItemOut(
         item_id=row.item_id,
         item_name=row.item_name,
+        category_name=(str(category.name) if category and category.name else None),
         brand=(str(item.brand) if item and item.brand else None),
         batch_number=(str(item.id) if item and item.id else None),
         expiry_date=(str(item.expiry_date) if item and item.expiry_date else None),

@@ -39,6 +39,8 @@ import { useToast } from '../../components/ui/Toaster'
 interface CartRow {
   item_id: number
   name: string
+  category_id?: number | null
+  category_filter_id?: number | null
   mrp: number
   quantity: number
   custom_unit_price: number
@@ -210,7 +212,6 @@ export default function Billing() {
   const [stockErrorByRow, setStockErrorByRow] = useState<Record<number, string>>({})
   const [gridSearch, setGridSearch] = useState('')
   const [debouncedGridSearch, setDebouncedGridSearch] = useState('')
-  const [gridCategoryId, setGridCategoryId] = useState('')
   const [activeGridSearchRow, setActiveGridSearchRow] = useState<number | null>(null)
   const [pendingQtyFocusRow, setPendingQtyFocusRow] = useState<number | null>(null)
   const qtyInputRefs = useRef<Record<number, HTMLInputElement | null>>({})
@@ -244,7 +245,10 @@ export default function Billing() {
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
   const gridSearchTerm = gridSearch.trim()
   const debouncedGridSearchTerm = debouncedGridSearch.trim()
-  const hasGridCategoryFilter = gridCategoryId !== ''
+  const activeGridCategoryId = activeGridSearchRow === null
+    ? null
+    : rows[activeGridSearchRow]?.category_filter_id ?? rows[activeGridSearchRow]?.category_id ?? null
+  const hasGridCategoryFilter = activeGridCategoryId != null
   const hasReadyGridSearchTerm = (
     gridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
     debouncedGridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
@@ -273,7 +277,7 @@ export default function Billing() {
   })
 
   const { data: inventoryItemsPage, isFetching: isFetchingGridItems } = useQuery({
-    queryKey: ['billing-grid-items', debouncedGridSearchTerm, gridCategoryId],
+    queryKey: ['billing-grid-items', debouncedGridSearchTerm, activeGridCategoryId],
     queryFn: async ({ signal }) => {
       if (
         activeGridSearchRow === null ||
@@ -288,7 +292,7 @@ export default function Billing() {
           BILLING_ITEM_PAGE_SIZE,
           0,
           undefined,
-          gridCategoryId ? { category_id: Number(gridCategoryId) } : undefined,
+          activeGridCategoryId != null ? { category_id: Number(activeGridCategoryId) } : undefined,
           { signal },
         )
       } catch (err: any) {
@@ -861,6 +865,8 @@ export default function Billing() {
             ? {
                 item_id: it.id,
                 name: it.name,
+                category_id: it.category_id ?? null,
+                category_filter_id: it.category_id ?? null,
                 mrp: Number(it.mrp) || 0,
                 quantity: 1,
                 custom_unit_price: Number(it.mrp) || 0,
@@ -889,6 +895,8 @@ export default function Billing() {
         {
           item_id: it.id,
           name: it.name,
+          category_id: it.category_id ?? null,
+          category_filter_id: it.category_id ?? null,
           mrp: Number(it.mrp) || 0,
           quantity: 1,
           custom_unit_price: Number(it.mrp) || 0,
@@ -917,6 +925,7 @@ export default function Billing() {
     return {
       id: row.item_id,
       name: row.name,
+      category_id: row.category_id ?? null,
       brand: row.brand ?? '',
       mrp: row.mrp,
       stock: row.stock ?? 0,
@@ -974,7 +983,9 @@ export default function Billing() {
   }
 
   function removeRow(i: number) {
-    setRows((prev) => normalizeRows(prev.map((r, idx) => (idx === i ? emptyRow() : r))))
+    setRows((prev) => normalizeRows(prev.map((r, idx) => (
+      idx === i ? { ...emptyRow(), category_filter_id: r.category_filter_id ?? null } : r
+    ))))
     setStockError(i)
     toast.push('Row cleared successfully. You can now select another item in that row.', 'info')
   }
@@ -983,7 +994,9 @@ export default function Billing() {
     setRows((prev) => {
       if (!it) {
         setStockError(i)
-        return normalizeRows(prev.map((r, idx) => (idx === i ? emptyRow() : r)))
+        return normalizeRows(prev.map((r, idx) => (
+          idx === i ? { ...emptyRow(), category_filter_id: r.category_filter_id ?? null } : r
+        )))
       }
       const st = Number(it.stock ?? 0)
       if (st <= 0) {
@@ -1015,7 +1028,7 @@ export default function Billing() {
               quantity: nextQty,
             }
           }
-          if (idx === i) return emptyRow()
+          if (idx === i) return { ...emptyRow(), category_filter_id: r.category_filter_id ?? null }
           return r
         })
         setStockError(i)
@@ -1029,6 +1042,8 @@ export default function Billing() {
           ? {
               item_id: Number(it.id),
               name: String(it.name || ''),
+              category_id: it.category_id ?? null,
+              category_filter_id: r.category_filter_id ?? it.category_id ?? null,
               mrp: Number(it.mrp || 0),
               quantity: Number(r.quantity || 0) > 0 ? Number(r.quantity) : 1,
               custom_unit_price: Number(it.mrp || 0),
@@ -1285,30 +1300,9 @@ export default function Billing() {
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1.5} sx={{ mb: 1.5 }}>
-          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
-            <Button startIcon={<AddIcon />} variant="contained" onClick={() => setPickerOpen(true)}>
-              Add Item
-            </Button>
-            <TextField
-              select
-              size="small"
-              label="Product Category"
-              value={gridCategoryId}
-              onChange={(e) => {
-                setGridCategoryId(e.target.value)
-                setGridSearch('')
-                setDebouncedGridSearch('')
-              }}
-              sx={{ minWidth: 210 }}
-            >
-              <MenuItem value="">All categories</MenuItem>
-              {productCategories.map((category) => (
-                <MenuItem key={category.id} value={String(category.id)}>
-                  {category.name}
-                </MenuItem>
-              ))}
-            </TextField>
-          </Stack>
+          <Button startIcon={<AddIcon />} variant="contained" onClick={() => setPickerOpen(true)}>
+            Add Item
+          </Button>
           <TextField
             size="small"
             label="Bill Date"
@@ -1321,17 +1315,17 @@ export default function Billing() {
         </Stack>
 
         <Box sx={{ overflowX: 'auto' }}>
-          <table className="table" style={{ tableLayout: 'fixed', width: '100%' }}>
+          <table className="table" style={{ tableLayout: 'fixed', width: '100%', minWidth: 1250 }}>
             <thead>
               <tr>
-                <th style={{ width: '29%' }}>Item</th>
-                <th style={{ width: '10%' }}>MRP</th>
-                <th style={{ width: '13%' }}>Expiry</th>
-                <th style={{ width: '8%' }}>Qty</th>
-                <th style={{ width: '10%' }}>Discount %</th>
-                <th style={{ width: '12%' }}>Selling Price</th>
-                <th style={{ width: '12%' }}>Line Total</th>
-                <th style={{ width: '6%' }}></th>
+                <th style={{ width: '35%' }}>Item</th>
+                <th style={{ width: '9%' }}>MRP</th>
+                <th style={{ width: '11%' }}>Expiry</th>
+                <th style={{ width: '7%' }}>Qty</th>
+                <th style={{ width: '9%' }}>Discount %</th>
+                <th style={{ width: '11%' }}>Selling Price</th>
+                <th style={{ width: '11%' }}>Line Total</th>
+                <th style={{ width: '7%' }}></th>
               </tr>
             </thead>
             <tbody>
@@ -1347,6 +1341,38 @@ export default function Billing() {
                 return (
                 <tr key={i}>
                   <td>
+                    <Stack direction="row" gap={1} alignItems="flex-start">
+                      <TextField
+                        select
+                        size="small"
+                        label="Category"
+                        value={r.category_filter_id ?? r.category_id ?? ''}
+                        onChange={(e) => {
+                          const nextCategoryId = e.target.value ? Number(e.target.value) : null
+                          setRows((prev) => normalizeRows(prev.map((row, idx) => {
+                            if (idx !== i) return row
+                            if (
+                              nextCategoryId != null &&
+                              row.category_id != null &&
+                              Number(row.category_id) !== Number(nextCategoryId)
+                            ) {
+                              return { ...emptyRow(), category_filter_id: nextCategoryId }
+                            }
+                            return { ...row, category_filter_id: nextCategoryId }
+                          })))
+                          setActiveGridSearchRow(i)
+                          setGridSearch('')
+                          setDebouncedGridSearch('')
+                        }}
+                        sx={{ minWidth: 145, ...GRID_INPUT_SX }}
+                      >
+                        <MenuItem value="">All</MenuItem>
+                        {productCategories.map((category) => (
+                          <MenuItem key={category.id} value={String(category.id)}>
+                            {category.name}
+                          </MenuItem>
+                        ))}
+                      </TextField>
                     <Autocomplete
                       size="small"
                       options={rowOptions}
@@ -1431,7 +1457,7 @@ export default function Billing() {
                           </Box>
                         </li>
                       )}
-                      sx={GRID_INPUT_SX}
+                      sx={{ ...GRID_INPUT_SX, minWidth: 210, flex: 1 }}
                       renderInput={(params) => (
                         <TextField
                           {...params}
@@ -1459,6 +1485,7 @@ export default function Billing() {
                         />
                       )}
                     />
+                    </Stack>
                   </td>
                   <td>{r.mrp}</td>
                   <td>{formatExpiry(r.expiry_date)}</td>

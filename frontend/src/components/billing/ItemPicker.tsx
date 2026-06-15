@@ -13,10 +13,12 @@ import {
   DialogActions,
   Button,
   Stack,
+  MenuItem,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { listItemsPage } from '../../services/inventory'
 import { openPack } from '../../services/lots'
+import { fetchCategories } from '../../services/products'
 import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../ui/Toaster'
 
@@ -120,22 +122,24 @@ export default function ItemPicker({
   const toast = useToast()
   const queryClient = useQueryClient()
   const [q, setQ] = useState('')
+  const [categoryId, setCategoryId] = useState('')
   const [openDraftItem, setOpenDraftItem] = useState<PickerItem | null>(null)
   const [openDraftQty, setOpenDraftQty] = useState('1')
   const searchTerm = q.trim()
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('')
-  const canSearchItems = (
-    open &&
+  const hasCategoryFilter = categoryId !== ''
+  const hasReadySearchTerm = (
     searchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
     debouncedSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
     searchTerm === debouncedSearchTerm
   )
+  const canSearchItems = open && (hasCategoryFilter || hasReadySearchTerm)
   const ITEM_PAGE_SIZE = 50
   const [pageOffset, setPageOffset] = useState(0)
 
   useEffect(() => {
     setPageOffset(0)
-  }, [searchTerm, open])
+  }, [searchTerm, categoryId, open])
 
   useEffect(() => {
     if (!open || searchTerm.length < PRODUCT_SEARCH_MIN_CHARS) {
@@ -148,19 +152,33 @@ export default function ItemPicker({
     return () => window.clearTimeout(timer)
   }, [open, searchTerm])
 
+  const { data: categories = [] } = useQuery({
+    queryKey: ['billing-product-categories'],
+    queryFn: () => fetchCategories({ active_only: true }),
+    enabled: open,
+    staleTime: 5 * 60_000,
+  })
+
   const { data, isFetching } = useQuery({
-    queryKey: ['billing-items', debouncedSearchTerm, pageOffset],
+    queryKey: ['billing-items', debouncedSearchTerm, categoryId, pageOffset],
     enabled: canSearchItems,
     queryFn: async ({ signal }) => {
       if (
         !open ||
-        debouncedSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS ||
-        searchTerm !== debouncedSearchTerm
+        (!hasCategoryFilter && debouncedSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS) ||
+        (!hasCategoryFilter && searchTerm !== debouncedSearchTerm)
       ) {
         return { items: [], total: 0, next_offset: null }
       }
       try {
-        return await listItemsPage(debouncedSearchTerm, ITEM_PAGE_SIZE, pageOffset, undefined, undefined, { signal })
+        return await listItemsPage(
+          hasReadySearchTerm ? debouncedSearchTerm : '',
+          ITEM_PAGE_SIZE,
+          pageOffset,
+          undefined,
+          categoryId ? { category_id: Number(categoryId) } : undefined,
+          { signal },
+        )
       } catch (err: any) {
         if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') throw err
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load items'
@@ -227,6 +245,7 @@ export default function ItemPicker({
   useEffect(() => {
     if (!open) {
       setQ('')
+      setCategoryId('')
       setOpenDraftItem(null)
       setOpenDraftQty('1')
     }
@@ -331,7 +350,7 @@ export default function ItemPicker({
       <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
         <DialogTitle>Select Item</DialogTitle>
         <DialogContent>
-          <Box my={1}>
+          <Stack my={1} direction={{ xs: 'column', sm: 'row' }} gap={1}>
             <TextField
               fullWidth
               autoFocus
@@ -342,7 +361,24 @@ export default function ItemPicker({
                 setPageOffset(0)
               }}
             />
-          </Box>
+            <TextField
+              select
+              label="Category"
+              value={categoryId}
+              onChange={(e) => {
+                setCategoryId(e.target.value)
+                setPageOffset(0)
+              }}
+              sx={{ minWidth: { xs: '100%', sm: 190 } }}
+            >
+              <MenuItem value="">All categories</MenuItem>
+              {categories.map((category) => (
+                <MenuItem key={category.id} value={String(category.id)}>
+                  {category.name}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Stack>
 
           {renderPageControls()}
           <List>

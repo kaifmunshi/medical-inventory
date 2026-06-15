@@ -32,6 +32,7 @@ import { createCustomer, fetchCustomers } from '../../services/customers'
 import type { Customer } from '../../lib/types'
 import { listItemsPage } from '../../services/inventory'
 import { openPack } from '../../services/lots'
+import { fetchCategories } from '../../services/products'
 import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
 
@@ -209,6 +210,7 @@ export default function Billing() {
   const [stockErrorByRow, setStockErrorByRow] = useState<Record<number, string>>({})
   const [gridSearch, setGridSearch] = useState('')
   const [debouncedGridSearch, setDebouncedGridSearch] = useState('')
+  const [gridCategoryId, setGridCategoryId] = useState('')
   const [activeGridSearchRow, setActiveGridSearchRow] = useState<number | null>(null)
   const [pendingQtyFocusRow, setPendingQtyFocusRow] = useState<number | null>(null)
   const qtyInputRefs = useRef<Record<number, HTMLInputElement | null>>({})
@@ -242,11 +244,15 @@ export default function Billing() {
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
   const gridSearchTerm = gridSearch.trim()
   const debouncedGridSearchTerm = debouncedGridSearch.trim()
-  const canSearchGridItems = (
-    activeGridSearchRow !== null &&
+  const hasGridCategoryFilter = gridCategoryId !== ''
+  const hasReadyGridSearchTerm = (
     gridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
     debouncedGridSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
     gridSearchTerm === debouncedGridSearchTerm
+  )
+  const canSearchGridItems = (
+    activeGridSearchRow !== null &&
+    (hasGridCategoryFilter || hasReadyGridSearchTerm)
   )
   const BILLING_ITEM_PAGE_SIZE = 50
   useEffect(() => {
@@ -260,18 +266,31 @@ export default function Billing() {
     return () => window.clearTimeout(timer)
   }, [activeGridSearchRow, gridSearchTerm])
 
+  const { data: productCategories = [] } = useQuery({
+    queryKey: ['billing-product-categories'],
+    queryFn: () => fetchCategories({ active_only: true }),
+    staleTime: 5 * 60_000,
+  })
+
   const { data: inventoryItemsPage, isFetching: isFetchingGridItems } = useQuery({
-    queryKey: ['billing-grid-items', debouncedGridSearchTerm],
+    queryKey: ['billing-grid-items', debouncedGridSearchTerm, gridCategoryId],
     queryFn: async ({ signal }) => {
       if (
         activeGridSearchRow === null ||
-        debouncedGridSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS ||
-        gridSearchTerm !== debouncedGridSearchTerm
+        (!hasGridCategoryFilter && debouncedGridSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS) ||
+        (!hasGridCategoryFilter && gridSearchTerm !== debouncedGridSearchTerm)
       ) {
         return { items: [], total: 0, next_offset: null }
       }
       try {
-        return await listItemsPage(debouncedGridSearchTerm, BILLING_ITEM_PAGE_SIZE, 0, undefined, undefined, { signal })
+        return await listItemsPage(
+          hasReadyGridSearchTerm ? debouncedGridSearchTerm : '',
+          BILLING_ITEM_PAGE_SIZE,
+          0,
+          undefined,
+          gridCategoryId ? { category_id: Number(gridCategoryId) } : undefined,
+          { signal },
+        )
       } catch (err: any) {
         if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') throw err
         const msg = err?.response?.data?.detail || err?.message || 'Failed to load products'
@@ -1266,9 +1285,30 @@ export default function Billing() {
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1.5} sx={{ mb: 1.5 }}>
-          <Button startIcon={<AddIcon />} variant="contained" onClick={() => setPickerOpen(true)}>
-            Add Item
-          </Button>
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+            <Button startIcon={<AddIcon />} variant="contained" onClick={() => setPickerOpen(true)}>
+              Add Item
+            </Button>
+            <TextField
+              select
+              size="small"
+              label="Product Category"
+              value={gridCategoryId}
+              onChange={(e) => {
+                setGridCategoryId(e.target.value)
+                setGridSearch('')
+                setDebouncedGridSearch('')
+              }}
+              sx={{ minWidth: 210 }}
+            >
+              <MenuItem value="">All categories</MenuItem>
+              {productCategories.map((category) => (
+                <MenuItem key={category.id} value={String(category.id)}>
+                  {category.name}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Stack>
           <TextField
             size="small"
             label="Bill Date"

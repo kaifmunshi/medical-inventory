@@ -985,6 +985,11 @@ export default function PurchasesPage() {
     }))
   }
 
+  function missingExpiryMessage(item: Pick<DraftItem, 'product_name'>, index: number) {
+    const label = item.product_name?.trim() || `Item ${index + 1}`
+    return `${label} needs an expiry date`
+  }
+
   function purchasePayloadItems(draftItems: DraftItem[]): PurchaseItemPayload[] {
     return cleanItems(draftItems).map(({ key, existing_stock_movement_id, ...rest }) => rest)
   }
@@ -1021,8 +1026,11 @@ export default function PurchasesPage() {
       toast.push('Every purchase item needs a product name', 'error')
       return
     }
-    if (cleanedItems.some((item) => !item.expiry_date)) {
-      toast.push('Every purchase item needs an expiry date', 'error')
+    const missingExpiryIndex = cleanedItems.findIndex((item) => !item.expiry_date)
+    if (missingExpiryIndex >= 0) {
+      const missingItem = cleanedItems[missingExpiryIndex]
+      setExpandedDraftLines((prev) => ({ ...prev, [missingItem.key]: true }))
+      toast.push(missingExpiryMessage(missingItem, missingExpiryIndex), 'error')
       return
     }
     if (cleanedItems.some((item) => Number(item.sealed_qty || 0) < 0 || Number(item.free_qty || 0) < 0)) {
@@ -1067,8 +1075,11 @@ export default function PurchasesPage() {
       toast.push('Every free stock item needs a product name', 'error')
       return
     }
-    if (cleanedItems.some((item) => !item.expiry_date)) {
-      toast.push('Every free stock item needs an expiry date', 'error')
+    const missingExpiryIndex = cleanedItems.findIndex((item) => !item.expiry_date)
+    if (missingExpiryIndex >= 0) {
+      const missingItem = cleanedItems[missingExpiryIndex]
+      setExpandedFreeStockLines((prev) => ({ ...prev, [missingItem.key]: true }))
+      toast.push(missingExpiryMessage(missingItem, missingExpiryIndex), 'error')
       return
     }
     if (cleanedItems.some((item) => Number(item.free_qty || 0) <= 0)) {
@@ -1147,8 +1158,11 @@ export default function PurchasesPage() {
       toast.push('Every replacement purchase item needs a product name', 'error')
       return
     }
-    if (cleanedItems.some((item) => !item.expiry_date)) {
-      toast.push('Every replacement purchase item needs an expiry date', 'error')
+    const missingExpiryIndex = cleanedItems.findIndex((item) => !item.expiry_date)
+    if (missingExpiryIndex >= 0) {
+      const missingItem = cleanedItems[missingExpiryIndex]
+      setExpandedEditLines((prev) => ({ ...prev, [missingItem.key]: true }))
+      toast.push(missingExpiryMessage(missingItem, missingExpiryIndex), 'error')
       return
     }
     if (cleanedItems.some((item) => Number(item.sealed_qty || 0) < 0 || Number(item.free_qty || 0) < 0)) {

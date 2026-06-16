@@ -53,6 +53,14 @@ def raw_purchase_gst_amount(subtotal: float, discount: float, items: List[Dict[s
     return round2(sum(round2(max(0.0, float(item["line_total"])) * float(item["gst_percent"]) / 100.0) for item in items) * factor)
 
 
+def purchase_total_amount(subtotal: float, discount: float, gst: float, rounding_adjustment: float) -> float:
+    rounding_adjustment = round2(rounding_adjustment)
+    total = round2(round2(subtotal) - round2(discount) + round2(gst) + rounding_adjustment)
+    if total < 0:
+        raise HTTPException(status_code=400, detail="Purchase total cannot be negative")
+    return total
+
+
 def purchase_snapshot(session, purchase: Purchase) -> dict:
     items = get_purchase_items(session, int(purchase.id))
     return {
@@ -633,7 +641,7 @@ def make_purchase_out(session, row: Purchase) -> PurchaseOut:
         deleted_at=row.deleted_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
-        items=[PurchaseItemOut(**item.dict()) for item in items],
+        items=[purchase_item_output(session, item) for item in items],
         payments=[PurchasePaymentOut(**payment.dict()) for payment in payments],
         return_total=return_total,
         net_amount=round2(float(row.total_amount or 0) - return_total),
@@ -655,6 +663,19 @@ def make_purchase_payment_out(payment: PurchasePayment, party_id: Optional[int] 
     data = payment.dict()
     data["party_id"] = party_id if party_id is not None else data.get("party_id")
     return PurchasePaymentOut(**data)
+
+
+def purchase_item_output(session, item: PurchaseItem) -> PurchaseItemOut:
+    data = item.dict()
+    if not clean_date(data.get("expiry_date")):
+        lot = session.get(InventoryLot, int(item.lot_id)) if item.lot_id else None
+        inventory_item = session.get(Item, int(item.inventory_item_id)) if item.inventory_item_id else None
+        data["expiry_date"] = (
+            clean_date(getattr(lot, "expiry_date", None))
+            or clean_date(getattr(inventory_item, "expiry_date", None))
+            or data.get("expiry_date")
+        )
+    return PurchaseItemOut(**data)
 
 
 def purchase_item_total_qty(item: PurchaseItem) -> int:
@@ -872,11 +893,11 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
 
     purchase.subtotal_amount = subtotal_amount
     purchase.gst_amount = purchase_gst_amount(subtotal_amount, purchase.discount_amount, list(existing_by_id.values()))
-    purchase.total_amount = round2(
-        float(subtotal_amount or 0)
-        - float(purchase.discount_amount or 0)
-        + float(purchase.gst_amount or 0)
-        + float(purchase.rounding_adjustment or 0)
+    purchase.total_amount = purchase_total_amount(
+        subtotal_amount,
+        purchase.discount_amount,
+        purchase.gst_amount,
+        purchase.rounding_adjustment,
     )
     if float(purchase.paid_amount or 0) + float(purchase.writeoff_amount or 0) > float(purchase.total_amount or 0) + 0.0001:
         raise HTTPException(status_code=400, detail="Edited items reduce total below settled amount")
@@ -1086,9 +1107,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
         discount_amount = round2(payload.discount_amount)
         gst_amount = raw_purchase_gst_amount(subtotal_amount, discount_amount, prepared_items)
         rounding_adjustment = round2(payload.rounding_adjustment)
-        total_amount = round2(subtotal_amount - discount_amount + gst_amount + rounding_adjustment)
-        if total_amount < 0:
-            raise HTTPException(status_code=400, detail="Purchase total cannot be negative")
+        total_amount = purchase_total_amount(subtotal_amount, discount_amount, gst_amount, rounding_adjustment)
 
         paid_amount = 0.0
         writeoff_amount = 0.0
@@ -1612,14 +1631,12 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
                 payment.party_id = row.party_id
                 session.add(payment)
 
-        row.total_amount = round2(
-            float(row.subtotal_amount or 0)
-            - float(row.discount_amount or 0)
-            + float(row.gst_amount or 0)
-            + float(row.rounding_adjustment or 0)
+        row.total_amount = purchase_total_amount(
+            row.subtotal_amount,
+            row.discount_amount,
+            row.gst_amount,
+            row.rounding_adjustment,
         )
-        if row.total_amount < 0:
-            raise HTTPException(status_code=400, detail="Purchase total cannot be negative")
         if float(row.paid_amount or 0) + float(row.writeoff_amount or 0) > float(row.total_amount or 0) + 0.0001:
             raise HTTPException(status_code=400, detail="Updated header reduces total below settled amount")
 
@@ -2652,11 +2669,11 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
             purchase.discount_amount,
             get_purchase_items(session, int(purchase.id)),
         )
-        purchase.total_amount = round2(
-            float(subtotal_amount or 0)
-            - float(purchase.discount_amount or 0)
-            + float(purchase.gst_amount or 0)
-            + float(purchase.rounding_adjustment or 0)
+        purchase.total_amount = purchase_total_amount(
+            subtotal_amount,
+            purchase.discount_amount,
+            purchase.gst_amount,
+            purchase.rounding_adjustment,
         )
         if float(purchase.paid_amount or 0) + float(purchase.writeoff_amount or 0) > float(purchase.total_amount or 0) + 0.0001:
             raise HTTPException(status_code=400, detail="Edited items reduce total below settled amount")

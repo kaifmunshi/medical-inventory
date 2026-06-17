@@ -58,6 +58,10 @@ import {
   updateProduct,
   type ProductPayload,
 } from '../../services/products'
+import {
+  notifyProductMasterChanged,
+  subscribeProductMasterChanged,
+} from '../../lib/productMasterEvents'
 import { buildStockReportLink } from '../../lib/reportLinks'
 import { formatLedgerNote } from '../../lib/stockLedger'
 import { useToast } from '../../components/ui/Toaster'
@@ -467,6 +471,15 @@ export default function StockCardPage() {
   const [from, setFrom] = useState(() => toDateInput(30))
   const [to, setTo] = useState(() => toDateInput(0))
   const [reason, setReason] = useState('')
+
+  useEffect(() => {
+    return subscribeProductMasterChanged(() => {
+      queryClient.invalidateQueries({ queryKey: ['stock-card-products'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-group'] })
+      queryClient.invalidateQueries({ queryKey: ['stock-card-brands'] })
+      queryClient.invalidateQueries({ queryKey: ['stock-card-categories'] })
+    })
+  }, [queryClient])
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(requestedBatchId)
   const [selectedMovementId, setSelectedMovementId] = useState<number | null>(null)
   const [billOpen, setBillOpen] = useState(false)
@@ -781,6 +794,10 @@ export default function StockCardPage() {
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-product-categories'] })
+      notifyProductMasterChanged()
       toast.push('Product master saved', 'success')
     },
     onError: (err: any) => {
@@ -809,6 +826,9 @@ export default function StockCardPage() {
       queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
       queryClient.invalidateQueries({ queryKey: ['products-master'] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-product-categories'] })
+      notifyProductMasterChanged()
       toast.push('Product deleted', 'success')
     },
     onError: (err: any) => {
@@ -825,6 +845,7 @@ export default function StockCardPage() {
       setProductBrandOpen(false)
       queryClient.invalidateQueries({ queryKey: ['stock-card-brands'] })
       queryClient.invalidateQueries({ queryKey: ['brand-master'] })
+      notifyProductMasterChanged()
       toast.push('Brand added', 'success')
     },
     onError: (err: any) => {
@@ -840,6 +861,8 @@ export default function StockCardPage() {
       setProductCategoryOpen(false)
       queryClient.invalidateQueries({ queryKey: ['stock-card-categories'] })
       queryClient.invalidateQueries({ queryKey: ['product-categories-master'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-product-categories'] })
+      notifyProductMasterChanged()
       toast.push('Category added', 'success')
     },
     onError: (err: any) => {

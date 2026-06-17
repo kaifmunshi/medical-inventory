@@ -20,6 +20,7 @@ import { listItemsPage } from '../../services/inventory'
 import { openPack } from '../../services/lots'
 import { fetchCategories } from '../../services/products'
 import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
+import { subscribeProductMasterChanged } from '../../lib/productMasterEvents'
 import { useToast } from '../ui/Toaster'
 
 export interface PickerItem {
@@ -142,6 +143,13 @@ export default function ItemPicker({
   }, [searchTerm, categoryId, open])
 
   useEffect(() => {
+    return subscribeProductMasterChanged(() => {
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-product-categories'] })
+    })
+  }, [queryClient])
+
+  useEffect(() => {
     if (!open || searchTerm.length < PRODUCT_SEARCH_MIN_CHARS) {
       setDebouncedSearchTerm('')
       return undefined
@@ -186,9 +194,10 @@ export default function ItemPicker({
         throw err
       }
     },
-    staleTime: 60_000,
+    staleTime: 0,
     gcTime: 5 * 60_000,
-    refetchOnWindowFocus: false,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
     retry: false,
   })
   const rawItems = canSearchItems ? ((data?.items || []) as PickerItem[]) : []

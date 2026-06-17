@@ -46,6 +46,10 @@ import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import {
+  notifyProductMasterChanged,
+  subscribeProductMasterChanged,
+} from '../../lib/productMasterEvents'
+import {
   createBrand,
   createCategory,
   createProduct,
@@ -227,6 +231,15 @@ export default function Inventory() {
   useEffect(() => {
     setPageOffset(0)
   }, [brandFilter, canLoadInventory, categoryFilter, debouncedRackQ, effectiveInventorySearch, expiryFilter])
+
+  useEffect(() => {
+    return subscribeProductMasterChanged(() => {
+      qc.invalidateQueries({ queryKey: ['inventory-products-master'] })
+      qc.invalidateQueries({ queryKey: ['inventory-items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-brands'] })
+      qc.invalidateQueries({ queryKey: ['inventory-categories'] })
+    })
+  }, [qc])
 
   // ✅ Paged inventory query (keeps each fetch to 50 rows)
   const {
@@ -499,6 +512,9 @@ export default function Inventory() {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['lots'] })
       qc.invalidateQueries({ queryKey: ['products-master'] })
+      qc.invalidateQueries({ queryKey: ['billing-items'] })
+      qc.invalidateQueries({ queryKey: ['billing-product-categories'] })
+      notifyProductMasterChanged()
       toast.push('Product master saved', 'success')
     },
     onError: (err: any) => {
@@ -526,6 +542,9 @@ export default function Inventory() {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['lots'] })
       qc.invalidateQueries({ queryKey: ['products-master'] })
+      qc.invalidateQueries({ queryKey: ['billing-items'] })
+      qc.invalidateQueries({ queryKey: ['billing-product-categories'] })
+      notifyProductMasterChanged()
       toast.push('Product deleted', 'success')
     },
     onError: (err: any) => {
@@ -542,6 +561,7 @@ export default function Inventory() {
       setProductBrandOpen(false)
       qc.invalidateQueries({ queryKey: ['inventory-brands'] })
       qc.invalidateQueries({ queryKey: ['brand-master'] })
+      notifyProductMasterChanged()
       toast.push('Brand added', 'success')
     },
     onError: (err: any) => {
@@ -558,6 +578,8 @@ export default function Inventory() {
       setProductCategoryOpen(false)
       qc.invalidateQueries({ queryKey: ['inventory-categories'] })
       qc.invalidateQueries({ queryKey: ['product-categories-master'] })
+      qc.invalidateQueries({ queryKey: ['billing-product-categories'] })
+      notifyProductMasterChanged()
       toast.push('Category added', 'success')
     },
     onError: (err: any) => {

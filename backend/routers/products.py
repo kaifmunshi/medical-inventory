@@ -39,6 +39,13 @@ class ProductMergeOut(BaseModel):
     backup_path: Optional[str] = None
 
 
+class ProductPageOut(BaseModel):
+    items: List[ProductOut]
+    total: int
+    limit: int
+    offset: int
+
+
 def _clean(v: Optional[str]) -> Optional[str]:
     if v is None:
         return None
@@ -385,12 +392,15 @@ def list_products(
     brand: Optional[str] = Query(None),
     category_id: Optional[int] = Query(None),
     active_only: bool = Query(True),
+    inactive_only: bool = Query(False),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ) -> List[ProductOut]:
     with get_session() as session:
         stmt = select(Product)
-        if active_only:
+        if inactive_only:
+            stmt = stmt.where(Product.is_active == False)  # noqa: E712
+        elif active_only:
             stmt = stmt.where(Product.is_active == True)  # noqa: E712
         if category_id is not None:
             stmt = stmt.where(Product.category_id == category_id)
@@ -410,6 +420,51 @@ def list_products(
 
         stmt = stmt.order_by(func.lower(Product.name).asc(), Product.id.asc()).offset(offset).limit(limit)
         return session.exec(stmt).all()
+
+
+@router.get("/page", response_model=ProductPageOut)
+def list_products_page(
+    q: Optional[str] = Query(None),
+    brand: Optional[str] = Query(None),
+    category_id: Optional[int] = Query(None),
+    active_only: bool = Query(True),
+    inactive_only: bool = Query(False),
+    limit: int = Query(25, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> ProductPageOut:
+    with get_session() as session:
+        filters = []
+        if inactive_only:
+            filters.append(Product.is_active == False)  # noqa: E712
+        elif active_only:
+            filters.append(Product.is_active == True)  # noqa: E712
+        if category_id is not None:
+            filters.append(Product.category_id == category_id)
+        brand_name = _clean(brand)
+        if brand_name:
+            filters.append(func.lower(func.coalesce(Product.brand, "")) == brand_name.lower())
+        qq = _clean(q)
+        if qq:
+            like = f"%{qq.lower()}%"
+            filters.append(
+                or_(
+                    func.lower(func.coalesce(Product.name, "")).like(like),
+                    func.lower(func.coalesce(Product.alias, "")).like(like),
+                    func.lower(func.coalesce(Product.brand, "")).like(like),
+                )
+            )
+
+        total_stmt = select(func.count()).select_from(Product)
+        rows_stmt = select(Product)
+        for condition in filters:
+            total_stmt = total_stmt.where(condition)
+            rows_stmt = rows_stmt.where(condition)
+
+        total = int(session.exec(total_stmt).one() or 0)
+        items = session.exec(
+            rows_stmt.order_by(func.lower(Product.name).asc(), Product.id.asc()).offset(offset).limit(limit)
+        ).all()
+        return ProductPageOut(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post("/", response_model=ProductOut, status_code=201)

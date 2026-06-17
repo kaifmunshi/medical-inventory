@@ -53,10 +53,31 @@ export async function fetchProducts(params?: {
   brand?: string
   category_id?: number
   active_only?: boolean
+  inactive_only?: boolean
   limit?: number
   offset?: number
 }): Promise<Product[]> {
   const res = await api.get<Product[]>('/products', { params })
+  return res.data
+}
+
+export interface ProductPage {
+  items: Product[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export async function fetchProductsPage(params?: {
+  q?: string
+  brand?: string
+  category_id?: number
+  active_only?: boolean
+  inactive_only?: boolean
+  limit?: number
+  offset?: number
+}): Promise<ProductPage> {
+  const res = await api.get<ProductPage>('/products/page', { params })
   return res.data
 }
 

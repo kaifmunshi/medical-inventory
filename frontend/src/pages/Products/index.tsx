@@ -8,19 +8,28 @@ import {
   DialogContent,
   DialogTitle,
   FormControlLabel,
+  IconButton,
   MenuItem,
+  Pagination,
   Paper,
   Stack,
   Switch,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import CallMergeIcon from '@mui/icons-material/CallMerge'
 import DeleteIcon from '@mui/icons-material/Delete'
+import KeyboardDoubleArrowDownIcon from '@mui/icons-material/KeyboardDoubleArrowDown'
+import KeyboardDoubleArrowUpIcon from '@mui/icons-material/KeyboardDoubleArrowUp'
 import RestoreFromTrashIcon from '@mui/icons-material/RestoreFromTrash'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
+import {
+  notifyProductMasterChanged,
+  subscribeProductMasterChanged,
+} from '../../lib/productMasterEvents'
 import {
   createProduct,
   createBrand,
@@ -29,7 +38,9 @@ import {
   fetchBrands,
   fetchCategories,
   fetchProducts,
+  fetchProductsPage,
   mergeProduct,
+  type ProductPage,
   type ProductPayload,
   updateProduct,
 } from '../../services/products'
@@ -73,6 +84,7 @@ export default function ProductsPage() {
   const [mergeSearch, setMergeSearch] = useState('')
   const [newBrandName, setNewBrandName] = useState('')
   const [newCategoryName, setNewCategoryName] = useState('')
+  const [showScrollJumps, setShowScrollJumps] = useState(false)
 
   useEffect(() => {
     setQ(searchParams.get('q') || '')
@@ -82,6 +94,45 @@ export default function ProductsPage() {
   useEffect(() => {
     setPage(0)
   }, [q, brandFilter, categoryFilter, rowsPerPage, showInactive])
+
+  useEffect(() => {
+    return subscribeProductMasterChanged(() => {
+      queryClient.invalidateQueries({ queryKey: ['products-master'] })
+      queryClient.invalidateQueries({ queryKey: ['product-merge-options'] })
+      queryClient.invalidateQueries({ queryKey: ['brand-master'] })
+      queryClient.invalidateQueries({ queryKey: ['product-categories-master'] })
+    })
+  }, [queryClient])
+
+  useEffect(() => {
+    let hideTimer: number | undefined
+
+    function pageCanScroll() {
+      return document.documentElement.scrollHeight > window.innerHeight + 8
+    }
+
+    function revealScrollJumps() {
+      if (!pageCanScroll()) {
+        setShowScrollJumps(false)
+        return
+      }
+      setShowScrollJumps(true)
+      if (hideTimer) window.clearTimeout(hideTimer)
+      hideTimer = window.setTimeout(() => setShowScrollJumps(false), 1600)
+    }
+
+    function handleResize() {
+      if (!pageCanScroll()) setShowScrollJumps(false)
+    }
+
+    window.addEventListener('scroll', revealScrollJumps, { passive: true })
+    window.addEventListener('resize', handleResize)
+    return () => {
+      if (hideTimer) window.clearTimeout(hideTimer)
+      window.removeEventListener('scroll', revealScrollJumps)
+      window.removeEventListener('resize', handleResize)
+    }
+  }, [])
 
   const categoriesQ = useQuery<Category[], Error>({
     queryKey: ['product-categories-master', { active_only: false }],
@@ -93,17 +144,21 @@ export default function ProductsPage() {
     queryFn: () => fetchBrands({ active_only: true }),
   })
 
-  const productsQ = useQuery<Product[], Error>({
+  const productsQ = useQuery<ProductPage, Error>({
     queryKey: ['products-master', q, brandFilter, categoryFilter, showInactive, page, rowsPerPage],
     queryFn: () =>
-      fetchProducts({
+      fetchProductsPage({
         q: q.trim() || undefined,
         brand: brandFilter.trim() || undefined,
         category_id: categoryFilter || undefined,
         active_only: !showInactive,
-        limit: rowsPerPage + 1,
+        inactive_only: showInactive,
+        limit: rowsPerPage,
         offset: page * rowsPerPage,
       }),
+    placeholderData: keepPreviousData,
+    refetchOnMount: 'always',
+    staleTime: 0,
   })
 
   const mergeOptionsQ = useQuery<Product[], Error>({
@@ -123,6 +178,8 @@ export default function ProductsPage() {
       toast.push('Product saved', 'success')
       queryClient.invalidateQueries({ queryKey: ['products-master'] })
       queryClient.invalidateQueries({ queryKey: ['brand-master'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
+      notifyProductMasterChanged()
       closeForm()
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to save product'), 'error'),
@@ -134,6 +191,8 @@ export default function ProductsPage() {
       toast.push('Product updated', 'success')
       queryClient.invalidateQueries({ queryKey: ['products-master'] })
       queryClient.invalidateQueries({ queryKey: ['brand-master'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
+      notifyProductMasterChanged()
       closeForm()
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to update product'), 'error'),
@@ -146,7 +205,9 @@ export default function ProductsPage() {
       queryClient.invalidateQueries({ queryKey: ['products-master'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
+      notifyProductMasterChanged()
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to delete product'), 'error'),
   })
@@ -158,7 +219,9 @@ export default function ProductsPage() {
       queryClient.invalidateQueries({ queryKey: ['products-master'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
+      notifyProductMasterChanged()
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to restore product'), 'error'),
   })
@@ -177,7 +240,9 @@ export default function ProductsPage() {
       queryClient.invalidateQueries({ queryKey: ['product-merge-options'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
+      notifyProductMasterChanged()
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to merge product'), 'error'),
   })
@@ -188,6 +253,7 @@ export default function ProductsPage() {
     onSuccess: (brand) => {
       toast.push('Brand added', 'success')
       queryClient.invalidateQueries({ queryKey: ['brand-master'] })
+      notifyProductMasterChanged()
       patchForm({ brand: brand.name })
       setNewBrandName('')
       setBrandDialogOpen(false)
@@ -200,6 +266,8 @@ export default function ProductsPage() {
     onSuccess: (category) => {
       toast.push('Category added', 'success')
       queryClient.invalidateQueries({ queryKey: ['product-categories-master'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-product-categories'] })
+      notifyProductMasterChanged()
       patchForm({ category_id: Number(category.id) })
       setNewCategoryName('')
       setCategoryDialogOpen(false)
@@ -211,13 +279,22 @@ export default function ProductsPage() {
   const categoryName = (id?: number | null) => categories.find((category) => Number(category.id) === Number(id))?.name || '-'
 
   const rows = useMemo(() => {
-    return (productsQ.data || []).slice(0, rowsPerPage)
-  }, [productsQ.data, rowsPerPage])
-  const hasNextPage = (productsQ.data || []).length > rowsPerPage
+    return productsQ.data?.items || []
+  }, [productsQ.data?.items])
+  const totalProducts = productsQ.data?.total || 0
+  const totalPages = Math.max(1, Math.ceil(totalProducts / rowsPerPage))
+  const pageStart = rows.length > 0 ? page * rowsPerPage + 1 : 0
+  const pageEnd = rows.length > 0 ? page * rowsPerPage + rows.length : 0
   const mergeOptions = useMemo(() => {
     const sourceId = Number(mergeSource?.id || 0)
     return (mergeOptionsQ.data || []).filter((product) => Number(product.id) !== sourceId)
   }, [mergeOptionsQ.data, mergeSource?.id])
+
+  useEffect(() => {
+    if (productsQ.isFetching) return
+    if (totalProducts === 0 && page !== 0) setPage(0)
+    else if (page > totalPages - 1) setPage(totalPages - 1)
+  }, [page, productsQ.isFetching, totalPages, totalProducts])
 
   function openAdd() {
     setEditing(null)
@@ -299,6 +376,65 @@ export default function ProductsPage() {
     setPage(0)
   }
 
+  function scrollToPageTop() {
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function scrollToPageBottom() {
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' })
+  }
+
+  function renderPager(position: 'top' | 'bottom') {
+    return (
+      <Stack
+        direction={{ xs: 'column', md: 'row' }}
+        gap={1}
+        justifyContent="space-between"
+        alignItems={{ xs: 'stretch', md: 'center' }}
+        sx={{ mt: position === 'bottom' ? 1.5 : 0, mb: position === 'top' ? 1.5 : 0 }}
+      >
+        <Stack direction="row" gap={0.5} alignItems="center" justifyContent={{ xs: 'space-between', md: 'flex-start' }}>
+          <Typography variant="body2" color="text.secondary">
+            Showing {pageStart}-{pageEnd} of {totalProducts}
+          </Typography>
+        </Stack>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="flex-end">
+          <TextField
+            select
+            size="small"
+            label="Rows"
+            value={rowsPerPage}
+            onChange={(e) => {
+              setRowsPerPage(Number(e.target.value))
+              setPage(0)
+            }}
+            sx={{ width: { xs: '100%', sm: 110 } }}
+          >
+            <MenuItem value={10}>10</MenuItem>
+            <MenuItem value={25}>25</MenuItem>
+            <MenuItem value={50}>50</MenuItem>
+          </TextField>
+          <Pagination
+            color="primary"
+            count={totalPages}
+            disabled={productsQ.isFetching}
+            page={page + 1}
+            onChange={(_, nextPage) => setPage(nextPage - 1)}
+            showFirstButton
+            showLastButton
+            siblingCount={1}
+            boundaryCount={1}
+            sx={{
+              '& .MuiPagination-ul': {
+                justifyContent: { xs: 'center', sm: 'flex-end' },
+              },
+            }}
+          />
+        </Stack>
+      </Stack>
+    )
+  }
+
   function saveQuickBrand() {
     const name = newBrandName.trim()
     if (!name) {
@@ -344,6 +480,41 @@ export default function ProductsPage() {
 
   return (
     <Stack gap={2}>
+      <Box
+        sx={(theme) => ({
+          position: 'fixed',
+          right: { xs: 6, sm: 10 },
+          top: '50%',
+          transform: 'translateY(-50%)',
+          zIndex: theme.zIndex.tooltip,
+          opacity: showScrollJumps ? 1 : 0,
+          pointerEvents: showScrollJumps ? 'auto' : 'none',
+          transition: 'opacity 160ms ease',
+        })}
+      >
+        <Stack
+          gap={0.5}
+          sx={(theme) => ({
+            bgcolor: 'background.paper',
+            border: `1px solid ${theme.palette.divider}`,
+            borderRadius: 1,
+            boxShadow: theme.shadows[3],
+            p: 0.25,
+          })}
+        >
+          <Tooltip title="Top of page" placement="left">
+            <IconButton size="small" onClick={scrollToPageTop} aria-label="Top of page">
+              <KeyboardDoubleArrowUpIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Bottom of page" placement="left">
+            <IconButton size="small" onClick={scrollToPageBottom} aria-label="Bottom of page">
+              <KeyboardDoubleArrowDownIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      </Box>
+
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
         <Typography variant="h5">Manage Product</Typography>
         <Button variant="contained" startIcon={<AddIcon />} onClick={openAdd}>
@@ -388,7 +559,7 @@ export default function ProductsPage() {
                 onChange={(e) => setShowInactive(e.target.checked)}
               />
             }
-            label="Show deleted"
+            label="Deleted only"
             sx={{ whiteSpace: 'nowrap' }}
           />
         </Stack>
@@ -398,9 +569,10 @@ export default function ProductsPage() {
         <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}>
           <Typography variant="subtitle1" fontWeight={700}>Product List</Typography>
           <Typography variant="body2" color="text.secondary">
-            Page {page + 1} • {rows.length} products
+            Page {page + 1} of {totalPages} • {rows.length} products
           </Typography>
         </Stack>
+        {renderPager('top')}
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
             <thead>
@@ -417,7 +589,15 @@ export default function ProductsPage() {
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.id} onDoubleClick={() => openEdit(row)} style={{ cursor: 'pointer', opacity: row.is_active ? 1 : 0.58 }}>
+                <tr
+                  key={row.id}
+                  onDoubleClick={() => openEdit(row)}
+                  style={{
+                    cursor: 'pointer',
+                    background: row.is_active ? undefined : '#ffebee',
+                    opacity: row.is_active ? 1 : 0.9,
+                  }}
+                >
                   <td>{row.name}</td>
                   <td>{row.brand || '-'}</td>
                   <td>{row.alias || '-'}</td>
@@ -479,29 +659,7 @@ export default function ProductsPage() {
             </tbody>
           </table>
         </Box>
-        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} justifyContent="flex-end" alignItems={{ sm: 'center' }} sx={{ mt: 1.5 }}>
-          <TextField
-            select
-            size="small"
-            label="Rows"
-            value={rowsPerPage}
-            onChange={(e) => {
-              setRowsPerPage(Number(e.target.value))
-              setPage(0)
-            }}
-            sx={{ width: 110 }}
-          >
-            <MenuItem value={10}>10</MenuItem>
-            <MenuItem value={25}>25</MenuItem>
-            <MenuItem value={50}>50</MenuItem>
-          </TextField>
-          <Button size="small" variant="outlined" disabled={page === 0 || productsQ.isFetching} onClick={() => setPage((prev) => Math.max(0, prev - 1))}>
-            Previous
-          </Button>
-          <Button size="small" variant="outlined" disabled={!hasNextPage || productsQ.isFetching} onClick={() => setPage((prev) => prev + 1)}>
-            Next
-          </Button>
-        </Stack>
+        {renderPager('bottom')}
       </Paper>
 
       <Dialog open={open} onClose={closeForm} fullWidth maxWidth="md">

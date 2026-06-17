@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, text
 from sqlmodel import select
 
 from backend.controls import log_audit
@@ -101,6 +101,21 @@ def _sync_brands_from_products(session) -> None:
     item_names = session.exec(select(Item.brand).where(Item.brand.is_not(None))).all()
     for raw in item_names:
         _ensure_brand_row(session, raw)
+
+
+def _sync_brands_from_products_once(session) -> None:
+    key = "product_brand_master_synced_v1"
+    row = session.exec(text("SELECT value FROM appmeta WHERE key = :key").bindparams(key=key)).first()
+    if row and str(row[0]) == "done":
+        return
+    _sync_brands_from_products(session)
+    session.exec(
+        text("""
+            INSERT INTO appmeta (key, value, updated_at)
+            VALUES (:key, 'done', datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """).bindparams(key=key)
+    )
 
 
 def _list_master_rows(model, *, active_only: bool):
@@ -254,7 +269,7 @@ def _product_ref_counts(session, product_id: int) -> dict:
 @router.get("/brands", response_model=List[BrandOut])
 def list_brands(active_only: bool = Query(True)) -> List[BrandOut]:
     with get_session() as session:
-        _sync_brands_from_products(session)
+        _sync_brands_from_products_once(session)
         session.commit()
     return _list_master_rows(Brand, active_only=active_only)
 

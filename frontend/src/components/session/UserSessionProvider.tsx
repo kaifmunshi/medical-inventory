@@ -143,7 +143,17 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
       const remainingMs = Math.max(0, SESSION_INACTIVITY_LOCK_MS - (Date.now() - lastActivityRef.current))
       lockTimer = window.setTimeout(lockSession, remainingMs)
     }
+    const lockIfInactive = () => {
+      const storedActivityAt = readStoredLastActivity(userId)
+      const lastActivityAt = storedActivityAt || lastActivityRef.current
+      if (Date.now() - lastActivityAt >= SESSION_INACTIVITY_LOCK_MS) {
+        lockSession()
+        return true
+      }
+      return false
+    }
     const handleActivity = () => {
+      if (lockIfInactive()) return
       const activityAt = Date.now()
       lastActivityRef.current = activityAt
       if (activityAt - lastPersistedActivityRef.current >= 1000) {
@@ -152,14 +162,23 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
       }
       scheduleLock()
     }
+    const handleWake = () => {
+      if (document.visibilityState === 'visible' && !lockIfInactive()) {
+        scheduleLock()
+      }
+    }
 
-    const activityEvents = ['mousedown', 'mousemove', 'keydown', 'touchstart', 'wheel', 'scroll', 'pointerdown', 'focus']
+    const activityEvents = ['mousedown', 'mousemove', 'keydown', 'touchstart', 'wheel', 'scroll', 'pointerdown']
     activityEvents.forEach((eventName) => window.addEventListener(eventName, handleActivity, { passive: true }))
+    window.addEventListener('focus', handleWake)
+    document.addEventListener('visibilitychange', handleWake)
     scheduleLock()
 
     return () => {
       window.clearTimeout(lockTimer)
       activityEvents.forEach((eventName) => window.removeEventListener(eventName, handleActivity))
+      window.removeEventListener('focus', handleWake)
+      document.removeEventListener('visibilitychange', handleWake)
     }
   }, [session?.user?.id, isLocked, lockSession, rememberActivity])
 

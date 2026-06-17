@@ -3,11 +3,11 @@ import os
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlmodel import Session
-from sqlmodel import SQLModel
 from backend.accounting import sync_existing_vouchers
 from backend import models
-from backend.db import engine, migrate_db
+from backend.db import engine
 from backend.security import set_request_actor, verify_session_token
 from backend.routers import inventory, billing
 from backend.routers import returns as returns_router
@@ -67,13 +67,28 @@ async def bind_request_actor(request: Request, call_next):
 
 
 
+def _sync_existing_vouchers_once() -> None:
+    with Session(engine, expire_on_commit=False) as session:
+        key = "accounting_existing_vouchers_synced_v1"
+        row = session.exec(text("SELECT value FROM appmeta WHERE key = :key").bindparams(key=key)).first()
+        if row and str(row[0]) == "done":
+            return
+        sync_existing_vouchers(session)
+        session.exec(
+            text("""
+                INSERT INTO appmeta (key, value, updated_at)
+                VALUES (:key, 'done', datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """).bindparams(key=key)
+        )
+        session.commit()
+
+
 @app.on_event("startup")
 def on_startup():
-    SQLModel.metadata.create_all(engine)
-    migrate_db()
-    with Session(engine, expire_on_commit=False) as session:
-        sync_existing_vouchers(session)
-        session.commit()
+    # backend.db already creates tables and applies schema/data migrations on import.
+    # Keep startup light: only run the historical accounting backfill once per database.
+    _sync_existing_vouchers_once()
 
 
 # Routers

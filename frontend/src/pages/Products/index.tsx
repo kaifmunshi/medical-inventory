@@ -51,6 +51,9 @@ type ProductForm = ProductPayload & {
   is_active?: boolean
 }
 
+const NO_CATEGORY_FILTER = '__no_category__'
+type CategoryFilterValue = number | typeof NO_CATEGORY_FILTER | null
+
 const emptyForm: ProductForm = {
   name: '',
   alias: '',
@@ -70,7 +73,7 @@ export default function ProductsPage() {
   const [searchParams] = useSearchParams()
   const [q, setQ] = useState(searchParams.get('q') || '')
   const [brandFilter, setBrandFilter] = useState(searchParams.get('brand') || '')
-  const [categoryFilter, setCategoryFilter] = useState<number | null>(null)
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilterValue>(null)
   const [showInactive, setShowInactive] = useState(false)
   const [page, setPage] = useState(0)
   const [rowsPerPage, setRowsPerPage] = useState(25)
@@ -150,7 +153,8 @@ export default function ProductsPage() {
       fetchProductsPage({
         q: q.trim() || undefined,
         brand: brandFilter.trim() || undefined,
-        category_id: categoryFilter || undefined,
+        category_id: typeof categoryFilter === 'number' ? categoryFilter : undefined,
+        uncategorized_only: categoryFilter === NO_CATEGORY_FILTER,
         active_only: !showInactive,
         inactive_only: showInactive,
         limit: rowsPerPage,
@@ -541,10 +545,16 @@ export default function ProductsPage() {
             select
             label="Category"
             value={categoryFilter ?? ''}
-            onChange={(e) => setCategoryFilter(e.target.value ? Number(e.target.value) : null)}
+            onChange={(e) => {
+              const value = e.target.value
+              if (!value) setCategoryFilter(null)
+              else if (value === NO_CATEGORY_FILTER) setCategoryFilter(NO_CATEGORY_FILTER)
+              else setCategoryFilter(Number(value))
+            }}
             sx={{ minWidth: 220 }}
           >
             <MenuItem value="">All</MenuItem>
+            <MenuItem value={NO_CATEGORY_FILTER}>No category</MenuItem>
             {categories.map((category) => (
               <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
             ))}

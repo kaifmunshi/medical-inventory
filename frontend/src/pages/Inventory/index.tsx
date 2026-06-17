@@ -134,12 +134,15 @@ function productNameKey(value?: string | null) {
     .replace(/\b(\d+)\s+(g|gm|ml|tab|tabs|tablet|tablets|cap|caps|n)\b/g, '$1$2')
 }
 
-function findExactProduct(products: any[], name?: string, brand?: string) {
+function findExactProduct(products: any[], name?: string, brand?: string, categoryId?: number | null) {
   const nameKey = productNameKey(name)
   const brandKey = String(brand || '').trim().replace(/\s+/g, ' ').toLowerCase()
+  const hasCategory = categoryId !== undefined
+  const categoryKey = Number(categoryId || 0)
   const matches = products.filter((product) => (
     productNameKey(product?.name) === nameKey
     && String(product?.brand || '').trim().replace(/\s+/g, ' ').toLowerCase() === brandKey
+    && (!hasCategory || Number(product?.category_id || 0) === categoryKey)
   ))
   return matches.find((product) => product?.is_active !== false) || matches[0] || null
 }
@@ -473,17 +476,19 @@ export default function Inventory() {
       if (!targetId) {
         const originName = productOrigin?.name || payload.name
         const originBrand = productOrigin?.brand ?? (payload.brand || '')
-        const knownOriginMatch = findExactProduct(productsQ.data || [], originName, originBrand)
+        const knownOriginMatch = findExactProduct(productsQ.data || [], originName, originBrand, payload.category_id ?? null)
         const freshOriginMatch = knownOriginMatch || findExactProduct(
           await fetchProducts({ q: originName, active_only: false, limit: 1000 }),
           originName,
           originBrand,
+          payload.category_id ?? null,
         )
-        const knownPayloadMatch = freshOriginMatch || findExactProduct(productsQ.data || [], payload.name, payload.brand)
+        const knownPayloadMatch = freshOriginMatch || findExactProduct(productsQ.data || [], payload.name, payload.brand, payload.category_id ?? null)
         const freshPayloadMatch = knownPayloadMatch || findExactProduct(
           await fetchProducts({ q: payload.name, active_only: false, limit: 1000 }),
           payload.name,
           payload.brand,
+          payload.category_id ?? null,
         )
         targetId = freshPayloadMatch?.id ? Number(freshPayloadMatch.id) : null
       }
@@ -619,9 +624,9 @@ export default function Inventory() {
     const brand = String(group?.brand || '')
     let product = null
     try {
-      product = findExactProduct(await fetchProducts({ q: name, active_only: false, limit: 1000 }), name, brand)
+      product = findExactProduct(await fetchProducts({ q: name, active_only: false, limit: 1000 }), name, brand, group?.category_id ?? null)
     } catch {
-      product = findExactProduct(productsQ.data || [], name, brand)
+      product = findExactProduct(productsQ.data || [], name, brand, group?.category_id ?? null)
     }
     const linkedProductId =
       Number(group?.items?.find((item: any) => Number(item?.product_id || 0) > 0)?.product_id || 0) ||

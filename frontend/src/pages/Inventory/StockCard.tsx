@@ -416,12 +416,15 @@ function daysUntilExpiry(expiry?: string | null) {
   return Math.round((exp.getTime() - today.getTime()) / (24 * 60 * 60 * 1000))
 }
 
-function findExactProduct(products: any[], name?: string, brand?: string) {
+function findExactProduct(products: any[], name?: string, brand?: string, categoryId?: number | null) {
   const nameKey = String(name || '').trim().toLowerCase()
   const brandKey = String(brand || '').trim().toLowerCase()
+  const hasCategory = categoryId !== undefined
+  const categoryKey = Number(categoryId || 0)
   const matches = products.filter((product) => (
     String(product?.name || '').trim().toLowerCase() === nameKey
     && String(product?.brand || '').trim().toLowerCase() === brandKey
+    && (!hasCategory || Number(product?.category_id || 0) === categoryKey)
   ))
   return matches.find((product) => product?.is_active !== false) || matches[0] || null
 }
@@ -754,17 +757,19 @@ export default function StockCardPage() {
       if (!targetId) {
         const originName = productOrigin?.name || payload.name
         const originBrand = productOrigin?.brand ?? (payload.brand || '')
-        const knownOriginMatch = findExactProduct(productsQ.data || [], originName, originBrand)
+        const knownOriginMatch = findExactProduct(productsQ.data || [], originName, originBrand, payload.category_id ?? null)
         const freshOriginMatch = knownOriginMatch || findExactProduct(
           await fetchProducts({ q: originName, active_only: false, limit: 1000 }),
           originName,
           originBrand,
+          payload.category_id ?? null,
         )
-        const knownPayloadMatch = freshOriginMatch || findExactProduct(productsQ.data || [], payload.name, payload.brand)
+        const knownPayloadMatch = freshOriginMatch || findExactProduct(productsQ.data || [], payload.name, payload.brand, payload.category_id ?? null)
         const freshPayloadMatch = knownPayloadMatch || findExactProduct(
           await fetchProducts({ q: payload.name, active_only: false, limit: 1000 }),
           payload.name,
           payload.brand,
+          payload.category_id ?? null,
         )
         targetId = freshPayloadMatch?.id ? Number(freshPayloadMatch.id) : null
       }
@@ -884,7 +889,12 @@ export default function StockCardPage() {
     const batch = currentBatch || batches[0]
     let product = null
     try {
-      product = findExactProduct(await fetchProducts({ q: name, active_only: false, limit: 1000 }), name, brand)
+      product = findExactProduct(
+        await fetchProducts({ q: name, active_only: false, limit: 1000 }),
+        name,
+        brand,
+        (batch as any)?.category_id ?? null,
+      )
     } catch {
       product = productMatch
     }

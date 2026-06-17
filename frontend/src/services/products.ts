@@ -52,6 +52,7 @@ export async function fetchProducts(params?: {
   q?: string
   brand?: string
   category_id?: number
+  uncategorized_only?: boolean
   active_only?: boolean
   inactive_only?: boolean
   limit?: number
@@ -72,6 +73,7 @@ export async function fetchProductsPage(params?: {
   q?: string
   brand?: string
   category_id?: number
+  uncategorized_only?: boolean
   active_only?: boolean
   inactive_only?: boolean
   limit?: number

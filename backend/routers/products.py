@@ -62,6 +62,10 @@ def _brand_key(v: Optional[str]) -> str:
     return (_clean(v) or "").lower()
 
 
+def _category_key(v: Optional[int]) -> int:
+    return int(v or 0)
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -391,6 +395,7 @@ def list_products(
     q: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
     category_id: Optional[int] = Query(None),
+    uncategorized_only: bool = Query(False),
     active_only: bool = Query(True),
     inactive_only: bool = Query(False),
     limit: int = Query(200, ge=1, le=1000),
@@ -402,7 +407,9 @@ def list_products(
             stmt = stmt.where(Product.is_active == False)  # noqa: E712
         elif active_only:
             stmt = stmt.where(Product.is_active == True)  # noqa: E712
-        if category_id is not None:
+        if uncategorized_only:
+            stmt = stmt.where(Product.category_id.is_(None))
+        elif category_id is not None:
             stmt = stmt.where(Product.category_id == category_id)
         brand_name = _clean(brand)
         if brand_name:
@@ -427,6 +434,7 @@ def list_products_page(
     q: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
     category_id: Optional[int] = Query(None),
+    uncategorized_only: bool = Query(False),
     active_only: bool = Query(True),
     inactive_only: bool = Query(False),
     limit: int = Query(25, ge=1, le=1000),
@@ -438,7 +446,9 @@ def list_products_page(
             filters.append(Product.is_active == False)  # noqa: E712
         elif active_only:
             filters.append(Product.is_active == True)  # noqa: E712
-        if category_id is not None:
+        if uncategorized_only:
+            filters.append(Product.category_id.is_(None))
+        elif category_id is not None:
             filters.append(Product.category_id == category_id)
         brand_name = _clean(brand)
         if brand_name:
@@ -492,11 +502,15 @@ def create_product(payload: ProductCreate) -> ProductOut:
         existing_rows = session.exec(
             select(Product).where(func.lower(func.coalesce(Product.brand, "")) == (brand or "").lower())
         ).all()
-        matching_existing = [row for row in existing_rows if _product_name_key(row.name) == _product_name_key(name)]
+        matching_existing = [
+            row for row in existing_rows
+            if _product_name_key(row.name) == _product_name_key(name)
+            and _category_key(row.category_id) == _category_key(payload.category_id)
+        ]
         active_existing = next((row for row in matching_existing if row.is_active), None)
         existing = active_existing or (matching_existing[0] if matching_existing else None)
         if active_existing:
-            raise HTTPException(status_code=400, detail="Product already exists for this name and brand")
+            raise HTTPException(status_code=400, detail="Product already exists for this name, brand, and category")
         if existing:
             previous_name = existing.name
             previous_brand = existing.brand
@@ -623,12 +637,15 @@ def update_product(product_id: int, payload: ProductUpdate) -> ProductOut:
         duplicate = next(
             (
                 candidate for candidate in duplicate_rows
-                if row.is_active and candidate.is_active and _product_name_key(candidate.name) == _product_name_key(row.name)
+                if row.is_active
+                and candidate.is_active
+                and _product_name_key(candidate.name) == _product_name_key(row.name)
+                and _category_key(candidate.category_id) == _category_key(row.category_id)
             ),
             None,
         )
         if duplicate:
-            raise HTTPException(status_code=400, detail="Product already exists for this name and brand")
+            raise HTTPException(status_code=400, detail="Product already exists for this name, brand, and category")
 
         row.updated_at = _now()
         session.add(row)

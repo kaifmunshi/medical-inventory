@@ -499,9 +499,12 @@ def create_product(payload: ProductCreate) -> ProductOut:
         if payload.category_id is not None and not session.get(Category, payload.category_id):
             raise HTTPException(status_code=400, detail="Category not found")
 
-        existing_rows = session.exec(
-            select(Product).where(func.lower(func.coalesce(Product.brand, "")) == (brand or "").lower())
-        ).all()
+        existing_stmt = select(Product).where(func.lower(func.coalesce(Product.brand, "")) == (brand or "").lower())
+        if payload.category_id is None:
+            existing_stmt = existing_stmt.where(Product.category_id.is_(None))
+        else:
+            existing_stmt = existing_stmt.where(Product.category_id == payload.category_id)
+        existing_rows = session.exec(existing_stmt).all()
         matching_existing = [
             row for row in existing_rows
             if _product_name_key(row.name) == _product_name_key(name)
@@ -591,6 +594,9 @@ def update_product(product_id: int, payload: ProductUpdate) -> ProductOut:
 
         previous_name = row.name
         previous_brand = row.brand
+        previous_category_id = row.category_id
+        previous_loose_sale_enabled = bool(row.loose_sale_enabled)
+        previous_conversion_qty = row.default_conversion_qty
         data = payload.dict(exclude_unset=True)
         if "name" in data:
             name = _clean(data["name"])
@@ -628,34 +634,59 @@ def update_product(product_id: int, payload: ProductUpdate) -> ProductOut:
         if "is_active" in data:
             row.is_active = bool(data["is_active"])
 
-        duplicate_rows = session.exec(
-            select(Product).where(
+        unique_key_changed = (
+            "name" in data
+            or "brand" in data
+            or "category_id" in data
+            or ("is_active" in data and bool(row.is_active))
+        )
+        if row.is_active and unique_key_changed:
+            duplicate_stmt = select(Product).where(
                 func.lower(func.coalesce(Product.brand, "")) == func.lower(row.brand or ""),
                 Product.id != product_id,
+                Product.is_active == True,  # noqa: E712
             )
-        ).all()
-        duplicate = next(
-            (
-                candidate for candidate in duplicate_rows
-                if row.is_active
-                and candidate.is_active
-                and _product_name_key(candidate.name) == _product_name_key(row.name)
-                and _category_key(candidate.category_id) == _category_key(row.category_id)
-            ),
-            None,
-        )
-        if duplicate:
-            raise HTTPException(status_code=400, detail="Product already exists for this name, brand, and category")
+            if row.category_id is None:
+                duplicate_stmt = duplicate_stmt.where(Product.category_id.is_(None))
+            else:
+                duplicate_stmt = duplicate_stmt.where(Product.category_id == row.category_id)
+            duplicate_rows = session.exec(duplicate_stmt).all()
+            duplicate = next(
+                (
+                    candidate for candidate in duplicate_rows
+                    if _product_name_key(candidate.name) == _product_name_key(row.name)
+                ),
+                None,
+            )
+            if duplicate:
+                raise HTTPException(status_code=400, detail="Product already exists for this name, brand, and category")
 
         row.updated_at = _now()
         session.add(row)
-        synced_items = _sync_product_to_inventory_items(
-            session,
-            row,
-            previous_name=previous_name,
-            previous_brand=previous_brand,
+        inventory_identity_changed = (
+            _product_name_key(previous_name) != _product_name_key(row.name)
+            or _brand_key(previous_brand) != _brand_key(row.brand)
+            or _category_key(previous_category_id) != _category_key(row.category_id)
         )
-        synced_conversion = _sync_product_conversion_to_lots(session, row)
+        conversion_changed = (
+            previous_loose_sale_enabled != bool(row.loose_sale_enabled)
+            or int(previous_conversion_qty or 0) != int(row.default_conversion_qty or 0)
+        )
+        synced_items = (
+            _sync_product_to_inventory_items(
+                session,
+                row,
+                previous_name=previous_name,
+                previous_brand=previous_brand,
+            )
+            if inventory_identity_changed
+            else 0
+        )
+        synced_conversion = (
+            _sync_product_conversion_to_lots(session, row)
+            if conversion_changed
+            else {"sealed_lots": 0, "loose_lots": 0, "loose_items": 0}
+        )
         log_audit(
             session,
             entity_type="PRODUCT",

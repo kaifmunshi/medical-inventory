@@ -72,7 +72,12 @@ function itemDisplayName(it: any) {
 function itemMetaLine(it: any) {
   const kind = itemKindLabel(it)
   const unit = itemUnitLabel(it)
-  const parts = [`Brand: ${String(it?.brand || '').trim() || '-'}`, kind]
+  const category = String(it?.category_name || '').trim()
+  const parts = [
+    category ? `Category: ${category}` : '',
+    `Brand: ${String(it?.brand || '').trim() || '-'}`,
+    kind,
+  ]
   if (unit && unit.trim().toLowerCase() !== kind.trim().toLowerCase()) parts.push(unit)
   return parts.filter(Boolean).join(' | ')
 }

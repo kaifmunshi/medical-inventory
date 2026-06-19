@@ -36,6 +36,7 @@ export interface BillUpdate {
   payment_credit?: number
   final_amount?: number
   notes?: string
+  old_bill_password?: string
 }
 
 export async function createBill(payload: BillCreate) {

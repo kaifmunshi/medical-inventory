@@ -75,6 +75,7 @@ class ItemOut(BaseModel):
     brand: Optional[str] = None
     product_id: Optional[int] = None
     category_id: Optional[int] = None
+    category_name: Optional[str] = None
     expiry_date: Optional[str] = None
     mrp: float
     cost_price: float = 0.0
@@ -488,6 +489,18 @@ def _attach_lot_metadata(session, items: List[Item]) -> None:
         object.__setattr__(item, "child_unit_name", product.child_unit_name)
         object.__setattr__(item, "conversion_qty", lot.conversion_qty or product.default_conversion_qty)
         object.__setattr__(item, "loose_sale_enabled", bool(product.loose_sale_enabled))
+
+
+def _attach_category_names(session, items: List[Item]) -> None:
+    category_ids = {int(item.category_id) for item in items if getattr(item, "category_id", None) is not None}
+    if not category_ids:
+        return
+    categories = session.exec(select(Category).where(Category.id.in_(category_ids))).all()
+    names_by_id = {int(category.id): str(category.name) for category in categories if category.id is not None}
+    for item in items:
+        category_id = getattr(item, "category_id", None)
+        if category_id is not None:
+            object.__setattr__(item, "category_name", names_by_id.get(int(category_id)))
 
 
 def _load_group_batches(session, *, name: Optional[str], brand: Optional[str]) -> Tuple[str, Optional[str], List[Item]]:
@@ -1318,6 +1331,7 @@ def list_items(
             items = session.exec(stmt).all()
             _attach_last_incoming(session, items)
             _attach_lot_metadata(session, items)
+            _attach_category_names(session, items)
             total = len(items)
             return {"items": items, "total": total, "next_offset": None}
 
@@ -1334,6 +1348,7 @@ def list_items(
         items = session.exec(page_stmt).all()
         _attach_last_incoming(session, items)
         _attach_lot_metadata(session, items)
+        _attach_category_names(session, items)
 
         next_offset = (
             (page_offset + page_limit)

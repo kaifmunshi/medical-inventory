@@ -71,7 +71,13 @@ function itemUnitLabel(it: any) {
 }
 
 function itemMetaLine(it: any) {
-  return [it?.brand, itemKindLabel(it), itemUnitLabel(it)].filter(Boolean).join(' | ')
+  const category = String(it?.category_name || '').trim()
+  return [
+    category ? `Category: ${category}` : '',
+    `Brand: ${String(it?.brand || '').trim() || '-'}`,
+    itemKindLabel(it),
+    itemUnitLabel(it),
+  ].filter(Boolean).join(' | ')
 }
 
 function itemDisplayName(it: any) {

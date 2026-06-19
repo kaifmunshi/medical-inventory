@@ -1756,7 +1756,7 @@ export default function BankBookPage() {
                             <Stack gap={0.25}>
                               <Typography variant="body2">{name}</Typography>
                               <Typography variant="caption" color="text.secondary">
-                                Brand: {String(it.brand || '').trim() || '-'}
+                                {[String(it.category_name || '').trim() ? `Category: ${String(it.category_name).trim()}` : '', `Brand: ${String(it.brand || '').trim() || '-'}`].filter(Boolean).join(' · ')}
                               </Typography>
                             </Stack>
                           </td>

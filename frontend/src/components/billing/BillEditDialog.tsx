@@ -25,6 +25,7 @@ import { openPack } from '../../services/lots'
 import type { Customer } from '../../lib/types'
 import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import BillPaymentsPanel from './BillPaymentsPanel'
+import { useUserSession } from '../session/UserSessionProvider'
 
 type EditMode = 'cash' | 'online' | 'split' | 'credit'
 type EditSplitCombination = 'cash-online' | 'cash-credit' | 'online-credit'
@@ -145,6 +146,14 @@ function normalizeDateInput(v: string) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
   if (s.length >= 10) return s.slice(0, 10)
   return s
+}
+
+function isPastFinancialYear(v?: string | null) {
+  const billDate = normalizeDateInput(String(v || ''))
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(billDate)) return false
+  const today = new Date()
+  const currentYearStart = today.getMonth() >= 3 ? today.getFullYear() : today.getFullYear() - 1
+  return billDate < `${currentYearStart}-04-01`
 }
 
 function round2(n: number) {
@@ -380,6 +389,7 @@ export default function BillEditDialog({
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
+  const { currentUser } = useUserSession()
 
   const [editBillId, setEditBillId] = useState<number | null>(null)
   const [paymentPanelBill, setPaymentPanelBill] = useState<any | null>(null)
@@ -408,6 +418,8 @@ export default function BillEditDialog({
   const [editNewCustomerAddress, setEditNewCustomerAddress] = useState('')
   const [editOpenLooseDraft, setEditOpenLooseDraft] = useState<any | null>(null)
   const [editOpenLooseQty, setEditOpenLooseQty] = useState('1')
+  const [oldBillPasswordOpen, setOldBillPasswordOpen] = useState(false)
+  const [oldBillPassword, setOldBillPassword] = useState('')
   const editItemSearchTerm = editItemQuery.trim()
   const debouncedEditItemSearchTerm = debouncedEditItemQuery.trim()
   const canSearchEditItems = (
@@ -980,7 +992,7 @@ export default function BillEditDialog({
   }, [open, editPaymentMode, editSettlementTotal, editSplitCombination])
 
   const mEdit = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (oldBillPasswordForSave?: string) => {
       if (!editBillId) throw new Error('Bill not selected')
       if (editPaymentMode !== editOriginalPaymentMode) {
         const ok = window.confirm(`Payment mode changed from "${String(editOriginalPaymentMode).toUpperCase()}" to "${String(editPaymentMode).toUpperCase()}". Continue with edit?`)
@@ -1017,6 +1029,7 @@ export default function BillEditDialog({
         final_amount: finalForSubmit,
         notes: editEffectiveNotes || undefined,
       }
+      if (oldBillPasswordForSave) payload.old_bill_password = oldBillPasswordForSave
 
       if (finalForSubmit <= 0) {
         payload.payment_mode = 'cash'
@@ -1103,7 +1116,21 @@ export default function BillEditDialog({
       toast.push('Credit mode requires customer details or notes before saving.', 'warning')
       return
     }
-    mEdit.mutate()
+    if (isPastFinancialYear(bill?.date_time || bill?.created_at)) {
+      setOldBillPassword('')
+      setOldBillPasswordOpen(true)
+      return
+    }
+    mEdit.mutate(undefined)
+  }
+
+  function confirmOldBillEdit() {
+    if (!oldBillPassword.trim()) {
+      toast.push('Enter your password to edit this old bill.', 'warning')
+      return
+    }
+    setOldBillPasswordOpen(false)
+    mEdit.mutate(oldBillPassword.trim())
   }
 
   const noSpinnerSx = {
@@ -1240,6 +1267,9 @@ export default function BillEditDialog({
                         {it.name}{itemKindLabel(it) ? ` - ${itemKindLabel(it)}` : ''}
                       </Typography>
                       <Stack direction="row" gap={1.5} flexWrap="wrap" alignItems="center">
+                        {String(it.category_name || '').trim() ? (
+                          <Typography variant="caption" color="text.secondary">Category: <b>{it.category_name}</b></Typography>
+                        ) : null}
                         <Typography variant="caption" color="text.secondary">ID: <b>#{it.id}</b></Typography>
                         <Typography variant="caption" color="text.secondary">Brand: <b>{it.brand || '-'}</b></Typography>
                         <Typography variant="caption" color="text.secondary">Stock: <b>{itemStockText(it)}</b></Typography>
@@ -1497,6 +1527,41 @@ export default function BillEditDialog({
         <DialogActions>
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="contained" onClick={saveEditBill} disabled={mEdit.isPending}>Save</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={oldBillPasswordOpen}
+        onClose={() => !mEdit.isPending && setOldBillPasswordOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>Confirm Old Bill Edit</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={1.5} sx={{ pt: 1 }}>
+            <Typography color="warning.main">
+              This bill belongs to a past financial year. Changing it can affect closed-period records.
+            </Typography>
+            <TextField
+              autoFocus
+              label={currentUser?.name ? `Password for ${currentUser.name}` : 'Password'}
+              type="password"
+              value={oldBillPassword}
+              onChange={(e) => setOldBillPassword(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') confirmOldBillEdit()
+              }}
+              inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', maxLength: 6 }}
+              helperText="Enter your user PIN to continue."
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOldBillPasswordOpen(false)} disabled={mEdit.isPending}>Cancel</Button>
+          <Button variant="contained" color="warning" onClick={confirmOldBillEdit} disabled={mEdit.isPending}>
+            Edit Old Bill
+          </Button>
         </DialogActions>
       </Dialog>
 

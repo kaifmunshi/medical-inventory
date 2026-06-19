@@ -807,7 +807,7 @@ export default function CustomerLedgerPage() {
     }, 0)
     const remaining = Math.max(0, receiptTotal - usedElsewhere)
     if (remaining <= 0) return
-    setDraft(billId, String(remaining))
+    setDraft(billId, String(Math.min(Number(bill.outstanding_amount || 0), remaining)))
   }
 
   function clampBillAdjustment(bill: OpenBill) {
@@ -879,7 +879,7 @@ export default function CustomerLedgerPage() {
     }, 0)
     const remaining = Math.max(0, applyAvailable - usedElsewhere)
     if (remaining <= 0) return
-    setApplyDraft(billId, String(remaining))
+    setApplyDraft(billId, String(Math.min(Number(bill.outstanding_amount || 0), remaining)))
   }
 
   function clampApplyAdjustment(bill: OpenBill) {
@@ -2113,7 +2113,7 @@ export default function CustomerLedgerPage() {
                               {it.item_name || it.name || it.item?.name || `#${it.item_id}`}
                             </Typography>
                             <Typography variant="caption" color="text.secondary">
-                              Brand: {String(it.brand || '').trim() || '-'}
+                              {[String(it.category_name || '').trim() ? `Category: ${String(it.category_name).trim()}` : '', `Brand: ${String(it.brand || '').trim() || '-'}`].filter(Boolean).join(' · ')}
                             </Typography>
                           </Stack>
                         </td>

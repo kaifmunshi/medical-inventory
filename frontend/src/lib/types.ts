@@ -6,6 +6,7 @@ export interface Item {
   brand?: string | null
   product_id?: ID | null
   category_id?: ID | null
+  category_name?: string | null
   expiry_date?: string | null
   mrp: number
   cost_price?: number | null

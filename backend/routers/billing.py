@@ -8,17 +8,17 @@ from sqlmodel import select
 from sqlalchemy import or_, exists, func, cast
 from sqlalchemy.types import Integer, Float
 from backend.accounting import mark_voucher_deleted, post_bill_payment_voucher, post_party_receipt_voucher, sync_bill_vouchers
-from backend.controls import assert_financial_year_unlocked
+from backend.controls import assert_financial_year_unlocked, get_active_financial_year, normalize_ymd
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
     Item, Category, Bill, BillItem, BillPayment, Return, ExchangeRecord,
     BillCreate, BillOut, BillItemOut,
-    Customer, Party, PartyReceipt, ReceiptBillAdjustment,
+    AppUser, Customer, Party, PartyReceipt, ReceiptBillAdjustment,
     StockMovement,  # ✅ NEW
 )
 from backend.inventory_lot_sync import item_stock_kind, item_stock_meta, sync_lot_quantity_for_item
-from backend.security import require_min_role
+from backend.security import get_request_actor_id, require_min_role
 
 router = APIRouter()
 
@@ -1070,6 +1070,7 @@ class BillUpdateIn(BaseModel):
     final_amount: Optional[float] = None
     date_time: Optional[str] = None
     notes: Optional[str] = None
+    old_bill_password: Optional[str] = None
 
 
 class BillCustomerMapIn(BaseModel):
@@ -1177,6 +1178,26 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             raise HTTPException(status_code=404, detail="Bill not found")
         if is_deleted_bill(b):
             raise HTTPException(status_code=400, detail="Deleted bill cannot be edited")
+
+        # Older financial years are editable only after the signed-in user's PIN
+        # is re-entered. This keeps the override server-enforced rather than a
+        # warning that can be bypassed from the client.
+        active_financial_year = get_active_financial_year(session)
+        bill_date_ymd = normalize_ymd(b.date_time)
+        is_old_financial_year_bill = bill_date_ymd < active_financial_year.start_date
+        if is_old_financial_year_bill:
+            actor_id = get_request_actor_id()
+            if actor_id is not None:
+                actor = session.get(AppUser, int(actor_id))
+                expected_pin = str(getattr(actor, "pin", "") or "").strip()
+                supplied_pin = str(payload.old_bill_password or "").strip()
+                if not expected_pin:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Set a PIN for the signed-in user before editing an old financial-year bill",
+                    )
+                if supplied_pin != expected_pin:
+                    raise HTTPException(status_code=403, detail="Incorrect password for old bill edit")
 
         existing_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
         old_qty_by_item: Dict[int, int] = {}
@@ -1418,7 +1439,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             and str(effective_payment_mode or "") == str(b.payment_mode or "")
             and str(bill_ts or "") == str(b.date_time or "")
         )
-        if not customer_link_only_edit:
+        if not customer_link_only_edit and not is_old_financial_year_bill:
             assert_financial_year_unlocked(session, bill_ts, context="Bill edit")
         paid_now = round2(cash + online)
         writeoff_now = round2(

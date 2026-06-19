@@ -349,7 +349,7 @@ export default function CustomerSummaryPage() {
                           <Stack gap={0.25}>
                             <Typography variant="body2">{it.item_name || it.name || it.item?.name || `#${it.item_id}`}</Typography>
                             <Typography variant="caption" color="text.secondary">
-                              Brand: {String(it.brand || '').trim() || '-'}
+                              {[String(it.category_name || '').trim() ? `Category: ${String(it.category_name).trim()}` : '', `Brand: ${String(it.brand || '').trim() || '-'}`].filter(Boolean).join(' · ')}
                             </Typography>
                           </Stack>
                         </td>

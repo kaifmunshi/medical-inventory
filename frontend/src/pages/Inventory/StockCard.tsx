@@ -1932,7 +1932,14 @@ export default function StockCardPage() {
                     const lineTotal = chargedLine(billDetail, item)
                     return (
                       <tr key={`bill-item-${index}`}>
-                        <td>{itemName}</td>
+                        <td>
+                          <Stack gap={0.25}>
+                            <Typography variant="body2">{itemName}</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {[String(item.category_name || '').trim() ? `Category: ${String(item.category_name).trim()}` : '', `Brand: ${String(item.brand || '').trim() || '-'}`].filter(Boolean).join(' · ')}
+                            </Typography>
+                          </Stack>
+                        </td>
                         <td>{qty}</td>
                         <td>{money(mrp)}</td>
                         <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>

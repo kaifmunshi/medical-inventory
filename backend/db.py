@@ -435,7 +435,11 @@ def repair_kalonji_1527_to_1693_once(session) -> tuple[int, str | None]:
     moved_qty = sum(-int(row[2]) for row in sales)
     source_stock = session.exec(text("SELECT stock FROM item WHERE id = :id").bindparams(id=source_id)).first()
     target_stock = session.exec(text("SELECT stock FROM item WHERE id = :id").bindparams(id=target_id)).first()
-    if source_stock is None or target_stock is None or moved_qty > int(target_stock) or int(source_stock) - qty + moved_qty < 0:
+    if source_stock is None or target_stock is None:
+        return 0, None
+    source_stock = int(source_stock[0])
+    target_stock = int(target_stock[0])
+    if moved_qty > target_stock or source_stock - qty + moved_qty < 0:
         return 0, None
     backup_path = create_data_repair_backup("before_kalonji_1527_1693_split")
     for movement_id, bill_id, _delta in sales:
@@ -443,8 +447,8 @@ def repair_kalonji_1527_to_1693_once(session) -> tuple[int, str | None]:
         session.exec(text("UPDATE billitem SET item_id = :target WHERE bill_id = :bill AND item_id = :source").bindparams(target=target_id, bill=int(bill_id), source=source_id))
         session.exec(text("UPDATE billitemallocation SET item_id = :target WHERE bill_id = :bill AND item_id = :source").bindparams(target=target_id, bill=int(bill_id), source=source_id))
     session.exec(text("DELETE FROM stockmovement WHERE id = :id").bindparams(id=placeholder_id))
-    session.exec(text("UPDATE item SET stock = :stock, is_archived = CASE WHEN :stock <= 0 THEN 1 ELSE 0 END, updated_at = :ts WHERE id = :id").bindparams(stock=int(source_stock)-qty+moved_qty, ts=_now_ts(), id=source_id))
-    session.exec(text("UPDATE item SET stock = :stock, updated_at = :ts WHERE id = :id").bindparams(stock=int(target_stock)-moved_qty, ts=_now_ts(), id=target_id))
+    session.exec(text("UPDATE item SET stock = :stock, is_archived = CASE WHEN :stock <= 0 THEN 1 ELSE 0 END, updated_at = :ts WHERE id = :id").bindparams(stock=source_stock-qty+moved_qty, ts=_now_ts(), id=source_id))
+    session.exec(text("UPDATE item SET stock = :stock, updated_at = :ts WHERE id = :id").bindparams(stock=target_stock-moved_qty, ts=_now_ts(), id=target_id))
     return 1, backup_path
 
 

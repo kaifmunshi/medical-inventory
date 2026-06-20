@@ -2936,10 +2936,20 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
             # and leaves older/unattributable OP history archived in place.
             # It still validates lots, bill rows, ledger totals, and stock
             # source before committing anything.
+            selected_placeholder_id = int(replacement_openings[0].id or 0) if len(replacement_openings) == 1 else 0
+            selected_target_is_planned = any(
+                int(plan["target_item_id"]) == int(target.id or 0)
+                for plan in all_purchase_placeholders
+            )
+            placeholder_is_already_planned = any(
+                int(plan["opening_movement_id"]) == selected_placeholder_id
+                for plan in all_purchase_placeholders
+            )
             if (
-                not all_purchase_placeholders
-                and int(source.stock or 0) == 0
-                and len(replacement_openings) == 1
+                int(source.stock or 0) == 0
+                and selected_placeholder_id > 0
+                and not selected_target_is_planned
+                and not placeholder_is_already_planned
                 and str(purchase_item.stock_source or "").upper() == "CREATED"
             ):
                 all_purchase_placeholders.append(

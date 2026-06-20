@@ -2923,6 +2923,35 @@ def club_purchase_batch_to_opening(payload: OpeningClubIn) -> OpeningClubOut:
                             f"Manual split required. OP rows: {opening_plan}. Purchase batches: {target_plan}"
                         ),
                     )
+
+            # A zero-stock OP batch can contain older opening history plus one
+            # later duplicate placeholder.  The normal one-to-one path below
+            # would move *every* post-placeholder movement to the selected
+            # purchase batch, which can make that batch negative when it only
+            # represents part of the history.  If automatic candidate matching
+            # did not add the selected target (usually because the purchase
+            # metadata is incomplete), seed the existing split-repair planner
+            # with the explicitly selected, otherwise-valid target.  The split
+            # planner moves only the quantity that the kept batch can support
+            # and leaves older/unattributable OP history archived in place.
+            # It still validates lots, bill rows, ledger totals, and stock
+            # source before committing anything.
+            if (
+                not all_purchase_placeholders
+                and int(source.stock or 0) == 0
+                and len(replacement_openings) == 1
+                and str(purchase_item.stock_source or "").upper() == "CREATED"
+            ):
+                all_purchase_placeholders.append(
+                    {
+                        "purchase_item_id": int(purchase_item.id or 0),
+                        "target_item_id": int(target.id or 0),
+                        "invoice_number": str(purchase.invoice_number or purchase.id),
+                        "invoice_date": invoice_date,
+                        "qty": int(purchase_qty),
+                        "opening_movement_id": int(replacement_openings[0].id or 0),
+                    }
+                )
             unique_placeholder_ids = {row["opening_movement_id"] for row in all_purchase_placeholders}
             unique_purchase_targets = {row["target_item_id"] for row in all_purchase_placeholders}
             if len(source_openings) == 1 and not replacement_openings and invoice_date:

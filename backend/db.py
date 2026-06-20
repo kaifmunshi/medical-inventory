@@ -411,6 +411,43 @@ def create_data_repair_backup(label: str) -> str:
     return str(backup_path)
 
 
+def repair_kalonji_1527_to_1693_once(session) -> tuple[int, str | None]:
+    """One-time, tightly scoped repair for the Kalonji Miswak duplicate OP row."""
+    source_id, target_id = 1527, 1693
+    rows = session.exec(text("""
+        SELECT s.id, s.delta
+        FROM stockmovement s
+        JOIN purchaseitem pi ON pi.inventory_item_id = :target_id
+        JOIN purchase p ON p.id = pi.purchase_id AND COALESCE(p.is_deleted, 0) = 0
+        WHERE s.item_id = :source_id AND s.reason = 'OPENING' AND s.ref_type = 'ITEM_MERGE'
+          AND s.delta = COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)
+          AND date(s.ts) >= date(p.invoice_date)
+    """).bindparams(source_id=source_id, target_id=target_id)).all()
+    if len(rows) != 1:
+        return 0, None
+    placeholder_id, qty = int(rows[0][0]), int(rows[0][1])
+    sales = session.exec(text("""
+        SELECT id, ref_id, delta FROM stockmovement
+        WHERE item_id = :source_id AND reason = 'SALE' AND ref_type = 'BILL'
+          AND (ts, id) > ((SELECT ts FROM stockmovement WHERE id = :placeholder_id), :placeholder_id)
+        ORDER BY ts, id
+    """).bindparams(source_id=source_id, placeholder_id=placeholder_id)).all()
+    moved_qty = sum(-int(row[2]) for row in sales)
+    source_stock = session.exec(text("SELECT stock FROM item WHERE id = :id").bindparams(id=source_id)).first()
+    target_stock = session.exec(text("SELECT stock FROM item WHERE id = :id").bindparams(id=target_id)).first()
+    if source_stock is None or target_stock is None or moved_qty > int(target_stock) or int(source_stock) - qty + moved_qty < 0:
+        return 0, None
+    backup_path = create_data_repair_backup("before_kalonji_1527_1693_split")
+    for movement_id, bill_id, _delta in sales:
+        session.exec(text("UPDATE stockmovement SET item_id = :target WHERE id = :id").bindparams(target=target_id, id=int(movement_id)))
+        session.exec(text("UPDATE billitem SET item_id = :target WHERE bill_id = :bill AND item_id = :source").bindparams(target=target_id, bill=int(bill_id), source=source_id))
+        session.exec(text("UPDATE billitemallocation SET item_id = :target WHERE bill_id = :bill AND item_id = :source").bindparams(target=target_id, bill=int(bill_id), source=source_id))
+    session.exec(text("DELETE FROM stockmovement WHERE id = :id").bindparams(id=placeholder_id))
+    session.exec(text("UPDATE item SET stock = :stock, is_archived = CASE WHEN :stock <= 0 THEN 1 ELSE 0 END, updated_at = :ts WHERE id = :id").bindparams(stock=int(source_stock)-qty+moved_qty, ts=_now_ts(), id=source_id))
+    session.exec(text("UPDATE item SET stock = :stock, updated_at = :ts WHERE id = :id").bindparams(stock=int(target_stock)-moved_qty, ts=_now_ts(), id=target_id))
+    return 1, backup_path
+
+
 def auto_repair_credit_return_bill_lines() -> tuple[int, str | None]:
     """Reconstruct legacy bill lines that were reduced or zeroed after credit returns."""
     conn = sqlite3.connect(DB_FILE)
@@ -2745,6 +2782,14 @@ def migrate_db():
             )
         """))
         session.commit()
+
+        kalonji_repair_key = "repair_kalonji_1527_1693_split_v1"
+        if not session.exec(text("SELECT 1 FROM appmeta WHERE key = :k").bindparams(k=kalonji_repair_key)).first():
+            fixed_count, backup_path = repair_kalonji_1527_to_1693_once(session)
+            session.exec(text("INSERT INTO appmeta (key, value, updated_at) VALUES (:k, :v, :ts)").bindparams(
+                k=kalonji_repair_key, v=f"done:{fixed_count};backup:{backup_path or ''}", ts=_now_ts()
+            ))
+            session.commit()
 
         # ---------- one-time data repair: bad bulk purchase duplicate repair ----------
         purchase_duplicate_repair_key = "repair_purchase_duplicate_stock_links_v1"

@@ -412,7 +412,7 @@ def create_data_repair_backup(label: str) -> str:
 
 
 def merge_kalonji_1693_into_1527_once(session) -> tuple[int, str | None]:
-    """Keep Kalonji batch #1527 and retire its accidental duplicate #1693."""
+    """Keep #1527, remove its duplicate opening, and retire duplicate batch #1693."""
     keep_id, duplicate_id = 1527, 1693
     items = session.exec(text("""
         SELECT id, name, brand, product_id, expiry_date, mrp, stock
@@ -448,7 +448,22 @@ def merge_kalonji_1693_into_1527_once(session) -> tuple[int, str | None]:
             (SELECT COUNT(*) FROM packopenevent WHERE source_item_id = :duplicate_id OR loose_item_id = :duplicate_id)
     """).bindparams(duplicate_id=duplicate_id)).one()
     duplicate_ref_count = int(duplicate_ref_row[0])
-    if duplicate_ref_count == 0 and int(duplicate[6] or 0) == 0:
+
+    placeholder_rows = session.exec(text("""
+        SELECT sm.id, sm.delta
+        FROM stockmovement sm
+        JOIN purchaseitem pi ON pi.id = 103
+        JOIN purchase p ON p.id = pi.purchase_id AND COALESCE(p.is_deleted, 0) = 0
+        WHERE sm.item_id = :keep_id
+          AND sm.reason = 'OPENING'
+          AND sm.ref_type = 'ITEM_MERGE'
+          AND sm.delta = COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)
+          AND date(sm.ts) >= date(p.invoice_date)
+        ORDER BY sm.id
+    """).bindparams(keep_id=keep_id)).all()
+    placeholder_ids = [int(row[0]) for row in placeholder_rows]
+    placeholder_qty = sum(int(row[1] or 0) for row in placeholder_rows)
+    if duplicate_ref_count == 0 and int(duplicate[6] or 0) == 0 and not placeholder_ids:
         return 0, None
 
     duplicate_lots = [int(row[0]) for row in session.exec(text(
@@ -461,30 +476,21 @@ def merge_kalonji_1693_into_1527_once(session) -> tuple[int, str | None]:
         return 0, None
     keep_lot_id = int(keep_lot_row[0]) if keep_lot_row else None
 
-    combined_stock = int(keep[6] or 0) + int(duplicate[6] or 0)
-    restore_row = None
-    split_meta = session.exec(text("""
-        SELECT value FROM appmeta WHERE key = 'repair_kalonji_1527_1693_split_v1'
-    """)).first()
-    if split_meta and str(split_meta[0] or "").startswith("done:1"):
-        restore_row = session.exec(text("""
-            SELECT p.invoice_date, COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)
-            FROM purchaseitem pi
-            JOIN purchase p ON p.id = pi.purchase_id
-            WHERE pi.inventory_item_id = :duplicate_id
-              AND COALESCE(p.is_deleted, 0) = 0
-              AND NOT EXISTS (
-                  SELECT 1 FROM stockmovement sm
-                  WHERE sm.item_id = :keep_id
-                    AND sm.reason = 'OPENING'
-                    AND sm.ref_type = 'ITEM_MERGE'
-                    AND sm.delta = COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)
-              )
-            ORDER BY pi.id
-        """).bindparams(keep_id=keep_id, duplicate_id=duplicate_id)).first()
+    combined_stock = int(keep[6] or 0) + int(duplicate[6] or 0) - placeholder_qty
     ledger_row = session.exec(text("""
         SELECT COALESCE(SUM(delta), 0) FROM stockmovement
         WHERE item_id IN (:keep_id, :duplicate_id)
+          AND id NOT IN (
+              SELECT sm.id
+              FROM stockmovement sm
+              JOIN purchaseitem pi ON pi.id = 103
+              JOIN purchase p ON p.id = pi.purchase_id AND COALESCE(p.is_deleted, 0) = 0
+              WHERE sm.item_id = :keep_id
+                AND sm.reason = 'OPENING'
+                AND sm.ref_type = 'ITEM_MERGE'
+                AND sm.delta = COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)
+                AND date(sm.ts) >= date(p.invoice_date)
+          )
     """).bindparams(keep_id=keep_id, duplicate_id=duplicate_id)).one()
     ledger_total = int(ledger_row[0])
     if ledger_total != combined_stock or combined_stock < 0:
@@ -493,20 +499,9 @@ def merge_kalonji_1693_into_1527_once(session) -> tuple[int, str | None]:
     session.commit()
     backup_path = create_data_repair_backup("before_kalonji_1693_into_1527_merge")
     ts = _now_ts()
-    if restore_row is not None:
-        restored_qty = int(restore_row[1] or 0)
-        if restored_qty <= 0:
-            return 0, None
-        combined_stock += restored_qty
-        session.exec(text("""
-            INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
-            VALUES (:keep_id, :movement_ts, :qty, 'OPENING', 'ITEM_MERGE', :keep_id,
-                    'Restored merge entry removed by the 1527/1693 split repair', 'SYSTEM')
-        """).bindparams(
-            keep_id=keep_id,
-            movement_ts=f"{str(restore_row[0])[:10]}T23:59:59",
-            qty=restored_qty,
-        ))
+    if placeholder_ids:
+        placeholder_list = ",".join(str(movement_id) for movement_id in placeholder_ids)
+        session.exec(text(f"DELETE FROM stockmovement WHERE id IN ({placeholder_list})"))
     session.exec(text("""
         UPDATE stockmovement
         SET item_id = :keep_id,
@@ -2884,7 +2879,7 @@ def migrate_db():
         """))
         session.commit()
 
-        kalonji_repair_key = "merge_kalonji_1693_into_1527_v2"
+        kalonji_repair_key = "club_kalonji_1527_1693_remove_duplicate_opening_v3"
         if not session.exec(text("SELECT 1 FROM appmeta WHERE key = :k").bindparams(k=kalonji_repair_key)).first():
             fixed_count, backup_path = merge_kalonji_1693_into_1527_once(session)
             session.exec(text("INSERT INTO appmeta (key, value, updated_at) VALUES (:k, :v, :ts)").bindparams(

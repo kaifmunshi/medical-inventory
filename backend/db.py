@@ -411,44 +411,141 @@ def create_data_repair_backup(label: str) -> str:
     return str(backup_path)
 
 
-def repair_kalonji_1527_to_1693_once(session) -> tuple[int, str | None]:
-    """One-time, tightly scoped repair for the Kalonji Miswak duplicate OP row."""
-    source_id, target_id = 1527, 1693
-    rows = session.exec(text("""
-        SELECT s.id, s.delta
-        FROM stockmovement s
-        JOIN purchaseitem pi ON pi.inventory_item_id = :target_id
-        JOIN purchase p ON p.id = pi.purchase_id AND COALESCE(p.is_deleted, 0) = 0
-        WHERE s.item_id = :source_id AND s.reason = 'OPENING' AND s.ref_type = 'ITEM_MERGE'
-          AND s.delta = COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)
-          AND date(s.ts) >= date(p.invoice_date)
-    """).bindparams(source_id=source_id, target_id=target_id)).all()
-    if len(rows) != 1:
+def merge_kalonji_1693_into_1527_once(session) -> tuple[int, str | None]:
+    """Keep Kalonji batch #1527 and retire its accidental duplicate #1693."""
+    keep_id, duplicate_id = 1527, 1693
+    items = session.exec(text("""
+        SELECT id, name, brand, product_id, expiry_date, mrp, stock
+        FROM item WHERE id IN (:keep_id, :duplicate_id)
+        ORDER BY id
+    """).bindparams(keep_id=keep_id, duplicate_id=duplicate_id)).all()
+    if len(items) != 2:
         return 0, None
-    placeholder_id, qty = int(rows[0][0]), int(rows[0][1])
-    sales = session.exec(text("""
-        SELECT id, ref_id, delta FROM stockmovement
-        WHERE item_id = :source_id AND reason = 'SALE' AND ref_type = 'BILL'
-          AND (ts, id) > ((SELECT ts FROM stockmovement WHERE id = :placeholder_id), :placeholder_id)
-        ORDER BY ts, id
-    """).bindparams(source_id=source_id, placeholder_id=placeholder_id)).all()
-    moved_qty = sum(-int(row[2]) for row in sales)
-    source_stock = session.exec(text("SELECT stock FROM item WHERE id = :id").bindparams(id=source_id)).first()
-    target_stock = session.exec(text("SELECT stock FROM item WHERE id = :id").bindparams(id=target_id)).first()
-    if source_stock is None or target_stock is None:
+
+    keep = next((row for row in items if int(row[0]) == keep_id), None)
+    duplicate = next((row for row in items if int(row[0]) == duplicate_id), None)
+    if keep is None or duplicate is None:
         return 0, None
-    source_stock = int(source_stock[0])
-    target_stock = int(target_stock[0])
-    if moved_qty > target_stock or source_stock - qty + moved_qty < 0:
+    # This migration must never turn into a broad, ID-only merge.
+    if (
+        str(keep[1] or "").strip().casefold() != str(duplicate[1] or "").strip().casefold()
+        or str(keep[2] or "").strip().casefold() != str(duplicate[2] or "").strip().casefold()
+        or int(keep[3] or 0) != int(duplicate[3] or 0)
+        or str(keep[4] or "") != str(duplicate[4] or "")
+        or abs(float(keep[5] or 0) - float(duplicate[5] or 0)) > 0.001
+    ):
         return 0, None
-    backup_path = create_data_repair_backup("before_kalonji_1527_1693_split")
-    for movement_id, bill_id, _delta in sales:
-        session.exec(text("UPDATE stockmovement SET item_id = :target WHERE id = :id").bindparams(target=target_id, id=int(movement_id)))
-        session.exec(text("UPDATE billitem SET item_id = :target WHERE bill_id = :bill AND item_id = :source").bindparams(target=target_id, bill=int(bill_id), source=source_id))
-        session.exec(text("UPDATE billitemallocation SET item_id = :target WHERE bill_id = :bill AND item_id = :source").bindparams(target=target_id, bill=int(bill_id), source=source_id))
-    session.exec(text("DELETE FROM stockmovement WHERE id = :id").bindparams(id=placeholder_id))
-    session.exec(text("UPDATE item SET stock = :stock, is_archived = CASE WHEN :stock <= 0 THEN 1 ELSE 0 END, updated_at = :ts WHERE id = :id").bindparams(stock=source_stock-qty+moved_qty, ts=_now_ts(), id=source_id))
-    session.exec(text("UPDATE item SET stock = :stock, updated_at = :ts WHERE id = :id").bindparams(stock=target_stock-moved_qty, ts=_now_ts(), id=target_id))
+
+    duplicate_ref_row = session.exec(text("""
+        SELECT
+            (SELECT COUNT(*) FROM stockmovement WHERE item_id = :duplicate_id) +
+            (SELECT COUNT(*) FROM purchaseitem WHERE inventory_item_id = :duplicate_id) +
+            (SELECT COUNT(*) FROM billitem WHERE item_id = :duplicate_id) +
+            (SELECT COUNT(*) FROM billitemallocation WHERE item_id = :duplicate_id) +
+            (SELECT COUNT(*) FROM returnitem WHERE item_id = :duplicate_id) +
+            (SELECT COUNT(*) FROM stockaudititem WHERE item_id = :duplicate_id) +
+            (SELECT COUNT(*) FROM purchasereturnitem WHERE inventory_item_id = :duplicate_id) +
+            (SELECT COUNT(*) FROM packopenevent WHERE source_item_id = :duplicate_id OR loose_item_id = :duplicate_id)
+    """).bindparams(duplicate_id=duplicate_id)).one()
+    duplicate_ref_count = int(duplicate_ref_row[0])
+    if duplicate_ref_count == 0 and int(duplicate[6] or 0) == 0:
+        return 0, None
+
+    duplicate_lots = [int(row[0]) for row in session.exec(text(
+        "SELECT id FROM inventorylot WHERE legacy_item_id = :duplicate_id ORDER BY id"
+    ).bindparams(duplicate_id=duplicate_id)).all()]
+    keep_lot_row = session.exec(text(
+        "SELECT id FROM inventorylot WHERE legacy_item_id = :keep_id ORDER BY id LIMIT 1"
+    ).bindparams(keep_id=keep_id)).first()
+    if duplicate_lots and keep_lot_row is None:
+        return 0, None
+    keep_lot_id = int(keep_lot_row[0]) if keep_lot_row else None
+
+    combined_stock = int(keep[6] or 0) + int(duplicate[6] or 0)
+    restore_row = None
+    split_meta = session.exec(text("""
+        SELECT value FROM appmeta WHERE key = 'repair_kalonji_1527_1693_split_v1'
+    """)).first()
+    if split_meta and str(split_meta[0] or "").startswith("done:1"):
+        restore_row = session.exec(text("""
+            SELECT p.invoice_date, COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)
+            FROM purchaseitem pi
+            JOIN purchase p ON p.id = pi.purchase_id
+            WHERE pi.inventory_item_id = :duplicate_id
+              AND COALESCE(p.is_deleted, 0) = 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM stockmovement sm
+                  WHERE sm.item_id = :keep_id
+                    AND sm.reason = 'OPENING'
+                    AND sm.ref_type = 'ITEM_MERGE'
+                    AND sm.delta = COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)
+              )
+            ORDER BY pi.id
+        """).bindparams(keep_id=keep_id, duplicate_id=duplicate_id)).first()
+    ledger_row = session.exec(text("""
+        SELECT COALESCE(SUM(delta), 0) FROM stockmovement
+        WHERE item_id IN (:keep_id, :duplicate_id)
+    """).bindparams(keep_id=keep_id, duplicate_id=duplicate_id)).one()
+    ledger_total = int(ledger_row[0])
+    if ledger_total != combined_stock or combined_stock < 0:
+        return 0, None
+
+    session.commit()
+    backup_path = create_data_repair_backup("before_kalonji_1693_into_1527_merge")
+    ts = _now_ts()
+    if restore_row is not None:
+        restored_qty = int(restore_row[1] or 0)
+        if restored_qty <= 0:
+            return 0, None
+        combined_stock += restored_qty
+        session.exec(text("""
+            INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
+            VALUES (:keep_id, :movement_ts, :qty, 'OPENING', 'ITEM_MERGE', :keep_id,
+                    'Restored merge entry removed by the 1527/1693 split repair', 'SYSTEM')
+        """).bindparams(
+            keep_id=keep_id,
+            movement_ts=f"{str(restore_row[0])[:10]}T23:59:59",
+            qty=restored_qty,
+        ))
+    session.exec(text("""
+        UPDATE stockmovement
+        SET item_id = :keep_id,
+            ref_id = CASE
+                WHEN ref_id = :duplicate_id AND ref_type IN ('ITEM', 'ITEM_CREATE', 'ITEM_MERGE', 'ITEM_COPY')
+                THEN :keep_id ELSE ref_id END
+        WHERE item_id = :duplicate_id
+    """).bindparams(keep_id=keep_id, duplicate_id=duplicate_id))
+    for table_name, column_name in (
+        ("billitem", "item_id"),
+        ("billitemallocation", "item_id"),
+        ("returnitem", "item_id"),
+        ("stockaudititem", "item_id"),
+        ("purchaseitem", "inventory_item_id"),
+        ("purchasereturnitem", "inventory_item_id"),
+    ):
+        session.exec(text(
+            f"UPDATE {table_name} SET {column_name} = :keep_id WHERE {column_name} = :duplicate_id"
+        ).bindparams(keep_id=keep_id, duplicate_id=duplicate_id))
+    session.exec(text("UPDATE packopenevent SET source_item_id = :keep_id WHERE source_item_id = :duplicate_id").bindparams(keep_id=keep_id, duplicate_id=duplicate_id))
+    session.exec(text("UPDATE packopenevent SET loose_item_id = :keep_id WHERE loose_item_id = :duplicate_id").bindparams(keep_id=keep_id, duplicate_id=duplicate_id))
+
+    if duplicate_lots:
+        lot_list = ",".join(str(lot_id) for lot_id in duplicate_lots)
+        for table_name in ("purchaseitem", "billitemallocation", "purchasereturnitem"):
+            session.exec(text(f"UPDATE {table_name} SET lot_id = :keep_lot_id WHERE lot_id IN ({lot_list})").bindparams(keep_lot_id=keep_lot_id))
+        session.exec(text(f"UPDATE packopenevent SET source_lot_id = :keep_lot_id WHERE source_lot_id IN ({lot_list})").bindparams(keep_lot_id=keep_lot_id))
+        session.exec(text(f"UPDATE packopenevent SET loose_lot_id = :keep_lot_id WHERE loose_lot_id IN ({lot_list})").bindparams(keep_lot_id=keep_lot_id))
+        session.exec(text(f"UPDATE inventorylot SET opened_from_lot_id = :keep_lot_id WHERE opened_from_lot_id IN ({lot_list})").bindparams(keep_lot_id=keep_lot_id))
+        session.exec(text(f"UPDATE inventorylot SET sealed_qty = 0, loose_qty = 0, legacy_item_id = NULL, is_active = 0, updated_at = :ts WHERE id IN ({lot_list})").bindparams(ts=ts))
+        session.exec(text("UPDATE inventorylot SET sealed_qty = :stock, updated_at = :ts WHERE id = :lot_id").bindparams(stock=combined_stock, ts=ts, lot_id=keep_lot_id))
+
+    session.exec(text("""
+        UPDATE item SET stock = :stock, is_archived = CASE WHEN :stock <= 0 THEN 1 ELSE 0 END, updated_at = :ts
+        WHERE id = :keep_id
+    """).bindparams(stock=combined_stock, ts=ts, keep_id=keep_id))
+    session.exec(text("""
+        UPDATE item SET stock = 0, is_archived = 1, updated_at = :ts WHERE id = :duplicate_id
+    """).bindparams(ts=ts, duplicate_id=duplicate_id))
     return 1, backup_path
 
 
@@ -2787,9 +2884,9 @@ def migrate_db():
         """))
         session.commit()
 
-        kalonji_repair_key = "repair_kalonji_1527_1693_split_v1"
+        kalonji_repair_key = "merge_kalonji_1693_into_1527_v2"
         if not session.exec(text("SELECT 1 FROM appmeta WHERE key = :k").bindparams(k=kalonji_repair_key)).first():
-            fixed_count, backup_path = repair_kalonji_1527_to_1693_once(session)
+            fixed_count, backup_path = merge_kalonji_1693_into_1527_once(session)
             session.exec(text("INSERT INTO appmeta (key, value, updated_at) VALUES (:k, :v, :ts)").bindparams(
                 k=kalonji_repair_key, v=f"done:{fixed_count};backup:{backup_path or ''}", ts=_now_ts()
             ))

@@ -6,9 +6,10 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func
 from sqlmodel import SQLModel, select
 
-from backend.accounting import mark_voucher_deleted, post_purchase_payment_voucher, sync_purchase_vouchers
+from backend.accounting import mark_voucher_deleted, post_purchase_payment_voucher, post_purchase_return_voucher, sync_purchase_vouchers
 from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
+from backend.purchase_return_settlement import recalculate_purchase_return_settlements
 from backend.models import (
     AuditLog,
     AuditLogOut,
@@ -623,6 +624,14 @@ def make_purchase_out(session, row: Purchase) -> PurchaseOut:
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).one() or 0)
+    returned_settlement = round2(session.exec(
+        select(func.coalesce(func.sum(
+            PurchaseReturn.refund_cash + PurchaseReturn.refund_online + PurchaseReturn.writeoff_reversal
+        ), 0)).where(
+            PurchaseReturn.purchase_id == row.id,
+            PurchaseReturn.is_deleted == False,  # noqa: E712
+        )
+    ).one() or 0)
     return PurchaseOut(
         id=row.id,
         party_id=row.party_id,
@@ -644,7 +653,7 @@ def make_purchase_out(session, row: Purchase) -> PurchaseOut:
         items=[purchase_item_output(session, item) for item in items],
         payments=[PurchasePaymentOut(**payment.dict()) for payment in payments],
         return_total=return_total,
-        net_amount=round2(float(row.total_amount or 0) - return_total),
+        net_amount=round2(float(row.total_amount or 0) - return_total + returned_settlement),
     )
 
 
@@ -960,6 +969,14 @@ def create_inventory_lot(
 
 
 def recompute_purchase_payment_state(session, purchase: Purchase) -> None:
+    recalculate_purchase_return_settlements(session, purchase)
+    supplier = session.get(Party, purchase.party_id)
+    if supplier:
+        for purchase_return in session.exec(select(PurchaseReturn).where(
+            PurchaseReturn.purchase_id == purchase.id,
+            PurchaseReturn.is_deleted == False,  # noqa: E712
+        )).all():
+            post_purchase_return_voucher(session, purchase_return, supplier)
     payments = session.exec(
         select(PurchasePayment).where(
             PurchasePayment.purchase_id == purchase.id,
@@ -997,7 +1014,28 @@ def purchase_net_amount(session, purchase: Purchase) -> float:
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).one() or 0
-    return round2(max(0.0, float(purchase.total_amount or 0) - float(return_total or 0)))
+    returned_settlement = session.exec(
+        select(func.coalesce(func.sum(
+            PurchaseReturn.refund_cash + PurchaseReturn.refund_online + PurchaseReturn.writeoff_reversal
+        ), 0)).where(
+            PurchaseReturn.purchase_id == purchase.id,
+            PurchaseReturn.is_deleted == False,  # noqa: E712
+        )
+    ).one() or 0
+    return round2(max(0.0, float(purchase.total_amount or 0) - float(return_total or 0) + float(returned_settlement or 0)))
+
+
+def purchase_payable_at(session, purchase: Purchase, paid_at: str) -> float:
+    """Amount that was payable when a payment occurred; same-day payments precede returns."""
+    payment_date = str(paid_at or "")[:10]
+    prior_returns = session.exec(
+        select(func.coalesce(func.sum(PurchaseReturn.total_amount), 0)).where(
+            PurchaseReturn.purchase_id == purchase.id,
+            PurchaseReturn.is_deleted == False,  # noqa: E712
+            PurchaseReturn.return_date < payment_date,
+        )
+    ).one() or 0
+    return round2(max(0.0, float(purchase.total_amount or 0) - float(prior_returns or 0)))
 
 
 @router.post("/", response_model=PurchaseOut, status_code=201)
@@ -1558,7 +1596,15 @@ def supplier_ledger(party_id: int) -> List[PurchaseLedgerRow]:
                     PurchaseReturn.is_deleted == False,  # noqa: E712
                 )
             ).one() or 0)
-            net_amount = round2(float(row.total_amount or 0) - return_amount)
+            returned_settlement = round2(session.exec(
+                select(func.coalesce(func.sum(
+                    PurchaseReturn.refund_cash + PurchaseReturn.refund_online + PurchaseReturn.writeoff_reversal
+                ), 0)).where(
+                    PurchaseReturn.purchase_id == row.id,
+                    PurchaseReturn.is_deleted == False,  # noqa: E712
+                )
+            ).one() or 0)
+            net_amount = round2(float(row.total_amount or 0) - return_amount + returned_settlement)
             outstanding = round2(net_amount - float(row.paid_amount or 0) - float(row.writeoff_amount or 0))
             out.append(
                 PurchaseLedgerRow(
@@ -1776,7 +1822,7 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
             if int(row.party_id) != int(supplier.id):
                 raise HTTPException(status_code=400, detail=f"Purchase {purchase_id} does not belong to this supplier")
             outstanding = round2(
-                purchase_net_amount(session, row)
+                purchase_payable_at(session, row, payment_ts)
                 - float(row.paid_amount or 0)
                 - float(row.writeoff_amount or 0)
             )
@@ -1937,7 +1983,7 @@ def update_supplier_payment(party_id: int, payment_id: int, payload: PurchasePay
                 )
             ).all()
             settled_elsewhere = round2(sum(float(p.amount or 0) for p in active_payments))
-            if settled_elsewhere + amount > purchase_net_amount(session, purchase) + 0.0001:
+            if settled_elsewhere + amount > purchase_payable_at(session, purchase, next_paid_at) + 0.0001:
                 raise HTTPException(status_code=400, detail="Payment exceeds outstanding amount")
 
         payment.party_id = supplier.id
@@ -2044,7 +2090,7 @@ def restore_supplier_payment(party_id: int, payment_id: int) -> PurchasePaymentO
                 )
             ).all()
             settled_active = round2(sum(float(p.amount or 0) for p in active_payments))
-            if settled_active + float(payment.amount or 0) > purchase_net_amount(session, purchase) + 0.0001:
+            if settled_active + float(payment.amount or 0) > purchase_payable_at(session, purchase, payment.paid_at) + 0.0001:
                 raise HTTPException(status_code=400, detail="Restored payment exceeds purchase total")
 
         payment.party_id = supplier.id
@@ -2117,7 +2163,7 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
             + float(row.writeoff_amount or 0)
             + amount
         )
-        if projected > purchase_net_amount(session, row) + 0.0001:
+        if projected > purchase_payable_at(session, row, paid_at) + 0.0001:
             raise HTTPException(status_code=400, detail="Payment exceeds outstanding amount")
 
         payment = PurchasePayment(
@@ -2224,7 +2270,7 @@ def update_purchase_payment(purchase_id: int, payment_id: int, payload: Purchase
             )
         ).all()
         settled_elsewhere = round2(sum(float(p.amount or 0) for p in active_payments))
-        if settled_elsewhere + amount > purchase_net_amount(session, row) + 0.0001:
+        if settled_elsewhere + amount > purchase_payable_at(session, row, next_paid_at) + 0.0001:
             raise HTTPException(status_code=400, detail="Payment exceeds outstanding amount")
 
         payment.paid_at = next_paid_at
@@ -2336,7 +2382,7 @@ def restore_purchase_payment(purchase_id: int, payment_id: int) -> PurchaseOut:
             )
         ).all()
         settled_active = round2(sum(float(p.amount or 0) for p in active_payments))
-        if settled_active + float(payment.amount or 0) > purchase_net_amount(session, row) + 0.0001:
+        if settled_active + float(payment.amount or 0) > purchase_payable_at(session, row, payment.paid_at) + 0.0001:
             raise HTTPException(status_code=400, detail="Restored payment exceeds purchase total")
 
         payment.is_deleted = False
@@ -2791,6 +2837,14 @@ def supplier_summary(party_id: int) -> SupplierLedgerSummary:
                 PurchaseReturn.is_deleted == False,  # noqa: E712
             )
         ).one() or 0)
+        returned_settlement = round2(session.exec(
+            select(func.coalesce(func.sum(
+                PurchaseReturn.refund_cash + PurchaseReturn.refund_online + PurchaseReturn.writeoff_reversal
+            ), 0)).where(
+                PurchaseReturn.party_id == party_id,
+                PurchaseReturn.is_deleted == False,  # noqa: E712
+            )
+        ).one() or 0)
         payments = session.exec(
             select(PurchasePayment).where(
                 PurchasePayment.party_id == party_id,
@@ -2806,7 +2860,7 @@ def supplier_summary(party_id: int) -> SupplierLedgerSummary:
             active_payments.append(payment)
         total_paid = round2(sum(float(row.amount or 0) for row in active_payments if not bool(row.is_writeoff)))
         total_writeoff = round2(sum(float(row.amount or 0) for row in active_payments if bool(row.is_writeoff)))
-        outstanding = round2(total_purchases - total_returns - total_paid - total_writeoff)
+        outstanding = round2(total_purchases - total_returns - total_paid - total_writeoff + returned_settlement)
         return SupplierLedgerSummary(
             party_id=party_id,
             total_purchases=total_purchases,

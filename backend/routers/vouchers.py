@@ -658,8 +658,8 @@ def daybook(
                     party_name=party_map.get(int(purchase_return.party_id or 0)),
                     narration=purchase_return.notes or f"Purchase return {purchase_return.return_number}",
                     amount=_round2(purchase_return.total_amount),
-                    cash_amount=0.0,
-                    online_amount=0.0,
+                    cash_amount=_round2(purchase_return.refund_cash),
+                    online_amount=_round2(purchase_return.refund_online),
                     status="DELETED" if purchase_return.is_deleted else "POSTED",
                     is_deleted=bool(purchase_return.is_deleted),
                 )

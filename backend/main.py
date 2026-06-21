@@ -69,7 +69,7 @@ async def bind_request_actor(request: Request, call_next):
 
 def _sync_existing_vouchers_once() -> None:
     with Session(engine, expire_on_commit=False) as session:
-        key = "accounting_existing_vouchers_synced_v1"
+        key = "accounting_existing_vouchers_synced_v2_purchase_return_refunds"
         row = session.exec(text("SELECT value FROM appmeta WHERE key = :key").bindparams(key=key)).first()
         if row and str(row[0]) == "done":
             return

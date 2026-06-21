@@ -45,6 +45,7 @@ import {
 import { listCashbookEntries } from '../../services/cashbook'
 import { getBill, listPayments } from '../../services/billing'
 import { listPurchasePayments } from '../../services/purchases'
+import { fetchPurchaseReturns } from '../../services/purchaseReturns'
 import { listExchangeRecords, listReturns } from '../../services/returns'
 import { fetchReceipts } from '../../services/parties'
 import { toYMD } from '../../lib/date'
@@ -475,6 +476,12 @@ export default function BankBookPage() {
     enabled: recordsFilter === 'DAY',
   })
 
+  const qDayPurchaseReturns = useQuery({
+    queryKey: ['bankbook-purchase-returns-day', selectedDate],
+    queryFn: () => fetchPurchaseReturns({ from_date: selectedDate, to_date: selectedDate, limit: 1000 }),
+    enabled: recordsFilter === 'DAY',
+  })
+
   const qDayReturns = useQuery({
     queryKey: ['bankbook-returns-day', selectedDate],
     queryFn: () => listReturns({ from_date: selectedDate, to_date: selectedDate, limit: 500 }),
@@ -558,6 +565,12 @@ export default function BankBookPage() {
       }
       return out
     },
+    enabled: canLoadAllRange,
+  })
+
+  const qAllPurchaseReturns = useQuery({
+    queryKey: ['bankbook-purchase-returns-all', allView, allRange.from, allRange.to],
+    queryFn: () => fetchPurchaseReturns({ from_date: allRange.from, to_date: allRange.to, limit: 1000 }),
     enabled: canLoadAllRange,
   })
 
@@ -783,6 +796,34 @@ export default function BankBookPage() {
     return buildPurchaseChargeRows(payments)
   }, [qAllPurchasePayments.data])
 
+  const purchaseReturnOnlineRowsDay = useMemo(() => (qDayPurchaseReturns.data || [])
+    .filter((row) => Number(row.refund_online || 0) > 0)
+    .map((row) => ({
+      id: `purchase-return-online-${row.id}`,
+      created_at: `${row.return_date}T00:00:00`,
+      entry_type: 'RECEIPT',
+      pill_type: 'RETURN',
+      amount: Number(row.refund_online || 0),
+      txn_charges: 0,
+      mode: 'ONLINE',
+      note: `Online refund from supplier for purchase return ${row.return_number}`,
+      source: 'PURCHASE_RETURN' as const,
+    })), [qDayPurchaseReturns.data])
+
+  const purchaseReturnOnlineRowsAll = useMemo(() => (qAllPurchaseReturns.data || [])
+    .filter((row) => Number(row.refund_online || 0) > 0)
+    .map((row) => ({
+      id: `purchase-return-online-${row.id}`,
+      created_at: `${row.return_date}T00:00:00`,
+      entry_type: 'RECEIPT',
+      pill_type: 'RETURN',
+      amount: Number(row.refund_online || 0),
+      txn_charges: 0,
+      mode: 'ONLINE',
+      note: `Online refund from supplier for purchase return ${row.return_number}`,
+      source: 'PURCHASE_RETURN' as const,
+    })), [qAllPurchaseReturns.data])
+
   const returnOnlineRowsDay = useMemo(() => {
     const returns = (qDayReturns.data || []) as any[]
     const exchangeByReturnId = new Map<number, any>()
@@ -991,6 +1032,7 @@ export default function BankBookPage() {
             ...billOnlineRowsDay,
             ...purchaseOnlineRowsDay,
             ...purchaseChargeRowsDay,
+            ...purchaseReturnOnlineRowsDay,
             ...cashbookContraRowsDay,
             ...exchangeOnlineInRowsDay,
             ...exchangeOnlineOutRowsDay,
@@ -1002,6 +1044,7 @@ export default function BankBookPage() {
             ...billOnlineRowsAll,
             ...purchaseOnlineRowsAll,
             ...purchaseChargeRowsAll,
+            ...purchaseReturnOnlineRowsAll,
             ...cashbookContraRowsAll,
             ...exchangeOnlineInRowsAll,
             ...exchangeOnlineOutRowsAll,
@@ -1023,6 +1066,7 @@ export default function BankBookPage() {
     billOnlineRowsDay,
     purchaseOnlineRowsDay,
     purchaseChargeRowsDay,
+    purchaseReturnOnlineRowsDay,
     cashbookContraRowsDay,
     exchangeOnlineInRowsDay,
     exchangeOnlineOutRowsDay,
@@ -1032,6 +1076,7 @@ export default function BankBookPage() {
     billOnlineRowsAll,
     purchaseOnlineRowsAll,
     purchaseChargeRowsAll,
+    purchaseReturnOnlineRowsAll,
     cashbookContraRowsAll,
     exchangeOnlineInRowsAll,
     exchangeOnlineOutRowsAll,

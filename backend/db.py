@@ -2496,6 +2496,9 @@ def migrate_db():
                 gst_amount REAL NOT NULL DEFAULT 0,
                 rounding_adjustment REAL NOT NULL DEFAULT 0,
                 total_amount REAL NOT NULL DEFAULT 0,
+                refund_cash REAL NOT NULL DEFAULT 0,
+                refund_online REAL NOT NULL DEFAULT 0,
+                writeoff_reversal REAL NOT NULL DEFAULT 0,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT,
                 created_at TEXT NOT NULL,
@@ -2510,6 +2513,12 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN gst_amount REAL NOT NULL DEFAULT 0"))
         if "rounding_adjustment" not in purchase_return_col_names:
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN rounding_adjustment REAL NOT NULL DEFAULT 0"))
+        if "refund_cash" not in purchase_return_col_names:
+            session.exec(text("ALTER TABLE purchasereturn ADD COLUMN refund_cash REAL NOT NULL DEFAULT 0"))
+        if "refund_online" not in purchase_return_col_names:
+            session.exec(text("ALTER TABLE purchasereturn ADD COLUMN refund_online REAL NOT NULL DEFAULT 0"))
+        if "writeoff_reversal" not in purchase_return_col_names:
+            session.exec(text("ALTER TABLE purchasereturn ADD COLUMN writeoff_reversal REAL NOT NULL DEFAULT 0"))
 
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchasereturnitem (
@@ -2632,6 +2641,77 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_bank_mode ON purchasepayment (bank_mode)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_transaction_id ON purchasepayment (transaction_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_is_writeoff ON purchasepayment (is_writeoff)"))
+
+        # Allocate existing linked returns between unpaid supplier credit, actual
+        # cash/bank refunds, and restored write-offs. This also repairs databases
+        # created before purchase-return refunds were persisted.
+        linked_purchase_rows = session.exec(text("""
+            SELECT DISTINCT p.id, p.total_amount
+            FROM purchase p
+            JOIN purchasereturn pr ON pr.purchase_id = p.id
+            WHERE COALESCE(pr.purchase_id, 0) > 0
+        """)).all()
+        for purchase_row in linked_purchase_rows:
+            purchase_id = int(purchase_row[0])
+            liability = round(float(purchase_row[1] or 0), 2)
+            events = []
+            for payment in session.exec(text("""
+                SELECT id, paid_at, amount, cash_amount, online_amount, is_writeoff
+                FROM purchasepayment
+                WHERE purchase_id = :purchase_id AND COALESCE(is_deleted, 0) = 0
+            """).bindparams(purchase_id=purchase_id)).all():
+                events.append((str(payment[1] or "")[:10], 0, int(payment[0]), "PAYMENT", payment))
+            for returned in session.exec(text("""
+                SELECT id, return_date, total_amount
+                FROM purchasereturn
+                WHERE purchase_id = :purchase_id AND COALESCE(is_deleted, 0) = 0
+            """).bindparams(purchase_id=purchase_id)).all():
+                events.append((str(returned[1] or "")[:10], 1, int(returned[0]), "RETURN", returned))
+            events.sort(key=lambda event: (event[0], event[1], event[2]))
+            cash_available = online_available = writeoff_available = 0.0
+            for _date, _order, event_id, event_type, event_row in events:
+                if event_type == "PAYMENT":
+                    amount = round(float(event_row[2] or 0), 2)
+                    liability = round(liability - amount, 2)
+                    if bool(event_row[5]):
+                        writeoff_available = round(writeoff_available + amount, 2)
+                    else:
+                        cash = round(float(event_row[3] or 0), 2)
+                        online = round(float(event_row[4] or 0), 2)
+                        if cash <= 0 and online <= 0:
+                            cash = amount
+                        cash_available = round(cash_available + cash, 2)
+                        online_available = round(online_available + online, 2)
+                    continue
+                return_total = round(float(event_row[2] or 0), 2)
+                settlement_needed = round(max(0.0, return_total - min(return_total, max(0.0, liability))), 2)
+                refund_cash = round(min(settlement_needed, cash_available), 2)
+                settlement_needed = round(settlement_needed - refund_cash, 2)
+                refund_online = round(min(settlement_needed, online_available), 2)
+                settlement_needed = round(settlement_needed - refund_online, 2)
+                writeoff_reversal = round(min(settlement_needed, writeoff_available), 2)
+                cash_available = round(cash_available - refund_cash, 2)
+                online_available = round(online_available - refund_online, 2)
+                writeoff_available = round(writeoff_available - writeoff_reversal, 2)
+                settled_back = round(refund_cash + refund_online + writeoff_reversal, 2)
+                liability = round(liability - return_total + settled_back, 2)
+                session.exec(text("""
+                    UPDATE purchasereturn
+                    SET refund_cash = :refund_cash,
+                        refund_online = :refund_online,
+                        writeoff_reversal = :writeoff_reversal
+                    WHERE id = :return_id
+                """).bindparams(
+                    refund_cash=refund_cash,
+                    refund_online=refund_online,
+                    writeoff_reversal=writeoff_reversal,
+                    return_id=event_id,
+                ))
+        session.exec(text("""
+            UPDATE purchasereturn
+            SET refund_cash = 0, refund_online = 0, writeoff_reversal = 0
+            WHERE COALESCE(is_deleted, 0) = 1 OR COALESCE(purchase_id, 0) = 0
+        """))
         session.commit()
 
         # ---------- receipts / loose stock / voucher migration ----------

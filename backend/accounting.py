@@ -347,6 +347,24 @@ def post_purchase_return_voucher(session, purchase_return: PurchaseReturn, party
     ]
     if gst > 0:
         lines.append({"ledger_id": int(ledgers["INPUT_GST"].id), "entry_type": "CR", "amount": gst, "narration": "Input GST reversal"})
+    refund_cash = round2(getattr(purchase_return, "refund_cash", 0.0))
+    refund_online = round2(getattr(purchase_return, "refund_online", 0.0))
+    writeoff_reversal = round2(getattr(purchase_return, "writeoff_reversal", 0.0))
+    if refund_cash > 0:
+        lines.extend([
+            {"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "DR", "amount": refund_cash, "narration": "Supplier cash refund"},
+            {"ledger_id": int(creditor_ledger.id), "entry_type": "CR", "amount": refund_cash, "narration": "Paid amount refunded by supplier"},
+        ])
+    if refund_online > 0:
+        lines.extend([
+            {"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "DR", "amount": refund_online, "narration": "Supplier online refund"},
+            {"ledger_id": int(creditor_ledger.id), "entry_type": "CR", "amount": refund_online, "narration": "Paid amount refunded by supplier"},
+        ])
+    if writeoff_reversal > 0:
+        lines.extend([
+            {"ledger_id": int(ledgers["PURCHASE_WRITE_OFF"].id), "entry_type": "DR", "amount": writeoff_reversal, "narration": "Supplier write-off reversal"},
+            {"ledger_id": int(creditor_ledger.id), "entry_type": "CR", "amount": writeoff_reversal, "narration": "Write-off restored by return"},
+        ])
     return upsert_voucher(
         session,
         voucher_type="PURCHASE_RETURN",

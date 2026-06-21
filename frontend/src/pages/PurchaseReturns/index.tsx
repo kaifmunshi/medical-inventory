@@ -521,6 +521,16 @@ export default function PurchaseReturnsPage() {
                     <Box sx={{ textAlign: { md: 'right' } }}>
                       <Typography variant="h6">{money(row.total_amount)}</Typography>
                       <Typography variant="caption" color="text.secondary">GST {money(row.gst_amount)} | Round off {money(row.rounding_adjustment)}</Typography>
+                      {(Number(row.refund_cash || 0) + Number(row.refund_online || 0)) > 0 && (
+                        <Typography variant="body2" color="success.main">
+                          Supplier refund: {money(Number(row.refund_cash || 0) + Number(row.refund_online || 0))}
+                          {Number(row.refund_cash || 0) > 0 ? ` cash ${money(row.refund_cash)}` : ''}
+                          {Number(row.refund_online || 0) > 0 ? ` online ${money(row.refund_online)}` : ''}
+                        </Typography>
+                      )}
+                      {Number(row.writeoff_reversal || 0) > 0 && (
+                        <Typography variant="body2">Write-off reversed: {money(row.writeoff_reversal)}</Typography>
+                      )}
                     </Box>
                     <Stack direction="row" spacing={1}>
                       <Button variant="text" onClick={() => setHistoryTarget(row)}>History</Button>

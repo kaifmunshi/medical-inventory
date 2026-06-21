@@ -797,6 +797,9 @@ class PurchaseReturn(SQLModel, table=True):
     gst_amount: float = 0.0
     rounding_adjustment: float = 0.0
     total_amount: float = 0.0
+    refund_cash: float = 0.0
+    refund_online: float = 0.0
+    writeoff_reversal: float = 0.0
     is_deleted: bool = Field(default=False, index=True)
     deleted_at: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
@@ -1213,6 +1216,9 @@ class PurchaseReturnOut(SQLModel):
     gst_amount: float
     rounding_adjustment: float
     total_amount: float
+    refund_cash: float = 0.0
+    refund_online: float = 0.0
+    writeoff_reversal: float = 0.0
     is_deleted: bool
     deleted_at: Optional[str] = None
     created_at: str

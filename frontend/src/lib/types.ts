@@ -309,6 +309,9 @@ export interface PurchaseReturn {
   gst_amount: number
   rounding_adjustment: number
   total_amount: number
+  refund_cash: number
+  refund_online: number
+  writeoff_reversal: number
   is_deleted: boolean
   deleted_at?: string | null
   created_at: string

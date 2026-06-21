@@ -8,6 +8,7 @@ from sqlmodel import select
 from backend.accounting import mark_voucher_deleted, post_purchase_return_voucher
 from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
+from backend.purchase_return_settlement import recalculate_purchase_return_settlements
 from backend.models import (
     AuditLog,
     AuditLogOut,
@@ -86,6 +87,9 @@ def _snapshot(session, row: PurchaseReturn, items: Optional[List[PurchaseReturnI
             "gst_amount": round2(row.gst_amount),
             "rounding_adjustment": round2(row.rounding_adjustment),
             "total_amount": round2(row.total_amount),
+            "refund_cash": round2(row.refund_cash),
+            "refund_online": round2(row.refund_online),
+            "writeoff_reversal": round2(row.writeoff_reversal),
             "is_deleted": bool(row.is_deleted),
         },
         "items": [
@@ -128,19 +132,39 @@ def _refresh_purchase_payment_status(session, purchase: Purchase) -> None:
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).one() or 0)
+    returned_settlement_total = float(session.exec(
+        select(func.coalesce(func.sum(
+            PurchaseReturn.refund_cash + PurchaseReturn.refund_online + PurchaseReturn.writeoff_reversal
+        ), 0)).where(
+            PurchaseReturn.purchase_id == purchase.id,
+            PurchaseReturn.is_deleted == False,  # noqa: E712
+        )
+    ).one() or 0)
     payments = session.exec(select(PurchasePayment).where(
         PurchasePayment.purchase_id == purchase.id,
         PurchasePayment.is_deleted == False,  # noqa: E712
     )).all()
     paid = round2(sum(float(item.amount or 0) for item in payments if not item.is_writeoff))
     writeoff = round2(sum(float(item.amount or 0) for item in payments if item.is_writeoff))
-    net = round2(max(0, float(purchase.total_amount or 0) - active_return_total))
+    net = round2(max(0, float(purchase.total_amount or 0) - active_return_total + returned_settlement_total))
     covered = round2(paid + writeoff)
     purchase.paid_amount = paid
     purchase.writeoff_amount = writeoff
     purchase.payment_status = "PAID" if net <= 0 or covered + 0.0001 >= net else ("UNPAID" if covered <= 0 else "PARTIAL")
     purchase.updated_at = now_ts()
     session.add(purchase)
+
+
+def _sync_purchase_return_settlements(session, purchase: Purchase, supplier: Party) -> None:
+    recalculate_purchase_return_settlements(session, purchase)
+    session.flush()
+    rows = session.exec(select(PurchaseReturn).where(PurchaseReturn.purchase_id == purchase.id)).all()
+    for item in rows:
+        if item.is_deleted or round2(item.total_amount) <= 0:
+            mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(item.id))
+        else:
+            post_purchase_return_voucher(session, item, supplier)
+    _refresh_purchase_payment_status(session, purchase)
 
 
 @router.get("/", response_model=List[PurchaseReturnOut])
@@ -228,6 +252,9 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             gst_amount=0,
             rounding_adjustment=round2(payload.rounding_adjustment),
             total_amount=0,
+            refund_cash=0,
+            refund_online=0,
+            writeoff_reversal=0,
         )
         session.add(row)
         session.flush()
@@ -367,6 +394,11 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
         row.updated_at = now_ts()
         session.add(row)
         session.flush()
+        if purchase:
+            _sync_purchase_return_settlements(session, purchase, supplier)
+        elif total > 0:
+            post_purchase_return_voucher(session, row, supplier)
+        session.flush()
         log_audit(
             session,
             entity_type="PURCHASE_RETURN",
@@ -375,10 +407,6 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             note=f"Created purchase return {row.return_number}",
             details={"after": _snapshot(session, row)},
         )
-        if total > 0:
-            post_purchase_return_voucher(session, row, supplier)
-        if purchase:
-            _refresh_purchase_payment_status(session, purchase)
         session.commit()
         session.refresh(row)
         return _out(session, row)
@@ -582,12 +610,12 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
         row.total_amount = total
         row.updated_at = now_ts()
         session.add(row)
-        if total > 0:
+        if purchase:
+            _sync_purchase_return_settlements(session, purchase, supplier)
+        elif total > 0:
             post_purchase_return_voucher(session, row, supplier)
         else:
             mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(row.id))
-        if purchase:
-            _refresh_purchase_payment_status(session, purchase)
         session.flush()
         log_audit(
             session,
@@ -656,7 +684,8 @@ def cancel_purchase_return(return_id: int) -> PurchaseReturnOut:
         session.add(row)
         mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(row.id))
         if purchase:
-            _refresh_purchase_payment_status(session, purchase)
+            supplier = _supplier(session, int(purchase.party_id))
+            _sync_purchase_return_settlements(session, purchase, supplier)
         session.flush()
         log_audit(
             session,

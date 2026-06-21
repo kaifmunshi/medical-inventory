@@ -44,6 +44,7 @@ import {
 import { listBankbookEntries } from '../../services/bankbook'
 import { getBill, listPayments } from '../../services/billing'
 import { listPurchasePayments } from '../../services/purchases'
+import { fetchPurchaseReturns } from '../../services/purchaseReturns'
 import { listExchangeRecords, listReturns } from '../../services/returns'
 import { fetchReceipts } from '../../services/parties'
 import { toYMD } from '../../lib/date'
@@ -425,6 +426,12 @@ export default function CashbookPage() {
     enabled: recordsFilter === 'DAY',
   })
 
+  const qDayPurchaseReturns = useQuery({
+    queryKey: ['cashbook-purchase-returns-day', selectedDate],
+    queryFn: () => fetchPurchaseReturns({ from_date: selectedDate, to_date: selectedDate, limit: 1000 }),
+    enabled: recordsFilter === 'DAY',
+  })
+
   const qDayReturns = useQuery({
     queryKey: ['cashbook-returns-day', selectedDate],
     queryFn: () =>
@@ -464,6 +471,12 @@ export default function CashbookPage() {
     queryKey: ['cashbook-all-purchase-payments', allView, allRange.from, allRange.to],
     queryFn: () =>
       fetchPagedRows((limit, offset) => listPurchasePayments({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 500),
+    enabled: canLoadAllRange,
+  })
+
+  const qAllPurchaseReturns = useQuery({
+    queryKey: ['cashbook-purchase-returns-all', allView, allRange.from, allRange.to],
+    queryFn: () => fetchPurchaseReturns({ from_date: allRange.from, to_date: allRange.to, limit: 1000 }),
     enabled: canLoadAllRange,
   })
 
@@ -649,6 +662,30 @@ export default function CashbookPage() {
     return buildPurchaseCashRows(payments)
   }, [qAllPurchasePayments.data])
 
+  const purchaseReturnCashRowsDay = useMemo(() => (qDayPurchaseReturns.data || [])
+    .filter((row) => Number(row.refund_cash || 0) > 0)
+    .map((row) => ({
+      id: `purchase-return-cash-${row.id}`,
+      created_at: `${row.return_date}T00:00:00`,
+      entry_type: 'RECEIPT',
+      pill_type: 'RETURN',
+      amount: Number(row.refund_cash || 0),
+      note: `Cash refunded by supplier for purchase return ${row.return_number}`,
+      source: 'PURCHASE_RETURN' as const,
+    })), [qDayPurchaseReturns.data])
+
+  const purchaseReturnCashRowsAll = useMemo(() => (qAllPurchaseReturns.data || [])
+    .filter((row) => Number(row.refund_cash || 0) > 0)
+    .map((row) => ({
+      id: `purchase-return-cash-${row.id}`,
+      created_at: `${row.return_date}T00:00:00`,
+      entry_type: 'RECEIPT',
+      pill_type: 'RETURN',
+      amount: Number(row.refund_cash || 0),
+      note: `Cash refunded by supplier for purchase return ${row.return_number}`,
+      source: 'PURCHASE_RETURN' as const,
+    })), [qAllPurchaseReturns.data])
+
   const returnCashRowsDay = useMemo(() => {
     const returns = (qDayReturns.data || []) as any[]
     const exchangeByReturnId = new Map<number, any>()
@@ -792,13 +829,14 @@ export default function CashbookPage() {
             ...manualRowsDay,
             ...billCashRowsDay,
             ...purchaseCashRowsDay,
+            ...purchaseReturnCashRowsDay,
             ...exchangeCashInRowsDay,
             ...contraRowsDay,
             ...returnCashRowsDay,
           ]
-        : [...manualRowsAll, ...billCashRowsAll, ...purchaseCashRowsAll, ...exchangeCashInRowsAll, ...contraRowsAll, ...returnCashRowsAll]
+        : [...manualRowsAll, ...billCashRowsAll, ...purchaseCashRowsAll, ...purchaseReturnCashRowsAll, ...exchangeCashInRowsAll, ...contraRowsAll, ...returnCashRowsAll]
     return rows.sort((a: any, b: any) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
-  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, purchaseCashRowsDay, exchangeCashInRowsDay, contraRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, purchaseCashRowsAll, exchangeCashInRowsAll, contraRowsAll, returnCashRowsAll])
+  }, [recordsFilter, selectedDate, day?.opening_balance, manualRowsDay, billCashRowsDay, purchaseCashRowsDay, purchaseReturnCashRowsDay, exchangeCashInRowsDay, contraRowsDay, returnCashRowsDay, manualRowsAll, billCashRowsAll, purchaseCashRowsAll, purchaseReturnCashRowsAll, exchangeCashInRowsAll, contraRowsAll, returnCashRowsAll])
 
   const allLedgerDates = useMemo(() => {
     if (recordsFilter !== 'ALL') return []

@@ -19,6 +19,7 @@ from backend.models import (
     PartyReceipt,
     Purchase,
     PurchasePayment,
+    PurchaseReturn,
     ReceiptBillAdjustment,
     Return,
 )
@@ -144,6 +145,15 @@ def _sum_purchase_cash_out(session, *, start_iso: Optional[str] = None, end_iso:
     return round(total, 2)
 
 
+def _sum_purchase_return_cash(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
+    stmt = select(PurchaseReturn).where(PurchaseReturn.is_deleted == False)  # noqa: E712
+    if start_iso:
+        stmt = stmt.where(PurchaseReturn.return_date >= start_iso[:10])
+    if end_iso:
+        stmt = stmt.where(PurchaseReturn.return_date <= end_iso[:10])
+    return round(sum(float(row.refund_cash or 0) for row in session.exec(stmt).all()), 2)
+
+
 def _sum_return_cash(session, *, start_iso: Optional[str] = None, end_iso: Optional[str] = None) -> float:
     stmt = select(Return)
     if start_iso:
@@ -221,6 +231,7 @@ def _day_snapshot(session, date: str, *, include_entries: bool = False):
         + _sum_rows(opening_rows)["net_change"]
         + _sum_bill_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
         + _sum_exchange_cash_in(session, start_iso=anchor_effective_start, end_iso=prev_end)
+        + _sum_purchase_return_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
         - _sum_return_cash(session, start_iso=anchor_effective_start, end_iso=prev_end)
         - _sum_purchase_cash_out(session, start_iso=anchor_effective_start, end_iso=prev_end)
     )
@@ -242,9 +253,10 @@ def _day_snapshot(session, date: str, *, include_entries: bool = False):
     exchange_cash_in_today = _sum_exchange_cash_in(session, start_iso=day_start, end_iso=day_end)
     return_cash_today = _sum_return_cash(session, start_iso=day_start, end_iso=day_end)
     purchase_cash_today = _sum_purchase_cash_out(session, start_iso=day_start, end_iso=day_end)
+    purchase_return_cash_today = _sum_purchase_return_cash(session, start_iso=day_start, end_iso=day_end)
     bankbook_contra_today = _sum_bankbook_contra(session, start_iso=day_start, end_iso=day_end)
     day_summary["receipts"] = round(
-        float(day_summary["receipts"]) + bill_cash_today + exchange_cash_in_today + float(bankbook_contra_today["receipts"]),
+        float(day_summary["receipts"]) + bill_cash_today + exchange_cash_in_today + purchase_return_cash_today + float(bankbook_contra_today["receipts"]),
         2,
     )
     day_summary["withdrawals"] = round(

@@ -326,8 +326,10 @@ export default function SupplierLedgerPage() {
         particulars: `Purchase ${purchase.invoice_number || `#${purchase.id}`}`,
         purchaseAmount: Number(purchase.total_amount || 0),
         returnAmount: 0,
+        refundAmount: 0,
         paidAmount: 0,
         writeoffAmount: 0,
+        writeoffReversalAmount: 0,
         mode: '',
         note: purchase.notes || '',
     }))
@@ -354,8 +356,10 @@ export default function SupplierLedgerPage() {
           : `${isWriteoff ? 'Supplier write-off' : 'Supplier payment'} without bill`,
         purchaseAmount: 0,
         returnAmount: 0,
+        refundAmount: 0,
         paidAmount: isWriteoff ? 0 : Number(payment.amount || 0),
         writeoffAmount: isWriteoff ? Number(payment.amount || 0) : 0,
+        writeoffReversalAmount: 0,
         mode: `${paymentModeLabel(payment.mode)}${bankDetail}`,
         note: payment.note || '',
       }
@@ -375,8 +379,10 @@ export default function SupplierLedgerPage() {
         particulars: `Purchase return ${purchaseReturn.return_number}${sourcePurchase ? ` for ${sourcePurchase.invoice_number}` : ''}`,
         purchaseAmount: 0,
         returnAmount: Number(purchaseReturn.total_amount || 0),
+        refundAmount: Number(purchaseReturn.refund_cash || 0) + Number(purchaseReturn.refund_online || 0),
         paidAmount: 0,
         writeoffAmount: 0,
+        writeoffReversalAmount: Number(purchaseReturn.writeoff_reversal || 0),
         mode: 'Supplier credit',
         note: purchaseReturn.notes || '',
       }
@@ -400,7 +406,9 @@ export default function SupplierLedgerPage() {
           : Number(event.purchaseAmount || 0) -
             Number(event.returnAmount || 0) -
             Number(event.paidAmount || 0) -
-            Number(event.writeoffAmount || 0)
+            Number(event.writeoffAmount || 0) +
+            Number(event.refundAmount || 0) +
+            Number(event.writeoffReversalAmount || 0)
       balance = round2(balance + delta)
       return {
         ...event,
@@ -416,8 +424,14 @@ export default function SupplierLedgerPage() {
     const activePayments = supplierPayments.filter((payment) => !payment.is_deleted)
     const totalPaid = activePayments.reduce((sum, payment) => sum + (payment.is_writeoff ? 0 : Number(payment.amount || 0)), 0)
     const totalWriteoff = activePayments.reduce((sum, payment) => sum + (payment.is_writeoff ? Number(payment.amount || 0) : 0), 0)
-    const closingBalance = openingBalance + totalPurchases - totalReturns - totalPaid - totalWriteoff
-    return { totalPurchases, totalReturns, totalPaid, totalWriteoff, closingBalance }
+    const totalRefunded = purchaseReturns.filter((row) => !row.is_deleted).reduce(
+      (sum, row) => sum + Number(row.refund_cash || 0) + Number(row.refund_online || 0), 0,
+    )
+    const totalWriteoffReversed = purchaseReturns.filter((row) => !row.is_deleted).reduce(
+      (sum, row) => sum + Number(row.writeoff_reversal || 0), 0,
+    )
+    const closingBalance = openingBalance + totalPurchases - totalReturns - totalPaid - totalWriteoff + totalRefunded + totalWriteoffReversed
+    return { totalPurchases, totalReturns, totalPaid, totalWriteoff, totalRefunded, totalWriteoffReversed, closingBalance }
   }, [openingBalance, purchaseReturns, purchases, supplierPayments])
 
   const allocationTotal = useMemo(
@@ -1278,6 +1292,8 @@ export default function SupplierLedgerPage() {
             <Chip label={`Purchases: Rs ${money(totals.totalPurchases)}`} variant="outlined" />
             <Chip label={`Returns: Rs ${money(totals.totalReturns)}`} color="secondary" variant="outlined" />
             <Chip label={`Paid: Rs ${money(totals.totalPaid)}`} color="success" variant="outlined" />
+            <Chip label={`Refunded: Rs ${money(totals.totalRefunded)}`} color="info" variant="outlined" />
+            {totals.totalWriteoffReversed > 0 && <Chip label={`Write-off Reversed: Rs ${money(totals.totalWriteoffReversed)}`} variant="outlined" />}
             <Chip label={`Write-off: Rs ${money(totals.totalWriteoff)}`} variant="outlined" />
             <Chip label={`Closing: Rs ${money(totals.closingBalance)}`} color="primary" />
           </Stack>
@@ -1295,7 +1311,9 @@ export default function SupplierLedgerPage() {
                 <th>Purchase</th>
                 <th>Return</th>
                 <th>Paid</th>
+                <th>Refunded</th>
                 <th>Write-off</th>
+                <th>WO Reversed</th>
                 <th>Cl Bal</th>
                 <th>Notes</th>
                 <th></th>
@@ -1368,7 +1386,9 @@ export default function SupplierLedgerPage() {
                     <td>{row.purchaseAmount ? money(row.purchaseAmount) : '-'}</td>
                     <td>{row.returnAmount ? money(row.returnAmount) : '-'}</td>
                     <td>{row.paidAmount ? money(row.paidAmount) : '-'}</td>
+                    <td>{row.refundAmount ? money(row.refundAmount) : '-'}</td>
                     <td>{row.writeoffAmount ? money(row.writeoffAmount) : '-'}</td>
+                    <td>{row.writeoffReversalAmount ? money(row.writeoffReversalAmount) : '-'}</td>
                     <td>{money(row.balanceAfter)}</td>
                     <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{row.note || '-'}</td>
 	                    <td>
@@ -1425,7 +1445,7 @@ export default function SupplierLedgerPage() {
               })}
               {ledgerRows.length === 0 && (
                 <tr>
-                  <td colSpan={9}>
+                  <td colSpan={12}>
                     <Box p={2} color="text.secondary">
                       {partyId ? 'No purchase ledger rows for this supplier yet.' : 'Select a supplier to view the ledger.'}
                     </Box>

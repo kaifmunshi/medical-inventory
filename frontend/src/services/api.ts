@@ -1,4 +1,4 @@
-import axios from 'axios'
+import axios, { AxiosError } from 'axios'
 import { loadStoredUserSession } from '../lib/userSession'
 
 function resolveApiBaseUrl() {
@@ -36,27 +36,34 @@ return config
 })
 
 api.interceptors.response.use(
-res => res,
-err => {
-const detail = err?.response?.data?.detail
-const path = String(err?.config?.url || '')
+(res) => res,
+(err: unknown) => {
+const error = err as AxiosError & { message?: string }
+const detail = (error?.response?.data as Record<string, unknown>)?.detail
+const path = String(error?.config?.url || '')
 
 if (detail) {
-err.message = Array.isArray(detail) ? detail.map((row: any) => row?.msg || String(row)).join(', ') : String(detail)
-return Promise.reject(err)
+const message = Array.isArray(detail)
+? detail.map((row: unknown) => {
+    const rowObj = row as Record<string, unknown>
+    return rowObj?.msg || String(row)
+  }).join(', ')
+: String(detail)
+error.message = message
+return Promise.reject(error)
 }
 
-if (!err?.response) {
-if (err?.code === 'ECONNABORTED') {
-err.message = `Request timed out while contacting ${API_BASE_URL}${path}`
+if (!error?.response) {
+if (error?.code === 'ECONNABORTED') {
+error.message = `Request timed out while contacting ${API_BASE_URL}${path}`
 } else {
-err.message = `Cannot reach backend at ${API_BASE_URL}${path}`
+error.message = `Cannot reach backend at ${API_BASE_URL}${path}`
 }
-return Promise.reject(err)
+return Promise.reject(error)
 }
 
-err.message = err?.message || `Request failed with status ${err?.response?.status || 'unknown'}`
-return Promise.reject(err)
+error.message = error?.message || `Request failed with status ${error?.response?.status || 'unknown'}`
+return Promise.reject(error)
 }
 )
 

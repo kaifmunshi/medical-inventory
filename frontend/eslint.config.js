@@ -25,11 +25,15 @@ export default tseslint.config(
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      '@typescript-eslint/no-explicit-any': 'off',
+      // Enable stricter type checking - allows 'unknown' but not 'any'
+      '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', ignoreRestSiblings: true }],
       'no-empty': ['error', { allowEmptyCatch: true }],
       'no-control-regex': 'off',
+      // NOTE: disabled because React Hook Form and Query have complex dependencies
+      // that can't be automatically tracked. Review manually when updating dependencies.
       'react-hooks/exhaustive-deps': 'off',
+      // NOTE: disabled as we use CRA and export components with hooks directly
       'react-refresh/only-export-components': 'off',
     },
   },

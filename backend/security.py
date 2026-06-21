@@ -5,9 +5,16 @@ import json
 import os
 import time
 from contextvars import ContextVar
-from typing import Dict, Iterable, Optional
+from typing import Iterable, Optional, TypedDict
 
 from fastapi import HTTPException
+
+
+class SessionPayload(TypedDict):
+    uid: int
+    name: str
+    role: str
+    exp: int
 
 _actor_name: ContextVar[Optional[str]] = ContextVar("actor_name", default=None)
 _actor_role: ContextVar[Optional[str]] = ContextVar("actor_role", default=None)
@@ -62,7 +69,7 @@ def create_session_token(*, user_id: int, name: str, role: str, ttl_seconds: int
     return f"{payload_part}.{_urlsafe_b64encode(signature)}"
 
 
-def verify_session_token(token: str) -> Optional[Dict[str, object]]:
+def verify_session_token(token: str) -> Optional[SessionPayload]:
     text = str(token or "").strip()
     if not text or "." not in text:
         return None
@@ -73,7 +80,7 @@ def verify_session_token(token: str) -> Optional[Dict[str, object]]:
         if not hmac.compare_digest(expected_sig, actual_sig):
             return None
         payload = json.loads(_urlsafe_b64decode(payload_part).decode("utf-8"))
-    except Exception:
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as e:
         return None
 
     if not isinstance(payload, dict):
@@ -81,7 +88,7 @@ def verify_session_token(token: str) -> Optional[Dict[str, object]]:
     try:
         exp = int(payload.get("exp", 0))
         user_id = int(payload.get("uid"))
-    except Exception:
+    except (ValueError, TypeError):
         return None
     if exp <= int(time.time()):
         return None
@@ -93,7 +100,7 @@ def verify_session_token(token: str) -> Optional[Dict[str, object]]:
     if not name:
         return None
 
-    return {"uid": user_id, "name": name, "role": role, "exp": exp}
+    return SessionPayload(uid=user_id, name=name, role=role, exp=exp)
 
 
 def require_roles(allowed_roles: Iterable[str], *, context: str) -> None:

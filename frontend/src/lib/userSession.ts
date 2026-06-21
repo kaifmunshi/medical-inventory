@@ -17,6 +17,11 @@ export type StoredShortcutItem = {
   hotkey?: string | null
 }
 
+interface ShortcutItemInput {
+  to?: string
+  hotkey?: string | null
+}
+
 function userShortcutsKey(userId: number) {
   return `app_user_shortcuts_v1:${userId}`
 }
@@ -48,11 +53,12 @@ export function loadStoredShortcuts(userId: number): StoredShortcutItem[] {
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
     return parsed
-      .map((item) => {
+      .map((item: unknown): StoredShortcutItem | null => {
         if (typeof item === 'string') return { to: item, hotkey: null }
         if (!item || typeof item !== 'object') return null
-        const to = String((item as any).to || '').trim()
-        const hotkey = String((item as any).hotkey || '').trim() || null
+        const shortcutInput = item as ShortcutItemInput
+        const to = String(shortcutInput.to || '').trim()
+        const hotkey = String(shortcutInput.hotkey || '').trim() || null
         if (!to) return null
         return { to, hotkey }
       })

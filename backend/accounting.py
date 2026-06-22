@@ -44,6 +44,7 @@ SYSTEM_GROUPS = {
     "PURCHASES": ("Purchase Accounts", "EXPENSE"),
     "INDIRECT_INCOME": ("Indirect Incomes", "INCOME"),
     "INDIRECT_EXPENSE": ("Indirect Expenses", "EXPENSE"),
+    "SUSPENSE_ACCOUNTS": ("Suspense Accounts", "ASSET"),
 }
 
 
@@ -58,6 +59,7 @@ SYSTEM_LEDGERS = {
     "CUSTOMER_WRITE_OFF": ("Customer Write-off", "INDIRECT_EXPENSE"),
     "PURCHASE_WRITE_OFF": ("Purchase Write-off", "INDIRECT_INCOME"),
     "BANK_CHARGES": ("Bank Charges", "INDIRECT_EXPENSE"),
+    "SUSPENSE_ACCOUNT": ("Suspense Account", "SUSPENSE_ACCOUNTS"),
 }
 
 

@@ -15,6 +15,25 @@ export type JournalVoucherPayload = {
   entries: JournalLinePayload[]
 }
 
+export type SuspenseStatement = {
+  ledger: Ledger
+  opening_balance: number
+  closing_balance: number
+  vouchers: PostedVoucher[]
+  book_entries: SuspenseBookEntry[]
+}
+
+export type SuspenseBookEntry = {
+  source_type: 'CASHBOOK' | 'BANKBOOK'
+  source_id: number
+  created_at: string
+  entry_type: 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE'
+  amount: number
+  mode?: string | null
+  txn_charges: number
+  note?: string | null
+}
+
 export async function fetchVoucherDayBook(params: {
   from_date?: string
   to_date?: string
@@ -43,6 +62,14 @@ export async function listLedgerGroups(): Promise<LedgerGroup[]> {
 
 export async function createLedger(payload: { name: string; group_id: number }): Promise<Ledger> {
   const { data } = await api.post<Ledger>('/vouchers/ledgers', payload)
+  return data
+}
+
+export async function fetchSuspenseStatement(params?: {
+  from_date?: string
+  to_date?: string
+}): Promise<SuspenseStatement> {
+  const { data } = await api.get<SuspenseStatement>('/vouchers/suspense-statement', { params })
   return data
 }
 

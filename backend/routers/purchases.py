@@ -513,6 +513,32 @@ def add_stock_movement(
     )
 
 
+def sync_purchase_stock_movement_invoice_number(
+    session,
+    *,
+    purchase_id: int,
+    old_invoice_number: str,
+    new_invoice_number: str,
+) -> None:
+    """Keep inventory purchase history labels aligned with an edited invoice number."""
+    old_number = str(old_invoice_number or "").strip()
+    new_number = str(new_invoice_number or "").strip()
+    if not old_number or not new_number or old_number == new_number:
+        return
+
+    movements = session.exec(
+        select(StockMovement)
+        .where(func.upper(func.coalesce(StockMovement.ref_type, "")) == "PURCHASE")
+        .where(StockMovement.ref_id == int(purchase_id))
+    ).all()
+    for movement in movements:
+        note = str(movement.note or "")
+        if old_number not in note:
+            continue
+        movement.note = note.replace(old_number, new_number, 1)
+        session.add(movement)
+
+
 def date_key(value: Optional[str]) -> str:
     return str(value or "")[:10]
 
@@ -1634,6 +1660,7 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
         assert_purchase_has_no_active_returns(session, purchase_id, context="Purchase update")
         assert_financial_year_unlocked(session, row.invoice_date, context="Purchase update")
         before_snapshot = purchase_snapshot(session, row)
+        old_invoice_number = row.invoice_number
 
         data = payload.dict(exclude_unset=True)
         if "party_id" in data:
@@ -1654,6 +1681,12 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
             if duplicate:
                 raise HTTPException(status_code=400, detail="This invoice number already exists for the supplier")
             row.invoice_number = invoice_number
+            sync_purchase_stock_movement_invoice_number(
+                session,
+                purchase_id=int(row.id),
+                old_invoice_number=old_invoice_number,
+                new_invoice_number=invoice_number,
+            )
         if "invoice_date" in data:
             invoice_date = clean_date(data["invoice_date"])
             if not invoice_date:

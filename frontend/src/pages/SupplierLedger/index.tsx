@@ -643,6 +643,8 @@ export default function SupplierLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-purchases'] })
       queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['stock-card-product-ledger'] })
+      queryClient.invalidateQueries({ queryKey: ['stock-card-batch-ledger'] })
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to update purchase'), 'error'),
   })

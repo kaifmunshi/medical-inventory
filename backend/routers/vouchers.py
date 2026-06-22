@@ -12,6 +12,7 @@ from backend.db import get_session
 from backend.models import (
     Bill,
     BillPayment,
+    BankbookEntry,
     CashbookEntry,
     ExchangeRecord,
     Ledger,
@@ -56,6 +57,34 @@ class JournalEntryIn(BaseModel):
 class LedgerCreateIn(BaseModel):
     name: str
     group_id: int
+
+
+class SuspenseBookEntryOut(BaseModel):
+    source_type: str
+    source_id: int
+    created_at: str
+    entry_type: str
+    amount: float
+    mode: Optional[str] = None
+    txn_charges: float = 0.0
+    note: Optional[str] = None
+
+
+class SuspenseStatementOut(BaseModel):
+    ledger: LedgerOut
+    opening_balance: float
+    closing_balance: float
+    vouchers: List[VoucherOut]
+    book_entries: List[SuspenseBookEntryOut]
+
+
+def _suspense_book_delta(entry_type: Optional[str], amount: float) -> float:
+    normalized = str(entry_type or "").strip().upper()
+    if normalized == "RECEIPT":
+        return -float(amount or 0)
+    if normalized in {"WITHDRAWAL", "EXPENSE"}:
+        return float(amount or 0)
+    return 0.0
 
 
 def _round2(x: float) -> float:
@@ -289,6 +318,119 @@ def create_ledger(payload: LedgerCreateIn):
         session.commit()
         session.refresh(row)
         return LedgerOut(**row.dict())
+
+
+@router.get("/suspense-statement", response_model=SuspenseStatementOut)
+def suspense_statement(
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+):
+    normalized_from = _normalize_ymd(from_date, default_to_today=False) if from_date else None
+    normalized_to = _normalize_ymd(to_date, default_to_today=False) if to_date else None
+    if normalized_from and normalized_to and normalized_from > normalized_to:
+        raise HTTPException(status_code=400, detail="From date cannot be after To date")
+
+    with get_session() as session:
+        ledgers = ensure_accounting_setup(session)
+        suspense = ledgers["SUSPENSE_ACCOUNT"]
+        session.commit()
+        session.refresh(suspense)
+
+        opening_balance = 0.0
+        if normalized_from:
+            opening_rows = session.exec(
+                select(VoucherEntry.entry_type, VoucherEntry.amount)
+                .join(Voucher, Voucher.id == VoucherEntry.voucher_id)
+                .where(
+                    VoucherEntry.ledger_id == suspense.id,
+                    Voucher.voucher_date < normalized_from,
+                    Voucher.is_deleted == False,  # noqa: E712
+                )
+            ).all()
+            opening_balance = _round2(sum(
+                float(amount or 0) if str(entry_type).upper() == "DR" else -float(amount or 0)
+                for entry_type, amount in opening_rows
+            ))
+
+            prior_cash_rows = session.exec(
+                select(CashbookEntry).where(CashbookEntry.created_at < f"{normalized_from}T00:00:00")
+            ).all()
+            prior_bank_rows = session.exec(
+                select(BankbookEntry).where(BankbookEntry.created_at < f"{normalized_from}T00:00:00")
+            ).all()
+            opening_balance = _round2(
+                opening_balance
+                + sum(_suspense_book_delta(row.entry_type, row.amount) for row in prior_cash_rows)
+                + sum(_suspense_book_delta(row.entry_type, row.amount) for row in prior_bank_rows)
+            )
+
+        stmt = (
+            select(Voucher).distinct()
+            .join(VoucherEntry, VoucherEntry.voucher_id == Voucher.id)
+            .where(
+                VoucherEntry.ledger_id == suspense.id,
+                Voucher.is_deleted == False,  # noqa: E712
+            )
+        )
+        if normalized_from:
+            stmt = stmt.where(Voucher.voucher_date >= normalized_from)
+        if normalized_to:
+            stmt = stmt.where(Voucher.voucher_date <= normalized_to)
+        rows = session.exec(stmt.order_by(Voucher.voucher_date.asc(), Voucher.id.asc())).all()
+
+        vouchers = [_voucher_out(session, row) for row in rows]
+        start_iso = f"{normalized_from}T00:00:00" if normalized_from else None
+        end_iso = f"{normalized_to}T23:59:59.999999" if normalized_to else None
+        cash_stmt = select(CashbookEntry)
+        bank_stmt = select(BankbookEntry)
+        if start_iso:
+            cash_stmt = cash_stmt.where(CashbookEntry.created_at >= start_iso)
+            bank_stmt = bank_stmt.where(BankbookEntry.created_at >= start_iso)
+        if end_iso:
+            cash_stmt = cash_stmt.where(CashbookEntry.created_at <= end_iso)
+            bank_stmt = bank_stmt.where(BankbookEntry.created_at <= end_iso)
+        cash_rows = session.exec(cash_stmt.order_by(CashbookEntry.created_at.asc(), CashbookEntry.id.asc())).all()
+        bank_rows = session.exec(bank_stmt.order_by(BankbookEntry.created_at.asc(), BankbookEntry.id.asc())).all()
+        book_entries = [
+            SuspenseBookEntryOut(
+                source_type="CASHBOOK",
+                source_id=int(row.id),
+                created_at=row.created_at,
+                entry_type=row.entry_type,
+                amount=_round2(row.amount),
+                note=row.note,
+            )
+            for row in cash_rows
+            if _suspense_book_delta(row.entry_type, row.amount) != 0
+        ] + [
+            SuspenseBookEntryOut(
+                source_type="BANKBOOK",
+                source_id=int(row.id),
+                created_at=row.created_at,
+                entry_type=row.entry_type,
+                amount=_round2(row.amount),
+                mode=row.mode,
+                txn_charges=_round2(row.txn_charges),
+                note=row.note,
+            )
+            for row in bank_rows
+            if _suspense_book_delta(row.entry_type, row.amount) != 0
+        ]
+        period_delta = 0.0
+        for voucher in vouchers:
+            for entry in voucher.entries:
+                if int(entry.ledger_id) != int(suspense.id):
+                    continue
+                period_delta += float(entry.amount or 0) if entry.entry_type == "DR" else -float(entry.amount or 0)
+        period_delta += sum(_suspense_book_delta(row.entry_type, row.amount) for row in book_entries)
+
+        return SuspenseStatementOut(
+            ledger=LedgerOut(**suspense.dict()),
+            opening_balance=opening_balance,
+            closing_balance=_round2(opening_balance + period_delta),
+            vouchers=vouchers,
+            book_entries=book_entries,
+        )
 
 
 @router.get("/", response_model=List[VoucherOut])

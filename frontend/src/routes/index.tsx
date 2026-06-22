@@ -32,6 +32,7 @@ import JournalEntryPage from '../pages/JournalEntry'
 import LooseStockPage from '../pages/LooseStock'
 import SupplierLedgerPage from '../pages/SupplierLedger'
 import CustomerLedgerPage from '../pages/CustomerLedger'
+import SuspenseAccountPage from '../pages/SuspenseAccount'
 
 function SessionLockRoute({ children }: { children: ReactNode }) {
   const location = useLocation()
@@ -80,6 +81,7 @@ export default function AppRoutes() {
         )}
         <Route path="loose-stock" element={<LooseStockPage />} />
         <Route path="supplier-ledger" element={<SupplierLedgerPage />} />
+        <Route path="suspense-account" element={<SuspenseAccountPage />} />
         <Route path="customer-ledger" element={<CustomerLedgerPage />} />
         <Route path="stock-audit" element={<StockAuditPage />} />
         <Route path="settings" element={<Settings />} />

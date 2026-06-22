@@ -96,6 +96,7 @@ export const appMenuGroups: AppMenuGroup[] = [
         : []),
       { to: '/customer-ledger', label: 'Customer Ledger', icon: <Group fontSize="small" />, hint: 'Debtor bills and receipts' },
       { to: '/supplier-ledger', label: 'Supplier Ledger', icon: <LocalShipping fontSize="small" />, hint: 'Supplier purchases and settlements' },
+      { to: '/suspense-account', label: 'Suspense Account', icon: <AccountBalanceWallet fontSize="small" />, hint: 'Date-wise suspense entries and adjustments' },
     ],
   },
   {

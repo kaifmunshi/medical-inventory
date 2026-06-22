@@ -4,12 +4,14 @@ import {
   Box,
   Button,
   Chip,
+  Checkbox,
   Collapse,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
+  FormControlLabel,
   IconButton,
   Link,
   MenuItem,
@@ -354,6 +356,7 @@ export default function CashbookPage() {
   const [entryDate, setEntryDate] = useState(today)
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
+  const [isSuspense, setIsSuspense] = useState(false)
   const [billOpen, setBillOpen] = useState(false)
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<any | null>(null)
@@ -363,6 +366,7 @@ export default function CashbookPage() {
   const [editDate, setEditDate] = useState(today)
   const [editAmount, setEditAmount] = useState('')
   const [editNote, setEditNote] = useState('')
+  const [editIsSuspense, setEditIsSuspense] = useState(false)
   const [deleteRow, setDeleteRow] = useState<any | null>(null)
 
   useEffect(() => {
@@ -515,10 +519,12 @@ export default function CashbookPage() {
         amount: Number(amount),
         note: note.trim() || undefined,
         entry_date: entryDate,
+        is_suspense: !['OPENING', 'CONTRA'].includes(entryType) && isSuspense,
       }),
     onSuccess: () => {
       setAmount('')
       setNote('')
+      setIsSuspense(false)
       setAddOpen(false)
       setSelectedDate(entryDate)
       qc.invalidateQueries({ queryKey: ['cashbook-day'] })
@@ -541,6 +547,7 @@ export default function CashbookPage() {
         amount: Number(editAmount),
         note: editNote.trim() || undefined,
         entry_date: editDate,
+        is_suspense: !['OPENING', 'CONTRA'].includes(editType) && editIsSuspense,
       }),
     onSuccess: (updated: any) => {
       setEditRow(null)
@@ -638,6 +645,7 @@ export default function CashbookPage() {
     setEditDate(isoDate(row.created_at) === '-' ? today : isoDate(row.created_at))
     setEditAmount(String(Number(row.amount || 0)))
     setEditNote(String(row.note || ''))
+    setEditIsSuspense(Boolean(row.is_suspense))
   }
 
   const billCashRowsDay = useMemo(() => {
@@ -1114,6 +1122,12 @@ export default function CashbookPage() {
               onChange={(e) => setNote(e.target.value)}
               placeholder="Optional details"
               sx={{ flex: 1 }}
+            />
+            <FormControlLabel
+              control={<Checkbox checked={isSuspense} onChange={(e) => setIsSuspense(e.target.checked)} />}
+              label="Suspense A/c"
+              disabled={entryType === 'OPENING' || entryType === 'CONTRA'}
+              sx={{ minWidth: 150 }}
             />
             <Button
               variant="contained"
@@ -1597,6 +1611,11 @@ export default function CashbookPage() {
               multiline
               minRows={2}
               fullWidth
+            />
+            <FormControlLabel
+              control={<Checkbox checked={editIsSuspense} onChange={(e) => setEditIsSuspense(e.target.checked)} />}
+              label="Show in Suspense A/c"
+              disabled={editType === 'OPENING' || editType === 'CONTRA'}
             />
             {mUpdate.isError ? (
               <Alert severity="error">{errorMessage(mUpdate.error, 'Failed to update entry.')}</Alert>

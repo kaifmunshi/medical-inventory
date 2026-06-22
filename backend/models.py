@@ -584,6 +584,7 @@ class CashbookEntry(SQLModel, table=True):
     entry_type: str = Field(index=True)  # "WITHDRAWAL" | "EXPENSE"
     amount: float                        # always store positive number
     note: Optional[str] = None
+    is_suspense: bool = Field(default=False, index=True)
 
 
 # --- Cashbook Schemas ---
@@ -592,6 +593,7 @@ class CashbookCreate(SQLModel):
     amount: float
     note: Optional[str] = None
     entry_date: Optional[str] = None  # YYYY-MM-DD (optional; defaults to today)
+    is_suspense: Optional[bool] = None
 
 
 class CashbookOut(SQLModel):
@@ -600,6 +602,7 @@ class CashbookOut(SQLModel):
     entry_type: str
     amount: float
     note: Optional[str] = None
+    is_suspense: bool = False
 
 
 class CashbookSummary(SQLModel):
@@ -623,6 +626,7 @@ class BankbookEntry(SQLModel, table=True):
     amount: float
     txn_charges: float = 0.0
     note: Optional[str] = None
+    is_suspense: bool = Field(default=False, index=True)
 
 
 # --- Bankbook Schemas ---
@@ -633,6 +637,7 @@ class BankbookCreate(SQLModel):
     txn_charges: float = 0.0
     note: Optional[str] = None
     entry_date: Optional[str] = None
+    is_suspense: Optional[bool] = None
 
 
 class BankbookOut(SQLModel):
@@ -643,6 +648,7 @@ class BankbookOut(SQLModel):
     amount: float
     txn_charges: float = 0.0
     note: Optional[str] = None
+    is_suspense: bool = False
 
 
 class BankbookSummary(SQLModel):

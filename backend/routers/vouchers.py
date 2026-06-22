@@ -353,15 +353,21 @@ def suspense_statement(
             ))
 
             prior_cash_rows = session.exec(
-                select(CashbookEntry).where(CashbookEntry.created_at < f"{normalized_from}T00:00:00")
+                select(CashbookEntry).where(
+                    CashbookEntry.created_at < f"{normalized_from}T00:00:00",
+                    CashbookEntry.is_suspense == True,  # noqa: E712
+                )
             ).all()
             prior_bank_rows = session.exec(
-                select(BankbookEntry).where(BankbookEntry.created_at < f"{normalized_from}T00:00:00")
+                select(BankbookEntry).where(
+                    BankbookEntry.created_at < f"{normalized_from}T00:00:00",
+                    BankbookEntry.is_suspense == True,  # noqa: E712
+                )
             ).all()
             opening_balance = _round2(
                 opening_balance
-                + sum(_suspense_book_delta(row.entry_type, row.amount) for row in prior_cash_rows)
-                + sum(_suspense_book_delta(row.entry_type, row.amount) for row in prior_bank_rows)
+                + sum(_suspense_book_delta(row.entry_type, row.amount) for row in prior_cash_rows if row.is_suspense)
+                + sum(_suspense_book_delta(row.entry_type, row.amount) for row in prior_bank_rows if row.is_suspense)
             )
 
         stmt = (
@@ -381,8 +387,8 @@ def suspense_statement(
         vouchers = [_voucher_out(session, row) for row in rows]
         start_iso = f"{normalized_from}T00:00:00" if normalized_from else None
         end_iso = f"{normalized_to}T23:59:59.999999" if normalized_to else None
-        cash_stmt = select(CashbookEntry)
-        bank_stmt = select(BankbookEntry)
+        cash_stmt = select(CashbookEntry).where(CashbookEntry.is_suspense == True)  # noqa: E712
+        bank_stmt = select(BankbookEntry).where(BankbookEntry.is_suspense == True)  # noqa: E712
         if start_iso:
             cash_stmt = cash_stmt.where(CashbookEntry.created_at >= start_iso)
             bank_stmt = bank_stmt.where(BankbookEntry.created_at >= start_iso)
@@ -401,7 +407,7 @@ def suspense_statement(
                 note=row.note,
             )
             for row in cash_rows
-            if _suspense_book_delta(row.entry_type, row.amount) != 0
+            if row.is_suspense and _suspense_book_delta(row.entry_type, row.amount) != 0
         ] + [
             SuspenseBookEntryOut(
                 source_type="BANKBOOK",
@@ -414,7 +420,7 @@ def suspense_statement(
                 note=row.note,
             )
             for row in bank_rows
-            if _suspense_book_delta(row.entry_type, row.amount) != 0
+            if row.is_suspense and _suspense_book_delta(row.entry_type, row.amount) != 0
         ]
         period_delta = 0.0
         for voucher in vouchers:

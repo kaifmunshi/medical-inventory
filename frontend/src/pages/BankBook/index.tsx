@@ -4,12 +4,14 @@ import {
   Box,
   Button,
   Chip,
+  Checkbox,
   Collapse,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
+  FormControlLabel,
   IconButton,
   Link,
   MenuItem,
@@ -388,6 +390,7 @@ export default function BankBookPage() {
   const [amount, setAmount] = useState('')
   const [txnCharges, setTxnCharges] = useState('')
   const [note, setNote] = useState('')
+  const [isSuspense, setIsSuspense] = useState(false)
   const [billOpen, setBillOpen] = useState(false)
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<any | null>(null)
@@ -399,6 +402,7 @@ export default function BankBookPage() {
   const [editAmount, setEditAmount] = useState('')
   const [editTxnCharges, setEditTxnCharges] = useState('')
   const [editNote, setEditNote] = useState('')
+  const [editIsSuspense, setEditIsSuspense] = useState(false)
   const [deleteRow, setDeleteRow] = useState<any | null>(null)
 
   useEffect(() => {
@@ -634,11 +638,13 @@ export default function BankBookPage() {
         txn_charges: entryType === 'CONTRA' ? 0 : Number(txnCharges || 0),
         note: note.trim() || undefined,
         entry_date: entryDate,
+        is_suspense: !['OPENING', 'CONTRA'].includes(entryType) && isSuspense,
       }),
     onSuccess: () => {
       setAmount('')
       setTxnCharges('')
       setNote('')
+      setIsSuspense(false)
       setAddOpen(false)
       setEntryMode('UPI')
       setSelectedDate(entryDate)
@@ -664,6 +670,7 @@ export default function BankBookPage() {
         txn_charges: editType === 'CONTRA' ? 0 : Number(editTxnCharges || 0),
         note: editNote.trim() || undefined,
         entry_date: editDate,
+        is_suspense: !['OPENING', 'CONTRA'].includes(editType) && editIsSuspense,
       }),
     onSuccess: (updated: any) => {
       setEditRow(null)
@@ -762,6 +769,7 @@ export default function BankBookPage() {
     setEditAmount(String(Number(row.amount || 0)))
     setEditTxnCharges(String(Number(row.txn_charges || 0)))
     setEditNote(String(row.note || ''))
+    setEditIsSuspense(Boolean(row.is_suspense))
   }
 
   const billOnlineRowsDay = useMemo(() => {
@@ -1400,6 +1408,12 @@ export default function BankBookPage() {
                 minRows={2}
                 fullWidth
               />
+              <FormControlLabel
+                control={<Checkbox checked={isSuspense} onChange={(e) => setIsSuspense(e.target.checked)} />}
+                label="Suspense A/c"
+                disabled={entryType === 'OPENING' || entryType === 'CONTRA'}
+                sx={{ minWidth: 150, mt: { md: 0.5 } }}
+              />
               <Button
                 variant="contained"
                 onClick={saveRecord}
@@ -1959,6 +1973,11 @@ export default function BankBookPage() {
               multiline
               minRows={2}
               fullWidth
+            />
+            <FormControlLabel
+              control={<Checkbox checked={editIsSuspense} onChange={(e) => setEditIsSuspense(e.target.checked)} />}
+              label="Show in Suspense A/c"
+              disabled={editType === 'OPENING' || editType === 'CONTRA'}
             />
             {mUpdate.isError ? (
               <Alert severity="error">{errorMessage(mUpdate.error, 'Failed to update bank record.')}</Alert>

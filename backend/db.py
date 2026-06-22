@@ -2404,11 +2404,17 @@ def migrate_db():
                 created_at TEXT NOT NULL,
                 entry_type TEXT NOT NULL,
                 amount REAL NOT NULL,
-                note TEXT
+                note TEXT,
+                is_suspense INTEGER NOT NULL DEFAULT 0
             )
         """))
+        cashbook_columns = {row[1] for row in session.exec(text("PRAGMA table_info(cashbookentry)")).all()}
+        if "is_suspense" not in cashbook_columns:
+            session.exec(text("ALTER TABLE cashbookentry ADD COLUMN is_suspense INTEGER NOT NULL DEFAULT 0"))
+            session.exec(text("UPDATE cashbookentry SET is_suspense = 1 WHERE lower(COALESCE(note, '')) LIKE '%suspense%'"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_cashbookentry_created_at ON cashbookentry (created_at)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_cashbookentry_entry_type ON cashbookentry (entry_type)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_cashbookentry_is_suspense ON cashbookentry (is_suspense)"))
         session.commit()
 
         # ---------- bankbookentry table migration ----------
@@ -2420,12 +2426,18 @@ def migrate_db():
                 mode TEXT NOT NULL,
                 amount REAL NOT NULL,
                 txn_charges REAL NOT NULL DEFAULT 0,
-                note TEXT
+                note TEXT,
+                is_suspense INTEGER NOT NULL DEFAULT 0
             )
         """))
+        bankbook_columns = {row[1] for row in session.exec(text("PRAGMA table_info(bankbookentry)")).all()}
+        if "is_suspense" not in bankbook_columns:
+            session.exec(text("ALTER TABLE bankbookentry ADD COLUMN is_suspense INTEGER NOT NULL DEFAULT 0"))
+            session.exec(text("UPDATE bankbookentry SET is_suspense = 1 WHERE lower(COALESCE(note, '')) LIKE '%suspense%'"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_bankbookentry_created_at ON bankbookentry (created_at)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_bankbookentry_entry_type ON bankbookentry (entry_type)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_bankbookentry_mode ON bankbookentry (mode)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_bankbookentry_is_suspense ON bankbookentry (is_suspense)"))
         session.commit()
 
         # ---------- purchase migration ----------

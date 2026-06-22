@@ -8,6 +8,7 @@ export type CashbookCreate = {
   amount: number
   note?: string
   entry_date?: string
+  is_suspense?: boolean
 }
 
 export type CashbookSummary = {
@@ -25,6 +26,7 @@ export type CashbookEntry = {
   entry_type: CashbookType
   amount: number
   note?: string | null
+  is_suspense: boolean
 }
 
 export async function createCashbookEntry(payload: CashbookCreate) {

@@ -10,6 +10,7 @@ export type BankbookCreate = {
   txn_charges?: number
   note?: string
   entry_date?: string
+  is_suspense?: boolean
 }
 
 export type BankbookSummary = {
@@ -30,6 +31,7 @@ export type BankbookEntry = {
   amount: number
   txn_charges: number
   note?: string | null
+  is_suspense: boolean
 }
 
 export type BankbookDay = {

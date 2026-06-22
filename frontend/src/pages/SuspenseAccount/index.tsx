@@ -226,6 +226,7 @@ export default function SuspenseAccountPage() {
           amount: numericAmount,
           note: narration.trim() || undefined,
           entry_date: entryDate,
+          is_suspense: true,
         }
         return editingId ? updateCashbookEntry(editingId, payload) : createCashbookEntry(payload)
       }
@@ -237,6 +238,7 @@ export default function SuspenseAccountPage() {
           txn_charges: Number(txnCharges || 0),
           note: narration.trim() || undefined,
           entry_date: entryDate,
+          is_suspense: true,
         }
         return editingId ? updateBankbookEntry(editingId, payload) : createBankbookEntry(payload)
       }

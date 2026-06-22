@@ -316,6 +316,7 @@ def create_entry(payload: CashbookCreate):
             amount=amt,
             note=(payload.note or None),
             created_at=created_at,
+            is_suspense=bool(payload.is_suspense),
         )
         session.add(row)
         session.commit()
@@ -354,6 +355,8 @@ def update_entry(entry_id: int, payload: CashbookCreate):
         row.amount = amt
         row.note = payload.note or None
         row.created_at = created_at
+        if payload.is_suspense is not None:
+            row.is_suspense = bool(payload.is_suspense)
         session.add(row)
         session.commit()
         session.refresh(row)

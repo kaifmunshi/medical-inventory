@@ -139,8 +139,8 @@ export default function SuspenseAccountPage() {
         reference: `${entry.source_type === 'CASHBOOK' ? 'Cash' : 'Bank'} #${entry.source_id}`,
         particulars: `${entry.source_type === 'CASHBOOK' ? 'Cashbook' : 'Bank Book'} · ${entry.entry_type}${entry.mode ? ` · ${entry.mode}` : ''}`,
         note: entry.note || '',
-        debit: isReceipt ? 0 : Number(entry.amount || 0),
-        credit: isReceipt ? Number(entry.amount || 0) : 0,
+        debit: isReceipt ? Number(entry.amount || 0) : 0,
+        credit: isReceipt ? 0 : Number(entry.amount || 0),
         editable: true,
         voucher: null as PostedVoucher | null,
         bookEntry: entry,
@@ -406,7 +406,7 @@ export default function SuspenseAccountPage() {
             </Stack>
             {editSource !== 'JOURNAL' ? (
               <Typography variant="caption" color="text.secondary">
-                Receipt means money came in (negative Suspense). Withdrawal or Expense means money went out (positive Suspense).
+                Receipt means money came in (Debit Suspense). Withdrawal or Expense means money went out (Credit Suspense).
               </Typography>
             ) : null}
             {editSource === 'JOURNAL' ? (

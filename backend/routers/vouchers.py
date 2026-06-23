@@ -81,9 +81,9 @@ class SuspenseStatementOut(BaseModel):
 def _suspense_book_delta(entry_type: Optional[str], amount: float) -> float:
     normalized = str(entry_type or "").strip().upper()
     if normalized == "RECEIPT":
-        return -float(amount or 0)
-    if normalized in {"WITHDRAWAL", "EXPENSE"}:
         return float(amount or 0)
+    if normalized in {"WITHDRAWAL", "EXPENSE"}:
+        return -float(amount or 0)
     return 0.0
 
 

@@ -303,6 +303,7 @@ export default function CustomerLedgerPage() {
   const [editReceiptTarget, setEditReceiptTarget] = useState<ReceiptHistoryRow | null>(null)
   const [recoverReceiptTarget, setRecoverReceiptTarget] = useState<ReceiptHistoryRow | null>(null)
   const [applyTarget, setApplyTarget] = useState<ReceiptHistoryRow | null>(null)
+  const [advancePickerOpen, setAdvancePickerOpen] = useState(false)
   const [applyDate, setApplyDate] = useState(today)
   const [applyNote, setApplyNote] = useState('')
   const [applyDrafts, setApplyDrafts] = useState<Record<number, string>>({})
@@ -637,6 +638,9 @@ export default function CustomerLedgerPage() {
   const activeReceiptHistory = receiptHistory.filter((row) => !row.isDeleted)
   const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
   const receiptHistoryOnAccountTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
+  const availableAdvanceReceipts = activeReceiptHistory.filter(
+    (row) => row.sourceType === 'party_receipt' && Number(row.onAccount || 0) > 0.0001,
+  )
 
   function billSortValue(row: DebtorLedgerRow | OpenBill, key: BillSortKey): string | number {
     if (key === 'payment_status') {
@@ -1064,9 +1068,22 @@ export default function CustomerLedgerPage() {
     <Stack gap={2}>
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
         <Typography variant="h5">Customer Ledger</Typography>
-        <Button variant="contained" onClick={openReceiptDialog} disabled={!selectedParty}>
-          Record Receipt
-        </Button>
+        <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+          <Button variant="contained" onClick={openReceiptDialog} disabled={!selectedParty}>
+            Record Receipt
+          </Button>
+          <Tooltip title={availableAdvanceReceipts.length > 0 ? 'Apply an available customer advance to open bills' : 'No available advance for this customer'} arrow>
+            <span>
+              <Button
+                variant="outlined"
+                onClick={() => setAdvancePickerOpen(true)}
+                disabled={!selectedParty || availableAdvanceReceipts.length === 0}
+              >
+                Adjust Advance
+              </Button>
+            </span>
+          </Tooltip>
+        </Stack>
       </Stack>
 
       <Paper sx={{ p: 2 }}>
@@ -1606,7 +1623,7 @@ export default function CustomerLedgerPage() {
                                   disabled={applyReceiptM.isPending}
                                   sx={{ minWidth: 54, px: 1 }}
                                 >
-                                  Apply
+                                  Adjust
                                 </Button>
                               </span>
                             </Tooltip>
@@ -1800,6 +1817,35 @@ export default function CustomerLedgerPage() {
           <Button variant="contained" onClick={saveReceipt} disabled={receiptM.isPending}>
             Save Receipt
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={advancePickerOpen} onClose={() => setAdvancePickerOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Choose Advance Receipt</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={1}>
+            {availableAdvanceReceipts.map((receipt) => (
+              <Button
+                key={receipt.id}
+                variant="outlined"
+                color="inherit"
+                onClick={() => {
+                  setAdvancePickerOpen(false)
+                  openApplyAdvance(receipt)
+                }}
+                sx={{ justifyContent: 'space-between', textTransform: 'none' }}
+              >
+                <span>Receipt #{receipt.receiptId} | {String(receipt.when || '').slice(0, 10)}</span>
+                <b>Available Rs {money(receipt.onAccount)}</b>
+              </Button>
+            ))}
+            {availableAdvanceReceipts.length === 0 ? (
+              <Typography color="text.secondary">No unused advance is available for this customer.</Typography>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAdvancePickerOpen(false)}>Cancel</Button>
         </DialogActions>
       </Dialog>
 

@@ -1733,6 +1733,59 @@ def cleanup_opening_purchase_duplicate_repair_pairs(session) -> tuple[int, str |
     return len(applied), backup_path
 
 
+def sync_purchase_stock_movement_notes(session) -> int:
+    """Refresh purchase-linked stock movement notes from the current purchase number."""
+
+    def refreshed_note(reason_value, note_value, invoice_number_value) -> str | None:
+        reason = str(reason_value or "").strip().upper()
+        note = str(note_value or "")
+        invoice_number = str(invoice_number_value or "").strip()
+        if not invoice_number:
+            return note_value
+
+        if reason == "PURCHASE":
+            return f"Purchase {invoice_number}"
+        if reason == "PURCHASE_LINK":
+            return f"Linked existing inventory to purchase {invoice_number}"
+        if reason == "PURCHASE_LINK_REMOVED":
+            return f"Removed existing inventory link from purchase {invoice_number}"
+        if reason == "PURCHASE_CANCEL":
+            return f"Cancelled purchase {invoice_number}"
+        if reason == "PURCHASE_LINK_CANCEL":
+            return f"Cancelled existing inventory link for purchase {invoice_number}"
+        if reason == "PURCHASE_EDIT":
+            edited_match = re.match(r"^Edited purchase .+?(: .*)$", note)
+            if edited_match:
+                return f"Edited purchase {invoice_number}{edited_match.group(1)}"
+            if re.match(r"^Replaced items on purchase\b", note):
+                return f"Replaced items on purchase {invoice_number}"
+        return note_value
+
+    rows = session.exec(
+        text("""
+            SELECT sm.id, sm.reason, sm.note, p.invoice_number
+            FROM stockmovement sm
+            JOIN purchase p ON p.id = sm.ref_id
+            WHERE upper(coalesce(sm.ref_type, '')) = 'PURCHASE'
+        """)
+    ).all()
+
+    updated = 0
+    for row in rows:
+        movement_id = int(row[0])
+        next_note = refreshed_note(row[1], row[2], row[3])
+        if next_note == row[2]:
+            continue
+        session.exec(
+            text("UPDATE stockmovement SET note = :note WHERE id = :id").bindparams(
+                note=next_note,
+                id=movement_id,
+            ),
+        )
+        updated += 1
+    return updated
+
+
 def convert_positive_club_recon_to_opening(session) -> tuple[int, str | None]:
     """
     Older clubbing code preserved leftover source stock with a current-dated
@@ -3130,6 +3183,12 @@ def migrate_db():
                     ts=ts_repair,
                 ),
             )
+            session.commit()
+
+        # ---------- repeat-safe upkeep: purchase stock movement notes ----------
+        # Keeps existing stock ledger notes aligned with the current purchase number.
+        synced_purchase_note_count = sync_purchase_stock_movement_notes(session)
+        if synced_purchase_note_count:
             session.commit()
 
         # ---------- default financial year ----------

@@ -526,16 +526,39 @@ def sync_purchase_stock_movement_invoice_number(
     if not old_number or not new_number or old_number == new_number:
         return
 
+    def refreshed_note(movement: StockMovement) -> Optional[str]:
+        reason = str(movement.reason or "").strip().upper()
+        note = str(movement.note or "")
+        replaced = note.replace(old_number, new_number, 1) if old_number in note else note
+
+        if reason == "PURCHASE":
+            return f"Purchase {new_number}"
+        if reason == "PURCHASE_LINK":
+            return f"Linked existing inventory to purchase {new_number}"
+        if reason == "PURCHASE_LINK_REMOVED":
+            return f"Removed existing inventory link from purchase {new_number}"
+        if reason == "PURCHASE_CANCEL":
+            return f"Cancelled purchase {new_number}"
+        if reason == "PURCHASE_LINK_CANCEL":
+            return f"Cancelled existing inventory link for purchase {new_number}"
+        if reason == "PURCHASE_EDIT":
+            edited_match = re.match(r"^Edited purchase .+?(: .*)$", note)
+            if edited_match:
+                return f"Edited purchase {new_number}{edited_match.group(1)}"
+            if re.match(r"^Replaced items on purchase\b", note):
+                return f"Replaced items on purchase {new_number}"
+        return replaced
+
     movements = session.exec(
         select(StockMovement)
         .where(func.upper(func.coalesce(StockMovement.ref_type, "")) == "PURCHASE")
         .where(StockMovement.ref_id == int(purchase_id))
     ).all()
     for movement in movements:
-        note = str(movement.note or "")
-        if old_number not in note:
+        note = refreshed_note(movement)
+        if note == movement.note:
             continue
-        movement.note = note.replace(old_number, new_number, 1)
+        movement.note = note
         session.add(movement)
 
 

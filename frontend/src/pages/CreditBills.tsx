@@ -28,10 +28,11 @@ import {
   listBillPayments,
 } from '../services/billing'
 import { fetchCustomers } from '../services/customers'
+import { applyPartyReceipt, fetchParties, fetchPartyReceipts } from '../services/parties'
 import { getExchangeByReturn, listExchangeRecords } from '../services/returns'
 import { todayRange } from '../lib/date'
 import { fetchFinancialYears } from '../services/settings'
-import type { FinancialYear } from '../lib/types'
+import type { FinancialYear, Party, PartyReceipt } from '../lib/types'
 
 function itemsPreview(items: any[], max = 6) {
   const names = (items || []).map(
@@ -116,6 +117,10 @@ function extractCustomerMeta(notes: any) {
   }
 }
 
+function normalizedName(value: unknown) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
 function previousFinancialYear(years: FinancialYear[], activeYear: FinancialYear | null) {
   if (!activeYear) return null
   return (
@@ -176,6 +181,11 @@ export default function CreditBills() {
   const [writeoffAmount, setWriteoffAmount] = useState<number | ''>('')
   const [note, setNote] = useState('')
   const [paymentDate, setPaymentDate] = useState(todayFrom)
+  const [advanceBill, setAdvanceBill] = useState<any | null>(null)
+  const [advanceReceiptId, setAdvanceReceiptId] = useState('')
+  const [advanceAmount, setAdvanceAmount] = useState<number | ''>('')
+  const [advanceDate, setAdvanceDate] = useState(todayFrom)
+  const [advanceNote, setAdvanceNote] = useState('')
   const payPending = useMemo(
     () =>
       round2(
@@ -225,6 +235,10 @@ export default function CreditBills() {
     queryKey: ['credit-bills-customers'],
     queryFn: () => fetchCustomers({ limit: 1000 }),
   })
+  const debtorPartiesQ = useQuery({
+    queryKey: ['credit-bills-debtor-parties'],
+    queryFn: () => fetchParties({ party_group: 'SUNDRY_DEBTOR', is_active: true }),
+  })
   const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
   const prevYear = useMemo(() => previousFinancialYear(yearsQ.data || [], activeYear), [activeYear, yearsQ.data])
   const customerById = useMemo(() => {
@@ -234,6 +248,26 @@ export default function CreditBills() {
     }
     return map
   }, [customersQ.data])
+  const debtorPartyById = useMemo(() => {
+    const map = new Map<number, Party>()
+    for (const party of debtorPartiesQ.data || []) map.set(Number(party.id), party)
+    return map
+  }, [debtorPartiesQ.data])
+  const debtorPartyByLegacyCustomerId = useMemo(() => {
+    const map = new Map<number, Party>()
+    for (const party of debtorPartiesQ.data || []) {
+      if (Number(party.legacy_customer_id || 0) > 0) map.set(Number(party.legacy_customer_id), party)
+    }
+    return map
+  }, [debtorPartiesQ.data])
+  const debtorPartyByName = useMemo(() => {
+    const map = new Map<string, Party>()
+    for (const party of debtorPartiesQ.data || []) {
+      const name = normalizedName(party.name)
+      if (name) map.set(name, party)
+    }
+    return map
+  }, [debtorPartiesQ.data])
   const qExchanges = useQuery({
     queryKey: ['credit-bills-exchanges', appliedFrom, appliedTo],
     queryFn: async () => {
@@ -417,6 +451,53 @@ export default function CreditBills() {
     }
   }
 
+  function debtorPartyForBill(bill: any) {
+    const directParty = debtorPartyById.get(Number(bill?.party_id || 0))
+    if (directParty) return directParty
+
+    const customerId = Number(bill?.customer_id || 0)
+    const legacyParty = debtorPartyByLegacyCustomerId.get(customerId)
+    if (legacyParty) return legacyParty
+
+    const customerName = customerId > 0 ? customerById.get(customerId)?.name : extractCustomerMeta(bill?.notes).name
+    return debtorPartyByName.get(normalizedName(customerName)) || null
+  }
+
+  const advanceParty = advanceBill ? debtorPartyForBill(advanceBill) : null
+  const advanceBillPending = useMemo(
+    () => round2(Math.max(0, Number(advanceBill?.total_amount || 0) - Number(advanceBill?.paid_amount || 0) - Number(advanceBill?.writeoff_amount || 0))),
+    [advanceBill],
+  )
+  const advanceReceiptsQ = useQuery({
+    queryKey: ['credit-bill-advance-receipts', advanceParty?.id],
+    queryFn: () => fetchPartyReceipts(Number(advanceParty?.id)),
+    enabled: Boolean(advanceParty?.id),
+  })
+  const availableAdvanceReceipts = useMemo(
+    () => (advanceReceiptsQ.data || []).filter((receipt) => !receipt.is_deleted && Number(receipt.unallocated_amount || 0) > 0.0001),
+    [advanceReceiptsQ.data],
+  )
+  const selectedAdvanceReceipt = useMemo<PartyReceipt | null>(
+    () => availableAdvanceReceipts.find((receipt) => Number(receipt.id) === Number(advanceReceiptId)) || null,
+    [advanceReceiptId, availableAdvanceReceipts],
+  )
+
+  function closeAdvanceDialog() {
+    setAdvanceBill(null)
+    setAdvanceReceiptId('')
+    setAdvanceAmount('')
+    setAdvanceDate(todayFrom)
+    setAdvanceNote('')
+  }
+
+  function openAdjustAdvance(bill: any) {
+    setAdvanceBill(bill)
+    setAdvanceReceiptId('')
+    setAdvanceAmount('')
+    setAdvanceDate(todayFrom)
+    setAdvanceNote('')
+  }
+
   function detailHasPendingBalance(bill: any) {
     return (
       Number(bill?.total_amount || 0) - Number(bill?.paid_amount || 0) - Number(bill?.writeoff_amount || 0) > 0.0001
@@ -586,6 +667,35 @@ export default function CreditBills() {
       setEditPaymentRow(null)
       await qBills.refetch()
       if (billId) await refreshDetailIfOpen(billId)
+      invalidatePaymentConsumers()
+    },
+  })
+
+  const mApplyAdvance = useMutation({
+    mutationFn: async () => {
+      if (!advanceBill?.id) throw new Error('Bill missing')
+      if (!advanceParty?.id) throw new Error('Customer account is not linked to this bill')
+      if (!selectedAdvanceReceipt?.id) throw new Error('Select an advance receipt')
+
+      const amount = round2(Number(advanceAmount || 0))
+      const available = Number(selectedAdvanceReceipt.unallocated_amount || 0)
+      if (amount <= 0) throw new Error('Adjustment amount must be greater than 0')
+      if (amount > advanceBillPending + 0.0001) throw new Error('Adjustment exceeds this bill balance')
+      if (amount > available + 0.0001) throw new Error('Adjustment exceeds the available advance')
+
+      return applyPartyReceipt(Number(advanceParty.id), Number(selectedAdvanceReceipt.id), {
+        payment_date: advanceDate || undefined,
+        note: advanceNote || undefined,
+        adjustments: [{ bill_id: Number(advanceBill.id), amount }],
+      })
+    },
+    onSuccess: async () => {
+      const billId = Number(advanceBill?.id || 0)
+      const partyId = Number(advanceParty?.id || 0)
+      closeAdvanceDialog()
+      await qBills.refetch()
+      if (billId) await refreshDetailIfOpen(billId)
+      if (partyId) queryClient.invalidateQueries({ queryKey: ['credit-bill-advance-receipts', partyId] })
       invalidatePaymentConsumers()
     },
   })
@@ -805,6 +915,14 @@ export default function CreditBills() {
                                 <Button size="small" variant="contained" onClick={() => openReceivePayment(r)}>
                                   Receive
                                 </Button>
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  onClick={() => openAdjustAdvance(r.raw)}
+                                  disabled={!debtorPartyForBill(r.raw)}
+                                >
+                                  Adjust Advance
+                                </Button>
                                 <Button size="small" variant="outlined" color="warning" onClick={() => openWriteoff(r)}>
                                   Write-off
                                 </Button>
@@ -864,6 +982,13 @@ export default function CreditBills() {
                       disabled={mPay.isPending}
                     >
                       Receive Payment
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      onClick={() => openAdjustAdvance(detail)}
+                      disabled={mApplyAdvance.isPending || !debtorPartyForBill(detail)}
+                    >
+                      Adjust Advance
                     </Button>
                     <Button
                       variant="outlined"
@@ -1250,6 +1375,79 @@ export default function CreditBills() {
                 <Typography color="error">
                   {(mPay.error as any)?.message || 'Payment failed'}
                 </Typography>
+              ) : null}
+            </Stack>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(advanceBill)} onClose={() => !mApplyAdvance.isPending && closeAdvanceDialog()} fullWidth maxWidth="sm">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          Adjust Advance (Bill #{advanceBill?.id})
+          <IconButton onClick={() => !mApplyAdvance.isPending && closeAdvanceDialog()} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          {!advanceParty ? (
+            <Typography color="error">This bill is not linked to a customer account.</Typography>
+          ) : advanceReceiptsQ.isLoading ? (
+            <Typography color="text.secondary">Loading customer advances...</Typography>
+          ) : availableAdvanceReceipts.length === 0 ? (
+            <Typography color="text.secondary">No unused customer advance is available.</Typography>
+          ) : (
+            <Stack gap={2}>
+              <Typography color="text.secondary">
+                Customer: {advanceParty.name} | Bill balance: {money(advanceBillPending)}
+              </Typography>
+              <TextField
+                select
+                label="Advance Receipt"
+                value={advanceReceiptId}
+                onChange={(event) => {
+                  const receiptId = event.target.value
+                  const receipt = availableAdvanceReceipts.find((item) => Number(item.id) === Number(receiptId))
+                  setAdvanceReceiptId(receiptId)
+                  setAdvanceAmount(receipt ? round2(Math.min(advanceBillPending, Number(receipt.unallocated_amount || 0))) : '')
+                }}
+              >
+                <MenuItem value="" disabled>Select an advance receipt</MenuItem>
+                {availableAdvanceReceipts.map((receipt) => (
+                  <MenuItem key={receipt.id} value={String(receipt.id)}>
+                    #{receipt.id} | {String(receipt.received_at || '').slice(0, 10)} | Available {money(receipt.unallocated_amount)}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <TextField
+                label="Adjustment Amount"
+                type="number"
+                value={advanceAmount}
+                onChange={(event) => setAdvanceAmount(event.target.value === '' ? '' : Number(event.target.value))}
+                inputProps={{ min: 0, max: Math.min(advanceBillPending, Number(selectedAdvanceReceipt?.unallocated_amount || 0)), step: '0.01' }}
+              />
+              <TextField
+                label="Adjustment Date"
+                type="date"
+                value={advanceDate}
+                onChange={(event) => setAdvanceDate(event.target.value)}
+                InputLabelProps={{ shrink: true }}
+              />
+              <TextField
+                label="Note (optional)"
+                value={advanceNote}
+                onChange={(event) => setAdvanceNote(event.target.value)}
+              />
+              <Box textAlign="right">
+                <Button
+                  variant="contained"
+                  onClick={() => mApplyAdvance.mutate()}
+                  disabled={mApplyAdvance.isPending || !selectedAdvanceReceipt || Number(advanceAmount || 0) <= 0}
+                >
+                  Apply Advance
+                </Button>
+              </Box>
+              {mApplyAdvance.isError ? (
+                <Typography color="error">{(mApplyAdvance.error as Error).message || 'Advance adjustment failed'}</Typography>
               ) : null}
             </Stack>
           )}

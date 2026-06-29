@@ -94,8 +94,12 @@ function makeFreeStockItem(): DraftItem {
   }
 }
 
+function round2(n: number) {
+  return Number(Number(n || 0).toFixed(2))
+}
+
 function money(n: number) {
-  return Number(n || 0).toFixed(2)
+  return round2(n).toFixed(2)
 }
 
 function paymentModeLabel(mode?: string | null) {
@@ -115,7 +119,7 @@ function lineGrossTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price'>) {
 }
 
 function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
-  return lineGrossTotal(item) - Number(item.discount_amount || 0) + Number(item.rounding_adjustment || 0)
+  return round2(lineGrossTotal(item) - Number(item.discount_amount || 0) + Number(item.rounding_adjustment || 0))
 }
 
 function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
@@ -128,10 +132,14 @@ function invoiceGst(
   items: Array<Pick<PurchaseItemPayload, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment' | 'gst_percent'>>,
   discountAmount: number,
 ) {
-  const subtotal = items.reduce((sum, item) => sum + lineBaseTotal(item), 0)
+  const subtotal = round2(items.reduce((sum, item) => round2(sum + lineBaseTotal(item)), 0))
   if (subtotal <= 0) return 0
-  const factor = Math.max(0, subtotal - Number(discountAmount || 0)) / subtotal
-  return items.reduce((sum, item) => sum + Math.max(0, lineBaseTotal(item)) * Number(item.gst_percent || 0) / 100, 0) * factor
+  const taxableAfterHeaderDiscount = Math.max(0, round2(subtotal - round2(discountAmount)))
+  const factor = taxableAfterHeaderDiscount / subtotal
+  return round2(items.reduce(
+    (sum, item) => round2(sum + round2(Math.max(0, lineBaseTotal(item)) * Number(item.gst_percent || 0) / 100)),
+    0,
+  ) * factor)
 }
 
 type PurchaseSnapshot = {
@@ -587,23 +595,23 @@ export default function PurchasesPage() {
   })
 
   const subtotal = useMemo(
-    () => items.reduce((sum, item) => sum + lineBaseTotal(item), 0),
+    () => round2(items.reduce((sum, item) => round2(sum + lineBaseTotal(item)), 0)),
     [items],
   )
   const freeStockTotalQty = freeStockItems.reduce((sum, item) => sum + Number(item.free_qty || 0), 0)
 
   const total = useMemo(
-    () => subtotal - Number(discountAmount || 0) + invoiceGst(items, Number(discountAmount || 0)) + Number(roundingAdjustment || 0),
+    () => round2(round2(subtotal) - round2(Number(discountAmount || 0)) + round2(invoiceGst(items, Number(discountAmount || 0))) + round2(Number(roundingAdjustment || 0))),
     [subtotal, discountAmount, items, roundingAdjustment],
   )
   const gstTotal = useMemo(() => invoiceGst(items, Number(discountAmount || 0)), [discountAmount, items])
-  const draftPaymentTotal = draftPayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)
-  const draftPaidTotal = draftPayments.reduce((sum, payment) => sum + (payment.is_writeoff ? 0 : Number(payment.amount || 0)), 0)
-  const draftWriteoffTotal = draftPayments.reduce((sum, payment) => sum + (payment.is_writeoff ? Number(payment.amount || 0) : 0), 0)
+  const draftPaymentTotal = round2(draftPayments.reduce((sum, payment) => round2(sum + Number(payment.amount || 0)), 0))
+  const draftPaidTotal = round2(draftPayments.reduce((sum, payment) => round2(sum + (payment.is_writeoff ? 0 : Number(payment.amount || 0))), 0))
+  const draftWriteoffTotal = round2(draftPayments.reduce((sum, payment) => round2(sum + (payment.is_writeoff ? Number(payment.amount || 0) : 0)), 0))
   const editingDraftPayment = editingDraftPaymentKey
     ? draftPayments.find((payment) => payment.key === editingDraftPaymentKey) || null
     : null
-  const draftPaymentAvailableAmount = Math.max(0, total - draftPaymentTotal) + (editingDraftPayment ? Number(editingDraftPayment.amount || 0) : 0)
+  const draftPaymentAvailableAmount = round2(Math.max(0, total - draftPaymentTotal) + (editingDraftPayment ? Number(editingDraftPayment.amount || 0) : 0))
 
   const suppliers = suppliersQ.data || []
   const categories = categoriesQ.data || []
@@ -616,11 +624,11 @@ export default function PurchasesPage() {
   const editDiscountValue = Number(editDiscountAmount || 0)
   const editGstAmount = invoiceGst(selectedPurchase?.items || [], editDiscountValue)
   const editRoundingValue = Number(editRoundingAdjustment || 0)
-  const editBillAmount = editSubtotal - editDiscountValue + editGstAmount + editRoundingValue
+  const editBillAmount = round2(editSubtotal - editDiscountValue + editGstAmount + editRoundingValue)
   const editPaidAmount = Number(selectedPurchase?.paid_amount || 0)
   const editWriteoffAmount = Number(selectedPurchase?.writeoff_amount || 0)
-  const editCoveredAmount = editPaidAmount + editWriteoffAmount
-  const editOutstandingAmount = editBillAmount - editCoveredAmount
+  const editCoveredAmount = round2(editPaidAmount + editWriteoffAmount)
+  const editOutstandingAmount = round2(editBillAmount - editCoveredAmount)
   const selectedSupplierName = selectedPurchase
     ? suppliers.find((s) => Number(s.id) === Number(selectedPurchase.party_id))?.name || `Supplier #${selectedPurchase.party_id}`
     : ''
@@ -632,17 +640,17 @@ export default function PurchasesPage() {
       || (Number(selectedPurchase?.id || 0) === Number(paymentHistoryPurchaseId) ? selectedPurchase : null)
     : null
   const paymentTargetOutstanding = paymentTargetPurchase
-    ? Math.max(0, Number(paymentTargetPurchase.total_amount || 0) - Number(paymentTargetPurchase.paid_amount || 0) - Number(paymentTargetPurchase.writeoff_amount || 0))
+    ? round2(Math.max(0, Number(paymentTargetPurchase.total_amount || 0) - Number(paymentTargetPurchase.paid_amount || 0) - Number(paymentTargetPurchase.writeoff_amount || 0)))
     : 0
-  const paymentAvailableAmount = paymentContext === 'draft'
+  const paymentAvailableAmount = round2(paymentContext === 'draft'
     ? draftPaymentAvailableAmount
-    : paymentTargetOutstanding + (editingPayment && !editingPayment.is_deleted ? Number(editingPayment.amount || 0) : 0)
-  const purchasePaymentCash = paymentType === 'writeoff' || paymentMode === 'online' ? 0 : Number(paymentCash || 0)
-  const purchasePaymentOnline = paymentType === 'writeoff' || paymentMode === 'cash' ? 0 : Number(paymentOnline || 0)
-  const purchasePaymentTxnCharges = paymentType === 'payment' && purchasePaymentOnline > 0 ? Number(paymentTxnCharges || 0) : 0
+    : paymentTargetOutstanding + (editingPayment && !editingPayment.is_deleted ? Number(editingPayment.amount || 0) : 0))
+  const purchasePaymentCash = paymentType === 'writeoff' || paymentMode === 'online' ? 0 : round2(Number(paymentCash || 0))
+  const purchasePaymentOnline = paymentType === 'writeoff' || paymentMode === 'cash' ? 0 : round2(Number(paymentOnline || 0))
+  const purchasePaymentTxnCharges = paymentType === 'payment' && purchasePaymentOnline > 0 ? round2(Number(paymentTxnCharges || 0)) : 0
   const purchasePaymentAmount = paymentType === 'writeoff'
-    ? Number(paymentAmount || 0)
-    : Number((purchasePaymentCash + purchasePaymentOnline).toFixed(2))
+    ? round2(Number(paymentAmount || 0))
+    : round2(purchasePaymentCash + purchasePaymentOnline)
   const purchasePaymentPartsInvalid = paymentType === 'writeoff'
     ? Number.isNaN(purchasePaymentAmount) || purchasePaymentAmount < 0
     : Number.isNaN(purchasePaymentCash) || Number.isNaN(purchasePaymentOnline) || purchasePaymentCash < 0 || purchasePaymentOnline < 0
@@ -853,7 +861,7 @@ export default function PurchasesPage() {
   }
 
   function openDraftPaymentDialog() {
-    const available = money(Math.max(0, total - draftPaymentTotal))
+    const available = money(round2(Math.max(0, total - draftPaymentTotal)))
     setPaymentContext('draft')
     setPaymentPurchaseId(null)
     setEditingPayment(null)
@@ -1048,18 +1056,18 @@ export default function PurchasesPage() {
       invoice_number: invoiceNumber.trim(),
       invoice_date: invoiceDate,
       notes: notes.trim() || undefined,
-      discount_amount: Number(discountAmount || 0),
-      gst_amount: gstTotal,
-      rounding_adjustment: Number(roundingAdjustment || 0),
+      discount_amount: round2(Number(discountAmount || 0)),
+      gst_amount: round2(gstTotal),
+      rounding_adjustment: round2(Number(roundingAdjustment || 0)),
       items: purchasePayloadItems(items),
       payments: draftPayments.map((payment) => ({
-        amount: Number(payment.amount || 0),
+        amount: round2(Number(payment.amount || 0)),
         mode: payment.mode,
         bank_mode: Number(payment.online_amount || 0) > 0 ? payment.bank_mode : undefined,
         transaction_id: Number(payment.online_amount || 0) > 0 && payment.bank_mode === 'UPI' ? payment.transaction_id?.trim() || undefined : undefined,
-        cash_amount: Number(payment.cash_amount || 0),
-        online_amount: Number(payment.online_amount || 0),
-        txn_charges: Number(payment.txn_charges || 0),
+        cash_amount: round2(Number(payment.cash_amount || 0)),
+        online_amount: round2(Number(payment.online_amount || 0)),
+        txn_charges: round2(Number(payment.txn_charges || 0)),
         note: payment.note?.trim() || undefined,
         paid_at: payment.paid_at || invoiceDate,
         is_writeoff: Boolean(payment.is_writeoff),
@@ -1951,7 +1959,7 @@ export default function PurchasesPage() {
                     <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
                       <Chip label={`Payments ${money(draftPaidTotal)}`} color="success" variant="outlined" />
                       <Chip label={`Write-off ${money(draftWriteoffTotal)}`} variant="outlined" />
-                      <Chip label={`Outstanding ${money(Math.max(0, total - draftPaymentTotal))}`} color="warning" variant="outlined" />
+                      <Chip label={`Outstanding ${money(round2(Math.max(0, total - draftPaymentTotal)))}`} color="warning" variant="outlined" />
                     </Stack>
                     <Button
 	                      variant="contained"

@@ -601,7 +601,7 @@ export default function PurchasesPage() {
   const freeStockTotalQty = freeStockItems.reduce((sum, item) => sum + Number(item.free_qty || 0), 0)
 
   const total = useMemo(
-    () => round2(round2(subtotal) - round2(Number(discountAmount || 0)) + round2(invoiceGst(items, Number(discountAmount || 0))) + round2(Number(roundingAdjustment || 0))),
+    () => round2(round2(subtotal) + round2(invoiceGst(items, Number(discountAmount || 0))) + round2(Number(roundingAdjustment || 0))),
     [subtotal, discountAmount, items, roundingAdjustment],
   )
   const gstTotal = useMemo(() => invoiceGst(items, Number(discountAmount || 0)), [discountAmount, items])
@@ -624,7 +624,7 @@ export default function PurchasesPage() {
   const editDiscountValue = Number(editDiscountAmount || 0)
   const editGstAmount = invoiceGst(selectedPurchase?.items || [], editDiscountValue)
   const editRoundingValue = Number(editRoundingAdjustment || 0)
-  const editBillAmount = round2(editSubtotal - editDiscountValue + editGstAmount + editRoundingValue)
+  const editBillAmount = round2(editSubtotal + editGstAmount + editRoundingValue)
   const editPaidAmount = Number(selectedPurchase?.paid_amount || 0)
   const editWriteoffAmount = Number(selectedPurchase?.writeoff_amount || 0)
   const editCoveredAmount = round2(editPaidAmount + editWriteoffAmount)

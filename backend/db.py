@@ -2291,6 +2291,23 @@ def migrate_db():
             if "updated_at" not in customer_col_names:
                 session.exec(text("ALTER TABLE customer ADD COLUMN updated_at TEXT"))
 
+            if "is_active" not in customer_col_names:
+                session.exec(text(
+                    "ALTER TABLE customer ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+                ))
+            if "merged_into_customer_id" not in customer_col_names:
+                session.exec(text(
+                    "ALTER TABLE customer ADD COLUMN merged_into_customer_id INTEGER"
+                ))
+            if "merged_at" not in customer_col_names:
+                session.exec(text(
+                    "ALTER TABLE customer ADD COLUMN merged_at TEXT"
+                ))
+            if "deleted_at" not in customer_col_names:
+                session.exec(text(
+                    "ALTER TABLE customer ADD COLUMN deleted_at TEXT"
+                ))
+
             session.exec(text(
                 "UPDATE customer SET created_at = :ts WHERE created_at IS NULL OR TRIM(created_at) = ''"
             ).bindparams(ts=_now_ts()))
@@ -2300,29 +2317,8 @@ def migrate_db():
 
             session.exec(text("CREATE INDEX IF NOT EXISTS ix_customer_name ON customer (name)"))
             session.exec(text("CREATE INDEX IF NOT EXISTS ix_customer_phone ON customer (phone)"))
-            session.commit()
-
-        requested_item_cols = session.exec(text("PRAGMA table_info(requesteditem)")).all()
-        requested_item_col_names = {c[1] for c in requested_item_cols}
-        if requested_item_cols:
-            if "customer_name" not in requested_item_col_names:
-                session.exec(text("ALTER TABLE requesteditem ADD COLUMN customer_name TEXT"))
-            if "notes" not in requested_item_col_names:
-                session.exec(text("ALTER TABLE requesteditem ADD COLUMN notes TEXT"))
-            if "created_at" not in requested_item_col_names:
-                session.exec(text("ALTER TABLE requesteditem ADD COLUMN created_at TEXT"))
-            if "updated_at" not in requested_item_col_names:
-                session.exec(text("ALTER TABLE requesteditem ADD COLUMN updated_at TEXT"))
-
-            session.exec(text(
-                "UPDATE requesteditem SET created_at = :ts WHERE created_at IS NULL OR TRIM(created_at) = ''"
-            ).bindparams(ts=_now_ts()))
-            session.exec(text(
-                "UPDATE requesteditem SET updated_at = COALESCE(NULLIF(created_at, ''), :ts) WHERE updated_at IS NULL OR TRIM(updated_at) = ''"
-            ).bindparams(ts=_now_ts()))
-
-            session.exec(text("CREATE INDEX IF NOT EXISTS ix_requesteditem_mobile ON requesteditem (mobile)"))
-            session.exec(text("CREATE INDEX IF NOT EXISTS ix_requesteditem_is_available ON requesteditem (is_available)"))
+            session.exec(text("CREATE INDEX IF NOT EXISTS ix_customer_is_active ON customer (is_active)"))
+            session.exec(text("CREATE INDEX IF NOT EXISTS ix_customer_merged_into_customer_id ON customer (merged_into_customer_id)"))
             session.commit()
 
         # ---------- inventory lot migration ----------

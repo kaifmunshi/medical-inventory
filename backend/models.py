@@ -150,6 +150,10 @@ class Customer(SQLModel, table=True):
     address_line: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    is_active: bool = Field(default=True, index=True)
+    merged_into_customer_id: Optional[int] = None
+    merged_at: Optional[str] = None
+    deleted_at: Optional[str] = None
 
 
 class Brand(SQLModel, table=True):
@@ -428,6 +432,11 @@ class CustomerOut(SQLModel):
     address_line: Optional[str] = None
     created_at: str
     updated_at: str
+
+    is_active: bool = True
+    merged_into_customer_id: Optional[int] = None
+    merged_at: Optional[str] = None
+    deleted_at: Optional[str] = None
 
 
 class BrandCreate(SQLModel):

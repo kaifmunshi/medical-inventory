@@ -291,6 +291,7 @@ def list_customers(
 ) -> List[CustomerOut]:
     with get_session() as session:
         stmt = select(Customer)
+        stmt = stmt.where(Customer.is_active == True)  # noqa: E712
         qq = (q or "").strip()
         if qq:
             like = f"%{qq.lower()}%"
@@ -351,7 +352,10 @@ def delete_customer(customer_id: int) -> Response:
                 status_code=400,
                 detail="Cannot delete customer because bills already exist for this customer",
             )
-        session.delete(row)
+        row.is_active = False
+        row.deleted_at = datetime.now().isoformat(timespec="seconds")
+        row.updated_at = row.deleted_at
+        session.add(row)
         session.commit()
         return Response(status_code=204)
 
@@ -477,14 +481,28 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
         if remove_party and remove_party.id:
             bill_conditions.append(Bill.party_id == int(remove_party.id))
         bills = session.exec(select(Bill).where(or_(*bill_conditions))).all()
+
+        keep_bill_ids = set(
+            int(bill_id)
+            for bill_id in session.exec(
+                select(Bill.id).where(_customer_bill_conditions(keep))
+            ).all()
+            if bill_id is not None
+        )
+
         moved_bills = 0
+
         for bill in bills:
-            if int(getattr(bill, "customer_id", 0) or 0) != keep_id:
-                moved_bills += 1
+            bill_id = int(bill.id or 0)
+
+            if bill_id in keep_bill_ids:
+                continue
+
             bill.customer_id = keep_id
             bill.party_id = int(keep_party.id or 0)
             bill.notes = _replace_customer_note(bill.notes, keep)
             session.add(bill)
+            moved_bills += 1
 
         moved_receipts = 0
         if remove_party and remove_party.id:
@@ -531,7 +549,19 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
                 "keep_party_id": int(keep_party.id or 0),
             },
         )
-        session.delete(remove)
+        # session.delete(remove)
+
+        now = datetime.now().isoformat(timespec="seconds")
+
+        remove.is_active = False
+        remove.merged_into_customer_id = keep_id
+        remove.merged_at = now
+        remove.deleted_at = now
+        remove.updated_at = now
+        remove.name = f"{remove.name} (Merged into #{keep_id})"
+
+        session.add(remove)
+        
         session.commit()
         return MergeCustomersOut(
             keep_customer_id=keep_id,

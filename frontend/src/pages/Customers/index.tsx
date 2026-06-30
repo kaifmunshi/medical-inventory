@@ -68,7 +68,7 @@ export default function CustomersPage() {
 
   const customersQ = useQuery<Customer[], Error>({
     queryKey: ['customers', q],
-    queryFn: () => fetchCustomers({ q: q.trim() || undefined }),
+    queryFn: () => fetchCustomers({ q: q.trim() || undefined, limit: 1000 }),
   })
   const keepSummaryQ = useQuery<CustomerSummary, Error>({
     queryKey: ['customer-summary', keepCustomer?.id],
@@ -428,8 +428,7 @@ export default function CustomersPage() {
               <Paper
                 variant="outlined"
                 sx={{ p: 2, flex: 1 }}
-                onMouseEnter={(e) => beginPreview(e, 'keep')}
-                onMouseLeave={closePreview}
+                
               >
                 <Stack gap={1.25}>
                   <Typography variant="subtitle2" fontWeight={800}>Keep Customer</Typography>
@@ -450,8 +449,7 @@ export default function CustomersPage() {
               <Paper
                 variant="outlined"
                 sx={{ p: 2, flex: 1 }}
-                onMouseEnter={(e) => beginPreview(e, 'remove')}
-                onMouseLeave={closePreview}
+                
               >
                 <Stack gap={1.25}>
                   <Typography variant="subtitle2" fontWeight={800}>Remove Duplicate</Typography>
@@ -492,19 +490,6 @@ export default function CustomersPage() {
           </Button>
         </DialogActions>
       </Dialog>
-
-      <Popover
-        open={Boolean(previewAnchor)}
-        anchorEl={previewAnchor}
-        onClose={closePreview}
-        disableRestoreFocus
-        sx={{ pointerEvents: 'none' }}
-        slotProps={{ paper: { sx: { p: 2, pointerEvents: 'none' } } }}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
-        transformOrigin={{ vertical: 'top', horizontal: 'left' }}
-      >
-        {previewContent(previewSummary, previewLoading)}
-      </Popover>
     </Stack>
   )
 }

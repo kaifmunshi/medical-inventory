@@ -1612,13 +1612,20 @@ export default function PurchasesPage() {
                           </li>
                         )}
                         renderInput={(params) => (
-                          <TextField
-                            {...params}
-                            label="Link Existing Stock"
-                            // helperText="Does not add stock. Use only for stock already entered."
-                            fullWidth
-                          />
-                        )}
+                        <TextField
+                          {...params}
+                          label="Link Existing Stock"
+                          fullWidth
+                          sx={{
+                            "& .MuiInputLabel-root": {
+                              color: "red",
+                            },
+                            "& .MuiInputLabel-root.Mui-focused": {
+                              color: "red",
+                            },
+                          }}
+                        />
+                      )}
                       />
                     </Grid>
                   ) : null}

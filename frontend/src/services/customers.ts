@@ -58,3 +58,15 @@ export async function moveCustomerBills(source_customer_id: number, destination_
   const res = await api.post('/customers/move-bills', { source_customer_id, destination_customer_id })
   return res.data as { moved_count: number; source_customer_id: number; destination_customer_id: number }
 }
+
+export async function mergeCustomers(keep_customer_id: number, remove_customer_id: number) {
+  const res = await api.post('/customers/merge', { keep_customer_id, remove_customer_id })
+  return res.data as {
+    keep_customer_id: number
+    removed_customer_id: number
+    moved_bills: number
+    moved_receipts: number
+    moved_ledgers: number
+    deactivated_party_id?: number | null
+  }
+}

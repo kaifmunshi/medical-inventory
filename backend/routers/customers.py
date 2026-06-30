@@ -8,7 +8,20 @@ from sqlmodel import select
 
 from backend.db import get_session
 from backend.inventory_lot_sync import item_stock_meta
-from backend.models import Bill, BillItem, BillItemOut, BillOut, Customer, CustomerCreate, CustomerUpdate, CustomerOut, Party
+from backend.controls import log_audit
+from backend.models import (
+    Bill,
+    BillItem,
+    BillItemOut,
+    BillOut,
+    Customer,
+    CustomerCreate,
+    CustomerUpdate,
+    CustomerOut,
+    Ledger,
+    Party,
+    PartyReceipt,
+)
 
 router = APIRouter()
 
@@ -139,6 +152,20 @@ class MoveCustomerBillsIn(BaseModel):
     destination_customer_id: int
 
 
+class MergeCustomersIn(BaseModel):
+    keep_customer_id: int
+    remove_customer_id: int
+
+
+class MergeCustomersOut(BaseModel):
+    keep_customer_id: int
+    removed_customer_id: int
+    moved_bills: int
+    moved_receipts: int
+    moved_ledgers: int
+    deactivated_party_id: Optional[int] = None
+
+
 def _name_exists(session, name: str, exclude_customer_id: Optional[int] = None) -> bool:
     normalized = _normalize_name(name).lower()
     if not normalized:
@@ -160,6 +187,69 @@ def _has_bills_for_customer(session, customer: Customer) -> bool:
 
     stmt = select(Bill.id).where(_customer_bill_conditions(customer))
     return session.exec(stmt.limit(1)).first() is not None
+
+
+def _ensure_customer_party(session, customer: Customer) -> Party:
+    party = session.exec(
+        select(Party)
+        .where(
+            Party.party_group == "SUNDRY_DEBTOR",
+            Party.legacy_customer_id == int(customer.id or 0),
+        )
+        .order_by(Party.id.asc())
+    ).first()
+    now = datetime.now().isoformat(timespec="seconds")
+    if party:
+        changed = False
+        if not party.is_active:
+            party.is_active = True
+            changed = True
+        if party.name != customer.name:
+            party.name = customer.name
+            changed = True
+        if party.phone != customer.phone:
+            party.phone = customer.phone
+            changed = True
+        if party.address_line != customer.address_line:
+            party.address_line = customer.address_line
+            changed = True
+        if changed:
+            party.updated_at = now
+            session.add(party)
+            session.flush()
+        return party
+
+    party = session.exec(
+        select(Party)
+        .where(
+            Party.party_group == "SUNDRY_DEBTOR",
+            func.lower(func.trim(func.coalesce(Party.name, ""))) == _normalize_name(customer.name).lower(),
+        )
+        .order_by(Party.id.asc())
+    ).first()
+    if party:
+        party.legacy_customer_id = int(customer.id or 0)
+        party.is_active = True
+        party.updated_at = now
+        session.add(party)
+        session.flush()
+        return party
+
+    party = Party(
+        name=_normalize_name(customer.name) or f"Customer #{customer.id}",
+        party_group="SUNDRY_DEBTOR",
+        phone=customer.phone,
+        address_line=customer.address_line,
+        opening_balance=0.0,
+        opening_balance_type="DR",
+        legacy_customer_id=int(customer.id or 0),
+        is_active=True,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(party)
+    session.flush()
+    return party
 
 
 @router.post("/", response_model=CustomerOut, status_code=201)
@@ -356,3 +446,98 @@ def move_customer_bills(payload: MoveCustomerBillsIn):
             "source_customer_id": source.id,
             "destination_customer_id": destination.id,
         }
+
+
+@router.post("/merge", response_model=MergeCustomersOut)
+def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
+    keep_id = int(payload.keep_customer_id)
+    remove_id = int(payload.remove_customer_id)
+    if keep_id == remove_id:
+        raise HTTPException(status_code=400, detail="Keep and remove customer must be different")
+
+    with get_session() as session:
+        keep = session.get(Customer, keep_id)
+        remove = session.get(Customer, remove_id)
+        if not keep:
+            raise HTTPException(status_code=404, detail="Keep customer not found")
+        if not remove:
+            raise HTTPException(status_code=404, detail="Remove customer not found")
+
+        keep_party = _ensure_customer_party(session, keep)
+        remove_party = session.exec(
+            select(Party)
+            .where(
+                Party.party_group == "SUNDRY_DEBTOR",
+                Party.legacy_customer_id == remove_id,
+            )
+            .order_by(Party.id.asc())
+        ).first()
+
+        bill_conditions = [_customer_bill_conditions(remove)]
+        if remove_party and remove_party.id:
+            bill_conditions.append(Bill.party_id == int(remove_party.id))
+        bills = session.exec(select(Bill).where(or_(*bill_conditions))).all()
+        moved_bills = 0
+        for bill in bills:
+            if int(getattr(bill, "customer_id", 0) or 0) != keep_id:
+                moved_bills += 1
+            bill.customer_id = keep_id
+            bill.party_id = int(keep_party.id or 0)
+            bill.notes = _replace_customer_note(bill.notes, keep)
+            session.add(bill)
+
+        moved_receipts = 0
+        if remove_party and remove_party.id:
+            receipts = session.exec(
+                select(PartyReceipt).where(PartyReceipt.party_id == int(remove_party.id))
+            ).all()
+            for receipt in receipts:
+                receipt.party_id = int(keep_party.id or 0)
+                session.add(receipt)
+                moved_receipts += 1
+
+        moved_ledgers = 0
+        if remove_party and remove_party.id:
+            ledgers = session.exec(select(Ledger).where(Ledger.party_id == int(remove_party.id))).all()
+            for ledger in ledgers:
+                ledger.party_id = int(keep_party.id or 0)
+                ledger.updated_at = datetime.now().isoformat(timespec="seconds")
+                session.add(ledger)
+                moved_ledgers += 1
+
+            remove_party.legacy_customer_id = None
+            remove_party.is_active = False
+            remove_party.notes = (
+                f"{remove_party.notes or ''}\nMerged into customer #{keep_id} on {datetime.now().isoformat(timespec='seconds')}"
+            ).strip()
+            remove_party.updated_at = datetime.now().isoformat(timespec="seconds")
+            session.add(remove_party)
+
+        log_audit(
+            session,
+            entity_type="CUSTOMER",
+            entity_id=keep_id,
+            action="MERGE",
+            note=f"Merged customer #{remove_id} into #{keep_id}",
+            details={
+                "keep_customer_id": keep_id,
+                "remove_customer_id": remove_id,
+                "keep_name": keep.name,
+                "remove_name": remove.name,
+                "moved_bills": moved_bills,
+                "moved_receipts": moved_receipts,
+                "moved_ledgers": moved_ledgers,
+                "removed_party_id": int(remove_party.id) if remove_party and remove_party.id else None,
+                "keep_party_id": int(keep_party.id or 0),
+            },
+        )
+        session.delete(remove)
+        session.commit()
+        return MergeCustomersOut(
+            keep_customer_id=keep_id,
+            removed_customer_id=remove_id,
+            moved_bills=moved_bills,
+            moved_receipts=moved_receipts,
+            moved_ledgers=moved_ledgers,
+            deactivated_party_id=int(remove_party.id) if remove_party and remove_party.id else None,
+        )

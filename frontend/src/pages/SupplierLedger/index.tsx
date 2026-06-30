@@ -46,7 +46,7 @@ import type { Category, Party, Product, Purchase, PurchaseItemPayload, PurchaseP
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
 
-type DraftItem = PurchaseItemPayload & { key: string; existing_stock_movement_id?: number }
+type DraftItem = PurchaseItemPayload & { key: string; batch_group_key?: string; existing_stock_movement_id?: number }
 
 const EXISTING_INVENTORY_FROM_DATE = '2026-04-01'
 const bankModeOptions: Array<{ value: PurchaseBankMode; label: string }> = [
@@ -76,6 +76,23 @@ function makeEmptyItem(): DraftItem {
     parent_unit_name: '',
     child_unit_name: '',
     conversion_qty: undefined,
+  }
+}
+
+function cloneItemForNewExpiry(item: DraftItem, copyPrices: boolean): DraftItem {
+  return {
+    ...item,
+    key: Math.random().toString(36).slice(2),
+    batch_group_key: item.batch_group_key || item.key,
+    purchase_item_id: undefined,
+    existing_inventory_item_id: undefined,
+    existing_stock_movement_id: undefined,
+    expiry_date: '',
+    cost_price: copyPrices ? Number(item.cost_price || 0) : 0,
+    mrp: copyPrices ? Number(item.mrp || 0) : 0,
+    gst_percent: copyPrices ? Number(item.gst_percent || 0) : 0,
+    discount_amount: copyPrices ? Number(item.discount_amount || 0) : 0,
+    rounding_adjustment: copyPrices ? Number(item.rounding_adjustment || 0) : 0,
   }
 }
 
@@ -222,8 +239,11 @@ export default function SupplierLedgerPage() {
   const [editDiscountAmount, setEditDiscountAmount] = useState('0')
   const [editRoundingAdjustment, setEditRoundingAdjustment] = useState('0')
   const [editItems, setEditItems] = useState<DraftItem[]>([makeEmptyItem()])
+  const [copyExpiryPrices, setCopyExpiryPrices] = useState(true)
   const [productSearch, setProductSearch] = useState('')
+  const [productSearchCategoryId, setProductSearchCategoryId] = useState<number | null>(null)
   const [inventorySearch, setInventorySearch] = useState('')
+  const [inventorySearchCategoryId, setInventorySearchCategoryId] = useState<number | null>(null)
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false)
   const [categoryTargetKey, setCategoryTargetKey] = useState<string | null>(null)
   const [newCategoryName, setNewCategoryName] = useState('')
@@ -231,9 +251,9 @@ export default function SupplierLedgerPage() {
   const [brandTargetKey, setBrandTargetKey] = useState<string | null>(null)
   const [newBrandName, setNewBrandName] = useState('')
   const productSearchTerm = productSearch.trim()
-  const canSearchProducts = productSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const canSearchProducts = productSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS || productSearchCategoryId !== null
   const inventorySearchTerm = inventorySearch.trim()
-  const canSearchInventoryBatches = inventorySearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const canSearchInventoryBatches = inventorySearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS || inventorySearchCategoryId !== null
 
   const suppliersQ = useQuery<Party[], Error>({
     queryKey: ['suppliers-ledger-select'],
@@ -274,16 +294,17 @@ export default function SupplierLedgerPage() {
   })
 
   const productsQ = useQuery<Product[], Error>({
-    queryKey: ['purchase-products', productSearchTerm],
-    queryFn: () => fetchProducts({ q: productSearchTerm }),
+    queryKey: ['purchase-products', productSearchTerm, productSearchCategoryId],
+    queryFn: () => fetchProducts({ q: productSearchTerm, category_id: productSearchCategoryId ?? undefined }),
     enabled: canSearchProducts,
   })
 
   const inventoryBatchesQ = useQuery<IncomingStockEntry[], Error>({
-    queryKey: ['purchase-existing-inventory', inventorySearchTerm, EXISTING_INVENTORY_FROM_DATE],
+    queryKey: ['purchase-existing-inventory', inventorySearchTerm, inventorySearchCategoryId, EXISTING_INVENTORY_FROM_DATE],
     queryFn: () => listIncomingStockEntries(inventorySearchTerm, {
       include_archived: true,
       incoming_from: EXISTING_INVENTORY_FROM_DATE,
+      category_id: inventorySearchCategoryId ?? undefined,
     }),
     enabled: canSearchInventoryBatches,
   })
@@ -293,6 +314,10 @@ export default function SupplierLedgerPage() {
   const brandNames = (brandsQ.data || []).map((brand) => brand.name)
   const products = canSearchProducts ? productsQ.data || [] : []
   const inventoryBatches = canSearchInventoryBatches ? inventoryBatchesQ.data || [] : []
+  const categoryNameById = useMemo(
+    () => new Map(categories.map((category) => [Number(category.id), category.name])),
+    [categories],
+  )
   const selectedSupplier = suppliers.find((supplier) => Number(supplier.id) === Number(partyId)) || null
   const purchases = purchasesQ.data || []
   const supplierPayments = supplierPaymentsQ.data || []
@@ -673,7 +698,7 @@ export default function SupplierLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['purchase-categories'] })
       queryClient.invalidateQueries({ queryKey: ['product-categories-master'] })
       if (categoryTargetKey) {
-        patchEditItem(categoryTargetKey, { category_id: Number(category.id) })
+        patchEditItemGroup(categoryTargetKey, { category_id: Number(category.id) })
       }
       setCategoryDialogOpen(false)
       setCategoryTargetKey(null)
@@ -689,7 +714,7 @@ export default function SupplierLedgerPage() {
       queryClient.invalidateQueries({ queryKey: ['purchase-brands'] })
       queryClient.invalidateQueries({ queryKey: ['brand-master'] })
       if (brandTargetKey) {
-        patchEditItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
+        patchEditItemGroup(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
       }
       setBrandDialogOpen(false)
       setBrandTargetKey(null)
@@ -896,9 +921,18 @@ export default function SupplierLedgerPage() {
     setEditItems((prev) => prev.map((item) => (item.key === key ? { ...item, ...patch } : item)))
   }
 
+  function patchEditItemGroup(key: string, patch: Partial<DraftItem>) {
+    setEditItems((prev) => {
+      const source = prev.find((item) => item.key === key)
+      if (!source) return prev
+      const groupKey = source.batch_group_key || source.key
+      return prev.map((item) => ((item.batch_group_key || item.key) === groupKey ? { ...item, ...patch } : item))
+    })
+  }
+
   function applyProduct(itemKey: string, product: Product | null) {
     if (!product) return
-    patchEditItem(itemKey, {
+    patchEditItemGroup(itemKey, {
       existing_inventory_item_id: undefined,
       existing_stock_movement_id: undefined,
       product_id: product.id,
@@ -966,7 +1000,7 @@ export default function SupplierLedgerPage() {
   }
 
   function cleanEditItems() {
-    return editItems.map(({ key, existing_stock_movement_id, ...item }) => ({
+    return editItems.map(({ key, batch_group_key, existing_stock_movement_id, ...item }) => ({
       ...item,
       product_name: item.product_name.trim(),
       alias: item.alias?.trim() || undefined,
@@ -1018,6 +1052,34 @@ export default function SupplierLedgerPage() {
   }
 
   function editItemEditor() {
+    const setActiveSearchCategory = (item: DraftItem) => {
+      const categoryId = item.category_id ? Number(item.category_id) : null
+      setProductSearchCategoryId(categoryId)
+      setInventorySearchCategoryId(categoryId)
+    }
+    const optionMetaText = (showCategory: boolean, categoryId?: number | null, rackNumber?: number | null, mrp?: number | null) => {
+      const parts = []
+      if (showCategory) {
+        parts.push(categoryId ? categoryNameById.get(Number(categoryId)) || `Category #${categoryId}` : 'Uncategorized')
+      }
+      parts.push(`Rack ${Number(rackNumber || 0)}`)
+      if (mrp !== undefined && mrp !== null) parts.push(`MRP ${money(Number(mrp || 0))}`)
+      return parts.join(' | ')
+    }
+    const addExpiryBatch = (source: DraftItem) => {
+      const next = cloneItemForNewExpiry(source, copyExpiryPrices)
+      setEditItems((prev) => {
+        const sourceIndex = prev.findIndex((row) => row.key === source.key)
+        if (sourceIndex < 0) return [...prev, next]
+        const groupKey = source.batch_group_key || source.key
+        const grouped = prev.map((row) => (row.key === source.key ? { ...row, batch_group_key: groupKey } : row))
+        return [
+          ...grouped.slice(0, sourceIndex + 1),
+          next,
+          ...grouped.slice(sourceIndex + 1),
+        ]
+      })
+    }
     return (
       <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
         <Stack
@@ -1033,13 +1095,26 @@ export default function SupplierLedgerPage() {
               {editItems.length} item{editItems.length === 1 ? '' : 's'} · Items net {money(editItemsSubtotal)} · Free qty reduces average rate
             </Typography>
           </Box>
-          <Stack direction="row" gap={1}>
-            <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setEditItems((prev) => [...prev, makeEmptyItem()])}>Add Item</Button>
+          <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
+            <FormControlLabel
+              control={<Checkbox size="small" checked={copyExpiryPrices} onChange={(e) => setCopyExpiryPrices(e.target.checked)} />}
+              label="Copy prices"
+              sx={{ m: 0 }}
+            />
+            <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setEditItems((prev) => [...prev, makeEmptyItem()])}>Add Product</Button>
           </Stack>
         </Stack>
 
         <Stack divider={<Divider flexItem />} sx={{ p: 0 }}>
-          {editItems.map((item, index) => (
+          {editItems.map((item, index) => {
+            const groupKey = item.batch_group_key || item.key
+            const firstGroupIndex = editItems.findIndex((row) => (row.batch_group_key || row.key) === groupKey)
+            if (firstGroupIndex !== index) return null
+            const groupItems = editItems.filter((row) => (row.batch_group_key || row.key) === groupKey)
+            const groupPaidQty = groupItems.reduce((sum, row) => sum + Number(row.sealed_qty || 0), 0)
+            const groupFreeQty = groupItems.reduce((sum, row) => sum + Number(row.free_qty || 0), 0)
+            const groupTotal = groupItems.reduce((sum, row) => sum + lineBaseTotal(row), 0)
+            return (
             <Box key={item.key} sx={{ p: 1.5, bgcolor: 'background.paper' }}>
               <Stack gap={1.25}>
                 <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1} flexWrap="wrap">
@@ -1057,21 +1132,87 @@ export default function SupplierLedgerPage() {
                     <Typography variant="caption" color="text.secondary">
                       {item.product_name || 'New purchase item'}
                     </Typography>
-                    <Chip size="small" variant="outlined" label={`Qty ${Number(item.sealed_qty || 0)}`} />
-                    <Chip size="small" variant="outlined" label={`Free ${Number(item.free_qty || 0)}`} />
-                    <Chip size="small" variant="outlined" label={`Item Total ${money(lineBaseTotal(item))}`} />
+                    {groupItems.length > 1 ? <Chip size="small" color="primary" variant="outlined" label={`${groupItems.length} expiries`} /> : null}
+                    <Chip size="small" variant="outlined" label={`Qty ${groupPaidQty}`} />
+                    <Chip size="small" variant="outlined" label={`Free ${groupFreeQty}`} />
+                    <Chip size="small" variant="outlined" label={`Item Total ${money(groupTotal)}`} />
                   </Stack>
-                  <Button
-                    color="error"
-                    size="small"
-                    variant="outlined"
-                    startIcon={<DeleteIcon />}
-                    onClick={() => setEditItems((prev) => (prev.length === 1 ? prev : prev.filter((row) => row.key !== item.key)))}
-                  >
-                    Remove
-                  </Button>
+                  <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
+                    <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => addExpiryBatch(item)}>
+                      Add Expiry
+                    </Button>
+                    <Button
+                      color="error"
+                      size="small"
+                      variant="outlined"
+                      startIcon={<DeleteIcon />}
+                      onClick={() => setEditItems((prev) => (prev.length === 1 ? prev : prev.filter((row) => (row.batch_group_key || row.key) !== groupKey)))}
+                    >
+                      Remove
+                    </Button>
+                  </Stack>
                 </Stack>
                 <Grid container spacing={1.25} alignItems="center">
+                  <Grid item xs={12} md={3}>
+                    <Stack direction="row" gap={1}>
+                      <TextField size="small" select label="Category" value={item.category_id ?? ''} onChange={(e) => patchEditItemGroup(item.key, { category_id: e.target.value ? Number(e.target.value) : undefined })} fullWidth>
+                        <MenuItem value="">All Categories</MenuItem>
+                        {categories.map((category) => (
+                          <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
+                        ))}
+                      </TextField>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={() => openCategoryDialog(item.key)}
+                        sx={{ minWidth: 0, px: 1 }}
+                      >
+                        New
+                      </Button>
+                    </Stack>
+                  </Grid>
+                  <Grid item xs={12} md={3.5}>
+                    <Autocomplete
+                      size="small"
+                      options={products}
+                      loading={canSearchProducts && productsQ.isFetching}
+                      getOptionLabel={(option) => {
+                        const categoryName = option.category_id ? categoryNameById.get(Number(option.category_id)) : ''
+                        return `${option.name}${option.brand ? ` | ${option.brand}` : ''}${categoryName ? ` | ${categoryName}` : ''}`
+                      }}
+                      filterOptions={(options) => options}
+                      noOptionsText={canSearchProducts ? 'No products found' : PRODUCT_SEARCH_PROMPT}
+                      onOpen={() => setActiveSearchCategory(item)}
+                      onFocus={() => setActiveSearchCategory(item)}
+                      onInputChange={(_, value, reason) => {
+                        if (reason === 'input') {
+                          setActiveSearchCategory(item)
+                          setProductSearch(value)
+                        }
+                        if (reason === 'clear' || reason === 'reset') {
+                          setActiveSearchCategory(item)
+                          setProductSearch('')
+                        }
+                      }}
+                      onChange={(_, value) => applyProduct(item.key, value)}
+                      renderOption={(props, option) => {
+                        return (
+                          <li {...props} key={option.id}>
+                            <Stack gap={0.25} sx={{ width: '100%' }}>
+                              <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
+                                <Typography variant="body2" fontWeight={700}>{option.name}</Typography>
+                                {option.brand ? <Chip size="small" label={option.brand} variant="outlined" /> : null}
+                              </Stack>
+                              <Typography variant="caption" color="text.secondary">
+                                {optionMetaText(!item.category_id, option.category_id, option.default_rack_number, option.printed_price)}
+                              </Typography>
+                            </Stack>
+                          </li>
+                        )
+                      }}
+                      renderInput={(params) => <TextField {...params} label="Pick Product" fullWidth />}
+                    />
+                  </Grid>
                   <Grid item xs={12} md={4}>
                     <Autocomplete
                       size="small"
@@ -1086,9 +1227,17 @@ export default function SupplierLedgerPage() {
                       isOptionEqualToValue={(option, value) => Number(option.movement_id) === Number(value.movement_id)}
                       getOptionLabel={incomingEntryLabel}
                       noOptionsText={canSearchInventoryBatches ? 'No batches found' : PRODUCT_SEARCH_PROMPT}
+                      onOpen={() => setActiveSearchCategory(item)}
+                      onFocus={() => setActiveSearchCategory(item)}
                       onInputChange={(_, value, reason) => {
-                        if (reason === 'input') setInventorySearch(value)
-                        if (reason === 'clear') setInventorySearch('')
+                        if (reason === 'input') {
+                          setActiveSearchCategory(item)
+                          setInventorySearch(value)
+                        }
+                        if (reason === 'clear') {
+                          setActiveSearchCategory(item)
+                          setInventorySearch('')
+                        }
                       }}
                       onChange={(_, value) => {
                         if (value) applyExistingInventory(item.key, value)
@@ -1103,7 +1252,15 @@ export default function SupplierLedgerPage() {
                               <Typography variant="body2">{option.name}{option.brand ? ` | ${option.brand}` : ''}</Typography>
                             </Stack>
                             <Typography variant="caption" color="text.secondary">
-                              Incoming {fmtDate(option.incoming_at)} | Exp {option.expiry_date || '-'} | MRP {money(option.mrp)} | Current {Number(option.stock || 0)} | {movementReasonLabel(option.reason)}
+                              {[
+                                !item.category_id ? categoryNameById.get(Number(option.category_id || 0)) || (option.category_id ? `Category #${option.category_id}` : 'Uncategorized') : '',
+                                `Rack ${Number(option.rack_number || 0)}`,
+                                `Incoming ${fmtDate(option.incoming_at)}`,
+                                `Exp ${option.expiry_date || '-'}`,
+                                `MRP ${money(option.mrp)}`,
+                                `Current ${Number(option.stock || 0)}`,
+                                movementReasonLabel(option.reason),
+                              ].filter(Boolean).join(' | ')}
                             </Typography>
                           </Stack>
                         </li>
@@ -1112,30 +1269,14 @@ export default function SupplierLedgerPage() {
                         <TextField
                           {...params}
                           label="Link Existing Stock"
-                          helperText="Does not add stock. Use only for stock already entered."
+                          // helperText="Does not add stock. Use only for stock already entered."
                           fullWidth
                         />
                       )}
                     />
                   </Grid>
                   <Grid item xs={12} md={3.5}>
-                    <Autocomplete
-                      size="small"
-                      options={products}
-                      loading={canSearchProducts && productsQ.isFetching}
-                      getOptionLabel={(option) => `${option.name}${option.brand ? ` | ${option.brand}` : ''}`}
-                      filterOptions={(options) => options}
-                      noOptionsText={canSearchProducts ? 'No products found' : PRODUCT_SEARCH_PROMPT}
-                      onInputChange={(_, value, reason) => {
-                        if (reason === 'input') setProductSearch(value)
-                        if (reason === 'clear' || reason === 'reset') setProductSearch('')
-                      }}
-                      onChange={(_, value) => applyProduct(item.key, value)}
-                      renderInput={(params) => <TextField {...params} label="Pick Product" fullWidth />}
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={3.5}>
-                    <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchEditItem(item.key, { product_name: e.target.value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })} fullWidth />
+                    <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchEditItemGroup(item.key, { product_name: e.target.value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })} fullWidth />
                   </Grid>
                   <Grid item xs={12} md={2}>
                     <Stack direction="row" gap={1}>
@@ -1144,10 +1285,10 @@ export default function SupplierLedgerPage() {
                         size="small"
                         options={brandNames}
                         value={item.brand || ''}
-                        onChange={(_, value) => patchEditItem(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })}
+                        onChange={(_, value) => patchEditItemGroup(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })}
                         onInputChange={(_, value, reason) => {
                           if (reason === 'input' || reason === 'clear') {
-                            patchEditItem(item.key, { brand: value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
+                            patchEditItemGroup(item.key, { brand: value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
                           }
                         }}
                         renderInput={(params) => <TextField {...params} label="Brand" fullWidth />}
@@ -1159,25 +1300,7 @@ export default function SupplierLedgerPage() {
                     </Stack>
                   </Grid>
                   <Grid item xs={12} md={1.5}>
-                    <TextField size="small" label="Alias" value={item.alias || ''} onChange={(e) => patchEditItem(item.key, { alias: e.target.value })} fullWidth />
-                  </Grid>
-                  <Grid item xs={12} md={2}>
-                    <Stack direction="row" gap={1}>
-                      <TextField size="small" select label="Category" value={item.category_id ?? ''} onChange={(e) => patchEditItem(item.key, { category_id: e.target.value ? Number(e.target.value) : undefined })} fullWidth>
-                        <MenuItem value="">None</MenuItem>
-                        {categories.map((category) => (
-                          <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
-                        ))}
-                      </TextField>
-                      <Button
-                        size="small"
-                        variant="outlined"
-                        onClick={() => openCategoryDialog(item.key)}
-                        sx={{ minWidth: 0, px: 1 }}
-                      >
-                        New
-                      </Button>
-                    </Stack>
+                    <TextField size="small" label="Alias" value={item.alias || ''} onChange={(e) => patchEditItemGroup(item.key, { alias: e.target.value })} fullWidth />
                   </Grid>
 
                   <Grid item xs={12}>
@@ -1213,7 +1336,7 @@ export default function SupplierLedgerPage() {
                     <Stack gap={0.75}>
                       <Stack direction="row" gap={1} alignItems="center" justifyContent="space-between">
                         <FormControlLabel
-                          control={<Checkbox size="small" checked={Boolean(item.loose_sale_enabled)} onChange={(e) => patchEditItem(item.key, { loose_sale_enabled: e.target.checked })} />}
+                          control={<Checkbox size="small" checked={Boolean(item.loose_sale_enabled)} onChange={(e) => patchEditItemGroup(item.key, { loose_sale_enabled: e.target.checked })} />}
                           label="Loose"
                           sx={{ m: 0 }}
                         />
@@ -1233,23 +1356,75 @@ export default function SupplierLedgerPage() {
                       </Stack>
                     </Stack>
                   </Grid>
+                  {groupItems.slice(1).map((batch, batchIndex) => (
+                    <Grid item xs={12} key={batch.key}>
+                      <Paper variant="outlined" sx={{ p: 1.25, bgcolor: 'rgba(31,107,74,0.025)' }}>
+                        <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 1 }}>
+                          <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                            Expiry {batchIndex + 2}
+                          </Typography>
+                          <Button
+                            color="error"
+                            size="small"
+                            variant="text"
+                            onClick={() => setEditItems((prev) => prev.filter((row) => row.key !== batch.key))}
+                          >
+                            Remove Expiry
+                          </Button>
+                        </Stack>
+                        <Grid container spacing={1.25} alignItems="center">
+                          <Grid item xs={6} md={1.6}>
+                            <TextField size="small" label="Expiry" type="date" value={batch.expiry_date || ''} onChange={(e) => patchEditItem(batch.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} required fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1}>
+                            <TextField size="small" label="Rack" type="number" value={batch.rack_number ?? 0} onChange={(e) => patchEditItem(batch.key, { rack_number: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1}>
+                            <TextField size="small" label="Qty" type="number" value={batch.sealed_qty} onChange={(e) => patchEditItem(batch.key, { sealed_qty: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1}>
+                            <TextField size="small" label="Free" type="number" value={batch.free_qty || 0} onChange={(e) => patchEditItem(batch.key, { free_qty: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Rate" type="number" value={batch.cost_price} onChange={(e) => patchEditItem(batch.key, { cost_price: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="MRP" type="number" value={batch.mrp} onChange={(e) => patchEditItem(batch.key, { mrp: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchEditItem(batch.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Round Off (+/-)" type="number" value={batch.rounding_adjustment || 0} onChange={(e) => patchEditItem(batch.key, { rounding_adjustment: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={12} md={1.6}>
+                            <Stack direction="row" gap={0.75} flexWrap="wrap">
+                              <Chip size="small" label={`Total ${money(lineBaseTotal(batch))}`} variant="outlined" />
+                              <Chip size="small" label={`Inward ${lineTotalQty(batch)}`} variant="outlined" />
+                            </Stack>
+                          </Grid>
+                        </Grid>
+                      </Paper>
+                    </Grid>
+                  ))}
                   {item.loose_sale_enabled && (
                     <>
                       <Grid item xs={12} md={4}>
-                        <TextField size="small" label="Parent Unit" value={item.parent_unit_name || ''} onChange={(e) => patchEditItem(item.key, { parent_unit_name: e.target.value })} fullWidth />
+                        <TextField size="small" label="Parent Unit" value={item.parent_unit_name || ''} onChange={(e) => patchEditItemGroup(item.key, { parent_unit_name: e.target.value })} fullWidth />
                       </Grid>
                       <Grid item xs={12} md={4}>
-                        <TextField size="small" label="Child Unit" value={item.child_unit_name || ''} onChange={(e) => patchEditItem(item.key, { child_unit_name: e.target.value })} fullWidth />
+                        <TextField size="small" label="Child Unit" value={item.child_unit_name || ''} onChange={(e) => patchEditItemGroup(item.key, { child_unit_name: e.target.value })} fullWidth />
                       </Grid>
                       <Grid item xs={12} md={4}>
-                        <TextField size="small" label="Conversion Qty" type="number" value={item.conversion_qty || ''} onChange={(e) => patchEditItem(item.key, { conversion_qty: e.target.value ? Number(e.target.value) : undefined })} fullWidth />
+                        <TextField size="small" label="Conversion Qty" type="number" value={item.conversion_qty || ''} onChange={(e) => patchEditItemGroup(item.key, { conversion_qty: e.target.value ? Number(e.target.value) : undefined })} fullWidth />
                       </Grid>
                     </>
                   )}
                 </Grid>
               </Stack>
             </Box>
-          ))}
+            )
+          })}
         </Stack>
       </Paper>
     )

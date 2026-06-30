@@ -271,7 +271,7 @@ export async function listAllItems(
 
 export async function listIncomingStockEntries(
   q: string = '',
-  options?: { include_archived?: boolean; incoming_from?: string },
+  options?: { include_archived?: boolean; incoming_from?: string; category_id?: number },
 ): Promise<IncomingStockEntry[]> {
   const limit = 500
   let offset = 0
@@ -282,6 +282,7 @@ export async function listIncomingStockEntries(
     if (q) params.q = q
     if (typeof options?.include_archived === 'boolean') params.include_archived = options.include_archived
     if (options?.incoming_from) params.incoming_from = options.incoming_from
+    if (typeof options?.category_id === 'number') params.category_id = options.category_id
     const { data } = await api.get('/inventory/incoming', { params })
     const page = data as IncomingStockEntryPage
     rows.push(...(page.items || []))

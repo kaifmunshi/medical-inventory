@@ -1362,6 +1362,7 @@ def list_items(
 @router.get("/incoming", response_model=IncomingStockEntryPageOut)
 def list_incoming_stock_entries(
     q: Optional[str] = Query(None, description="Search item/movement text or item/movement id"),
+    category_id: Optional[int] = Query(None, ge=0, description="Filter by product category"),
     incoming_from: Optional[str] = Query(None, description="YYYY-MM-DD; only positive incoming entries from this date"),
     include_archived: bool = Query(False, description="If true, include archived batches"),
     limit: int = Query(50, ge=1, le=500),
@@ -1386,6 +1387,21 @@ def list_incoming_stock_entries(
             except ValueError:
                 raise HTTPException(status_code=400, detail="incoming_from must be YYYY-MM-DD")
             stmt = stmt.where(movement_ts >= f"{from_date}T00:00:00")
+
+        if category_id is not None:
+            product_lot_item_ids = (
+                select(InventoryLot.legacy_item_id)
+                .join(Product, Product.id == InventoryLot.product_id)
+                .where(Product.category_id == category_id)
+                .where(InventoryLot.legacy_item_id.is_not(None))
+            )
+            stmt = stmt.outerjoin(Product, Product.id == Item.product_id).where(
+                or_(
+                    Item.category_id == category_id,
+                    Product.category_id == category_id,
+                    Item.id.in_(product_lot_item_ids),
+                )
+            )
 
         if q:
             search_text = q.strip()

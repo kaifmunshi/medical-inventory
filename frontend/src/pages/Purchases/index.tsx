@@ -49,7 +49,7 @@ import type { AuditLog, Category, Party, Product, Purchase, PurchaseItemPayload,
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import { useToast } from '../../components/ui/Toaster'
 
-type DraftItem = PurchaseItemPayload & { key: string; existing_stock_movement_id?: number }
+type DraftItem = PurchaseItemPayload & { key: string; batch_group_key?: string; existing_stock_movement_id?: number }
 type DraftPayment = PurchasePaymentPayload & { key: string; paid_at: string; is_deleted?: boolean }
 
 const EXISTING_INVENTORY_FROM_DATE = '2026-04-01'
@@ -91,6 +91,25 @@ function makeFreeStockItem(): DraftItem {
     cost_price: 0,
     discount_amount: 0,
     rounding_adjustment: 0,
+  }
+}
+
+function cloneItemForNewExpiry(item: DraftItem, copyPrices: boolean): DraftItem {
+  return {
+    ...item,
+    key: Math.random().toString(36).slice(2),
+    batch_group_key: item.batch_group_key || item.key,
+    purchase_item_id: undefined,
+    existing_inventory_item_id: undefined,
+    existing_stock_movement_id: undefined,
+    expiry_date: '',
+    sealed_qty: Math.max(1, Number(item.sealed_qty || 0)),
+    free_qty: Number(item.free_qty || 0),
+    cost_price: copyPrices ? Number(item.cost_price || 0) : 0,
+    mrp: copyPrices ? Number(item.mrp || 0) : 0,
+    gst_percent: copyPrices ? Number(item.gst_percent || 0) : 0,
+    discount_amount: copyPrices ? Number(item.discount_amount || 0) : 0,
+    rounding_adjustment: copyPrices ? Number(item.rounding_adjustment || 0) : 0,
   }
 }
 
@@ -170,6 +189,22 @@ function purchaseSnapshotItems(snapshot?: PurchaseSnapshot) {
 
 function lineTotalQty(item: Pick<DraftItem, 'sealed_qty' | 'free_qty'>) {
   return Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
+}
+
+function hasDraftItemContent(item: DraftItem) {
+  return Boolean(
+    item.product_name?.trim() ||
+    item.brand?.trim() ||
+    item.alias?.trim() ||
+    item.expiry_date?.trim() ||
+    item.product_id ||
+    item.existing_inventory_item_id ||
+    item.existing_stock_movement_id ||
+    Number(item.mrp || 0) ||
+    Number(item.cost_price || 0) ||
+    Number(item.discount_amount || 0) ||
+    Number(item.rounding_adjustment || 0),
+  )
 }
 
 function fmtDate(value?: string | null) {
@@ -254,6 +289,7 @@ export default function PurchasesPage() {
   const [editingDraftPaymentKey, setEditingDraftPaymentKey] = useState<string | null>(null)
   const [paymentContext, setPaymentContext] = useState<'saved' | 'draft'>('saved')
   const [expandedDraftLines, setExpandedDraftLines] = useState<Record<string, boolean>>({})
+  const [copyExpiryPrices, setCopyExpiryPrices] = useState(true)
   const [freeStockPartyId, setFreeStockPartyId] = useState<number | null>(null)
   const [freeStockInvoiceNumber, setFreeStockInvoiceNumber] = useState('')
   const [freeStockDate, setFreeStockDate] = useState(today)
@@ -263,7 +299,9 @@ export default function PurchasesPage() {
   const [expandedEditLines, setExpandedEditLines] = useState<Record<string, boolean>>({})
 
   const [productSearch, setProductSearch] = useState('')
+  const [productSearchCategoryId, setProductSearchCategoryId] = useState<number | null>(null)
   const [inventorySearch, setInventorySearch] = useState('')
+  const [inventorySearchCategoryId, setInventorySearchCategoryId] = useState<number | null>(null)
   const [selectedPurchaseId, setSelectedPurchaseId] = useState<number | null>(null)
   const [purchaseHistoryOpen, setPurchaseHistoryOpen] = useState(false)
   const [editHeaderOpen, setEditHeaderOpen] = useState(false)
@@ -287,9 +325,9 @@ export default function PurchasesPage() {
   const [paymentType, setPaymentType] = useState<'payment' | 'writeoff'>('payment')
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false)
   const productSearchTerm = productSearch.trim()
-  const canSearchProducts = productSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const canSearchProducts = productSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS || productSearchCategoryId !== null
   const inventorySearchTerm = inventorySearch.trim()
-  const canSearchInventoryBatches = inventorySearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS
+  const canSearchInventoryBatches = inventorySearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS || inventorySearchCategoryId !== null
 
   const [editPartyId, setEditPartyId] = useState<number | null>(null)
   const [editInvoiceNumber, setEditInvoiceNumber] = useState('')
@@ -324,16 +362,17 @@ export default function PurchasesPage() {
   })
 
   const productsQ = useQuery<Product[], Error>({
-    queryKey: ['purchase-products', productSearchTerm],
-    queryFn: () => fetchProducts({ q: productSearchTerm }),
+    queryKey: ['purchase-products', productSearchTerm, productSearchCategoryId],
+    queryFn: () => fetchProducts({ q: productSearchTerm, category_id: productSearchCategoryId ?? undefined }),
     enabled: canSearchProducts,
   })
 
   const inventoryBatchesQ = useQuery<IncomingStockEntry[], Error>({
-    queryKey: ['purchase-existing-inventory', inventorySearchTerm, EXISTING_INVENTORY_FROM_DATE],
+    queryKey: ['purchase-existing-inventory', inventorySearchTerm, inventorySearchCategoryId, EXISTING_INVENTORY_FROM_DATE],
     queryFn: () => listIncomingStockEntries(inventorySearchTerm, {
       include_archived: true,
       incoming_from: EXISTING_INVENTORY_FROM_DATE,
+      category_id: inventorySearchCategoryId ?? undefined,
     }),
     enabled: canSearchInventoryBatches,
   })
@@ -567,8 +606,8 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['purchase-categories'] })
       queryClient.invalidateQueries({ queryKey: ['product-categories-master'] })
       if (categoryTargetKey) {
-        updateItem(categoryTargetKey, { category_id: Number(category.id) })
-        updateEditItem(categoryTargetKey, { category_id: Number(category.id) })
+        updateItemGroup(categoryTargetKey, { category_id: Number(category.id) })
+        updateEditItemGroup(categoryTargetKey, { category_id: Number(category.id) })
       }
       setCategoryDialogOpen(false)
       setCategoryTargetKey(null)
@@ -584,8 +623,8 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['purchase-brands'] })
       queryClient.invalidateQueries({ queryKey: ['brand-master'] })
       if (brandTargetKey) {
-        updateItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
-        updateEditItem(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
+        updateItemGroup(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
+        updateEditItemGroup(brandTargetKey, { brand: brand.name, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
       }
       setBrandDialogOpen(false)
       setBrandTargetKey(null)
@@ -618,6 +657,10 @@ export default function PurchasesPage() {
   const brandNames = (brandsQ.data || []).map((brand) => brand.name)
   const products = canSearchProducts ? productsQ.data || [] : []
   const inventoryBatches = canSearchInventoryBatches ? inventoryBatchesQ.data || [] : []
+  const categoryNameById = useMemo(
+    () => new Map(categories.map((category) => [Number(category.id), category.name])),
+    [categories],
+  )
   const purchases = purchasesQ.data || []
   const selectedPurchase = selectedPurchaseQ.data || null
   const editSubtotal = Number(selectedPurchase?.subtotal_amount || 0)
@@ -685,6 +728,19 @@ export default function PurchasesPage() {
   }, [paymentAvailableAmount, paymentCash, paymentMode, paymentOpen, paymentType])
 
   useEffect(() => {
+    if (!addOpen || items.length === 0) return
+    const last = items[items.length - 1]
+    const isComplete =
+      Boolean(last.product_name?.trim()) &&
+      Boolean(last.expiry_date?.trim()) &&
+      lineTotalQty(last) > 0
+    if (!isComplete) return
+    const next = makeEmptyItem()
+    setItems((prev) => [...prev, next])
+    setExpandedDraftLines((prev) => ({ ...prev, [next.key]: true }))
+  }, [addOpen, items])
+
+  useEffect(() => {
     if (!paymentOpen || paymentType !== 'payment' || purchasePaymentOnline > 0) return
     setPaymentTransactionId((prev) => (prev === '' ? prev : ''))
     setPaymentTxnCharges((prev) => (prev === '0' ? prev : '0'))
@@ -741,6 +797,15 @@ export default function PurchasesPage() {
     setItems((prev) => prev.map((item) => (item.key === key ? { ...item, ...patch } : item)))
   }
 
+  function updateItemGroup(key: string, patch: Partial<DraftItem>) {
+    setItems((prev) => {
+      const source = prev.find((item) => item.key === key)
+      if (!source) return prev
+      const groupKey = source.batch_group_key || source.key
+      return prev.map((item) => ((item.batch_group_key || item.key) === groupKey ? { ...item, ...patch } : item))
+    })
+  }
+
   function updateFreeStockItem(key: string, patch: Partial<DraftItem>) {
     setFreeStockItems((prev) => prev.map((item) => (item.key === key ? {
       ...item,
@@ -756,6 +821,15 @@ export default function PurchasesPage() {
 
   function updateEditItem(key: string, patch: Partial<DraftItem>) {
     setEditItems((prev) => prev.map((item) => (item.key === key ? { ...item, ...patch } : item)))
+  }
+
+  function updateEditItemGroup(key: string, patch: Partial<DraftItem>) {
+    setEditItems((prev) => {
+      const source = prev.find((item) => item.key === key)
+      if (!source) return prev
+      const groupKey = source.batch_group_key || source.key
+      return prev.map((item) => ((item.batch_group_key || item.key) === groupKey ? { ...item, ...patch } : item))
+    })
   }
 
   function applyExistingInventory(itemKey: string, incomingEntry: IncomingStockEntry | null, editMode = false) {
@@ -995,18 +1069,23 @@ export default function PurchasesPage() {
     }))
   }
 
+  function filledDraftItems(draftItems: DraftItem[]) {
+    return draftItems.filter(hasDraftItemContent)
+  }
+
   function missingExpiryMessage(item: Pick<DraftItem, 'product_name'>, index: number) {
     const label = item.product_name?.trim() || `Item ${index + 1}`
     return `${label} needs an expiry date`
   }
 
   function purchasePayloadItems(draftItems: DraftItem[]): PurchaseItemPayload[] {
-    return cleanItems(draftItems).map(({ key, existing_stock_movement_id, ...rest }) => rest)
+    return cleanItems(draftItems).map(({ key, batch_group_key, existing_stock_movement_id, ...rest }) => rest)
   }
 
   function freeStockPayloadItems(draftItems: DraftItem[]): PurchaseItemPayload[] {
     return cleanItems(draftItems).map(({
       key,
+      batch_group_key,
       existing_stock_movement_id,
       purchase_item_id,
       existing_inventory_item_id,
@@ -1031,7 +1110,12 @@ export default function PurchasesPage() {
       toast.push('Invoice number is required', 'error')
       return
     }
-    const cleanedItems = cleanItems(items)
+    const activeItems = filledDraftItems(items)
+    if (activeItems.length === 0) {
+      toast.push('Add at least one purchase item', 'error')
+      return
+    }
+    const cleanedItems = cleanItems(activeItems)
     if (cleanedItems.some((item) => !item.product_name)) {
       toast.push('Every purchase item needs a product name', 'error')
       return
@@ -1059,7 +1143,7 @@ export default function PurchasesPage() {
       discount_amount: round2(Number(discountAmount || 0)),
       gst_amount: round2(gstTotal),
       rounding_adjustment: round2(Number(roundingAdjustment || 0)),
-      items: purchasePayloadItems(items),
+      items: purchasePayloadItems(activeItems),
       payments: draftPayments.map((payment) => ({
         amount: round2(Number(payment.amount || 0)),
         mode: payment.mode,
@@ -1080,7 +1164,12 @@ export default function PurchasesPage() {
       toast.push('Select a free stock date', 'error')
       return
     }
-    const cleanedItems = cleanItems(freeStockItems)
+    const activeItems = filledDraftItems(freeStockItems)
+    if (activeItems.length === 0) {
+      toast.push('Add at least one free stock item', 'error')
+      return
+    }
+    const cleanedItems = cleanItems(activeItems)
     if (cleanedItems.some((item) => !item.product_name)) {
       toast.push('Every free stock item needs a product name', 'error')
       return
@@ -1101,7 +1190,7 @@ export default function PurchasesPage() {
       invoice_number: freeStockInvoiceNumber.trim() || undefined,
       invoice_date: freeStockDate,
       notes: freeStockNotes.trim() || undefined,
-      items: freeStockPayloadItems(freeStockItems),
+      items: freeStockPayloadItems(activeItems),
     })
   }
 
@@ -1163,7 +1252,12 @@ export default function PurchasesPage() {
 
   function saveItemReplacement() {
     if (!selectedPurchaseId) return
-    const cleanedItems = cleanItems(editItems)
+    const activeItems = filledDraftItems(editItems)
+    if (activeItems.length === 0) {
+      toast.push('Add at least one replacement purchase item', 'error')
+      return
+    }
+    const cleanedItems = cleanItems(activeItems)
     if (cleanedItems.some((item) => !item.product_name)) {
       toast.push('Every replacement purchase item needs a product name', 'error')
       return
@@ -1185,7 +1279,7 @@ export default function PurchasesPage() {
     }
     replaceItemsM.mutate({
       id: selectedPurchaseId,
-      items: purchasePayloadItems(editItems),
+      items: purchasePayloadItems(activeItems),
     })
   }
 
@@ -1255,9 +1349,31 @@ export default function PurchasesPage() {
     const headerRoundOff = editMode ? Number(selectedPurchase?.rounding_adjustment || 0) : 0
     const draftBillTotal = draftSubtotal - headerDiscount + headerGst + headerRoundOff
     const draftCovered = editMode ? Number(selectedPurchase?.paid_amount || 0) + Number(selectedPurchase?.writeoff_amount || 0) : 0
+    const setActiveSearchCategory = (item: DraftItem) => {
+      const categoryId = item.category_id ? Number(item.category_id) : null
+      setProductSearchCategoryId(categoryId)
+      setInventorySearchCategoryId(categoryId)
+    }
+    const optionMetaText = (showCategory: boolean, categoryId?: number | null, rackNumber?: number | null, mrp?: number | null) => {
+      const parts = []
+      if (showCategory) {
+        parts.push(categoryId ? categoryNameById.get(Number(categoryId)) || `Category #${categoryId}` : 'Uncategorized')
+      }
+      parts.push(`Rack ${Number(rackNumber || 0)}`)
+      if (mrp !== undefined && mrp !== null) parts.push(`MRP ${money(Number(mrp || 0))}`)
+      return parts.join(' | ')
+    }
+    const patchSharedProductFields = (itemKey: string, patch: Partial<DraftItem>) => {
+      setDraftItems((prev) => {
+        const source = prev.find((row) => row.key === itemKey)
+        if (!source) return prev
+        const groupKey = source.batch_group_key || source.key
+        return prev.map((row) => ((row.batch_group_key || row.key) === groupKey ? { ...row, ...patch } : row))
+      })
+    }
     const applyPickedProduct = (itemKey: string, product: Product | null) => {
       if (!product) return
-      patchItem(itemKey, {
+      patchSharedProductFields(itemKey, {
         existing_inventory_item_id: undefined,
         existing_stock_movement_id: undefined,
         product_id: product.id,
@@ -1273,6 +1389,21 @@ export default function PurchasesPage() {
       })
       if (!editMode && !freeOnly) setInventorySearch(product.name)
     }
+    const addExpiryBatch = (source: DraftItem) => {
+      const next = cloneItemForNewExpiry(source, copyExpiryPrices)
+      setDraftItems((prev) => {
+        const sourceIndex = prev.findIndex((row) => row.key === source.key)
+        if (sourceIndex < 0) return [...prev, next]
+        const groupKey = source.batch_group_key || source.key
+        const grouped = prev.map((row) => (row.key === source.key ? { ...row, batch_group_key: groupKey } : row))
+        return [
+          ...grouped.slice(0, sourceIndex + 1),
+          next,
+          ...grouped.slice(sourceIndex + 1),
+        ]
+      })
+      setExpandedLines((prev) => ({ ...prev, [source.key]: true, [next.key]: true }))
+    }
     return (
       <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
         <Stack
@@ -1287,10 +1418,17 @@ export default function PurchasesPage() {
             <Typography variant="caption" color="text.secondary">
               {freeOnly
                 ? `${draftItems.length} item${draftItems.length === 1 ? '' : 's'} · Pure free stock · No supplier balance`
-                : `${draftItems.length} item${draftItems.length === 1 ? '' : 's'} · Items net ${money(draftSubtotal)} · Free qty reduces average rate`}
+                : `${draftItems.length} batch${draftItems.length === 1 ? '' : 'es'} · Items net ${money(draftSubtotal)} · Free qty reduces average rate`}
             </Typography>
           </Box>
-          <Stack direction="row" gap={1}>
+          <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
+            {!freeOnly ? (
+              <FormControlLabel
+                control={<Checkbox size="small" checked={copyExpiryPrices} onChange={(e) => setCopyExpiryPrices(e.target.checked)} />}
+                label="Copy prices"
+                sx={{ m: 0 }}
+              />
+            ) : null}
             <Button
               variant="outlined"
               startIcon={<AddIcon />}
@@ -1300,13 +1438,20 @@ export default function PurchasesPage() {
                 setExpandedLines((prev) => ({ ...prev, [next.key]: true }))
               }}
             >
-              Add Item
+              Add Product
             </Button>
           </Stack>
         </Stack>
 
         <Stack divider={<Divider flexItem />} sx={{ p: 0 }}>
           {draftItems.map((item, index) => {
+            const groupKey = item.batch_group_key || item.key
+            const firstGroupIndex = draftItems.findIndex((row) => (row.batch_group_key || row.key) === groupKey)
+            if (firstGroupIndex !== index) return null
+            const groupItems = draftItems.filter((row) => (row.batch_group_key || row.key) === groupKey)
+            const groupPaidQty = groupItems.reduce((sum, row) => sum + Number(row.sealed_qty || 0), 0)
+            const groupFreeQty = groupItems.reduce((sum, row) => sum + Number(row.free_qty || 0), 0)
+            const groupTotal = groupItems.reduce((sum, row) => round2(sum + lineBaseTotal(row)), 0)
             const isExpanded = expandedLines[item.key] ?? defaultExpanded
             return (
             <Box key={item.key} sx={{ p: 1.5, bgcolor: isExpanded ? 'background.paper' : 'grey.50' }}>
@@ -1326,14 +1471,20 @@ export default function PurchasesPage() {
                     <Typography variant="caption" color="text.secondary">
                       {item.product_name || 'New purchase item'}
                     </Typography>
-                    {!freeOnly ? <Chip size="small" variant="outlined" label={`Paid ${Number(item.sealed_qty || 0)}`} /> : null}
-                    <Chip size="small" variant="outlined" label={`Free ${Number(item.free_qty || 0)}`} />
-                    <Chip size="small" variant="outlined" label={freeOnly ? 'Cost 0.00' : `Item Total ${money(lineBaseTotal(item))}`} />
+                    {groupItems.length > 1 ? <Chip size="small" color="primary" variant="outlined" label={`${groupItems.length} expiries`} /> : null}
+                    {!freeOnly ? <Chip size="small" variant="outlined" label={`Paid ${groupPaidQty}`} /> : null}
+                    <Chip size="small" variant="outlined" label={`Free ${groupFreeQty}`} />
+                    <Chip size="small" variant="outlined" label={freeOnly ? 'Cost 0.00' : `Item Total ${money(groupTotal)}`} />
                   </Stack>
                   <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
                     <Button size="small" variant="outlined" onClick={() => setExpandedLines((prev) => ({ ...prev, [item.key]: !isExpanded }))}>
                       {isExpanded ? 'Collapse' : 'Expand'}
                     </Button>
+                    {!freeOnly ? (
+                      <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => addExpiryBatch(item)}>
+                        Add Expiry
+                      </Button>
+                    ) : null}
                     <Button
                       color="error"
                       size="small"
@@ -1347,6 +1498,66 @@ export default function PurchasesPage() {
                 </Stack>
                 {isExpanded ? (
                 <Grid container spacing={1.25} alignItems="center">
+                  <Grid item xs={12} md={3}>
+                    <Stack direction="row" gap={1}>
+                      <TextField size="small" select label="Category" value={item.category_id ?? ''} onChange={(e) => patchSharedProductFields(item.key, { category_id: e.target.value ? Number(e.target.value) : undefined })} fullWidth>
+                        <MenuItem value="">All Categories</MenuItem>
+                        {categories.map((category) => (
+                          <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
+                        ))}
+                      </TextField>
+                      <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() => openCategoryDialog(item.key)}
+                          sx={{ minWidth: 0, px: 1 }}
+                        >
+                          New
+                        </Button>
+                    </Stack>
+                  </Grid>
+                  
+                  <Grid item xs={12} md={3.5}>
+                    <Autocomplete
+                      size="small"
+                      options={products}
+                      loading={canSearchProducts && productsQ.isFetching}
+                      getOptionLabel={(option) => {
+                        return `${option.name}${option.brand ? ` | ${option.brand}` : ''}`
+                      }}
+                      filterOptions={(options) => options}
+                      noOptionsText={canSearchProducts ? 'No products found' : PRODUCT_SEARCH_PROMPT}
+                      onOpen={() => setActiveSearchCategory(item)}
+                      onFocus={() => setActiveSearchCategory(item)}
+                      onInputChange={(_, value, reason) => {
+                        if (reason === 'input') {
+                          setActiveSearchCategory(item)
+                          setProductSearch(value)
+                        }
+                        if (reason === 'clear' || reason === 'reset') {
+                          setActiveSearchCategory(item)
+                          setProductSearch('')
+                        }
+                      }}
+                      onChange={(_, value) => applyPickedProduct(item.key, value)}
+                      renderOption={(props, option) => {
+                        return (
+                          <li {...props} key={option.id}>
+                            <Stack gap={0.25} sx={{ width: '100%' }}>
+                              <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
+                                <Typography variant="body2" fontWeight={700}>{option.name}</Typography>
+                                {option.brand ? <Chip size="small" label={option.brand} variant="outlined" /> : null}
+                              </Stack>
+                              <Typography variant="caption" color="text.secondary">
+                                {optionMetaText(!item.category_id, option.category_id, option.default_rack_number, option.printed_price)}
+                              </Typography>
+                            </Stack>
+                          </li>
+                        )
+                      }}
+                      renderInput={(params) => <TextField {...params} label="Pick Product" fullWidth />}
+                    />
+                  </Grid>
                   {!freeOnly ? (
                     <Grid item xs={12} md={4}>
                       <Autocomplete
@@ -1362,9 +1573,17 @@ export default function PurchasesPage() {
                         isOptionEqualToValue={(option, value) => Number(option.movement_id) === Number(value.movement_id)}
                         getOptionLabel={incomingEntryLabel}
                         noOptionsText={canSearchInventoryBatches ? 'No batches found' : PRODUCT_SEARCH_PROMPT}
+                        onOpen={() => setActiveSearchCategory(item)}
+                        onFocus={() => setActiveSearchCategory(item)}
                         onInputChange={(_, value, reason) => {
-                          if (reason === 'input') setInventorySearch(value)
-                          if (reason === 'clear') setInventorySearch('')
+                          if (reason === 'input') {
+                            setActiveSearchCategory(item)
+                            setInventorySearch(value)
+                          }
+                          if (reason === 'clear') {
+                            setActiveSearchCategory(item)
+                            setInventorySearch('')
+                          }
                         }}
                         onChange={(_, value) => {
                           if (value) applyExistingInventory(item.key, value, editMode)
@@ -1379,7 +1598,15 @@ export default function PurchasesPage() {
                                 <Typography variant="body2">{option.name}{option.brand ? ` | ${option.brand}` : ''}</Typography>
                               </Stack>
                               <Typography variant="caption" color="text.secondary">
-                                Incoming {fmtDate(option.incoming_at)} | Exp {option.expiry_date || '-'} | MRP {money(option.mrp)} | Current {Number(option.stock || 0)} | {movementReasonLabel(option.reason)}
+                                {[
+                                  !item.category_id ? categoryNameById.get(Number(option.category_id || 0)) || (option.category_id ? `Category #${option.category_id}` : 'Uncategorized') : '',
+                                  `Rack ${Number(option.rack_number || 0)}`,
+                                  `Incoming ${fmtDate(option.incoming_at)}`,
+                                  `Exp ${option.expiry_date || '-'}`,
+                                  `MRP ${money(option.mrp)}`,
+                                  `Current ${Number(option.stock || 0)}`,
+                                  movementReasonLabel(option.reason),
+                                ].filter(Boolean).join(' | ')}
                               </Typography>
                             </Stack>
                           </li>
@@ -1388,7 +1615,7 @@ export default function PurchasesPage() {
                           <TextField
                             {...params}
                             label="Link Existing Stock"
-                            helperText="Does not add stock. Use only for stock already entered."
+                            // helperText="Does not add stock. Use only for stock already entered."
                             fullWidth
                           />
                         )}
@@ -1396,23 +1623,7 @@ export default function PurchasesPage() {
                     </Grid>
                   ) : null}
                   <Grid item xs={12} md={3.5}>
-                    <Autocomplete
-                      size="small"
-                      options={products}
-                      loading={canSearchProducts && productsQ.isFetching}
-                      getOptionLabel={(option) => `${option.name}${option.brand ? ` | ${option.brand}` : ''}`}
-                      filterOptions={(options) => options}
-                      noOptionsText={canSearchProducts ? 'No products found' : PRODUCT_SEARCH_PROMPT}
-                      onInputChange={(_, value, reason) => {
-                        if (reason === 'input') setProductSearch(value)
-                        if (reason === 'clear' || reason === 'reset') setProductSearch('')
-                      }}
-                      onChange={(_, value) => applyPickedProduct(item.key, value)}
-                      renderInput={(params) => <TextField {...params} label="Pick Product" fullWidth />}
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={3.5}>
-                    <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchItem(item.key, { product_name: e.target.value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })} fullWidth />
+                    <TextField size="small" label="Product Name" value={item.product_name} onChange={(e) => patchSharedProductFields(item.key, { product_name: e.target.value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })} fullWidth />
                   </Grid>
                   <Grid item xs={12} md={2}>
                     <Stack direction="row" gap={1}>
@@ -1421,10 +1632,10 @@ export default function PurchasesPage() {
                         size="small"
                         options={brandNames}
                         value={item.brand || ''}
-                        onChange={(_, value) => patchItem(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })}
+                        onChange={(_, value) => patchSharedProductFields(item.key, { brand: typeof value === 'string' ? value : value || '', product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })}
                         onInputChange={(_, value, reason) => {
                           if (reason === 'input' || reason === 'clear') {
-                            patchItem(item.key, { brand: value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
+                            patchSharedProductFields(item.key, { brand: value, product_id: undefined, existing_inventory_item_id: undefined, existing_stock_movement_id: undefined })
                           }
                         }}
                         renderInput={(params) => <TextField {...params} label="Brand" fullWidth />}
@@ -1436,25 +1647,7 @@ export default function PurchasesPage() {
                     </Stack>
                   </Grid>
                   <Grid item xs={12} md={1.5}>
-                    <TextField size="small" label="Alias" value={item.alias || ''} onChange={(e) => patchItem(item.key, { alias: e.target.value })} fullWidth />
-                  </Grid>
-                  <Grid item xs={12} md={2}>
-                    <Stack direction="row" gap={1}>
-                      <TextField size="small" select label="Category" value={item.category_id ?? ''} onChange={(e) => patchItem(item.key, { category_id: e.target.value ? Number(e.target.value) : undefined })} fullWidth>
-                        <MenuItem value="">None</MenuItem>
-                        {categories.map((category) => (
-                          <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>
-                        ))}
-                      </TextField>
-                      <Button
-                          size="small"
-                          variant="outlined"
-                          onClick={() => openCategoryDialog(item.key)}
-                          sx={{ minWidth: 0, px: 1 }}
-                        >
-                          New
-                        </Button> 
-                    </Stack>
+                    <TextField size="small" label="Alias" value={item.alias || ''} onChange={(e) => patchSharedProductFields(item.key, { alias: e.target.value })} fullWidth />
                   </Grid>
 
                   <Grid item xs={12}>
@@ -1531,16 +1724,70 @@ export default function PurchasesPage() {
                       </Stack>
                     </Stack>
                   </Grid>
+                  {!freeOnly && groupItems.slice(1).map((batch, batchIndex) => (
+                    <Grid item xs={12} key={batch.key}>
+                      <Paper variant="outlined" sx={{ p: 1.25, bgcolor: 'rgba(31,107,74,0.025)' }}>
+                        <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 1 }}>
+                          <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                            Expiry {batchIndex + 2}
+                          </Typography>
+                          <Button
+                            color="error"
+                            size="small"
+                            variant="text"
+                            onClick={() => setDraftItems((prev) => prev.filter((row) => row.key !== batch.key))}
+                          >
+                            Remove Expiry
+                          </Button>
+                        </Stack>
+                        <Grid container spacing={1.25} alignItems="center">
+                          <Grid item xs={6} md={1.6}>
+                            <TextField size="small" label="Expiry" type="date" value={batch.expiry_date || ''} onChange={(e) => patchItem(batch.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} required fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1}>
+                            <TextField size="small" label="Rack" type="number" value={batch.rack_number ?? 0} onChange={(e) => patchItem(batch.key, { rack_number: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1}>
+                            <TextField size="small" label="Paid Qty" type="number" value={batch.sealed_qty} onChange={(e) => patchItem(batch.key, { sealed_qty: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1}>
+                            <TextField size="small" label="Free" type="number" value={batch.free_qty || 0} onChange={(e) => patchItem(batch.key, { free_qty: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="MRP" type="number" value={batch.mrp} onChange={(e) => patchItem(batch.key, { mrp: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Rate" type="number" value={batch.cost_price} onChange={(e) => patchItem(batch.key, { cost_price: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="GST %" type="number" value={batch.gst_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { gst_percent: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchItem(batch.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Round Off (+/-)" type="number" value={batch.rounding_adjustment || 0} onChange={(e) => patchItem(batch.key, { rounding_adjustment: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={12} md={1.6}>
+                            <Stack direction="row" gap={0.75} flexWrap="wrap">
+                              <Chip size="small" label={`Total ${money(lineBaseTotal(batch))}`} variant="outlined" />
+                              <Chip size="small" label={`Inward ${lineTotalQty(batch)}`} variant="outlined" />
+                            </Stack>
+                          </Grid>
+                        </Grid>
+                      </Paper>
+                    </Grid>
+                  ))}
                   {item.loose_sale_enabled && (
                     <>
                       <Grid item xs={12} md={4}>
-                        <TextField size="small" label="Parent Unit" value={item.parent_unit_name || ''} onChange={(e) => patchItem(item.key, { parent_unit_name: e.target.value })} fullWidth />
+                        <TextField size="small" label="Parent Unit" value={item.parent_unit_name || ''} onChange={(e) => patchSharedProductFields(item.key, { parent_unit_name: e.target.value })} fullWidth />
                       </Grid>
                       <Grid item xs={12} md={4}>
-                        <TextField size="small" label="Child Unit" value={item.child_unit_name || ''} onChange={(e) => patchItem(item.key, { child_unit_name: e.target.value })} fullWidth />
+                        <TextField size="small" label="Child Unit" value={item.child_unit_name || ''} onChange={(e) => patchSharedProductFields(item.key, { child_unit_name: e.target.value })} fullWidth />
                       </Grid>
                       <Grid item xs={12} md={4}>
-                        <TextField size="small" label="Conversion Qty" type="number" value={item.conversion_qty || ''} onChange={(e) => patchItem(item.key, { conversion_qty: e.target.value ? Number(e.target.value) : undefined })} fullWidth />
+                        <TextField size="small" label="Conversion Qty" type="number" value={item.conversion_qty || ''} onChange={(e) => patchSharedProductFields(item.key, { conversion_qty: e.target.value ? Number(e.target.value) : undefined })} fullWidth />
                       </Grid>
                     </>
                   )}

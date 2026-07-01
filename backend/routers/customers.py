@@ -363,11 +363,13 @@ def list_customers(
     q: Optional[str] = Query(None, description="Search name/phone/address"),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    include_archived: bool = Query(False),
+    archived_only: bool = Query(False),
 ) -> List[CustomerOut]:
     with get_session() as session:
         stmt = select(Customer)
-        if not include_archived:
+        if archived_only:
+            stmt = stmt.where(Customer.is_active == False)  # noqa: E712
+        else:
             stmt = stmt.where(Customer.is_active == True)  # noqa: E712
         qq = (q or "").strip()
         if qq:

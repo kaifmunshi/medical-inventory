@@ -76,11 +76,11 @@ export default function CustomersPage() {
   const [keepCustomer, setKeepCustomer] = useState<Customer | null>(null)
   const [removeCustomer, setRemoveCustomer] = useState<Customer | null>(null)
   const [selectedExtraBillIds, setSelectedExtraBillIds] = useState<number[]>([])
-  const [showArchived, setShowArchived] = useState(false)
+  const [archivedOnly, setArchivedOnly] = useState(false)
 
   const customersQ = useQuery<Customer[], Error>({
-    queryKey: ['customers', q, showArchived],
-    queryFn: () => fetchCustomers({ q: q.trim() || undefined, limit: 1000, include_archived: showArchived }),
+    queryKey: ['customers', q, archivedOnly],
+    queryFn: () => fetchCustomers({ q: q.trim() || undefined, limit: 1000, archived_only: archivedOnly }),
   })
   const keepSummaryQ = useQuery<CustomerSummary, Error>({
     queryKey: ['customer-summary', keepCustomer?.id, 'with-note-matches'],
@@ -476,11 +476,11 @@ export default function CustomersPage() {
           <FormControlLabel
             control={
               <Switch
-                checked={showArchived}
-                onChange={(event) => setShowArchived(event.target.checked)}
+                checked={archivedOnly}
+                onChange={(event) => setArchivedOnly(event.target.checked)}
               />
             }
-            label="Show archived"
+            label="Archived only"
             sx={{ m: 0, whiteSpace: 'nowrap' }}
           />
           <Button variant="contained" onClick={openAdd}>

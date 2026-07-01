@@ -42,7 +42,7 @@ export async function fetchCustomers(params?: {
   q?: string
   limit?: number
   offset?: number
-  include_archived?: boolean
+  archived_only?: boolean
 }): Promise<Customer[]> {
   const res = await api.get<Customer[]>('/customers', { params })
   return res.data

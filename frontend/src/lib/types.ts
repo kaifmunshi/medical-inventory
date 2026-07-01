@@ -44,6 +44,10 @@ export interface Customer {
   address_line?: string | null
   created_at?: string
   updated_at?: string
+  is_active?: boolean
+  merged_into_customer_id?: ID | null
+  merged_at?: string | null
+  deleted_at?: string | null
 }
 
 export interface Brand {

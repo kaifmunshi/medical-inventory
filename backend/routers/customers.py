@@ -41,23 +41,88 @@ def _normalize_name(v: Optional[str]) -> str:
     return " ".join(str(v or "").strip().split())
 
 
-def _customer_note_conditions(customer_name: str):
-    normalized = _normalize_name(customer_name).lower()
+def _customer_note_conditions(customer: Customer):
+    name = _normalize_name(customer.name).lower()
+    phone = str(customer.phone or "").strip()
+    address = _normalize_name(getattr(customer, "address_line", None)).lower()
     note = func.lower(func.ltrim(func.coalesce(Bill.notes, "")))
-    base = f"customer: {normalized}"
-    return or_(
-        note == base,
-        note.like(f"{base} |%"),
-        note.like(f"{base}\n%"),
+
+    if phone:
+        base = f"customer: {name} | {phone}"
+        return or_(
+            note == base,
+            note.like(f"{base} |%"),
+            note.like(f"{base}\n%"),
+        )
+    if address:
+        base = f"customer: {name} | {address}"
+        return or_(
+            note == base,
+            note.like(f"{base}\n%"),
+        )
+    else:
+        base = f"customer: {name}"
+        return or_(
+            note == base,
+            note.like(f"{base}\n%"),
+        )
+
+
+def _customer_unlinked_note_candidate_condition(
+    customers: List[Customer],
+    exclude_matched_customer_notes: bool = True,
+):
+    note = func.lower(func.ltrim(func.coalesce(Bill.notes, "")))
+    conditions = []
+    matched_conditions = []
+    seen_names = set()
+    for customer in customers:
+        name = _normalize_name(getattr(customer, "name", None)).lower()
+        if not name:
+            continue
+        matched_conditions.append(_customer_note_conditions(customer))
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        conditions.extend([
+            note == name,
+            note.like(f"{name} %"),
+            note.like(f"{name}\n%"),
+            note == f"customer: {name}",
+            note.like(f"customer: {name} |%"),
+            note.like(f"customer: {name}\n%"),
+        ])
+    if not conditions:
+        return None
+    candidate_condition = or_(*conditions)
+    if exclude_matched_customer_notes and matched_conditions:
+        return candidate_condition & ~(or_(*matched_conditions))
+    return candidate_condition
+
+
+def _unlinked_bill_filter():
+    return (
+        (Bill.customer_id == None) &  # noqa: E711
+        (Bill.party_id == None) &  # noqa: E711
+        (Bill.is_deleted == False)  # noqa: E712
     )
 
 
-def _customer_bill_conditions(customer: Customer):
-    return or_(
-        Bill.customer_id == int(customer.id or 0),
-        _customer_note_conditions(customer.name),
-    )
-
+def _customer_bill_conditions(session, customer: Customer, include_unlinked_notes: bool = True):
+    customer_id = int(customer.id or 0)
+    customer_party_id = _customer_party_id(session, customer)
+    conditions = [
+        Bill.customer_id == customer_id,
+    ]
+    if include_unlinked_notes:
+        conditions.append(
+            (Bill.customer_id == None) &  # noqa: E711
+            (Bill.party_id == None) &  # noqa: E711
+            _customer_note_conditions(customer)
+        )
+    if customer_party_id is not None:
+        conditions.append(Bill.party_id == int(customer_party_id))
+    return or_(*conditions)
 
 def _customer_party_id(session, customer: Customer) -> Optional[int]:
     if not customer or not customer.id:
@@ -155,6 +220,7 @@ class MoveCustomerBillsIn(BaseModel):
 class MergeCustomersIn(BaseModel):
     keep_customer_id: int
     remove_customer_id: int
+    extra_bill_ids: List[int] = []
 
 
 class MergeCustomersOut(BaseModel):
@@ -166,13 +232,22 @@ class MergeCustomersOut(BaseModel):
     deactivated_party_id: Optional[int] = None
 
 
+class UnlinkedBillCandidateOut(BaseModel):
+    id: int
+    date_time: str
+    total_amount: float
+    payment_status: str
+    notes: Optional[str] = None
+
+
 def _name_exists(session, name: str, exclude_customer_id: Optional[int] = None) -> bool:
     normalized = _normalize_name(name).lower()
     if not normalized:
         return False
 
     stmt = select(Customer.id).where(
-        func.lower(func.trim(func.coalesce(Customer.name, ""))) == normalized
+        func.lower(func.trim(func.coalesce(Customer.name, ""))) == normalized,
+        Customer.is_active == True,  # noqa: E712
     )
     if exclude_customer_id is not None:
         stmt = stmt.where(Customer.id != int(exclude_customer_id))
@@ -185,7 +260,7 @@ def _has_bills_for_customer(session, customer: Customer) -> bool:
     if not normalized and not customer.id:
         return False
 
-    stmt = select(Bill.id).where(_customer_bill_conditions(customer))
+    stmt = select(Bill.id).where(_customer_bill_conditions(session, customer))
     return session.exec(stmt.limit(1)).first() is not None
 
 
@@ -321,6 +396,8 @@ def update_customer(customer_id: int, payload: CustomerUpdate) -> CustomerOut:
             raise HTTPException(status_code=404, detail="Customer not found")
 
         data = payload.dict(exclude_unset=True)
+        if not bool(getattr(row, "is_active", True)):
+            raise HTTPException(status_code=400, detail="Archived customer cannot be edited")
         if "name" in data:
             nm = _normalize_name(data.get("name"))
             if not nm:
@@ -360,8 +437,50 @@ def delete_customer(customer_id: int) -> Response:
         return Response(status_code=204)
 
 
+@router.get("/unlinked-bill-candidates", response_model=List[UnlinkedBillCandidateOut])
+def list_unlinked_bill_candidates(
+    keep_customer_id: Optional[int] = Query(None),
+    remove_customer_id: Optional[int] = Query(None),
+) -> List[UnlinkedBillCandidateOut]:
+    ids = [int(v) for v in [keep_customer_id, remove_customer_id] if v is not None]
+    if not ids:
+        return []
+
+    with get_session() as session:
+        customers = []
+        for customer_id in ids:
+            customer = session.get(Customer, customer_id)
+            if customer and bool(getattr(customer, "is_active", True)):
+                customers.append(customer)
+
+        note_condition = _customer_unlinked_note_candidate_condition(customers)
+        if note_condition is None:
+            return []
+
+        bills = session.exec(
+            select(Bill)
+            .where(_unlinked_bill_filter())
+            .where(note_condition)
+            .order_by(Bill.id.desc())
+        ).all()
+
+        return [
+            UnlinkedBillCandidateOut(
+                id=int(bill.id or 0),
+                date_time=bill.date_time,
+                total_amount=float(bill.total_amount or 0),
+                payment_status=str(bill.payment_status or ""),
+                notes=bill.notes,
+            )
+            for bill in bills
+        ]
+
+
 @router.get("/{customer_id}/summary", response_model=CustomerSummaryOut)
-def get_customer_summary(customer_id: int) -> CustomerSummaryOut:
+def get_customer_summary(
+    customer_id: int,
+    include_unlinked_notes: bool = Query(True),
+) -> CustomerSummaryOut:
     with get_session() as session:
         customer = session.get(Customer, customer_id)
         if not customer:
@@ -369,7 +488,7 @@ def get_customer_summary(customer_id: int) -> CustomerSummaryOut:
 
         bills = session.exec(
             select(Bill)
-            .where(_customer_bill_conditions(customer))
+            .where(_customer_bill_conditions(session, customer, include_unlinked_notes=include_unlinked_notes))
             .where(Bill.is_deleted == False)  # noqa: E712
             .order_by(Bill.id.desc())
         ).all()
@@ -407,6 +526,10 @@ def get_customer_summary(customer_id: int) -> CustomerSummaryOut:
                 address_line=customer.address_line,
                 created_at=customer.created_at,
                 updated_at=customer.updated_at,
+                is_active=bool(getattr(customer, "is_active", True)),
+                merged_into_customer_id=getattr(customer, "merged_into_customer_id", None),
+                merged_at=getattr(customer, "merged_at", None),
+                deleted_at=getattr(customer, "deleted_at", None),
             ),
             totals=totals,
             bills=[_to_bill_out(session, bill) for bill in bills],
@@ -428,7 +551,7 @@ def move_customer_bills(payload: MoveCustomerBillsIn):
 
         bills = session.exec(
             select(Bill)
-            .where(_customer_bill_conditions(source))
+            .where(_customer_bill_conditions(session, source))
             .where(Bill.is_deleted == False)  # noqa: E712
         ).all()
         if not bills:
@@ -466,7 +589,12 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
             raise HTTPException(status_code=404, detail="Keep customer not found")
         if not remove:
             raise HTTPException(status_code=404, detail="Remove customer not found")
+        if not bool(getattr(keep, "is_active", True)):
+            raise HTTPException(status_code=400, detail="Keep customer is archived")
+        if not bool(getattr(remove, "is_active", True)):
+            raise HTTPException(status_code=400, detail="Remove customer is already archived")
 
+        now = datetime.now().isoformat(timespec="seconds")
         keep_party = _ensure_customer_party(session, keep)
         remove_party = session.exec(
             select(Party)
@@ -477,15 +605,42 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
             .order_by(Party.id.asc())
         ).first()
 
-        bill_conditions = [_customer_bill_conditions(remove)]
+        bill_conditions = [_customer_bill_conditions(session, remove)]
         if remove_party and remove_party.id:
             bill_conditions.append(Bill.party_id == int(remove_party.id))
         bills = session.exec(select(Bill).where(or_(*bill_conditions))).all()
 
+        extra_bill_ids = sorted({int(bill_id) for bill_id in payload.extra_bill_ids if int(bill_id) > 0})
+        if extra_bill_ids:
+            note_condition = _customer_unlinked_note_candidate_condition([keep, remove])
+            if note_condition is None:
+                raise HTTPException(status_code=400, detail="Selected unlinked bills do not match these customers")
+
+            allowed_extra_ids = set(
+                int(bill_id)
+                for bill_id in session.exec(
+                    select(Bill.id)
+                    .where(Bill.id.in_(extra_bill_ids))
+                    .where(_unlinked_bill_filter())
+                    .where(note_condition)
+                ).all()
+                if bill_id is not None
+            )
+            invalid_extra_ids = [bill_id for bill_id in extra_bill_ids if bill_id not in allowed_extra_ids]
+            if invalid_extra_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Selected unlinked bills are no longer available: {', '.join(str(v) for v in invalid_extra_ids)}",
+                )
+
+            existing_bill_ids = {int(bill.id or 0) for bill in bills}
+            extra_bills = session.exec(select(Bill).where(Bill.id.in_(extra_bill_ids))).all()
+            bills.extend([bill for bill in extra_bills if int(bill.id or 0) not in existing_bill_ids])
+
         keep_bill_ids = set(
             int(bill_id)
             for bill_id in session.exec(
-                select(Bill.id).where(_customer_bill_conditions(keep))
+                select(Bill.id).where(_customer_bill_conditions(session, keep, include_unlinked_notes=False))
             ).all()
             if bill_id is not None
         )
@@ -526,9 +681,9 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
             remove_party.legacy_customer_id = None
             remove_party.is_active = False
             remove_party.notes = (
-                f"{remove_party.notes or ''}\nMerged into customer #{keep_id} on {datetime.now().isoformat(timespec='seconds')}"
+                f"{remove_party.notes or ''}\nMerged into customer #{keep_id} on {now}"
             ).strip()
-            remove_party.updated_at = datetime.now().isoformat(timespec="seconds")
+            remove_party.updated_at = now
             session.add(remove_party)
 
         log_audit(
@@ -549,19 +704,14 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
                 "keep_party_id": int(keep_party.id or 0),
             },
         )
-        # session.delete(remove)
-
-        now = datetime.now().isoformat(timespec="seconds")
-
         remove.is_active = False
         remove.merged_into_customer_id = keep_id
         remove.merged_at = now
         remove.deleted_at = now
         remove.updated_at = now
-        remove.name = f"{remove.name} (Merged into #{keep_id})"
 
         session.add(remove)
-        
+
         session.commit()
         return MergeCustomersOut(
             keep_customer_id=keep_id,

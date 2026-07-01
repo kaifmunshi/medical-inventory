@@ -5,12 +5,15 @@ import {
   Box,
   Button,
   Checkbox,
+  Chip,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControlLabel,
   Paper,
   Stack,
+  Switch,
   TextField,
   Typography,
   IconButton,
@@ -73,10 +76,11 @@ export default function CustomersPage() {
   const [keepCustomer, setKeepCustomer] = useState<Customer | null>(null)
   const [removeCustomer, setRemoveCustomer] = useState<Customer | null>(null)
   const [selectedExtraBillIds, setSelectedExtraBillIds] = useState<number[]>([])
+  const [showArchived, setShowArchived] = useState(false)
 
   const customersQ = useQuery<Customer[], Error>({
-    queryKey: ['customers', q],
-    queryFn: () => fetchCustomers({ q: q.trim() || undefined, limit: 1000 }),
+    queryKey: ['customers', q, showArchived],
+    queryFn: () => fetchCustomers({ q: q.trim() || undefined, limit: 1000, include_archived: showArchived }),
   })
   const keepSummaryQ = useQuery<CustomerSummary, Error>({
     queryKey: ['customer-summary', keepCustomer?.id, 'with-note-matches'],
@@ -452,7 +456,7 @@ export default function CustomersPage() {
   }
 
   const rows = customersQ.data || []
-  const mergeOptions = rows
+  const mergeOptions = rows.filter((customer) => customer.is_active !== false)
 
   return (
     <Stack gap={2}>
@@ -469,6 +473,16 @@ export default function CustomersPage() {
           <Button variant="outlined" startIcon={<MergeTypeIcon />} onClick={openMerge}>
             Club
           </Button>
+          <FormControlLabel
+            control={
+              <Switch
+                checked={showArchived}
+                onChange={(event) => setShowArchived(event.target.checked)}
+              />
+            }
+            label="Show archived"
+            sx={{ m: 0, whiteSpace: 'nowrap' }}
+          />
           <Button variant="contained" onClick={openAdd}>
             Add Customer
           </Button>
@@ -489,40 +503,70 @@ export default function CustomersPage() {
                   <th>Name</th>
                   <th>Phone</th>
                   <th>Address</th>
+                  <th>Status</th>
                   <th>Created</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
-                  <tr key={r.id}>
-                    <td>{r.name}</td>
-                    <td>{r.phone || '-'}</td>
-                    <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{r.address_line || '-'}</td>
-                    <td>{formatDate(r.created_at)}</td>
-                    <td>
-                      <Stack direction="row" gap={1}>
-                        <Button size="small" onClick={() => navigate(`/customer-ledger?customer_id=${r.id}`)}>
-                          Ledger
-                        </Button>
-                        <IconButton
-                          size="small"
-                          color="primary"
-                          onClick={() => navigate(`/customers/${r.id}/summary`)}
-                          title="Open Summary"
-                        >
-                          <ReceiptLongIcon fontSize="small" />
-                        </IconButton>
-                        <IconButton size="small" onClick={() => openEdit(r)} disabled={updateM.isPending}>
-                          <EditIcon fontSize="small" />
-                        </IconButton>
-                      </Stack>
-                    </td>
-                  </tr>
-                ))}
+                {rows.map((r) => {
+                  const archived = r.is_active === false
+                  const mergedInto = r.merged_into_customer_id
+                  const archivedAt = r.merged_at || r.deleted_at || undefined
+                  return (
+                    <tr key={r.id}>
+                      <td>{r.name}</td>
+                      <td>{r.phone || '-'}</td>
+                      <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{r.address_line || '-'}</td>
+                      <td>
+                        {archived ? (
+                          <Stack gap={0.5}>
+                            <Chip
+                              size="small"
+                              color={mergedInto ? 'warning' : 'default'}
+                              label={mergedInto ? `Merged into #${mergedInto}` : 'Archived'}
+                              sx={{ width: 'fit-content' }}
+                            />
+                            {archivedAt ? (
+                              <Typography variant="caption" color="text.secondary">
+                                {formatDate(archivedAt)}
+                              </Typography>
+                            ) : null}
+                          </Stack>
+                        ) : (
+                          <Chip size="small" color="success" label="Active" sx={{ width: 'fit-content' }} />
+                        )}
+                      </td>
+                      <td>{formatDate(r.created_at)}</td>
+                      <td>
+                        <Stack direction="row" gap={1}>
+                          <Button size="small" onClick={() => navigate(`/customer-ledger?customer_id=${r.id}`)}>
+                            Ledger
+                          </Button>
+                          <IconButton
+                            size="small"
+                            color="primary"
+                            onClick={() => navigate(`/customers/${r.id}/summary`)}
+                            title="Open Summary"
+                          >
+                            <ReceiptLongIcon fontSize="small" />
+                          </IconButton>
+                          <IconButton
+                            size="small"
+                            onClick={() => openEdit(r)}
+                            disabled={updateM.isPending || archived}
+                            title={archived ? 'Archived customers cannot be edited' : 'Edit'}
+                          >
+                            <EditIcon fontSize="small" />
+                          </IconButton>
+                        </Stack>
+                      </td>
+                    </tr>
+                  )
+                })}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={5}>
+                    <td colSpan={6}>
                       <Box p={2} color="text.secondary">
                         No customers yet.
                       </Box>

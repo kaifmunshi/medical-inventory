@@ -363,10 +363,12 @@ def list_customers(
     q: Optional[str] = Query(None, description="Search name/phone/address"),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    include_archived: bool = Query(False),
 ) -> List[CustomerOut]:
     with get_session() as session:
         stmt = select(Customer)
-        stmt = stmt.where(Customer.is_active == True)  # noqa: E712
+        if not include_archived:
+            stmt = stmt.where(Customer.is_active == True)  # noqa: E712
         qq = (q or "").strip()
         if qq:
             like = f"%{qq.lower()}%"
@@ -646,18 +648,24 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
         )
 
         moved_bills = 0
+        normalized_overlapping_bills = 0
 
         for bill in bills:
             bill_id = int(bill.id or 0)
-
-            if bill_id in keep_bill_ids:
-                continue
+            already_visible_under_keep = bill_id in keep_bill_ids
+            old_customer_id = getattr(bill, "customer_id", None)
+            old_party_id = getattr(bill, "party_id", None)
+            old_notes = bill.notes
 
             bill.customer_id = keep_id
             bill.party_id = int(keep_party.id or 0)
             bill.notes = _replace_customer_note(bill.notes, keep)
             session.add(bill)
-            moved_bills += 1
+            if already_visible_under_keep:
+                if old_customer_id != bill.customer_id or old_party_id != bill.party_id or old_notes != bill.notes:
+                    normalized_overlapping_bills += 1
+            else:
+                moved_bills += 1
 
         moved_receipts = 0
         if remove_party and remove_party.id:
@@ -698,6 +706,7 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
                 "keep_name": keep.name,
                 "remove_name": remove.name,
                 "moved_bills": moved_bills,
+                "normalized_overlapping_bills": normalized_overlapping_bills,
                 "moved_receipts": moved_receipts,
                 "moved_ledgers": moved_ledgers,
                 "removed_party_id": int(remove_party.id) if remove_party and remove_party.id else None,

@@ -38,7 +38,12 @@ export interface UnlinkedBillCandidate {
   notes?: string | null
 }
 
-export async function fetchCustomers(params?: { q?: string; limit?: number; offset?: number }): Promise<Customer[]> {
+export async function fetchCustomers(params?: {
+  q?: string
+  limit?: number
+  offset?: number
+  include_archived?: boolean
+}): Promise<Customer[]> {
   const res = await api.get<Customer[]>('/customers', { params })
   return res.data
 }

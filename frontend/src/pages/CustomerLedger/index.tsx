@@ -60,6 +60,18 @@ function money(n: number | string | undefined | null) {
   return Number(n || 0).toFixed(2)
 }
 
+function normalizeAmountInput(raw: string) {
+  const text = String(raw ?? '').trim()
+  if (!text) return ''
+  const negative = text.startsWith('-') ? '-' : ''
+  const unsigned = negative ? text.slice(1) : text
+  const [wholeRaw, fractionalRaw] = unsigned.split('.', 2)
+  const wholeDigits = wholeRaw.replace(/\D/g, '')
+  const whole = wholeDigits.replace(/^0+(?=\d)/, '') || '0'
+  const fractional = fractionalRaw === undefined ? '' : fractionalRaw.replace(/\D/g, '')
+  return `${negative}${whole}${fractionalRaw === undefined ? '' : `.${fractional}`}`
+}
+
 function round2(n: number) {
   return Number(Number(n || 0).toFixed(2))
 }
@@ -347,10 +359,10 @@ export default function CustomerLedgerPage() {
   const [expandedReturns, setExpandedReturns] = useState<Record<number, boolean>>({})
   const [expandedReceipts, setExpandedReceipts] = useState<Record<string, boolean>>({})
   const [sectionOpen, setSectionOpen] = useState<Record<LedgerSectionKey, boolean>>({
-    openBills: true,
-    billLedger: true,
-    returns: true,
-    receipts: true,
+    openBills: false,
+    billLedger: false,
+    returns: false,
+    receipts: false,
   })
 
   const customersQ = useQuery<Customer[], Error>({
@@ -732,7 +744,13 @@ export default function CustomerLedgerPage() {
   const sortedReceiptHistory = useMemo(() => sortReceipts(receiptHistory, receiptSort), [receiptHistory, receiptSort])
 
   function toggleSection(key: LedgerSectionKey) {
-    setSectionOpen((prev) => ({ ...prev, [key]: !prev[key] }))
+    setSectionOpen((prev) => ({
+      openBills: false,
+      billLedger: false,
+      returns: false,
+      receipts: false,
+      [key]: !prev[key],
+    }))
   }
 
   function openReceiptDialog() {
@@ -749,7 +767,7 @@ export default function CustomerLedgerPage() {
   }
 
   function setDraft(billId: number, value: string) {
-    setAdjustmentDrafts((prev) => ({ ...prev, [billId]: value }))
+    setAdjustmentDrafts((prev) => ({ ...prev, [billId]: normalizeAmountInput(value) }))
   }
 
   function setReceiptMode(next: 'cash' | 'online' | 'split') {
@@ -768,15 +786,16 @@ export default function CustomerLedgerPage() {
   }
 
   function handleReceiptAmountChange(raw: string) {
-    setReceiptAmount(raw)
+    const value = normalizeAmountInput(raw)
+    setReceiptAmount(value)
     if (mode === 'cash') {
-      setCashAmount(raw)
+      setCashAmount(value)
       setOnlineAmount('0')
     } else if (mode === 'online') {
       setCashAmount('0')
-      setOnlineAmount(raw)
+      setOnlineAmount(value)
     } else {
-      setCashAmount(raw)
+      setCashAmount(value)
       setOnlineAmount('0')
     }
   }
@@ -797,37 +816,42 @@ export default function CustomerLedgerPage() {
   }
 
   function handleEditReceiptAmountChange(raw: string) {
-    setEditReceiptAmount(raw)
+    const value = normalizeAmountInput(raw)
+    setEditReceiptAmount(value)
     if (editReceiptMode === 'cash') {
-      setEditReceiptCash(raw)
+      setEditReceiptCash(value)
       setEditReceiptOnline('0')
     } else if (editReceiptMode === 'online') {
       setEditReceiptCash('0')
-      setEditReceiptOnline(raw)
+      setEditReceiptOnline(value)
     } else {
-      setEditReceiptCash(raw)
+      setEditReceiptCash(value)
       setEditReceiptOnline('0')
     }
   }
 
   function setEditSplitCash(raw: string) {
-    setEditReceiptCash(raw)
-    setEditReceiptAmount(String(Number(raw || 0) + Number(editReceiptOnline || 0)))
+    const value = normalizeAmountInput(raw)
+    setEditReceiptCash(value)
+    setEditReceiptAmount(money(Number(value || 0) + Number(editReceiptOnline || 0)))
   }
 
   function setEditSplitOnline(raw: string) {
-    setEditReceiptOnline(raw)
-    setEditReceiptAmount(String(Number(editReceiptCash || 0) + Number(raw || 0)))
+    const value = normalizeAmountInput(raw)
+    setEditReceiptOnline(value)
+    setEditReceiptAmount(money(Number(editReceiptCash || 0) + Number(value || 0)))
   }
 
   function setSplitCash(raw: string) {
-    setCashAmount(raw)
-    setReceiptAmount(String(Number(raw || 0) + Number(onlineAmount || 0)))
+    const value = normalizeAmountInput(raw)
+    setCashAmount(value)
+    setReceiptAmount(money(Number(value || 0) + Number(onlineAmount || 0)))
   }
 
   function setSplitOnline(raw: string) {
-    setOnlineAmount(raw)
-    setReceiptAmount(String(Number(cashAmount || 0) + Number(raw || 0)))
+    const value = normalizeAmountInput(raw)
+    setOnlineAmount(value)
+    setReceiptAmount(money(Number(cashAmount || 0) + Number(value || 0)))
   }
 
   function fillBillAdjustmentOnFocus(bill: OpenBill) {
@@ -839,7 +863,7 @@ export default function CustomerLedgerPage() {
     }, 0)
     const remaining = Math.max(0, receiptTotal - usedElsewhere)
     if (remaining <= 0) return
-    setDraft(billId, String(Math.min(Number(bill.outstanding_amount || 0), remaining)))
+    setDraft(billId, money(Math.min(Number(bill.outstanding_amount || 0), remaining)))
   }
 
   function clampBillAdjustment(bill: OpenBill) {
@@ -849,7 +873,7 @@ export default function CustomerLedgerPage() {
       setDraft(billId, '0')
       return
     }
-    setDraft(billId, String(raw))
+    setDraft(billId, money(raw))
   }
 
   function fillAdjustmentsFromReceipt() {
@@ -857,7 +881,7 @@ export default function CustomerLedgerPage() {
     const next: Record<number, string> = {}
     for (const bill of openBillsForReceipt) {
       const amount = Math.min(Number(bill.outstanding_amount || 0), Math.max(0, remaining))
-      next[Number(bill.bill_id)] = amount > 0 ? String(amount) : '0'
+      next[Number(bill.bill_id)] = amount > 0 ? money(amount) : '0'
       remaining = Math.max(0, remaining - amount)
     }
     setAdjustmentDrafts(next)
@@ -891,15 +915,15 @@ export default function CustomerLedgerPage() {
             : 'cash'
     setEditReceiptTarget(row)
     setEditReceiptMode(normalizedMode)
-    setEditReceiptAmount(String(total))
-    setEditReceiptCash(String(cash))
-    setEditReceiptOnline(String(online))
+    setEditReceiptAmount(money(total))
+    setEditReceiptCash(money(cash))
+    setEditReceiptOnline(money(online))
     setEditReceiptDate(String(row.when || today).slice(0, 10))
     setEditReceiptNote(row.note || '')
   }
 
   function setApplyDraft(billId: number, value: string) {
-    setApplyDrafts((prev) => ({ ...prev, [billId]: value }))
+    setApplyDrafts((prev) => ({ ...prev, [billId]: normalizeAmountInput(value) }))
   }
 
   function fillApplyAdjustmentOnFocus(bill: OpenBill) {
@@ -911,7 +935,7 @@ export default function CustomerLedgerPage() {
     }, 0)
     const remaining = Math.max(0, applyAvailable - usedElsewhere)
     if (remaining <= 0) return
-    setApplyDraft(billId, String(Math.min(Number(bill.outstanding_amount || 0), remaining)))
+    setApplyDraft(billId, money(Math.min(Number(bill.outstanding_amount || 0), remaining)))
   }
 
   function clampApplyAdjustment(bill: OpenBill) {
@@ -921,7 +945,7 @@ export default function CustomerLedgerPage() {
       setApplyDraft(billId, '0')
       return
     }
-    setApplyDraft(billId, String(raw))
+    setApplyDraft(billId, money(raw))
   }
 
   function fillApplyFromAdvance() {
@@ -929,7 +953,7 @@ export default function CustomerLedgerPage() {
     const next: Record<number, string> = {}
     for (const bill of openBillsForReceipt) {
       const amount = Math.min(Number(bill.outstanding_amount || 0), Math.max(0, remaining))
-      next[Number(bill.bill_id)] = amount > 0 ? String(amount) : '0'
+      next[Number(bill.bill_id)] = amount > 0 ? money(amount) : '0'
       remaining = Math.max(0, remaining - amount)
     }
     setApplyDrafts(next)
@@ -1254,7 +1278,7 @@ export default function CustomerLedgerPage() {
                       <td className="expand-col">
                         <IconButton
                           size="small"
-                          onClick={() => setExpandedOpenBills((prev) => ({ ...prev, [billId]: !prev[billId] }))}
+                          onClick={() => setExpandedOpenBills((prev) => (prev[billId] ? {} : { [billId]: true }))}
                         >
                           {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
                         </IconButton>
@@ -1354,7 +1378,7 @@ export default function CustomerLedgerPage() {
                       <td className="expand-col">
                         <IconButton
                           size="small"
-                          onClick={() => setExpandedLedgerRows((prev) => ({ ...prev, [billId]: !prev[billId] }))}
+                          onClick={() => setExpandedLedgerRows((prev) => (prev[billId] ? {} : { [billId]: true }))}
                         >
                           {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
                         </IconButton>
@@ -1460,7 +1484,7 @@ export default function CustomerLedgerPage() {
                       <td className="expand-col">
                         <IconButton
                           size="small"
-                          onClick={() => setExpandedReturns((prev) => ({ ...prev, [returnId]: !prev[returnId] }))}
+                          onClick={() => setExpandedReturns((prev) => (prev[returnId] ? {} : { [returnId]: true }))}
                         >
                           {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
                         </IconButton>
@@ -1617,7 +1641,7 @@ export default function CustomerLedgerPage() {
                       <td className="expand-col">
                         <IconButton
                           size="small"
-                          onClick={() => setExpandedReceipts((prev) => ({ ...prev, [receipt.id]: !prev[receipt.id] }))}
+                          onClick={() => setExpandedReceipts((prev) => (prev[receipt.id] ? {} : { [receipt.id]: true }))}
                         >
                           {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
                         </IconButton>
@@ -1879,23 +1903,26 @@ export default function CustomerLedgerPage() {
                 <tbody>
                   {openBillsForReceipt.map((bill) => {
                     const billId = Number(bill.bill_id)
+                    const billDate = formatLedgerDateTime(bill.bill_date)
                     const usedElsewhere = Object.entries(adjustmentDrafts).reduce((sum, [id, value]) => {
                       return Number(id) === billId ? sum : sum + Number(value || 0)
                     }, 0)
                     const remainingForThis = Math.max(0, receiptTotal - usedElsewhere)
                     return (
                     <tr key={bill.bill_id}>
-                      <td>
-                        <Stack gap={0.25}>
+                      <td style={{ textAlign: 'left', minWidth: 180 }}>
+                        <Stack gap={0.25} alignItems="flex-start">
                           <Link
                             component="button"
                             underline="hover"
                             onClick={() => openBillDetail(Number(bill.bill_id))}
-                            sx={{ fontWeight: 800 }}
+                            sx={{ p: 0, fontWeight: 800, textAlign: 'left' }}
                           >
                             Bill #{bill.bill_id}
                           </Link>
-                          <Typography variant="caption" color="text.secondary">{bill.bill_date}</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {billDate.time ? `${billDate.date} | ${billDate.time}` : billDate.date}
+                          </Typography>
                         </Stack>
                       </td>
                       <td><Typography fontWeight={800}>Rs {money(bill.outstanding_amount)}</Typography></td>
@@ -1924,19 +1951,38 @@ export default function CustomerLedgerPage() {
                 </tbody>
               </table>
             </Box>
-
-            <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
-              <Typography>Receipt Total: {money(receiptTotal)}</Typography>
-              <Typography>Applied to Bills: {money(adjustmentTotal)}</Typography>
-              <Typography fontWeight={700}>Advance / On Account: {money(onAccountAmount)}</Typography>
-            </Stack>
           </Stack>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setReceiptOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={() => saveReceipt()} disabled={receiptM.isPending}>
-            Save Receipt
-          </Button>
+        <DialogActions
+          sx={{
+            justifyContent: 'space-between',
+            alignItems: { xs: 'stretch', md: 'center' },
+            gap: 1.5,
+            flexDirection: { xs: 'column', md: 'row' },
+            bgcolor: '#f7faf8',
+            borderTop: '1px solid',
+            borderColor: 'divider',
+            px: 2,
+            py: 1.5,
+          }}
+        >
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5} flexWrap="wrap" useFlexGap>
+            <Typography variant="body2">
+              Receipt Total: <Box component="span" sx={{ fontWeight: 900, color: 'success.dark' }}>{money(receiptTotal)}</Box>
+            </Typography>
+            <Typography variant="body2">
+              Applied to Bills: <Box component="span" sx={{ fontWeight: 900, color: 'warning.dark' }}>{money(adjustmentTotal)}</Box>
+            </Typography>
+            <Typography variant="body2">
+              Advance / On Account: <Box component="span" sx={{ fontWeight: 900, color: 'error.dark' }}>{money(onAccountAmount)}</Box>
+            </Typography>
+          </Stack>
+          <Stack direction="row" gap={1} justifyContent="flex-end">
+            <Button onClick={() => setReceiptOpen(false)}>Cancel</Button>
+            <Button variant="contained" onClick={() => saveReceipt()} disabled={receiptM.isPending}>
+              Save Receipt
+            </Button>
+          </Stack>
         </DialogActions>
       </Dialog>
 
@@ -2018,23 +2064,26 @@ export default function CustomerLedgerPage() {
                 <tbody>
                   {openBillsForReceipt.map((bill) => {
                     const billId = Number(bill.bill_id)
+                    const billDate = formatLedgerDateTime(bill.bill_date)
                     const usedElsewhere = Object.entries(applyDrafts).reduce((sum, [id, value]) => {
                       return Number(id) === billId ? sum : sum + Number(value || 0)
                     }, 0)
                     const remainingForThis = Math.max(0, applyAvailable - usedElsewhere)
                     return (
                       <tr key={bill.bill_id}>
-                        <td>
-                          <Stack gap={0.25}>
+                        <td style={{ textAlign: 'left', minWidth: 180 }}>
+                          <Stack gap={0.25} alignItems="flex-start">
                             <Link
                               component="button"
                               underline="hover"
                               onClick={() => openBillDetail(Number(bill.bill_id))}
-                              sx={{ fontWeight: 800 }}
+                              sx={{ p: 0, fontWeight: 800, textAlign: 'left' }}
                             >
                               Bill #{bill.bill_id}
                             </Link>
-                            <Typography variant="caption" color="text.secondary">{bill.bill_date}</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {billDate.time ? `${billDate.date} | ${billDate.time}` : billDate.date}
+                            </Typography>
                           </Stack>
                         </td>
                         <td><Typography fontWeight={800}>Rs {money(bill.outstanding_amount)}</Typography></td>

@@ -1339,7 +1339,6 @@ export default function PurchasesPage() {
     const patchItem = freeOnly ? updateFreeStockItem : (editMode ? updateEditItem : updateItem)
     const expandedLines = freeOnly ? expandedFreeStockLines : (editMode ? expandedEditLines : expandedDraftLines)
     const setExpandedLines = freeOnly ? setExpandedFreeStockLines : (editMode ? setExpandedEditLines : setExpandedDraftLines)
-    const defaultExpanded = !editMode
     const draftSubtotal = draftItems.reduce(
       (sum, item) => sum + lineBaseTotal(item),
       0,
@@ -1402,7 +1401,7 @@ export default function PurchasesPage() {
           ...grouped.slice(sourceIndex + 1),
         ]
       })
-      setExpandedLines((prev) => ({ ...prev, [source.key]: true, [next.key]: true }))
+      setExpandedLines({ [next.key]: true })
     }
     return (
       <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
@@ -1435,7 +1434,7 @@ export default function PurchasesPage() {
               onClick={() => {
                 const next = freeOnly ? makeFreeStockItem() : makeEmptyItem()
                 setDraftItems((prev) => [...prev, next])
-                setExpandedLines((prev) => ({ ...prev, [next.key]: true }))
+                setExpandedLines({ [next.key]: true })
               }}
             >
               Add Product
@@ -1452,7 +1451,7 @@ export default function PurchasesPage() {
             const groupPaidQty = groupItems.reduce((sum, row) => sum + Number(row.sealed_qty || 0), 0)
             const groupFreeQty = groupItems.reduce((sum, row) => sum + Number(row.free_qty || 0), 0)
             const groupTotal = groupItems.reduce((sum, row) => round2(sum + lineBaseTotal(row)), 0)
-            const isExpanded = expandedLines[item.key] ?? defaultExpanded
+            const isExpanded = Boolean(expandedLines[item.key])
             return (
             <Box key={item.key} sx={{ p: 1.5, bgcolor: isExpanded ? 'background.paper' : 'grey.50' }}>
               <Stack gap={1.25}>
@@ -1477,7 +1476,7 @@ export default function PurchasesPage() {
                     <Chip size="small" variant="outlined" label={freeOnly ? 'Cost 0.00' : `Item Total ${money(groupTotal)}`} />
                   </Stack>
                   <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
-                    <Button size="small" variant="outlined" onClick={() => setExpandedLines((prev) => ({ ...prev, [item.key]: !isExpanded }))}>
+                    <Button size="small" variant="outlined" onClick={() => setExpandedLines((prev) => (prev[item.key] ? {} : { [item.key]: true }))}>
                       {isExpanded ? 'Collapse' : 'Expand'}
                     </Button>
                     {!freeOnly ? (

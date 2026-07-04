@@ -13,9 +13,20 @@ export default function DisableNumberInputScroll() {
       numberInput.blur()
     }
 
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+      const target = event.target
+      if (!(target instanceof HTMLInputElement)) return
+      if (target.type !== 'number') return
+
+      event.preventDefault()
+    }
+
     document.addEventListener('wheel', handleWheel, { capture: true, passive: false })
+    document.addEventListener('keydown', handleKeyDown, true)
     return () => {
       document.removeEventListener('wheel', handleWheel, true)
+      document.removeEventListener('keydown', handleKeyDown, true)
     }
   }, [])
 

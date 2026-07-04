@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Box,
   Collapse,
@@ -24,32 +24,11 @@ type SidebarProps = {
   collapsed?: boolean
 }
 
-const STORAGE_KEY = 'sidebar_group_state'
-
-function defaultExpanded() {
-  return Object.fromEntries(appMenuGroups.map((group) => [group.key, true])) as Record<string, boolean>
-}
-
 export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed = false }: SidebarProps) {
   const { pathname } = useLocation()
   const { isLocked } = useUserSession()
   const year = new Date().getFullYear()
-  const [expanded, setExpanded] = useState<Record<string, boolean>>(defaultExpanded)
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (!raw) return
-      const parsed = JSON.parse(raw)
-      setExpanded({ ...defaultExpanded(), ...(parsed || {}) })
-    } catch {
-      // ignore malformed state
-    }
-  }, [])
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(expanded))
-  }, [expanded])
+  const [expandedGroupKey, setExpandedGroupKey] = useState('')
 
   const visibleMenuGroups = useMemo(() => {
     if (!isLocked) return appMenuGroups
@@ -71,14 +50,8 @@ export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed =
     return group?.key || ''
   }, [pathname, visibleMenuGroups])
 
-  useEffect(() => {
-    if (activeGroupKey) {
-      setExpanded((prev) => ({ ...prev, [activeGroupKey]: true }))
-    }
-  }, [activeGroupKey])
-
   function toggleGroup(groupKey: string) {
-    setExpanded((prev) => ({ ...prev, [groupKey]: !prev[groupKey] }))
+    setExpandedGroupKey((current) => (current === groupKey ? '' : groupKey))
   }
 
   function renderSidebarBody(isCollapsed: boolean) {
@@ -124,7 +97,7 @@ export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed =
         <Box sx={{ overflowY: 'auto', pr: 0.5, mr: -0.5, flex: 1, minHeight: 0 }}>
           {visibleMenuGroups.map((group, index) => {
             const isActiveGroup = activeGroupKey === group.key
-            const isOpen = Boolean(expanded[group.key])
+            const isOpen = expandedGroupKey === group.key
 
             if (group.items.length === 1) {
               const link = group.items[0]

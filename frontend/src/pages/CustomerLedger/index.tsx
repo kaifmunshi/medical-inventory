@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react'
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -57,6 +58,29 @@ import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 
 function money(n: number | string | undefined | null) {
   return Number(n || 0).toFixed(2)
+}
+
+function round2(n: number) {
+  return Number(Number(n || 0).toFixed(2))
+}
+
+function signedPartyOpening(party?: Party | null) {
+  const amount = Number(party?.opening_balance || 0)
+  return party?.opening_balance_type === 'CR' ? -amount : amount
+}
+
+function signedBalanceLabel(value: number) {
+  const signed = round2(value)
+  const marker = signed < -0.0001 ? '-' : '+'
+  const suffix = signed < -0.0001 ? ' CR' : ' DR'
+  return `${marker}Rs ${money(Math.abs(signed))}${suffix}`
+}
+
+function balanceChipColor(value: number): 'default' | 'success' | 'error' | 'info' {
+  const signed = round2(value)
+  if (signed > 0.0001) return 'error'
+  if (signed < -0.0001) return 'info'
+  return 'success'
 }
 
 function actualReturnSettlement(row: CustomerReturnLedgerRow) {
@@ -313,6 +337,7 @@ export default function CustomerLedgerPage() {
   const [editReceiptOnline, setEditReceiptOnline] = useState('0')
   const [editReceiptDate, setEditReceiptDate] = useState(today)
   const [editReceiptNote, setEditReceiptNote] = useState('')
+  const [receiptAdvanceConfirmOpen, setReceiptAdvanceConfirmOpen] = useState(false)
   const [openBillSort, setOpenBillSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
   const [ledgerSort, setLedgerSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
   const [returnSort, setReturnSort] = useState<SortState<ReturnSortKey>>({ key: 'date_time', direction: 'desc' })
@@ -638,6 +663,9 @@ export default function CustomerLedgerPage() {
   const activeReceiptHistory = receiptHistory.filter((row) => !row.isDeleted)
   const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
   const receiptHistoryOnAccountTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
+  const openingBalance = signedPartyOpening(selectedParty)
+  const closingBalance = round2(openingBalance + totalOutstanding - receiptHistoryOnAccountTotal)
+  const remainingOutstandingAfterReceipt = Math.max(0, totalOutstanding - adjustmentTotal)
   const availableAdvanceReceipts = activeReceiptHistory.filter(
     (row) => row.sourceType === 'party_receipt' && Number(row.onAccount || 0) > 0.0001,
   )
@@ -974,7 +1002,7 @@ export default function CustomerLedgerPage() {
     })
   }
 
-  function saveReceipt() {
+  function saveReceipt(confirmAdvance = false) {
     if (!selectedParty?.id) {
       toast.push('Select a customer before saving receipt', 'warning')
       return
@@ -983,6 +1011,11 @@ export default function CustomerLedgerPage() {
       toast.push('Receipt amount must be greater than 0', 'warning')
       return
     }
+    if (!confirmAdvance && onAccountAmount > 0.0001 && remainingOutstandingAfterReceipt > 0.0001) {
+      setReceiptAdvanceConfirmOpen(true)
+      return
+    }
+    setReceiptAdvanceConfirmOpen(false)
     receiptM.mutate({
       partyId: Number(selectedParty.id),
       payload: {
@@ -1111,21 +1144,76 @@ export default function CustomerLedgerPage() {
 
       {selectedCustomer && (
         <Paper sx={{ p: 2 }}>
-          <Stack direction={{ xs: 'column', md: 'row' }} gap={2} justifyContent="space-between" alignItems={{ md: 'center' }}>
-            <div>
-              <Typography fontWeight={700}>{selectedCustomer.name}</Typography>
-              <Typography variant="body2" color="text.secondary">
-                {[selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).join(' • ') || 'Customer master record'}
-              </Typography>
-            </div>
-            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
-              <Chip color={totalOutstanding > 0 ? 'error' : 'success'} label={`Outstanding Rs ${money(totalOutstanding)}`} sx={{ fontWeight: 900 }} />
-              <Chip color="primary" variant="outlined" label={`Open Bills ${openBills.length}`} sx={{ fontWeight: 800 }} />
-              <Chip color="warning" variant="outlined" label={`Sales Return Credit Rs ${money(totalReturnCredit)}`} sx={{ fontWeight: 800 }} />
-              <Chip color="secondary" variant="outlined" label={`Sales Return Refund Rs ${money(totalReturnRefund)}`} sx={{ fontWeight: 800 }} />
-              <Chip color="success" variant="outlined" label={`Receipts Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
-              <Chip color="info" variant="outlined" label={`Advance Rs ${money(receiptHistoryOnAccountTotal)}`} sx={{ fontWeight: 800 }} />
+          <Stack gap={1.75}>
+            <Stack direction={{ xs: 'column', md: 'row' }} gap={2} justifyContent="space-between" alignItems={{ md: 'flex-start' }}>
+              <Box>
+                <Typography fontWeight={800}>{selectedCustomer.name}</Typography>
+                {[selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).length > 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    {[selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).join(' • ')}
+                  </Typography>
+                ) : null}
+              </Box>
+
+              <Box
+                sx={{
+                  display: 'grid',
+                  gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
+                  gap: 1.5,
+                  minWidth: { md: 440 },
+                  alignSelf: { xs: 'stretch', md: 'flex-start' },
+                }}
+              >
+                <Box sx={{ borderLeft: '4px solid', borderColor: `${balanceChipColor(openingBalance)}.main`, pl: 1.5 }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={900}>
+                    OP Balance
+                  </Typography>
+                  <Typography fontWeight={900} fontSize={20} color={`${balanceChipColor(openingBalance)}.main`}>
+                    {signedBalanceLabel(openingBalance)}
+                  </Typography>
+                </Box>
+
+                <Box sx={{ borderLeft: '4px solid', borderColor: `${balanceChipColor(closingBalance)}.main`, pl: 1.5 }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={900}>
+                    CL Balance
+                  </Typography>
+                  <Typography fontWeight={900} fontSize={20} color={`${balanceChipColor(closingBalance)}.main`}>
+                    {signedBalanceLabel(closingBalance)}
+                  </Typography>
+                </Box>
+              </Box>
             </Stack>
+
+            <Box
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: {
+                  xs: '1fr 1fr',
+                  md: 'repeat(5, minmax(120px, 1fr))',
+                },
+                borderTop: '1px solid',
+                borderColor: 'divider',
+                pt: 1.5,
+                gap: 1.5,
+              }}
+            >
+              {[
+                { label: 'Outstanding', value: `Rs ${money(totalOutstanding)}`, color: totalOutstanding > 0 ? 'error.main' : 'success.main' },
+                { label: 'Advance', value: `Rs ${money(receiptHistoryOnAccountTotal)}`, color: receiptHistoryOnAccountTotal > 0 ? 'info.main' : 'text.primary' },
+                { label: 'Receipts', value: `Rs ${money(receiptHistoryTotal)}`, color: 'success.main' },
+                { label: 'Returns', value: `Rs ${money(totalReturnCredit + totalReturnRefund)}`, color: 'warning.main' },
+                { label: 'Open Bills', value: String(openBills.length), color: 'primary.main' },
+              ].map((item) => (
+                <Box key={item.label}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={800}>
+                    {item.label}
+                  </Typography>
+                  <Typography fontWeight={900} color={item.color}>
+                    {item.value}
+                  </Typography>
+                </Box>
+              ))}
+            </Box>
           </Stack>
         </Paper>
       )}
@@ -1689,6 +1777,38 @@ export default function CustomerLedgerPage() {
         </Box>
       </CollapsibleLedgerSection>
 
+      <Dialog
+        open={receiptAdvanceConfirmOpen}
+        onClose={() => !receiptM.isPending && setReceiptAdvanceConfirmOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Record Advance?</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Alert severity="warning">
+              This receipt leaves Rs {money(onAccountAmount)} unapplied while Rs {money(remainingOutstandingAfterReceipt)} is still pending in open bills.
+            </Alert>
+            <Typography variant="body2" color="text.secondary">
+              If you continue, the unapplied amount will be posted as customer advance / credit balance in this customer account. It can be adjusted against bills later from Adjust Advance.
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setReceiptAdvanceConfirmOpen(false)} disabled={receiptM.isPending}>
+            Go Back
+          </Button>
+          <Button
+            variant="contained"
+            color="warning"
+            onClick={() => saveReceipt(true)}
+            disabled={receiptM.isPending}
+          >
+            Keep as Advance
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={receiptOpen} onClose={() => setReceiptOpen(false)} fullWidth maxWidth="lg">
         <DialogTitle>Record Receipt</DialogTitle>
         <DialogContent dividers>
@@ -1814,7 +1934,7 @@ export default function CustomerLedgerPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setReceiptOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={saveReceipt} disabled={receiptM.isPending}>
+          <Button variant="contained" onClick={() => saveReceipt()} disabled={receiptM.isPending}>
             Save Receipt
           </Button>
         </DialogActions>

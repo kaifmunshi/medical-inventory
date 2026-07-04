@@ -437,6 +437,13 @@ class CustomerOut(SQLModel):
     merged_into_customer_id: Optional[int] = None
     merged_at: Optional[str] = None
     deleted_at: Optional[str] = None
+    party_id: Optional[int] = None
+    opening_balance: float = 0.0
+    opening_balance_type: str = "DR"
+    outstanding_amount: float = 0.0
+    advance_amount: float = 0.0
+    closing_balance: float = 0.0
+    closing_balance_type: str = "DR"
 
 
 class BrandCreate(SQLModel):

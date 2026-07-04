@@ -60,6 +60,18 @@ function money(value?: number | string | null) {
   return Number(value || 0).toFixed(2)
 }
 
+function signedBalance(amount?: number | string | null, type?: string | null) {
+  const value = Number(amount || 0)
+  return String(type || 'DR').toUpperCase() === 'CR' ? -value : value
+}
+
+function balanceLabel(amount?: number | string | null, type?: string | null) {
+  const signed = signedBalance(amount, type)
+  const marker = signed < -0.0001 ? '-' : '+'
+  const suffix = signed < -0.0001 ? ' CR' : ' DR'
+  return `${marker}₹${money(Math.abs(signed))}${suffix}`
+}
+
 export default function CustomersPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -504,6 +516,7 @@ export default function CustomersPage() {
                   <th>Phone</th>
                   <th>Address</th>
                   <th>Status</th>
+                  <th>Closing</th>
                   <th>Created</th>
                   <th></th>
                 </tr>
@@ -537,6 +550,19 @@ export default function CustomersPage() {
                           <Chip size="small" color="success" label="Active" sx={{ width: 'fit-content' }} />
                         )}
                       </td>
+                      <td>
+                        <Stack gap={0.5}>
+                          <Chip
+                            size="small"
+                            color={signedBalance(r.closing_balance, r.closing_balance_type) < -0.0001 ? 'info' : signedBalance(r.closing_balance, r.closing_balance_type) > 0.0001 ? 'error' : 'success'}
+                            label={balanceLabel(r.closing_balance, r.closing_balance_type)}
+                            sx={{ fontWeight: 800, width: 'fit-content' }}
+                          />
+                          <Typography variant="caption" color="text.secondary">
+                            Due ₹{money(r.outstanding_amount)} · Adv ₹{money(r.advance_amount)}
+                          </Typography>
+                        </Stack>
+                      </td>
                       <td>{formatDate(r.created_at)}</td>
                       <td>
                         <Stack direction="row" gap={1}>
@@ -566,7 +592,7 @@ export default function CustomersPage() {
                 })}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={6}>
+                    <td colSpan={7}>
                       <Box p={2} color="text.secondary">
                         No customers yet.
                       </Box>

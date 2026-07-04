@@ -14,6 +14,7 @@ from backend.models import (
     BillItem,
     BillItemOut,
     BillOut,
+    BillPayment,
     Customer,
     CustomerCreate,
     CustomerUpdate,
@@ -21,6 +22,7 @@ from backend.models import (
     Ledger,
     Party,
     PartyReceipt,
+    ReceiptBillAdjustment,
 )
 
 router = APIRouter()
@@ -129,9 +131,23 @@ def _customer_party_id(session, customer: Customer) -> Optional[int]:
         return None
     party = session.exec(
         select(Party)
-        .where(Party.legacy_customer_id == int(customer.id))
+        .where(
+            Party.party_group == "SUNDRY_DEBTOR",
+            Party.legacy_customer_id == int(customer.id),
+        )
         .order_by(Party.id.asc())
     ).first()
+    if not party:
+        customer_name = _normalize_name(customer.name).lower()
+        if customer_name:
+            party = session.exec(
+                select(Party)
+                .where(
+                    Party.party_group == "SUNDRY_DEBTOR",
+                    func.lower(func.trim(func.coalesce(Party.name, ""))) == customer_name,
+                )
+                .order_by(Party.id.asc())
+            ).first()
     return int(party.id) if party and party.id else None
 
 
@@ -191,6 +207,95 @@ def _to_bill_out(session, bill: Bill) -> BillOut:
             )
             for item in items
         ],
+    )
+
+
+def _round2(value: float) -> float:
+    return float(f"{float(value or 0):.2f}")
+
+
+def _signed_opening_balance(party: Optional[Party]) -> float:
+    if not party:
+        return 0.0
+    amount = _round2(float(getattr(party, "opening_balance", 0.0) or 0.0))
+    return -amount if str(getattr(party, "opening_balance_type", "DR") or "DR").upper() == "CR" else amount
+
+
+def _balance_type(amount: float) -> str:
+    return "CR" if _round2(amount) < 0 else "DR"
+
+
+def _active_receipt_adjusted_amount(session, receipt: PartyReceipt) -> float:
+    if not receipt or not receipt.id:
+        return 0.0
+    rows = session.exec(
+        select(ReceiptBillAdjustment).where(ReceiptBillAdjustment.receipt_id == int(receipt.id))
+    ).all()
+    total = 0.0
+    for row in rows:
+        if row.bill_payment_id is not None:
+            payment = session.get(BillPayment, int(row.bill_payment_id))
+            if payment and bool(getattr(payment, "is_deleted", False)):
+                continue
+        total += float(row.adjusted_amount or 0.0)
+    return _round2(total)
+
+
+def _customer_account_balance_out(session, customer: Customer) -> CustomerOut:
+    party_id = _customer_party_id(session, customer)
+    party = session.get(Party, int(party_id)) if party_id is not None else None
+    bills = session.exec(
+        select(Bill)
+        .where(_customer_bill_conditions(session, customer))
+        .where(Bill.is_deleted == False)  # noqa: E712
+    ).all()
+    outstanding = _round2(
+        sum(
+            max(
+                0.0,
+                float(bill.total_amount or 0.0)
+                - float(bill.paid_amount or 0.0)
+                - float(getattr(bill, "writeoff_amount", 0.0) or 0.0),
+            )
+            for bill in bills
+        )
+    )
+    advance = 0.0
+    if party_id is not None:
+        receipts = session.exec(
+            select(PartyReceipt)
+            .where(PartyReceipt.party_id == int(party_id))
+            .where(PartyReceipt.is_deleted == False)  # noqa: E712
+        ).all()
+        advance = _round2(
+            sum(
+                max(
+                    0.0,
+                    float(receipt.total_amount or 0.0) - _active_receipt_adjusted_amount(session, receipt),
+                )
+                for receipt in receipts
+            )
+        )
+    opening = _signed_opening_balance(party)
+    closing = _round2(opening + outstanding - advance)
+    return CustomerOut(
+        id=int(customer.id or 0),
+        name=customer.name,
+        phone=customer.phone,
+        address_line=customer.address_line,
+        created_at=customer.created_at,
+        updated_at=customer.updated_at,
+        is_active=bool(getattr(customer, "is_active", True)),
+        merged_into_customer_id=getattr(customer, "merged_into_customer_id", None),
+        merged_at=getattr(customer, "merged_at", None),
+        deleted_at=getattr(customer, "deleted_at", None),
+        party_id=int(party_id) if party_id is not None else None,
+        opening_balance=abs(_round2(opening)),
+        opening_balance_type=_balance_type(opening),
+        outstanding_amount=outstanding,
+        advance_amount=advance,
+        closing_balance=abs(closing),
+        closing_balance_type=_balance_type(closing),
     )
 
 
@@ -355,7 +460,7 @@ def create_customer(payload: CustomerCreate) -> CustomerOut:
         session.add(row)
         session.commit()
         session.refresh(row)
-        return row
+        return _customer_account_balance_out(session, row)
 
 
 @router.get("/", response_model=List[CustomerOut])
@@ -389,7 +494,8 @@ def list_customers(
             .offset(offset)
             .limit(limit)
         )
-        return session.exec(stmt).all()
+        rows = session.exec(stmt).all()
+        return [_customer_account_balance_out(session, row) for row in rows]
 
 
 @router.patch("/{customer_id}", response_model=CustomerOut)
@@ -419,7 +525,7 @@ def update_customer(customer_id: int, payload: CustomerUpdate) -> CustomerOut:
         session.add(row)
         session.commit()
         session.refresh(row)
-        return row
+        return _customer_account_balance_out(session, row)
 
 
 @router.delete("/{customer_id}", status_code=204)
@@ -523,18 +629,7 @@ def get_customer_summary(
         )
 
         return CustomerSummaryOut(
-            customer=CustomerOut(
-                id=customer.id,
-                name=customer.name,
-                phone=customer.phone,
-                address_line=customer.address_line,
-                created_at=customer.created_at,
-                updated_at=customer.updated_at,
-                is_active=bool(getattr(customer, "is_active", True)),
-                merged_into_customer_id=getattr(customer, "merged_into_customer_id", None),
-                merged_at=getattr(customer, "merged_at", None),
-                deleted_at=getattr(customer, "deleted_at", None),
-            ),
+            customer=_customer_account_balance_out(session, customer),
             totals=totals,
             bills=[_to_bill_out(session, bill) for bill in bills],
         )

@@ -48,6 +48,13 @@ export interface Customer {
   merged_into_customer_id?: ID | null
   merged_at?: string | null
   deleted_at?: string | null
+  party_id?: ID | null
+  opening_balance?: number
+  opening_balance_type?: 'DR' | 'CR'
+  outstanding_amount?: number
+  advance_amount?: number
+  closing_balance?: number
+  closing_balance_type?: 'DR' | 'CR'
 }
 
 export interface Brand {

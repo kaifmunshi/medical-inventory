@@ -31,10 +31,15 @@ import {
   subscribeProductMasterChanged,
 } from '../../lib/productMasterEvents'
 import {
+  findSimilarProductName,
+  similarProductWarningMessage,
+} from '../../lib/productSimilarity'
+import {
   createProduct,
   createBrand,
   createCategory,
   deleteProduct,
+  fetchAllProducts,
   fetchBrands,
   fetchCategories,
   fetchProducts,
@@ -343,7 +348,14 @@ export default function ProductsPage() {
     patchForm({ loose_sale_enabled: next })
   }
 
-  function save() {
+  async function confirmSimilarProductCreate(payload: ProductForm) {
+    const candidates = await fetchAllProducts({ active_only: false })
+    const match = findSimilarProductName(candidates, payload.name)
+    if (!match) return true
+    return window.confirm(similarProductWarningMessage(payload.name, match))
+  }
+
+  async function save() {
     const payload: ProductForm = {
       ...form,
       name: form.name.trim(),
@@ -370,7 +382,14 @@ export default function ProductsPage() {
       return
     }
     if (editing) updateM.mutate({ id: Number(editing.id), payload })
-    else createM.mutate(payload)
+    else {
+      try {
+        const ok = await confirmSimilarProductCreate(payload)
+        if (ok) createM.mutate(payload)
+      } catch (err: any) {
+        toast.push(String(err?.response?.data?.detail || err?.message || 'Could not check similar products'), 'error')
+      }
+    }
   }
 
   function resetFilters() {

@@ -62,6 +62,28 @@ export async function fetchProducts(params?: {
   return res.data
 }
 
+export async function fetchAllProducts(params?: {
+  q?: string
+  brand?: string
+  category_id?: number
+  uncategorized_only?: boolean
+  active_only?: boolean
+  inactive_only?: boolean
+}): Promise<Product[]> {
+  const limit = 1000
+  let offset = 0
+  const rows: Product[] = []
+
+  while (true) {
+    const page = await fetchProducts({ ...params, limit, offset })
+    rows.push(...page)
+    if (page.length < limit) break
+    offset += limit
+  }
+
+  return rows
+}
+
 export interface ProductPage {
   items: Product[]
   total: number

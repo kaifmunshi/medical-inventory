@@ -27,7 +27,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { createParty, fetchParties } from '../../services/parties'
 import { listIncomingStockEntries, type IncomingStockEntry } from '../../services/inventory'
-import { createBrand, createCategory, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
+import { createBrand, createCategory, fetchAllProducts, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
 import {
   addPurchasePayment,
   cancelPurchase,
@@ -47,9 +47,15 @@ import {
 } from '../../services/purchases'
 import type { AuditLog, Category, Party, Product, Purchase, PurchaseItemPayload, PurchasePayment, PurchasePaymentPayload } from '../../lib/types'
 import { PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
+import { findSimilarNewProductCandidate, similarProductWarningMessage } from '../../lib/productSimilarity'
 import { useToast } from '../../components/ui/Toaster'
 
-type DraftItem = PurchaseItemPayload & { key: string; batch_group_key?: string; existing_stock_movement_id?: number }
+type DraftItem = Omit<PurchaseItemPayload, 'rounding_adjustment'> & {
+  rounding_adjustment?: number | string
+  key: string
+  batch_group_key?: string
+  existing_stock_movement_id?: number
+}
 type DraftPayment = PurchasePaymentPayload & { key: string; paid_at: string; is_deleted?: boolean }
 
 const EXISTING_INVENTORY_FROM_DATE = '2026-04-01'
@@ -109,12 +115,17 @@ function cloneItemForNewExpiry(item: DraftItem, copyPrices: boolean): DraftItem 
     mrp: copyPrices ? Number(item.mrp || 0) : 0,
     gst_percent: copyPrices ? Number(item.gst_percent || 0) : 0,
     discount_amount: copyPrices ? Number(item.discount_amount || 0) : 0,
-    rounding_adjustment: copyPrices ? Number(item.rounding_adjustment || 0) : 0,
+    rounding_adjustment: copyPrices ? safeNumber(item.rounding_adjustment) : 0,
   }
 }
 
 function round2(n: number) {
   return Number(Number(n || 0).toFixed(2))
+}
+
+function safeNumber(value: unknown) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : 0
 }
 
 function money(n: number) {
@@ -138,7 +149,7 @@ function lineGrossTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price'>) {
 }
 
 function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
-  return round2(lineGrossTotal(item) - Number(item.discount_amount || 0) + Number(item.rounding_adjustment || 0))
+  return round2(lineGrossTotal(item) - Number(item.discount_amount || 0) + safeNumber(item.rounding_adjustment))
 }
 
 function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
@@ -148,7 +159,7 @@ function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'co
 }
 
 function invoiceGst(
-  items: Array<Pick<PurchaseItemPayload, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment' | 'gst_percent'>>,
+  items: Array<Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment' | 'gst_percent'>>,
   discountAmount: number,
 ) {
   const subtotal = round2(items.reduce((sum, item) => round2(sum + lineBaseTotal(item)), 0))
@@ -203,7 +214,7 @@ function hasDraftItemContent(item: DraftItem) {
     Number(item.mrp || 0) ||
     Number(item.cost_price || 0) ||
     Number(item.discount_amount || 0) ||
-    Number(item.rounding_adjustment || 0),
+    safeNumber(item.rounding_adjustment),
   )
 }
 
@@ -1063,7 +1074,7 @@ export default function PurchasesPage() {
       brand: item.brand?.trim() || undefined,
       expiry_date: item.expiry_date?.trim() || undefined,
       gst_percent: Number(item.gst_percent || 0),
-      rounding_adjustment: Number(item.rounding_adjustment || 0),
+      rounding_adjustment: safeNumber(item.rounding_adjustment),
       parent_unit_name: item.parent_unit_name?.trim() || undefined,
       child_unit_name: item.child_unit_name?.trim() || undefined,
     }))
@@ -1101,7 +1112,17 @@ export default function PurchasesPage() {
     }))
   }
 
-  function submit() {
+  async function confirmNewProductNames(draftItems: DraftItem[]) {
+    const candidates = cleanItems(filledDraftItems(draftItems))
+    const similar = findSimilarNewProductCandidate(
+      await fetchAllProducts({ active_only: false }),
+      candidates,
+    )
+    if (!similar) return true
+    return window.confirm(similarProductWarningMessage(similar.name, similar.match))
+  }
+
+  async function submit() {
     if (!partyId) {
       toast.push('Select a supplier first', 'error')
       return
@@ -1135,6 +1156,13 @@ export default function PurchasesPage() {
       toast.push('Each purchase item needs paid qty or free qty greater than 0', 'error')
       return
     }
+    try {
+      const ok = await confirmNewProductNames(activeItems)
+      if (!ok) return
+    } catch (err: any) {
+      toast.push(String(err?.response?.data?.detail || err?.message || 'Could not check similar products'), 'error')
+      return
+    }
     createM.mutate({
       party_id: partyId,
       invoice_number: invoiceNumber.trim(),
@@ -1159,7 +1187,7 @@ export default function PurchasesPage() {
     })
   }
 
-  function submitFreeStock() {
+  async function submitFreeStock() {
     if (!freeStockDate) {
       toast.push('Select a free stock date', 'error')
       return
@@ -1183,6 +1211,13 @@ export default function PurchasesPage() {
     }
     if (cleanedItems.some((item) => Number(item.free_qty || 0) <= 0)) {
       toast.push('Free stock qty must be greater than 0', 'error')
+      return
+    }
+    try {
+      const ok = await confirmNewProductNames(activeItems)
+      if (!ok) return
+    } catch (err: any) {
+      toast.push(String(err?.response?.data?.detail || err?.message || 'Could not check similar products'), 'error')
       return
     }
     createFreeStockM.mutate({
@@ -1250,7 +1285,7 @@ export default function PurchasesPage() {
     }
   }
 
-  function saveItemReplacement() {
+  async function saveItemReplacement() {
     if (!selectedPurchaseId) return
     const activeItems = filledDraftItems(editItems)
     if (activeItems.length === 0) {
@@ -1275,6 +1310,13 @@ export default function PurchasesPage() {
     }
     if (cleanedItems.some((item) => lineTotalQty(item) <= 0)) {
       toast.push('Each replacement purchase item needs paid qty or free qty greater than 0', 'error')
+      return
+    }
+    try {
+      const ok = await confirmNewProductNames(activeItems)
+      if (!ok) return
+    } catch (err: any) {
+      toast.push(String(err?.response?.data?.detail || err?.message || 'Could not check similar products'), 'error')
       return
     }
     replaceItemsM.mutate({
@@ -1690,7 +1732,7 @@ export default function PurchasesPage() {
                         <TextField size="small" label="Discount (Rs)" type="number" value={item.discount_amount || 0} onChange={(e) => patchItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
                       </Grid>
                       <Grid item xs={6} md={1.2}>
-                        <TextField size="small" label="Round Off (+/-)" type="number" value={item.rounding_adjustment || 0} onChange={(e) => patchItem(item.key, { rounding_adjustment: Number(e.target.value) })} fullWidth />
+                        <TextField size="small" label="Round Off (+/-)" type="number" value={item.rounding_adjustment ?? 0} onChange={(e) => patchItem(item.key, { rounding_adjustment: e.target.value })} fullWidth />
                       </Grid>
                     </>
                   ) : null}
@@ -1772,7 +1814,7 @@ export default function PurchasesPage() {
                             <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchItem(batch.key, { discount_amount: Number(e.target.value) })} fullWidth />
                           </Grid>
                           <Grid item xs={6} md={1.2}>
-                            <TextField size="small" label="Round Off (+/-)" type="number" value={batch.rounding_adjustment || 0} onChange={(e) => patchItem(batch.key, { rounding_adjustment: Number(e.target.value) })} fullWidth />
+                            <TextField size="small" label="Round Off (+/-)" type="number" value={batch.rounding_adjustment ?? 0} onChange={(e) => patchItem(batch.key, { rounding_adjustment: e.target.value })} fullWidth />
                           </Grid>
                           <Grid item xs={12} md={1.6}>
                             <Stack direction="row" gap={0.75} flexWrap="wrap">

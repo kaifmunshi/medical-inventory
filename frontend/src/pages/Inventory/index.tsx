@@ -41,6 +41,7 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 import OpenInNewIcon from '@mui/icons-material/OpenInNew'
+import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
 
 import AdjustStockDialog from '../../components/ui/AdjustStockDialog'
 import { useToast } from '../../components/ui/Toaster'
@@ -50,10 +51,15 @@ import {
   subscribeProductMasterChanged,
 } from '../../lib/productMasterEvents'
 import {
+  findSimilarProductName,
+  similarProductWarningMessage,
+} from '../../lib/productSimilarity'
+import {
   createBrand,
   createCategory,
   createProduct,
   deleteProduct,
+  fetchAllProducts,
   fetchBrands,
   fetchCategories,
   fetchProducts,
@@ -492,7 +498,16 @@ export default function Inventory() {
         )
         targetId = freshPayloadMatch?.id ? Number(freshPayloadMatch.id) : null
       }
-      return targetId ? updateProduct(targetId, payload) : createProduct(payload)
+      if (targetId) return updateProduct(targetId, payload)
+
+      const similarMatch = findSimilarProductName(
+        await fetchAllProducts({ active_only: false }),
+        payload.name,
+      )
+      if (similarMatch && !window.confirm(similarProductWarningMessage(payload.name, similarMatch))) {
+        throw new Error('Product creation cancelled')
+      }
+      return createProduct(payload)
     },
     onSuccess: (savedProduct) => {
       setProductId(Number(savedProduct.id))
@@ -524,6 +539,7 @@ export default function Inventory() {
     },
     onError: (err: any) => {
       const msg = err?.response?.data?.detail || err?.message || 'Product save failed'
+      if (String(msg) === 'Product creation cancelled') return
       toast.push(String(msg), 'error')
     },
   })
@@ -842,7 +858,12 @@ export default function Inventory() {
             <MenuItem value="missing">Without Expiry</MenuItem>
           </TextField>
 
-          <Button variant="contained" onClick={handleAdd} sx={{ minWidth: { md: 132 }, height: 46 }}>
+          <Button
+            variant="contained"
+            onClick={handleAdd}
+            data-enter-ignore="true"
+            sx={{ minWidth: { md: 118 }, height: 46 }}
+          >
             Add Item
           </Button>
         </Stack>
@@ -892,17 +913,23 @@ export default function Inventory() {
                 '& .inventory-grid': {
                   borderCollapse: 'collapse',
                   width: '100%',
-                  minWidth: 1180,
+                  minWidth: { xs: 980, lg: 1080 },
                   tableLayout: 'fixed',
                 },
-                '& .inventory-grid th:nth-of-type(1), & .inventory-grid td:nth-of-type(1)': { width: 260 },
-                '& .inventory-grid th:nth-of-type(2), & .inventory-grid td:nth-of-type(2)': { width: 76 },
-                '& .inventory-grid th:nth-of-type(3), & .inventory-grid td:nth-of-type(3)': { width: 150 },
-                '& .inventory-grid th:nth-of-type(4), & .inventory-grid td:nth-of-type(4)': { width: 140 },
-                '& .inventory-grid th:nth-of-type(5), & .inventory-grid td:nth-of-type(5)': { width: 130 },
-                '& .inventory-grid th:nth-of-type(6), & .inventory-grid td:nth-of-type(6)': { width: 92 },
-                '& .inventory-grid th:nth-of-type(7), & .inventory-grid td:nth-of-type(7)': { width: 172 },
-                '& .inventory-grid th:nth-of-type(8), & .inventory-grid td:nth-of-type(8)': { width: 260 },
+                '& .inventory-grid th:nth-of-type(1), & .inventory-grid td:nth-of-type(1)': {
+                  width: 'max(320px, calc(100% - 760px))',
+                  whiteSpace: 'normal',
+                  overflow: 'visible',
+                  textOverflow: 'clip',
+                  wordBreak: 'break-word',
+                },
+                '& .inventory-grid th:nth-of-type(2), & .inventory-grid td:nth-of-type(2)': { width: 58 },
+                '& .inventory-grid th:nth-of-type(3), & .inventory-grid td:nth-of-type(3)': { width: 116 },
+                '& .inventory-grid th:nth-of-type(4), & .inventory-grid td:nth-of-type(4)': { width: 114 },
+                '& .inventory-grid th:nth-of-type(5), & .inventory-grid td:nth-of-type(5)': { width: 112 },
+                '& .inventory-grid th:nth-of-type(6), & .inventory-grid td:nth-of-type(6)': { width: 78 },
+                '& .inventory-grid th:nth-of-type(7), & .inventory-grid td:nth-of-type(7)': { width: 134 },
+                '& .inventory-grid th:nth-of-type(8), & .inventory-grid td:nth-of-type(8)': { width: 148 },
                 '& .inventory-grid thead th': {
                   borderBottom: '1px solid rgba(0,0,0,0.14)',
                   background: 'rgba(255,255,255,0.98)',
@@ -913,6 +940,9 @@ export default function Inventory() {
                 },
                 '& .inventory-grid th:last-of-type, & .inventory-grid td:last-of-type': {
                   overflow: 'visible',
+                },
+                '& .inventory-grid td:last-of-type .MuiStack-root': {
+                  flexWrap: 'nowrap',
                 },
                 '& .inventory-grid tbody tr > td': {
                   background: '#fff',
@@ -943,7 +973,7 @@ export default function Inventory() {
                     <th>Earliest Expiry</th>
                     <th>MRP</th>
                     <th>Stock</th>
-                    <th style={{ width: 260 }}>Actions</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
 
@@ -1034,30 +1064,28 @@ export default function Inventory() {
                         </td>
 
                         <td>
-                          <Stack direction="row" gap={1}>
+                          <Stack direction="row" gap={0.5} alignItems="center">
                             <Tooltip title="Manage Product">
-                              <Button
+                              <IconButton
                                 size="small"
-                                variant="outlined"
+                                aria-label="Manage Product"
                                 onClick={() => openRelatedProduct(g)}
-                                sx={{ minWidth: 0 }}
                               >
-                                Product
-                              </Button>
+                                <Inventory2OutlinedIcon fontSize="small" />
+                              </IconButton>
                             </Tooltip>
                             <Tooltip title="Open Stock Card">
-                              <Button
+                              <IconButton
                                 size="small"
-                                variant="outlined"
+                                aria-label="Open Stock Card"
                                 component="a"
                                 href={stockCardPathForGroup(g)}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                endIcon={<OpenInNewIcon fontSize="small" />}
                                 onClick={(event) => event.stopPropagation()}
                               >
-                                Stock Card
-                              </Button>
+                                <OpenInNewIcon fontSize="small" />
+                              </IconButton>
                             </Tooltip>
 
                             <Tooltip title="Edit (earliest visible batch)">
@@ -1115,20 +1143,19 @@ export default function Inventory() {
                                   />
                                 </td>
                                 <td>
-                                  <Stack direction="row" gap={1}>
+                                  <Stack direction="row" gap={0.5} alignItems="center">
                                     <Tooltip title="Open Batch Stock Card">
-                                      <Button
+                                      <IconButton
                                         size="small"
-                                        variant="outlined"
+                                        aria-label="Open Batch Stock Card"
                                         component="a"
                                         href={stockCardPathForBatch(g, it)}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        endIcon={<OpenInNewIcon fontSize="small" />}
                                         onClick={(event) => event.stopPropagation()}
                                       >
-                                        Stock Card
-                                      </Button>
+                                        <OpenInNewIcon fontSize="small" />
+                                      </IconButton>
                                     </Tooltip>
 
                                     <Tooltip title="Edit this batch">

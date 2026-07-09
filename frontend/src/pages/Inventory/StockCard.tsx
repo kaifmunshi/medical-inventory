@@ -52,6 +52,7 @@ import {
   createCategory,
   createProduct,
   deleteProduct,
+  fetchAllProducts,
   fetchBrands,
   fetchCategories,
   fetchProducts,
@@ -62,6 +63,10 @@ import {
   notifyProductMasterChanged,
   subscribeProductMasterChanged,
 } from '../../lib/productMasterEvents'
+import {
+  findSimilarProductName,
+  similarProductWarningMessage,
+} from '../../lib/productSimilarity'
 import { buildStockReportLink } from '../../lib/reportLinks'
 import { formatLedgerNote } from '../../lib/stockLedger'
 import { useToast } from '../../components/ui/Toaster'
@@ -773,7 +778,16 @@ export default function StockCardPage() {
         )
         targetId = freshPayloadMatch?.id ? Number(freshPayloadMatch.id) : null
       }
-      return targetId ? updateProduct(targetId, payload) : createProduct(payload)
+      if (targetId) return updateProduct(targetId, payload)
+
+      const similarMatch = findSimilarProductName(
+        await fetchAllProducts({ active_only: false }),
+        payload.name,
+      )
+      if (similarMatch && !window.confirm(similarProductWarningMessage(payload.name, similarMatch))) {
+        throw new Error('Product creation cancelled')
+      }
+      return createProduct(payload)
     },
     onSuccess: (savedProduct) => {
       setProductId(Number(savedProduct.id))
@@ -806,7 +820,9 @@ export default function StockCardPage() {
       toast.push('Product master saved', 'success')
     },
     onError: (err: any) => {
-      toast.push(String(err?.message || 'Product save failed'), 'error')
+      const msg = err?.response?.data?.detail || err?.message || 'Product save failed'
+      if (String(msg) === 'Product creation cancelled') return
+      toast.push(String(msg), 'error')
     },
   })
 

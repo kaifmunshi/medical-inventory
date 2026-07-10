@@ -23,6 +23,11 @@ export function isLockAllowedPath(pathname: string) {
   return path === '/inventory' || path.startsWith('/inventory/')
 }
 
+export function isSessionLockPausedPath(pathname: string) {
+  const path = normalizePath(pathname)
+  return path === '/billing' || path.startsWith('/billing/') || path === '/purchases' || path.startsWith('/purchases/')
+}
+
 export function readStoredLastActivity(userId: number) {
   try {
     return readNumber(localStorage.getItem(keyFor(SESSION_ACTIVITY_STORAGE_PREFIX, userId)))

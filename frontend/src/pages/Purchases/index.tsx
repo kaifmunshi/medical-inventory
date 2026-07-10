@@ -152,10 +152,8 @@ function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'disc
   return round2(lineGrossTotal(item) - Number(item.discount_amount || 0) + safeNumber(item.rounding_adjustment))
 }
 
-function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
-  const totalQty = Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
-  if (totalQty <= 0) return 0
-  return lineBaseTotal(item) / totalQty
+function lineGstAmount(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment' | 'gst_percent'>) {
+  return round2(Math.max(0, lineBaseTotal(item)) * Number(item.gst_percent || 0) / 100)
 }
 
 function invoiceGst(
@@ -739,19 +737,6 @@ export default function PurchasesPage() {
   }, [paymentAvailableAmount, paymentCash, paymentMode, paymentOpen, paymentType])
 
   useEffect(() => {
-    if (!addOpen || items.length === 0) return
-    const last = items[items.length - 1]
-    const isComplete =
-      Boolean(last.product_name?.trim()) &&
-      Boolean(last.expiry_date?.trim()) &&
-      lineTotalQty(last) > 0
-    if (!isComplete) return
-    const next = makeEmptyItem()
-    setItems((prev) => [...prev, next])
-    setExpandedDraftLines((prev) => ({ ...prev, [next.key]: true }))
-  }, [addOpen, items])
-
-  useEffect(() => {
     if (!paymentOpen || paymentType !== 'payment' || purchasePaymentOnline > 0) return
     setPaymentTransactionId((prev) => (prev === '' ? prev : ''))
     setPaymentTxnCharges((prev) => (prev === '0' ? prev : '0'))
@@ -1038,31 +1023,44 @@ export default function PurchasesPage() {
   function openEditItems() {
     const purchase = selectedPurchaseQ.data
     if (!purchase) return
-    const nextItems = purchase.items.map((item) => ({
-      key: Math.random().toString(36).slice(2),
-      purchase_item_id: item.id,
-      existing_inventory_item_id: item.stock_source === 'ATTACHED' && item.inventory_item_id ? item.inventory_item_id : undefined,
-      product_id: item.product_id,
-      product_name: item.product_name,
-      alias: '',
-      brand: item.brand || '',
-      category_id: undefined,
-      expiry_date: item.expiry_date || '',
-      rack_number: item.rack_number,
-      sealed_qty: item.sealed_qty,
-      free_qty: item.free_qty,
-      cost_price: item.cost_price,
-      mrp: item.mrp,
-      gst_percent: item.gst_percent,
-      discount_amount: item.discount_amount,
-      rounding_adjustment: item.rounding_adjustment || 0,
-      loose_sale_enabled: false,
-      parent_unit_name: '',
-      child_unit_name: '',
-      conversion_qty: undefined,
-    }))
+    const groupKeyByProduct = new Map<string, string>()
+    const expandedGroups: Record<string, boolean> = {}
+    const nextItems = purchase.items.map((item) => {
+      const key = Math.random().toString(36).slice(2)
+      const productGroupKey = [
+        item.product_id ? `id:${item.product_id}` : `name:${String(item.product_name || '').trim().toLowerCase()}`,
+        String(item.brand || '').trim().toLowerCase(),
+      ].join('|')
+      const batchGroupKey = groupKeyByProduct.get(productGroupKey) || key
+      groupKeyByProduct.set(productGroupKey, batchGroupKey)
+      expandedGroups[batchGroupKey] = true
+      return {
+        key,
+        batch_group_key: batchGroupKey,
+        purchase_item_id: item.id,
+        existing_inventory_item_id: item.stock_source === 'ATTACHED' && item.inventory_item_id ? item.inventory_item_id : undefined,
+        product_id: item.product_id,
+        product_name: item.product_name,
+        alias: '',
+        brand: item.brand || '',
+        category_id: undefined,
+        expiry_date: item.expiry_date || '',
+        rack_number: item.rack_number,
+        sealed_qty: item.sealed_qty,
+        free_qty: item.free_qty,
+        cost_price: item.cost_price,
+        mrp: item.mrp,
+        gst_percent: item.gst_percent,
+        discount_amount: item.discount_amount,
+        rounding_adjustment: item.rounding_adjustment || 0,
+        loose_sale_enabled: false,
+        parent_unit_name: '',
+        child_unit_name: '',
+        conversion_qty: undefined,
+      }
+    })
     setEditItems(nextItems)
-    setExpandedEditLines({})
+    setExpandedEditLines(expandedGroups)
     setEditItemsOpen(true)
   }
 
@@ -1432,10 +1430,10 @@ export default function PurchasesPage() {
     }
     const addExpiryBatch = (source: DraftItem) => {
       const next = cloneItemForNewExpiry(source, copyExpiryPrices)
+      const groupKey = source.batch_group_key || source.key
       setDraftItems((prev) => {
         const sourceIndex = prev.findIndex((row) => row.key === source.key)
         if (sourceIndex < 0) return [...prev, next]
-        const groupKey = source.batch_group_key || source.key
         const grouped = prev.map((row) => (row.key === source.key ? { ...row, batch_group_key: groupKey } : row))
         return [
           ...grouped.slice(0, sourceIndex + 1),
@@ -1443,16 +1441,119 @@ export default function PurchasesPage() {
           ...grouped.slice(sourceIndex + 1),
         ]
       })
-      setExpandedLines({ [next.key]: true })
+      setExpandedLines((prev) => ({ ...prev, [source.key]: true, [groupKey]: true, [next.key]: true }))
     }
+    const batchTotals = (row: DraftItem) => {
+      const subtotal = lineBaseTotal(row)
+      const gst = lineGstAmount(row)
+      return {
+        subtotal,
+        gst,
+        total: round2(subtotal + gst),
+        inward: lineTotalQty(row),
+      }
+    }
+    const batchSummaryPills = (row: DraftItem) => {
+      const totals = batchTotals(row)
+      const pillSx = {
+        borderRadius: 1,
+        bgcolor: 'background.paper',
+        '& .MuiChip-label': { px: 1 },
+      }
+      return (
+        <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1 }}>
+          <Chip size="small" label={`Subtotal ${money(totals.subtotal)}`} variant="outlined" sx={{ ...pillSx, borderColor: '#cfd8d3' }} />
+          <Chip size="small" label={`GST ${money(totals.gst)}`} variant="outlined" sx={{ ...pillSx, color: '#1d4f91', borderColor: '#9ec5f8', bgcolor: '#f4f8ff' }} />
+          <Chip size="small" label={`Total ${money(totals.total)}`} variant="outlined" sx={{ ...pillSx, color: '#1f6b4a', borderColor: '#9bc3ad', bgcolor: '#f4faf6' }} />
+          <Chip size="small" label={`Inward ${totals.inward}`} variant="outlined" sx={{ ...pillSx, borderColor: '#d4d4d4', bgcolor: '#fafafa' }} />
+        </Stack>
+      )
+    }
+    const removeBatch = (batchKey: string) => {
+      const fallback = freeOnly ? makeFreeStockItem() : makeEmptyItem()
+      setDraftItems((prev) => {
+        const next = prev.filter((row) => row.key !== batchKey)
+        if (next.length > 0) return next
+        return [fallback]
+      })
+      setExpandedLines((expanded) => ({ ...expanded, [fallback.key]: true }))
+    }
+    const removeProductGroup = (removeGroupKey: string) => {
+      const fallback = freeOnly ? makeFreeStockItem() : makeEmptyItem()
+      setDraftItems((prev) => {
+        const next = prev.filter((row) => (row.batch_group_key || row.key) !== removeGroupKey)
+        if (next.length > 0) return next
+        return [fallback]
+      })
+      setExpandedLines((expanded) => ({ ...expanded, [fallback.key]: true }))
+    }
+    const renderBatchBlock = (batch: DraftItem, batchIndex: number, groupCount: number) => (
+      <Grid item xs={12} key={batch.key}>
+        <Box sx={{ p: 1.5, border: '1px solid', borderColor: '#dce6df', borderLeft: '4px solid', borderLeftColor: batchIndex === 0 ? 'primary.main' : '#9bc3ad', borderRadius: 1, bgcolor: '#fbfcfb' }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 1 }}>
+            <Typography variant="subtitle2" fontWeight={800}>
+              Expiry {batchIndex + 1}
+            </Typography>
+            <Button
+              color="error"
+              size="small"
+              variant="text"
+              onClick={() => removeBatch(batch.key)}
+            >
+              {groupCount > 1 ? 'Remove Expiry' : 'Remove'}
+            </Button>
+          </Stack>
+          <Grid container spacing={1.25} alignItems="center">
+            <Grid item xs={6} md={1.6}>
+              <TextField size="small" label="Expiry" type="date" value={batch.expiry_date || ''} onChange={(e) => patchItem(batch.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} required fullWidth />
+            </Grid>
+            <Grid item xs={6} md={1}>
+              <TextField size="small" label="Rack" type="number" value={batch.rack_number ?? 0} onChange={(e) => patchItem(batch.key, { rack_number: Number(e.target.value) })} fullWidth />
+            </Grid>
+            {!freeOnly ? (
+              <Grid item xs={6} md={1}>
+                <TextField size="small" label="Paid Qty" type="number" value={batch.sealed_qty} onChange={(e) => patchItem(batch.key, { sealed_qty: Number(e.target.value) })} fullWidth />
+              </Grid>
+            ) : null}
+            <Grid item xs={6} md={1}>
+              <TextField size="small" label={freeOnly ? 'Free Qty' : 'Free'} type="number" value={batch.free_qty || 0} onChange={(e) => patchItem(batch.key, { free_qty: Number(e.target.value) })} fullWidth />
+            </Grid>
+            <Grid item xs={6} md={1.2}>
+              <TextField size="small" label="MRP" type="number" value={batch.mrp} onChange={(e) => patchItem(batch.key, { mrp: Number(e.target.value) })} fullWidth />
+            </Grid>
+            {!freeOnly ? (
+              <>
+                <Grid item xs={6} md={1.2}>
+                  <TextField size="small" label="Rate" type="number" value={batch.cost_price} onChange={(e) => patchItem(batch.key, { cost_price: Number(e.target.value) })} fullWidth />
+                </Grid>
+                <Grid item xs={6} md={1.2}>
+                  <TextField size="small" label="GST %" type="number" value={batch.gst_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { gst_percent: Number(e.target.value) })} fullWidth />
+                </Grid>
+                <Grid item xs={6} md={1.2}>
+                  <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchItem(batch.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                </Grid>
+                <Grid item xs={6} md={1.2}>
+                  <TextField size="small" label="Round Off (+/-)" type="number" value={batch.rounding_adjustment ?? 0} onChange={(e) => patchItem(batch.key, { rounding_adjustment: e.target.value })} fullWidth />
+                </Grid>
+              </>
+            ) : null}
+            <Grid item xs={12} md={freeOnly ? 2 : 2.4}>
+              {freeOnly ? (
+                <Typography variant="caption" color="text.secondary">Inward {Number(batch.sealed_qty || 0) + Number(batch.free_qty || 0)}</Typography>
+              ) : batchSummaryPills(batch)}
+            </Grid>
+          </Grid>
+        </Box>
+      </Grid>
+    )
     return (
-      <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
+      <Paper variant="outlined" sx={{ overflow: 'hidden', borderRadius: 1, borderColor: '#dce6df', boxShadow: 'none' }}>
         <Stack
           direction={{ xs: 'column', md: 'row' }}
           justifyContent="space-between"
           alignItems={{ md: 'center' }}
           gap={1}
-          sx={{ px: 2, py: 1.5, bgcolor: 'rgba(31,107,74,0.05)', borderBottom: '1px solid', borderColor: 'divider' }}
+          sx={{ px: 2, py: 1.5, bgcolor: '#f7faf8', borderBottom: '1px solid', borderColor: '#dce6df' }}
         >
           <Box>
             <Typography variant="subtitle1" fontWeight={700}>{freeOnly ? 'Free Stock Items' : 'Purchase Items'}</Typography>
@@ -1476,7 +1577,7 @@ export default function PurchasesPage() {
               onClick={() => {
                 const next = freeOnly ? makeFreeStockItem() : makeEmptyItem()
                 setDraftItems((prev) => [...prev, next])
-                setExpandedLines({ [next.key]: true })
+                setExpandedLines((prev) => ({ ...prev, [next.key]: true }))
               }}
             >
               Add Product
@@ -1484,7 +1585,7 @@ export default function PurchasesPage() {
           </Stack>
         </Stack>
 
-        <Stack divider={<Divider flexItem />} sx={{ p: 0 }}>
+        <Stack divider={<Divider flexItem sx={{ borderColor: '#e6ece8' }} />} sx={{ p: 0 }}>
           {draftItems.map((item, index) => {
             const groupKey = item.batch_group_key || item.key
             const firstGroupIndex = draftItems.findIndex((row) => (row.batch_group_key || row.key) === groupKey)
@@ -1493,32 +1594,71 @@ export default function PurchasesPage() {
             const groupPaidQty = groupItems.reduce((sum, row) => sum + Number(row.sealed_qty || 0), 0)
             const groupFreeQty = groupItems.reduce((sum, row) => sum + Number(row.free_qty || 0), 0)
             const groupTotal = groupItems.reduce((sum, row) => round2(sum + lineBaseTotal(row)), 0)
-            const isExpanded = Boolean(expandedLines[item.key])
+            const groupGst = groupItems.reduce((sum, row) => round2(sum + lineGstAmount(row)), 0)
+            const groupGrandTotal = round2(groupTotal + groupGst)
+            const isExpanded = Boolean(expandedLines[groupKey] || groupItems.some((row) => expandedLines[row.key]))
             return (
-            <Box key={item.key} sx={{ p: 1.5, bgcolor: isExpanded ? 'background.paper' : 'grey.50' }}>
+            <Box key={item.key} sx={{ bgcolor: isExpanded ? '#ffffff' : '#fafafa' }}>
               <Stack gap={1.25}>
-                <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1} flexWrap="wrap">
-                  <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap" sx={{ minWidth: 0 }}>
-                    <Chip size="small" label={`Item ${index + 1}`} />
-                    {item.existing_inventory_item_id ? (
-                      <Chip
-                        size="small"
-                        color="info"
-                        icon={<Inventory2OutlinedIcon />}
-                        label={`Linked Stock #${item.existing_inventory_item_id}${item.existing_stock_movement_id ? ` / In #${item.existing_stock_movement_id}` : ''}`}
-                        variant="outlined"
-                      />
-                    ) : null}
-                    <Typography variant="caption" color="text.secondary">
-                      {item.product_name || 'New purchase item'}
+                <Stack
+                  direction="row"
+                  justifyContent="space-between"
+                  alignItems="flex-start"
+                  gap={1.5}
+                  flexWrap="wrap"
+                  sx={{ px: 1.75, py: 1.25, bgcolor: '#fbfdfb', borderLeft: '4px solid', borderLeftColor: 'primary.main' }}
+                >
+                  <Stack gap={0.35} sx={{ minWidth: 0, flex: '1 1 420px' }}>
+                    <Typography variant="subtitle2" fontWeight={800} sx={{ lineHeight: 1.25 }}>
+                      Item {index + 1} · {item.product_name || 'New purchase item'}
                     </Typography>
-                    {groupItems.length > 1 ? <Chip size="small" color="primary" variant="outlined" label={`${groupItems.length} expiries`} /> : null}
-                    {!freeOnly ? <Chip size="small" variant="outlined" label={`Paid ${groupPaidQty}`} /> : null}
-                    <Chip size="small" variant="outlined" label={`Free ${groupFreeQty}`} />
-                    <Chip size="small" variant="outlined" label={freeOnly ? 'Cost 0.00' : `Item Total ${money(groupTotal)}`} />
+                    <Typography variant="caption" color="text.secondary">
+                      {[
+                        `${groupItems.length} ${groupItems.length === 1 ? 'expiry' : 'expiries'}`,
+                        !freeOnly ? `Paid ${groupPaidQty}` : '',
+                        `Free ${groupFreeQty}`,
+                        item.existing_inventory_item_id
+                          ? `Linked stock #${item.existing_inventory_item_id}${item.existing_stock_movement_id ? ` / In #${item.existing_stock_movement_id}` : ''}`
+                          : '',
+                      ].filter(Boolean).join(' · ')}
+                    </Typography>
                   </Stack>
+                  {!freeOnly ? (
+                    <Stack
+                      direction="row"
+                      gap={2}
+                      flexWrap="wrap"
+                      justifyContent="flex-end"
+                      sx={{
+                        px: 1.25,
+                        py: 0.75,
+                        color: 'text.secondary',
+                        bgcolor: '#ffffff',
+                        border: '1px solid',
+                        borderColor: '#e0e8e3',
+                        borderRadius: 1,
+                      }}
+                    >
+                      <Box>
+                        <Typography variant="caption" display="block">Subtotal</Typography>
+                        <Typography variant="body2" color="text.primary" fontWeight={700}>{money(groupTotal)}</Typography>
+                      </Box>
+                      <Box>
+                        <Typography variant="caption" display="block">GST</Typography>
+                        <Typography variant="body2" color="text.primary" fontWeight={700}>{money(groupGst)}</Typography>
+                      </Box>
+                      <Box>
+                        <Typography variant="caption" display="block">Total</Typography>
+                        <Typography variant="body2" color="text.primary" fontWeight={800}>{money(groupGrandTotal)}</Typography>
+                      </Box>
+                    </Stack>
+                  ) : null}
                   <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
-                    <Button size="small" variant="outlined" onClick={() => setExpandedLines((prev) => (prev[item.key] ? {} : { [item.key]: true }))}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => setExpandedLines((prev) => ({ ...prev, [groupKey]: !(prev[groupKey] || prev[item.key]) }))}
+                    >
                       {isExpanded ? 'Collapse' : 'Expand'}
                     </Button>
                     {!freeOnly ? (
@@ -1531,13 +1671,14 @@ export default function PurchasesPage() {
                       size="small"
                       variant="outlined"
                       startIcon={<DeleteIcon />}
-                      onClick={() => setDraftItems((prev) => (prev.length === 1 ? prev : prev.filter((row) => row.key !== item.key)))}
+                      onClick={() => removeProductGroup(groupKey)}
                     >
                       Remove
                     </Button>
                   </Stack>
                 </Stack>
                 {isExpanded ? (
+                <Box sx={{ px: 1.75, pb: 1.75 }}>
                 <Grid container spacing={1.25} alignItems="center">
                   <Grid item xs={12} md={3}>
                     <Stack direction="row" gap={1}>
@@ -1659,10 +1800,10 @@ export default function PurchasesPage() {
                           fullWidth
                           sx={{
                             "& .MuiInputLabel-root": {
-                              color: "red",
+                              color: "#b45309",
                             },
                             "& .MuiInputLabel-root.Mui-focused": {
-                              color: "red",
+                              color: "#b45309",
                             },
                           }}
                         />
@@ -1699,147 +1840,40 @@ export default function PurchasesPage() {
                   </Grid>
 
                   <Grid item xs={12}>
-                    <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      fontWeight={800}
+                      sx={{ display: 'block', px: 1, py: 0.75, bgcolor: '#f6f8f7', border: '1px solid', borderColor: '#e4ebe7', borderRadius: 1 }}
+                    >
                       {freeOnly ? 'Batch and quantity' : 'Batch, quantity, and invoice math'}
                     </Typography>
                   </Grid>
-                  <Grid item xs={6} md={1.6}>
-                    <TextField size="small" label="Expiry" type="date" value={item.expiry_date || ''} onChange={(e) => patchItem(item.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} required fullWidth />
-                  </Grid>
-                  <Grid item xs={6} md={1}>
-                    <TextField size="small" label="Rack" type="number" value={item.rack_number ?? 0} onChange={(e) => patchItem(item.key, { rack_number: Number(e.target.value) })} fullWidth />
-                  </Grid>
-                  {!freeOnly ? (
-                    <Grid item xs={6} md={1}>
-                      <TextField size="small" label="Paid Qty" type="number" value={item.sealed_qty} onChange={(e) => patchItem(item.key, { sealed_qty: Number(e.target.value) })} fullWidth />
-                    </Grid>
-                  ) : null}
-                  <Grid item xs={6} md={1}>
-                    <TextField size="small" label={freeOnly ? 'Free Qty' : 'Free'} type="number" value={item.free_qty || 0} onChange={(e) => patchItem(item.key, { free_qty: Number(e.target.value) })} fullWidth />
-                  </Grid>
-                  <Grid item xs={6} md={1.2}>
-                    <TextField size="small" label="MRP" type="number" value={item.mrp} onChange={(e) => patchItem(item.key, { mrp: Number(e.target.value) })} fullWidth />
-                  </Grid>
-                  {!freeOnly ? (
-                    <>
-                      <Grid item xs={6} md={1.2}>
-                        <TextField size="small" label="Rate" type="number" value={item.cost_price} onChange={(e) => patchItem(item.key, { cost_price: Number(e.target.value) })} fullWidth />
-                      </Grid>
-                      <Grid item xs={6} md={1.2}>
-                        <TextField size="small" label="GST %" type="number" value={item.gst_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(item.key, { gst_percent: Number(e.target.value) })} fullWidth />
-                      </Grid>
-                      <Grid item xs={6} md={1.2}>
-                        <TextField size="small" label="Discount (Rs)" type="number" value={item.discount_amount || 0} onChange={(e) => patchItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
-                      </Grid>
-                      <Grid item xs={6} md={1.2}>
-                        <TextField size="small" label="Round Off (+/-)" type="number" value={item.rounding_adjustment ?? 0} onChange={(e) => patchItem(item.key, { rounding_adjustment: e.target.value })} fullWidth />
-                      </Grid>
-                    </>
-                  ) : null}
-                  <Grid item xs={12} md={2.8}>
-                    <Stack gap={0.75}>
-                      <Stack direction="row" gap={1} alignItems="center" justifyContent="space-between">
-                        <FormControlLabel
-                          control={<Checkbox size="small" checked={Boolean(item.loose_sale_enabled)} onChange={(e) => patchItem(item.key, { loose_sale_enabled: e.target.checked })} />}
-                          label="Loose"
-                          sx={{ m: 0 }}
-                        />
-                        <Typography variant="subtitle2" sx={{ minWidth: 80, textAlign: 'right' }}>
-                          {freeOnly ? 'Free' : money(lineBaseTotal(item))}
-                        </Typography>
-                      </Stack>
-                      <Stack direction="row" gap={0.75} flexWrap="wrap">
-                        {!freeOnly ? (
-                          <Chip
-                            size="small"
-                            label={`Gross ${money(lineGrossTotal(item))}`}
-                            variant="outlined"
-                          />
-                        ) : null}
-                        <Chip
-                          size="small"
-                          label={`Total Inward ${Number(item.sealed_qty || 0) + Number(item.free_qty || 0)}`}
-                          variant="outlined"
-                        />
-                        {!freeOnly ? (
-                          <Chip
-                            size="small"
-                            color={Number(item.free_qty || 0) > 0 ? 'success' : 'default'}
-                            label={`Avg Rate ${money(lineEffectiveCost(item))}`}
-                            variant={Number(item.free_qty || 0) > 0 ? 'filled' : 'outlined'}
-                          />
-                        ) : null}
-                      </Stack>
-                    </Stack>
-                  </Grid>
-                  {!freeOnly && groupItems.slice(1).map((batch, batchIndex) => (
-                    <Grid item xs={12} key={batch.key}>
-                      <Paper variant="outlined" sx={{ p: 1.25, bgcolor: 'rgba(31,107,74,0.025)' }}>
-                        <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 1 }}>
-                          <Typography variant="caption" color="text.secondary" fontWeight={700}>
-                            Expiry {batchIndex + 2}
-                          </Typography>
-                          <Button
-                            color="error"
-                            size="small"
-                            variant="text"
-                            onClick={() => setDraftItems((prev) => prev.filter((row) => row.key !== batch.key))}
-                          >
-                            Remove Expiry
-                          </Button>
-                        </Stack>
-                        <Grid container spacing={1.25} alignItems="center">
-                          <Grid item xs={6} md={1.6}>
-                            <TextField size="small" label="Expiry" type="date" value={batch.expiry_date || ''} onChange={(e) => patchItem(batch.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} required fullWidth />
+                  <Grid item xs={12}>
+                    <Stack gap={1}>
+                      <FormControlLabel
+                        control={<Checkbox size="small" checked={Boolean(item.loose_sale_enabled)} onChange={(e) => patchSharedProductFields(item.key, { loose_sale_enabled: e.target.checked })} />}
+                        label="Loose"
+                        sx={{ m: 0 }}
+                      />
+                      {item.loose_sale_enabled && (
+                        <Grid container spacing={1.25}>
+                          <Grid item xs={12} md={4}>
+                            <TextField size="small" label="Parent Unit" value={item.parent_unit_name || ''} onChange={(e) => patchSharedProductFields(item.key, { parent_unit_name: e.target.value })} fullWidth />
                           </Grid>
-                          <Grid item xs={6} md={1}>
-                            <TextField size="small" label="Rack" type="number" value={batch.rack_number ?? 0} onChange={(e) => patchItem(batch.key, { rack_number: Number(e.target.value) })} fullWidth />
+                          <Grid item xs={12} md={4}>
+                            <TextField size="small" label="Child Unit" value={item.child_unit_name || ''} onChange={(e) => patchSharedProductFields(item.key, { child_unit_name: e.target.value })} fullWidth />
                           </Grid>
-                          <Grid item xs={6} md={1}>
-                            <TextField size="small" label="Paid Qty" type="number" value={batch.sealed_qty} onChange={(e) => patchItem(batch.key, { sealed_qty: Number(e.target.value) })} fullWidth />
-                          </Grid>
-                          <Grid item xs={6} md={1}>
-                            <TextField size="small" label="Free" type="number" value={batch.free_qty || 0} onChange={(e) => patchItem(batch.key, { free_qty: Number(e.target.value) })} fullWidth />
-                          </Grid>
-                          <Grid item xs={6} md={1.2}>
-                            <TextField size="small" label="MRP" type="number" value={batch.mrp} onChange={(e) => patchItem(batch.key, { mrp: Number(e.target.value) })} fullWidth />
-                          </Grid>
-                          <Grid item xs={6} md={1.2}>
-                            <TextField size="small" label="Rate" type="number" value={batch.cost_price} onChange={(e) => patchItem(batch.key, { cost_price: Number(e.target.value) })} fullWidth />
-                          </Grid>
-                          <Grid item xs={6} md={1.2}>
-                            <TextField size="small" label="GST %" type="number" value={batch.gst_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { gst_percent: Number(e.target.value) })} fullWidth />
-                          </Grid>
-                          <Grid item xs={6} md={1.2}>
-                            <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchItem(batch.key, { discount_amount: Number(e.target.value) })} fullWidth />
-                          </Grid>
-                          <Grid item xs={6} md={1.2}>
-                            <TextField size="small" label="Round Off (+/-)" type="number" value={batch.rounding_adjustment ?? 0} onChange={(e) => patchItem(batch.key, { rounding_adjustment: e.target.value })} fullWidth />
-                          </Grid>
-                          <Grid item xs={12} md={1.6}>
-                            <Stack direction="row" gap={0.75} flexWrap="wrap">
-                              <Chip size="small" label={`Total ${money(lineBaseTotal(batch))}`} variant="outlined" />
-                              <Chip size="small" label={`Inward ${lineTotalQty(batch)}`} variant="outlined" />
-                            </Stack>
+                          <Grid item xs={12} md={4}>
+                            <TextField size="small" label="Conversion Qty" type="number" value={item.conversion_qty || ''} onChange={(e) => patchSharedProductFields(item.key, { conversion_qty: e.target.value ? Number(e.target.value) : undefined })} fullWidth />
                           </Grid>
                         </Grid>
-                      </Paper>
-                    </Grid>
-                  ))}
-                  {item.loose_sale_enabled && (
-                    <>
-                      <Grid item xs={12} md={4}>
-                        <TextField size="small" label="Parent Unit" value={item.parent_unit_name || ''} onChange={(e) => patchSharedProductFields(item.key, { parent_unit_name: e.target.value })} fullWidth />
-                      </Grid>
-                      <Grid item xs={12} md={4}>
-                        <TextField size="small" label="Child Unit" value={item.child_unit_name || ''} onChange={(e) => patchSharedProductFields(item.key, { child_unit_name: e.target.value })} fullWidth />
-                      </Grid>
-                      <Grid item xs={12} md={4}>
-                        <TextField size="small" label="Conversion Qty" type="number" value={item.conversion_qty || ''} onChange={(e) => patchSharedProductFields(item.key, { conversion_qty: e.target.value ? Number(e.target.value) : undefined })} fullWidth />
-                      </Grid>
-                    </>
-                  )}
+                      )}
+                    </Stack>
+                  </Grid>
+                  {groupItems.map((batch, batchIndex) => renderBatchBlock(batch, batchIndex, groupItems.length))}
                 </Grid>
+                </Box>
                 ) : null}
               </Stack>
             </Box>

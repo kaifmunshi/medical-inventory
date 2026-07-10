@@ -130,6 +130,12 @@ function previousFinancialYear(years: FinancialYear[], activeYear: FinancialYear
   )
 }
 
+const CREDIT_BILLS_CACHE_OPTIONS = {
+  staleTime: 5 * 60 * 1000,
+  gcTime: 30 * 60 * 1000,
+  refetchOnMount: false,
+} as const
+
 // ✅ small colored status chip
 function StatusChip({ status }: { status: any }) {
   const s = String(status || '').toUpperCase()
@@ -226,18 +232,22 @@ export default function CreditBills() {
         from_date: appliedFrom || undefined,
         to_date: appliedTo || undefined,
       }),
+    ...CREDIT_BILLS_CACHE_OPTIONS,
   })
   const yearsQ = useQuery({
     queryKey: ['credit-bills-financial-years'],
     queryFn: fetchFinancialYears,
+    ...CREDIT_BILLS_CACHE_OPTIONS,
   })
   const customersQ = useQuery({
     queryKey: ['credit-bills-customers'],
     queryFn: () => fetchCustomers({ limit: 1000 }),
+    ...CREDIT_BILLS_CACHE_OPTIONS,
   })
   const debtorPartiesQ = useQuery({
     queryKey: ['credit-bills-debtor-parties'],
     queryFn: () => fetchParties({ party_group: 'SUNDRY_DEBTOR', is_active: true }),
+    ...CREDIT_BILLS_CACHE_OPTIONS,
   })
   const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
   const prevYear = useMemo(() => previousFinancialYear(yearsQ.data || [], activeYear), [activeYear, yearsQ.data])
@@ -287,6 +297,7 @@ export default function CreditBills() {
       }
       return out
     },
+    ...CREDIT_BILLS_CACHE_OPTIONS,
   })
 
   const creditRows = useMemo(() => {

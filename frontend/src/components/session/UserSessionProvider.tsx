@@ -16,6 +16,7 @@ import LockOpenIcon from '@mui/icons-material/LockOpen'
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined'
 import LogoutIcon from '@mui/icons-material/Logout'
 import { useMutation, useQuery } from '@tanstack/react-query'
+import { useLocation } from 'react-router-dom'
 import { useToast } from '../ui/Toaster'
 import type { AppUser, UserSession } from '../../lib/types'
 import {
@@ -25,6 +26,7 @@ import {
   saveStoredLastActivity,
   saveStoredSessionLock,
   SESSION_INACTIVITY_LOCK_MS,
+  isSessionLockPausedPath,
   shouldRestoreSessionLocked,
 } from '../../lib/sessionLock'
 import {
@@ -76,6 +78,7 @@ function normalizeShortcutList(input: StoredShortcutItem[]) {
 
 export function UserSessionProvider({ children }: { children: ReactNode }) {
   const toast = useToast()
+  const location = useLocation()
   const [session, setSession] = useState<UserSession | null>(null)
   const [ready, setReady] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
@@ -86,6 +89,7 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
   const [shortcuts, setShortcutsState] = useState<StoredShortcutItem[]>([])
   const lastActivityRef = useRef(Date.now())
   const lastPersistedActivityRef = useRef(0)
+  const sessionLockPaused = isSessionLockPausedPath(location.pathname)
 
   useEffect(() => {
     const stored = loadStoredUserSession()
@@ -93,12 +97,16 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
       const activityAt = readStoredLastActivity(stored.user.id) || Date.now()
       lastActivityRef.current = activityAt
       lastPersistedActivityRef.current = activityAt
-      setIsLocked(shouldRestoreSessionLocked(stored.user.id))
+      setIsLocked(sessionLockPaused ? false : shouldRestoreSessionLocked(stored.user.id))
+      if (sessionLockPaused) {
+        clearStoredSessionLock(stored.user.id)
+        saveStoredLastActivity(stored.user.id, Date.now())
+      }
     }
     setSession(stored)
     setReady(true)
     setLoginOpen(false)
-  }, [])
+  }, [sessionLockPaused])
 
   useEffect(() => {
     if (!session?.user?.id) {
@@ -117,18 +125,30 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
   const lockSession = useCallback(() => {
     const userId = session?.user?.id
     if (!userId) return
+    if (isSessionLockPausedPath(window.location.pathname)) {
+      rememberActivity(userId)
+      clearStoredSessionLock(userId)
+      setIsLocked(false)
+      return
+    }
     saveStoredSessionLock(userId)
     setIsLocked(true)
     setLoginOpen(false)
     setPin('')
     setUnlockPin('')
-  }, [session?.user?.id])
+  }, [session?.user?.id, rememberActivity])
 
   useEffect(() => {
     const userId = session?.user?.id
     if (!userId || isLocked) return undefined
 
     const now = Date.now()
+    if (sessionLockPaused) {
+      rememberActivity(userId, now)
+      clearStoredSessionLock(userId)
+      return undefined
+    }
+
     const storedActivityAt = readStoredLastActivity(userId)
     if (storedActivityAt && now - storedActivityAt >= SESSION_INACTIVITY_LOCK_MS) {
       lockSession()
@@ -180,7 +200,7 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('focus', handleWake)
       document.removeEventListener('visibilitychange', handleWake)
     }
-  }, [session?.user?.id, isLocked, lockSession, rememberActivity])
+  }, [session?.user?.id, isLocked, lockSession, rememberActivity, sessionLockPaused])
 
   const usersQ = useQuery<AppUser[], Error>({
     queryKey: ['session-active-users'],

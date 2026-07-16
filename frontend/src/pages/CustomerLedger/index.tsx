@@ -97,8 +97,7 @@ function balanceChipColor(value: number): 'default' | 'success' | 'error' | 'inf
 
 function actualReturnSettlement(row: CustomerReturnLedgerRow) {
   const refund = Number(row.refund_cash || 0) + Number(row.refund_online || 0)
-  if (refund > 0) return refund
-  return String(row.refund_mode || '').toLowerCase() === 'credit' ? Number(row.credit_amount || 0) : 0
+  return refund + Number(row.credit_amount || 0)
 }
 
 function allocatedLineRefunds(row: CustomerReturnLedgerRow) {

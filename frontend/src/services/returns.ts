@@ -18,6 +18,7 @@ export type CreateReturnBody = {
 export type ListReturnsParams = {
   from_date?: string   // YYYY-MM-DD
   to_date?: string     // YYYY-MM-DD (inclusive)
+  source_bill_id?: number
   limit?: number
   offset?: number
 }
@@ -48,6 +49,7 @@ export type ReturnRecord = {
     expiry_date?: string | null
   } & ReturnStockMeta>
   refund_mode: 'cash' | 'online' | 'credit' | 'split'
+  credit_amount?: number
   refund_cash: number
   refund_online: number
   notes?: string

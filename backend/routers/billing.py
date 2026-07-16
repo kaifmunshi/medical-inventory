@@ -107,6 +107,10 @@ def bill_credit_return_total(session, bill_id: int) -> float:
     for row in session.exec(select(Return).where(Return.source_bill_id == bill_id)).all():
         if row.id is None or int(row.id) in exchange_return_ids:
             continue
+        credit = round2(as_f(getattr(row, "credit_amount", 0.0)))
+        if credit > 0:
+            total += credit
+            continue
         cash = round2(as_f(getattr(row, "refund_cash", 0.0)))
         online = round2(as_f(getattr(row, "refund_online", 0.0)))
         if cash <= 0 and online <= 0:

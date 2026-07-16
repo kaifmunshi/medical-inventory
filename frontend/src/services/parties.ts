@@ -21,6 +21,11 @@ export async function fetchParties(params?: {
   return res.data
 }
 
+export async function fetchParty(id: number): Promise<Party> {
+  const res = await api.get<Party>(`/parties/lookup/${id}`)
+  return res.data
+}
+
 export async function createParty(payload: PartyPayload): Promise<Party> {
   const res = await api.post<Party>('/parties', payload)
   return res.data

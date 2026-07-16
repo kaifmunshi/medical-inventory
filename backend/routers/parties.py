@@ -416,8 +416,13 @@ def _validate_receipt_mode(mode: str, cash_amount: float, online_amount: float) 
 
 
 def _infer_return_refund_mode(row: Return) -> str:
+    credit = _round2(float(getattr(row, "credit_amount", 0.0) or 0.0))
     cash = _round2(float(getattr(row, "refund_cash", 0.0) or 0.0))
     online = _round2(float(getattr(row, "refund_online", 0.0) or 0.0))
+    if credit > 0 and (cash > 0 or online > 0):
+        return "split"
+    if credit > 0:
+        return "credit"
     if cash > 0 and online > 0:
         return "split"
     if cash > 0:
@@ -425,6 +430,17 @@ def _infer_return_refund_mode(row: Return) -> str:
     if online > 0:
         return "online"
     return "credit"
+
+
+def _return_credit_amount(row: Return) -> float:
+    credit = _round2(float(getattr(row, "credit_amount", 0.0) or 0.0))
+    if credit > 0:
+        return credit
+    cash = _round2(float(getattr(row, "refund_cash", 0.0) or 0.0))
+    online = _round2(float(getattr(row, "refund_online", 0.0) or 0.0))
+    if cash <= 0 and online <= 0:
+        return _round2(float(getattr(row, "subtotal_return", 0.0) or 0.0))
+    return 0.0
 
 
 @router.post("/", response_model=PartyOut, status_code=201)
@@ -496,6 +512,16 @@ def list_parties(
             )
         stmt = stmt.order_by(func.lower(Party.name).asc(), Party.id.desc()).offset(offset).limit(limit)
         return session.exec(stmt).all()
+
+
+@router.get("/lookup/{party_id}", response_model=PartyOut)
+def get_party(party_id: int) -> PartyOut:
+    with get_session() as session:
+        _sync_customer_debtor_parties(session)
+        row = session.get(Party, party_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Party not found")
+        return row
 
 
 @router.patch("/{party_id}", response_model=PartyOut)
@@ -706,7 +732,7 @@ def debtor_returns(party_id: int) -> List[CustomerReturnLedgerRow]:
                     refund_mode=refund_mode,
                     refund_cash=_round2(float(getattr(row, "refund_cash", 0.0) or 0.0)),
                     refund_online=_round2(float(getattr(row, "refund_online", 0.0) or 0.0)),
-                    credit_amount=subtotal if refund_mode == "credit" else 0.0,
+                    credit_amount=_return_credit_amount(row),
                     exchange_id=int(exchange.id) if exchange and exchange.id is not None else None,
                     exchange_new_bill_id=int(exchange.new_bill_id) if exchange and exchange.new_bill_id is not None else None,
                     notes=row.notes,

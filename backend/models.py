@@ -94,6 +94,7 @@ class Return(SQLModel, table=True):
     date_time: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     source_bill_id: Optional[int] = None   # can be null for “no bill”
     subtotal_return: float                 # sum of (qty * mrp) being returned
+    credit_amount: float = 0.0
     refund_cash: float = 0.0
     refund_online: float = 0.0
     notes: Optional[str] = None
@@ -364,6 +365,7 @@ class ReturnOut(SQLModel):
     source_bill_id: Optional[int]
     subtotal_return: float
     refund_mode: str = "cash"
+    credit_amount: float = 0.0
     refund_cash: float
     refund_online: float
     notes: Optional[str] = None

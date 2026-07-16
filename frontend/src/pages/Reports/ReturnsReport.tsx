@@ -88,8 +88,11 @@ function itemDisplayName(it: any) {
 function inferReturnRefundMode(row: any) {
   const explicit = String(row?.refund_mode || '').trim().toLowerCase()
   if (explicit) return explicit
+  const credit = Number(row?.credit_amount || 0)
   const cash = Number(row?.refund_cash || 0)
   const online = Number(row?.refund_online || 0)
+  if (credit > 0 && (cash > 0 || online > 0)) return 'split'
+  if (credit > 0) return 'credit'
   if (cash > 0 && online > 0) return 'split'
   if (cash > 0) return 'cash'
   if (online > 0) return 'online'
@@ -122,8 +125,8 @@ function billDiscountPerUnit(bill: any, it: any) {
 function actualRefundTotal(row: any) {
   const explicit = Number(row?.actual_refund_total)
   if (Number.isFinite(explicit) && explicit >= 0) return explicit
-  const cashOnline = Number(row?.refund_cash || 0) + Number(row?.refund_online || 0)
-  if (cashOnline > 0) return cashOnline
+  const settled = Number(row?.credit_amount || 0) + Number(row?.refund_cash || 0) + Number(row?.refund_online || 0)
+  if (settled > 0) return settled
   return Number(row?.subtotal_return || 0)
 }
 
@@ -133,7 +136,7 @@ function auditPaymentSummary(detailsJson?: string | null) {
     const before = details?.before
     const after = details?.after
     if (!before || !after) return null
-    const summary = (value: any) => `${String(value?.refund_mode || '-').toUpperCase()} | Cash ₹${money(value?.refund_cash)} | Online ₹${money(value?.refund_online)}`
+    const summary = (value: any) => `${String(value?.refund_mode || '-').toUpperCase()} | Credit ₹${money(value?.credit_amount)} | Cash ₹${money(value?.refund_cash)} | Online ₹${money(value?.refund_online)}`
     return `${summary(before)} → ${summary(after)}`
   } catch {
     return null
@@ -452,9 +455,10 @@ export default function ReturnsReport(props: {
                       const refundContext = {
                         ...(detail.return || {}),
                         source_bill: detail.source_bill,
+                        credit_amount: detail.credit_amount,
                         refund_cash: detail.refund_cash,
                         refund_online: detail.refund_online,
-                        actual_refund_total: Number(detail.refund_cash || 0) + Number(detail.refund_online || 0),
+                        actual_refund_total: Number(detail.credit_amount || 0) + Number(detail.refund_cash || 0) + Number(detail.refund_online || 0),
                       }
                       const sale = detail.source_bill ? billSoldUnitPrice(detail.source_bill, it) : soldUnitPrice(it)
                       const discount = detail.source_bill ? billDiscountPerUnit(detail.source_bill, it) : discountPerUnit(it)
@@ -547,14 +551,14 @@ export default function ReturnsReport(props: {
                 {(() => {
                   const mode = inferReturnRefundMode(detail)
                   const paid = Number(detail.refund_cash || 0) + Number(detail.refund_online || 0)
-                  const credited = mode === 'credit' ? Number(detail.subtotal_return || 0) : 0
+                  const credited = Number(detail.credit_amount || 0)
                   return <>
                 <Typography>
                   Settlement Mode: <b>{String(mode).toUpperCase()}</b>
                 </Typography>
                 <Typography>
-                  {mode === 'credit' ? 'Credited to Source Bill' : 'Paid to Customer'}: <b>₹{money(mode === 'credit' ? credited : paid)}</b>
-                  {' '}| Cash ₹{money(detail.refund_cash)} | Online ₹{money(detail.refund_online)}
+                  Total Settled: <b>₹{money(credited + paid)}</b>
+                  {' '}| Credit ₹{money(credited)} | Cash ₹{money(detail.refund_cash)} | Online ₹{money(detail.refund_online)}
                 </Typography>
                   </>
                 })()}
@@ -623,7 +627,7 @@ export default function ReturnsReport(props: {
 
               <Stack gap={0.5} sx={{ ml: 'auto', maxWidth: 360 }}>
                 <Typography>
-                  {inferReturnRefundMode(detail) === 'credit' ? 'Credit Applied:' : 'Customer Refund:'}{' '}
+                  Total Settled:{' '}
                   <b>
                     {money(
                       actualRefundTotal(detail) ||

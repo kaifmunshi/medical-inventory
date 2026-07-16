@@ -2182,6 +2182,25 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_billpayment_is_deleted ON billpayment (is_deleted)"))
         session.commit()
 
+        # ---------- sales return settlement migration ----------
+        return_cols = session.exec(text('PRAGMA table_info("return")')).all()
+        return_col_names = {c[1] for c in return_cols}
+        if "credit_amount" not in return_col_names:
+            session.exec(text('ALTER TABLE "return" ADD COLUMN credit_amount REAL NOT NULL DEFAULT 0'))
+            session.exec(text("""
+                UPDATE "return"
+                SET credit_amount = COALESCE(subtotal_return, 0)
+                WHERE source_bill_id IS NOT NULL
+                  AND COALESCE(refund_cash, 0) = 0
+                  AND COALESCE(refund_online, 0) = 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM exchangerecord ex
+                      WHERE ex.return_id = "return".id
+                  )
+            """))
+        session.commit()
+
         # ---------- bill item allocation migration ----------
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS billitemallocation (

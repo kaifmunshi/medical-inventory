@@ -53,6 +53,8 @@ type DraftItem = Omit<PurchaseItemPayload, 'rounding_adjustment'> & {
   batch_group_key?: string
   existing_stock_movement_id?: number
 }
+type PurchaseStatusFilter = 'all' | 'open' | 'paid' | 'partial' | 'unpaid'
+type LedgerTypeFilter = 'all' | 'purchase' | 'payment' | 'return' | 'writeoff'
 
 const EXISTING_INVENTORY_FROM_DATE = '2026-04-01'
 const bankModeOptions: Array<{ value: PurchaseBankMode; label: string }> = [
@@ -265,6 +267,12 @@ export default function SupplierLedgerPage() {
   const canSearchProducts = productSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS || productSearchCategoryId !== null
   const inventorySearchTerm = inventorySearch.trim()
   const canSearchInventoryBatches = inventorySearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS || inventorySearchCategoryId !== null
+  const [purchaseStatusFilter, setPurchaseStatusFilter] = useState<PurchaseStatusFilter>('all')
+  const [ledgerTypeFilter, setLedgerTypeFilter] = useState<LedgerTypeFilter>('all')
+  const [ledgerSearch, setLedgerSearch] = useState('')
+  const [ledgerFromDate, setLedgerFromDate] = useState('')
+  const [ledgerToDate, setLedgerToDate] = useState('')
+  const [showDeletedLedgerRows, setShowDeletedLedgerRows] = useState(false)
 
   const suppliersQ = useQuery<Party[], Error>({
     queryKey: ['suppliers-ledger-select'],
@@ -335,6 +343,7 @@ export default function SupplierLedgerPage() {
   const purchaseReturns = purchaseReturnsQ.data || []
   const openingBalance = openingForSupplier(selectedSupplier)
   const openPurchases = purchases.filter((purchase) => outstandingOf(purchase) > 0.0001)
+  const openPurchaseOutstanding = openPurchases.reduce((sum, purchase) => sum + outstandingOf(purchase), 0)
   const selectedPurchase = purchases.find((purchase) => Number(purchase.id) === Number(selectedPurchaseId)) || null
   const editItemsSubtotal = useMemo(
     () => editItems.reduce((sum, item) => sum + lineBaseTotal(item), 0),
@@ -453,6 +462,54 @@ export default function SupplierLedgerPage() {
       }
     }).reverse()
   }, [openingBalance, purchaseReturns, purchases, supplierPayments, today])
+
+  const filteredLedgerRows = useMemo(() => {
+    const q = ledgerSearch.trim().toLowerCase()
+    const fromValue = ledgerFromDate ? dateValue(`${ledgerFromDate}T00:00:00`) : 0
+    const toValue = ledgerToDate ? dateValue(`${ledgerToDate}T23:59:59`) : Number.POSITIVE_INFINITY
+
+    function purchaseStatusMatches(purchase: Purchase | null) {
+      if (purchaseStatusFilter === 'all') return true
+      if (!purchase) return false
+      const outstanding = outstandingOf(purchase)
+      const status = String(purchase.payment_status || '').toUpperCase()
+      if (purchaseStatusFilter === 'open') return outstanding > 0.0001
+      if (purchaseStatusFilter === 'paid') return outstanding <= 0.0001
+      if (purchaseStatusFilter === 'partial') return status === 'PARTIAL' || (outstanding > 0.0001 && Number(purchase.paid_amount || 0) > 0)
+      if (purchaseStatusFilter === 'unpaid') return status === 'UNPAID' || (outstanding > 0.0001 && Number(purchase.paid_amount || 0) <= 0)
+      return true
+    }
+
+    function typeMatches(row: (typeof ledgerRows)[number]) {
+      if (ledgerTypeFilter === 'all') return true
+      if (ledgerTypeFilter === 'purchase') return row.type === 'PURCHASE'
+      if (ledgerTypeFilter === 'payment') return row.type === 'PAYMENT'
+      if (ledgerTypeFilter === 'writeoff') return row.type === 'WRITEOFF'
+      if (ledgerTypeFilter === 'return') return row.type === 'PURCHASE_RETURN'
+      return true
+    }
+
+    return ledgerRows.filter((row) => {
+      if (!showDeletedLedgerRows && row.isDeleted) return false
+      if (!typeMatches(row)) return false
+      const rowDate = dateValue(row.sortTs)
+      if (rowDate < fromValue || rowDate > toValue) return false
+      const purchase = row.purchaseId ? purchases.find((entry) => Number(entry.id) === Number(row.purchaseId)) || null : null
+      if (!purchaseStatusMatches(purchase)) return false
+      if (!q) return true
+      const haystack = [
+        row.particulars,
+        row.note,
+        row.mode,
+        row.purchaseId ? `purchase ${row.purchaseId}` : '',
+        row.paymentId ? `payment ${row.paymentId}` : '',
+        purchase?.invoice_number || '',
+        purchase?.notes || '',
+        ...(purchase?.items || []).map((item) => `${item.product_name || ''} ${item.brand || ''}`),
+      ].join(' ').toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [ledgerFromDate, ledgerRows, ledgerSearch, ledgerToDate, ledgerTypeFilter, purchaseStatusFilter, purchases, showDeletedLedgerRows])
 
   const totals = useMemo(() => {
     const totalPurchases = purchases.reduce((sum, purchase) => sum + Number(purchase.total_amount || 0), 0)
@@ -1506,12 +1563,85 @@ export default function SupplierLedgerPage() {
             <Chip label={`Refunded: Rs ${money(totals.totalRefunded)}`} color="info" variant="outlined" />
             {totals.totalWriteoffReversed > 0 && <Chip label={`Write-off Reversed: Rs ${money(totals.totalWriteoffReversed)}`} variant="outlined" />}
             <Chip label={`Write-off: Rs ${money(totals.totalWriteoff)}`} variant="outlined" />
+            <Chip label={`Open Bills: ${openPurchases.length}`} color={openPurchases.length > 0 ? 'warning' : 'success'} variant="outlined" />
+            <Chip label={`Open Amount: Rs ${money(openPurchaseOutstanding)}`} color={openPurchaseOutstanding > 0 ? 'warning' : 'success'} variant="outlined" />
             <Chip label={`Closing: Rs ${money(totals.closingBalance)}`} color="primary" />
           </Stack>
         </Paper>
       )}
 
       <Paper sx={{ p: 2 }}>
+        <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} alignItems={{ md: 'center' }} sx={{ mb: 2 }}>
+          <TextField
+            select
+            size="small"
+            label="Bill Status"
+            value={purchaseStatusFilter}
+            onChange={(event) => setPurchaseStatusFilter(event.target.value as PurchaseStatusFilter)}
+            sx={{ minWidth: 150 }}
+          >
+            <MenuItem value="all">All bills</MenuItem>
+            <MenuItem value="open">Open bills</MenuItem>
+            <MenuItem value="partial">Partial</MenuItem>
+            <MenuItem value="unpaid">Unpaid</MenuItem>
+            <MenuItem value="paid">Paid/settled</MenuItem>
+          </TextField>
+          <TextField
+            select
+            size="small"
+            label="Rows"
+            value={ledgerTypeFilter}
+            onChange={(event) => setLedgerTypeFilter(event.target.value as LedgerTypeFilter)}
+            sx={{ minWidth: 150 }}
+          >
+            <MenuItem value="all">All rows</MenuItem>
+            <MenuItem value="purchase">Purchases</MenuItem>
+            <MenuItem value="payment">Payments</MenuItem>
+            <MenuItem value="writeoff">Write-offs</MenuItem>
+            <MenuItem value="return">Returns</MenuItem>
+          </TextField>
+          <TextField
+            size="small"
+            label="Search"
+            value={ledgerSearch}
+            onChange={(event) => setLedgerSearch(event.target.value)}
+            placeholder="Invoice, item, note..."
+            sx={{ minWidth: { xs: '100%', md: 220 } }}
+          />
+          <TextField
+            size="small"
+            label="From"
+            type="date"
+            value={ledgerFromDate}
+            onChange={(event) => setLedgerFromDate(event.target.value)}
+            InputLabelProps={{ shrink: true }}
+          />
+          <TextField
+            size="small"
+            label="To"
+            type="date"
+            value={ledgerToDate}
+            onChange={(event) => setLedgerToDate(event.target.value)}
+            InputLabelProps={{ shrink: true }}
+          />
+          <FormControlLabel
+            control={<Checkbox checked={showDeletedLedgerRows} onChange={(event) => setShowDeletedLedgerRows(event.target.checked)} />}
+            label="Deleted"
+          />
+          <Button
+            variant="text"
+            onClick={() => {
+              setPurchaseStatusFilter('all')
+              setLedgerTypeFilter('all')
+              setLedgerSearch('')
+              setLedgerFromDate('')
+              setLedgerToDate('')
+              setShowDeletedLedgerRows(false)
+            }}
+          >
+            Reset
+          </Button>
+        </Stack>
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
             <thead>
@@ -1531,7 +1661,7 @@ export default function SupplierLedgerPage() {
               </tr>
             </thead>
             <tbody>
-              {ledgerRows.map((row) => {
+              {filteredLedgerRows.map((row) => {
                 const purchase = purchases.find((entry) => Number(entry.id) === Number(row.purchaseId)) || null
 	                const canAddForRow = row.type === 'PURCHASE' && purchase
                 const payment = row.paymentId
@@ -1654,11 +1784,11 @@ export default function SupplierLedgerPage() {
                   </tr>
                 )
               })}
-              {ledgerRows.length === 0 && (
+              {filteredLedgerRows.length === 0 && (
                 <tr>
                   <td colSpan={12}>
                     <Box p={2} color="text.secondary">
-                      {partyId ? 'No purchase ledger rows for this supplier yet.' : 'Select a supplier to view the ledger.'}
+                      {partyId ? 'No ledger rows match the current filters.' : 'Select a supplier to view the ledger.'}
                     </Box>
                   </td>
                 </tr>

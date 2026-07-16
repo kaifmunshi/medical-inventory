@@ -11,7 +11,7 @@ from backend.security import require_min_role
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
-    Item, Bill, BillItem,
+    Item, Bill, BillItem, BillPayment,
     Return, ReturnItem,
     ReturnCreate, ReturnOut, ReturnItemOut,
     AuditLog, AuditLogOut,
@@ -99,8 +99,13 @@ def return_item_to_out(session, row: ReturnItem) -> ReturnItemOut:
 
 
 def infer_refund_mode(r: Return) -> str:
+    credit = round2(float(getattr(r, "credit_amount", 0.0) or 0.0))
     cash = round2(float(getattr(r, "refund_cash", 0.0) or 0.0))
     online = round2(float(getattr(r, "refund_online", 0.0) or 0.0))
+    if credit > 0 and (cash > 0 or online > 0):
+        return "split"
+    if credit > 0:
+        return "credit"
     if cash > 0 and online > 0:
         return "split"
     if cash > 0:
@@ -108,6 +113,17 @@ def infer_refund_mode(r: Return) -> str:
     if online > 0:
         return "online"
     return "credit"
+
+
+def return_credit_amount(r: Return) -> float:
+    credit = round2(float(getattr(r, "credit_amount", 0.0) or 0.0))
+    if credit > 0:
+        return credit
+    cash = round2(float(getattr(r, "refund_cash", 0.0) or 0.0))
+    online = round2(float(getattr(r, "refund_online", 0.0) or 0.0))
+    if cash <= 0 and online <= 0:
+        return round2(float(getattr(r, "subtotal_return", 0.0) or 0.0))
+    return 0.0
 
 
 def bill_line_base_total(session, bill: Bill) -> float:
@@ -137,9 +153,155 @@ def bill_credit_return_total(session, bill_id: int) -> float:
     for row in rows:
         if row.id is None or int(row.id) in exchange_return_ids:
             continue
-        if infer_refund_mode(row) == "credit":
-            total += float(getattr(row, "subtotal_return", 0.0) or 0.0)
+        total += return_credit_amount(row)
     return round2(total)
+
+
+def active_bill_payments(session, bill_id: int) -> List[BillPayment]:
+    return session.exec(
+        select(BillPayment).where(
+            BillPayment.bill_id == bill_id,
+            BillPayment.is_deleted == False,  # noqa: E712
+        )
+    ).all()
+
+
+def bill_covered_amount(bill: Bill) -> float:
+    return round2(
+        float(getattr(bill, "paid_amount", 0.0) or 0.0)
+        + float(getattr(bill, "writeoff_amount", 0.0) or 0.0)
+    )
+
+
+def bill_outstanding_amount(bill: Bill) -> float:
+    return round2(max(0.0, float(getattr(bill, "total_amount", 0.0) or 0.0) - bill_covered_amount(bill)))
+
+
+def bill_paid_channel_totals(session, bill: Bill) -> tuple[float, float]:
+    payments = [p for p in active_bill_payments(session, int(bill.id or 0)) if not bool(getattr(p, "is_writeoff", False))]
+    if payments:
+        return (
+            round2(sum(float(getattr(p, "cash_amount", 0.0) or 0.0) for p in payments)),
+            round2(sum(float(getattr(p, "online_amount", 0.0) or 0.0) for p in payments)),
+        )
+    return (
+        round2(float(getattr(bill, "payment_cash", 0.0) or 0.0)),
+        round2(float(getattr(bill, "payment_online", 0.0) or 0.0)),
+    )
+
+
+def bill_return_refund_totals(session, bill_id: int, *, exclude_return_id: Optional[int] = None) -> tuple[float, float]:
+    exchange_return_ids = exchange_return_ids_for_bill(session, bill_id)
+    cash = 0.0
+    online = 0.0
+    for row in session.exec(select(Return).where(Return.source_bill_id == bill_id)).all():
+        if row.id is None:
+            continue
+        row_id = int(row.id)
+        if row_id in exchange_return_ids or (exclude_return_id is not None and row_id == int(exclude_return_id)):
+            continue
+        cash += float(getattr(row, "refund_cash", 0.0) or 0.0)
+        online += float(getattr(row, "refund_online", 0.0) or 0.0)
+    return round2(cash), round2(online)
+
+
+def allocate_refund_channels(
+    *,
+    amount: float,
+    cash_available: float,
+    online_available: float,
+    mode: str,
+    requested_cash: float = 0.0,
+    requested_online: float = 0.0,
+) -> tuple[float, float]:
+    remaining = round2(amount)
+    if remaining <= MONEY_EPSILON:
+        return 0.0, 0.0
+
+    cash_avail = round2(max(0.0, cash_available))
+    online_avail = round2(max(0.0, online_available))
+    mode = str(mode or "").strip().lower()
+    cash = 0.0
+    online = 0.0
+
+    def take(channel: str, requested: Optional[float] = None) -> None:
+        nonlocal remaining, cash, online, cash_avail, online_avail
+        if remaining <= MONEY_EPSILON:
+            return
+        cap = cash_avail if channel == "cash" else online_avail
+        if cap <= MONEY_EPSILON:
+            return
+        target = remaining if requested is None else min(remaining, max(0.0, round2(requested)))
+        taken = round2(min(target, cap))
+        if channel == "cash":
+            cash = round2(cash + taken)
+            cash_avail = round2(cash_avail - taken)
+        else:
+            online = round2(online + taken)
+            online_avail = round2(online_avail - taken)
+        remaining = round2(remaining - taken)
+
+    if mode == "online":
+        take("online")
+        take("cash")
+    elif mode == "split":
+        take("cash", requested_cash)
+        take("online", requested_online)
+        take("cash")
+        take("online")
+    else:
+        take("cash")
+        take("online")
+
+    if remaining > MONEY_EPSILON:
+        raise HTTPException(status_code=400, detail="Return exceeds available bill credit/payment balance")
+    return cash, online
+
+
+def calculate_return_settlement(
+    session,
+    bill: Optional[Bill],
+    *,
+    subtotal_return: float,
+    refund_mode: str,
+    requested_cash: float = 0.0,
+    requested_online: float = 0.0,
+    existing_return: Optional[Return] = None,
+) -> tuple[float, float, float]:
+    subtotal = round2(subtotal_return)
+    if subtotal <= MONEY_EPSILON:
+        return 0.0, 0.0, 0.0
+    mode = str(refund_mode or "").strip().lower()
+    if not bill:
+        credit = 0.0
+        return (*allocate_refund_channels(
+            amount=subtotal,
+            cash_available=subtotal,
+            online_available=subtotal,
+            mode=mode,
+            requested_cash=requested_cash,
+            requested_online=requested_online,
+        ), credit)
+
+    existing_id = int(existing_return.id) if existing_return and existing_return.id is not None else None
+    old_credit = return_credit_amount(existing_return) if existing_return else 0.0
+    credit_capacity = round2(bill_outstanding_amount(bill) + old_credit)
+    credit = round2(min(subtotal, credit_capacity))
+    refund_needed = round2(subtotal - credit)
+
+    paid_cash, paid_online = bill_paid_channel_totals(session, bill)
+    used_cash, used_online = bill_return_refund_totals(session, int(bill.id or 0), exclude_return_id=existing_id)
+    cash_available = round2(paid_cash - used_cash)
+    online_available = round2(paid_online - used_online)
+    refund_cash, refund_online = allocate_refund_channels(
+        amount=refund_needed,
+        cash_available=cash_available,
+        online_available=online_available,
+        mode=mode,
+        requested_cash=requested_cash,
+        requested_online=requested_online,
+    )
+    return refund_cash, refund_online, credit
 
 
 def apply_return_credit_to_bill(session, r: Return, old_credit_amount: float, new_credit_amount: float) -> None:
@@ -200,6 +362,7 @@ def return_to_out(session, r: Return) -> ReturnOut:
         source_bill_id=r.source_bill_id,
         subtotal_return=r.subtotal_return,
         refund_mode=infer_refund_mode(r),
+        credit_amount=return_credit_amount(r),
         refund_cash=r.refund_cash,
         refund_online=r.refund_online,
         notes=r.notes,
@@ -261,11 +424,16 @@ def charged_total_map_for_bill(session, bill_id: int) -> Dict[int, float]:
     credited_qty_by_item: Dict[int, int] = {}
     exchange_return_ids = exchange_return_ids_for_bill(session, bill_id)
     for ret in session.exec(select(Return).where(Return.source_bill_id == bill_id)).all():
-        if ret.id is None or int(ret.id) in exchange_return_ids or infer_refund_mode(ret) != "credit":
+        if ret.id is None or int(ret.id) in exchange_return_ids:
             continue
+        credit_amount = return_credit_amount(ret)
+        subtotal = round2(float(getattr(ret, "subtotal_return", 0.0) or 0.0))
+        if credit_amount <= MONEY_EPSILON or subtotal <= MONEY_EPSILON:
+            continue
+        credit_ratio = min(1.0, credit_amount / subtotal)
         for item in session.exec(select(ReturnItem).where(ReturnItem.return_id == ret.id)).all():
             iid = int(item.item_id)
-            credited_by_item[iid] = credited_by_item.get(iid, 0.0) + float(item.line_total or 0.0)
+            credited_by_item[iid] = credited_by_item.get(iid, 0.0) + round2(float(item.line_total or 0.0) * credit_ratio)
             credited_qty_by_item[iid] = credited_qty_by_item.get(iid, 0) + int(item.quantity or 0)
 
     floor_total = round2(sum(credited_by_item.values()))
@@ -336,9 +504,12 @@ def list_returns(
     offset: int = Query(0, ge=0),
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
+    source_bill_id: Optional[int] = Query(None),
 ):
     with get_session() as session:
         stmt = select(Return)
+        if source_bill_id:
+            stmt = stmt.where(Return.source_bill_id == int(source_bill_id))
         if from_date:
             stmt = stmt.where(Return.date_time >= f"{from_date}T00:00:00")
         if to_date:
@@ -358,7 +529,7 @@ def returns_dashboard_summary(
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
 ):
     with get_session() as session:
-        stmt = select(Return.refund_cash, Return.refund_online, Return.subtotal_return)
+        stmt = select(Return)
         if from_date:
             stmt = stmt.where(Return.date_time >= f"{from_date}T00:00:00")
         if to_date:
@@ -368,15 +539,13 @@ def returns_dashboard_summary(
         online = 0.0
         credit = 0.0
         count = 0
-        for refund_cash, refund_online, subtotal_return in session.exec(stmt).all():
+        for row in session.exec(stmt).all():
             count += 1
-            rc = float(refund_cash or 0)
-            ro = float(refund_online or 0)
-            if rc != 0 or ro != 0:
-                cash += rc
-                online += ro
-            else:
-                credit += float(subtotal_return or 0)
+            rc = float(getattr(row, "refund_cash", 0.0) or 0.0)
+            ro = float(getattr(row, "refund_online", 0.0) or 0.0)
+            cash += rc
+            online += ro
+            credit += return_credit_amount(row)
 
         cash = round2(cash)
         online = round2(online)
@@ -508,34 +677,24 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
         old_mode = infer_refund_mode(r)
         old_cash = round2(float(getattr(r, "refund_cash", 0.0) or 0.0))
         old_online = round2(float(getattr(r, "refund_online", 0.0) or 0.0))
-        old_credit_amount = subtotal if old_mode == "credit" else 0.0
+        old_credit_amount = return_credit_amount(r)
+        bill = session.get(Bill, int(r.source_bill_id or 0)) if r.source_bill_id else None
+        rc, ro, new_credit_amount = calculate_return_settlement(
+            session,
+            bill,
+            subtotal_return=subtotal,
+            refund_mode=mode,
+            requested_cash=round2(payload.refund_cash),
+            requested_online=round2(payload.refund_online),
+            existing_return=r,
+        )
 
-        if mode == "credit":
-            rc, ro = 0.0, 0.0
-            new_credit_amount = subtotal
-            if not r.source_bill_id:
-                raise HTTPException(status_code=400, detail="Credit refund requires a source bill")
-        elif mode == "cash":
-            rc, ro = round2(payload.refund_cash or subtotal), 0.0
-            new_credit_amount = 0.0
-            if abs(rc - subtotal) > ROUND_TOLERANCE:
-                raise HTTPException(status_code=400, detail="refund_cash deviates from return subtotal")
-        elif mode == "online":
-            rc, ro = 0.0, round2(payload.refund_online or subtotal)
-            new_credit_amount = 0.0
-            if abs(ro - subtotal) > ROUND_TOLERANCE:
-                raise HTTPException(status_code=400, detail="refund_online deviates from return subtotal")
-        else:
-            rc, ro = round2(payload.refund_cash), round2(payload.refund_online)
-            new_credit_amount = 0.0
-            if abs(round2(rc + ro) - subtotal) > ROUND_TOLERANCE:
-                raise HTTPException(status_code=400, detail="cash+online deviates from return subtotal")
-
-        if old_mode == mode and old_cash == rc and old_online == ro:
+        if old_mode == infer_refund_mode(r) and old_cash == rc and old_online == ro and old_credit_amount == new_credit_amount:
             return return_to_out(session, r)
 
         r.refund_cash = rc
         r.refund_online = ro
+        r.credit_amount = new_credit_amount
         session.add(r)
         session.flush()
         apply_return_credit_to_bill(session, r, old_credit_amount, new_credit_amount)
@@ -548,15 +707,17 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
             details={
                 "before": {
                     "refund_mode": old_mode,
+                    "credit_amount": old_credit_amount,
                     "refund_cash": old_cash,
                     "refund_online": old_online,
-                    "total_paid": round2(old_cash + old_online),
+                    "total_paid": round2(old_credit_amount + old_cash + old_online),
                 },
                 "after": {
-                    "refund_mode": mode,
+                    "refund_mode": infer_refund_mode(r),
+                    "credit_amount": new_credit_amount,
                     "refund_cash": rc,
                     "refund_online": ro,
-                    "total_paid": round2(rc + ro),
+                    "total_paid": round2(new_credit_amount + rc + ro),
                 },
                 "return_value": subtotal,
                 "source_bill_id": r.source_bill_id,
@@ -760,46 +921,21 @@ def create_return(payload: ReturnCreate):
 
         subtotal_return = round2(subtotal_return)
 
-        # ----- validate refund with tolerance -----
-        if payload.refund_mode == "credit":
-            # credit mode: don't expect immediate cash/online refund here.
-            rc, ro = 0.0, 0.0
-        elif payload.refund_mode == "cash":
-            rc, ro = round2(payload.refund_cash), 0.0
-            if abs(rc - subtotal_return) > ROUND_TOLERANCE:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"refund_cash ₹{rc:.2f} deviates from computed subtotal ₹{subtotal_return:.2f} "
-                        f"by more than ₹{int(ROUND_TOLERANCE)}"
-                    )
-                )
-        elif payload.refund_mode == "online":
-            rc, ro = 0.0, round2(payload.refund_online)
-            if abs(ro - subtotal_return) > ROUND_TOLERANCE:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"refund_online ₹{ro:.2f} deviates from computed subtotal ₹{subtotal_return:.2f} "
-                        f"by more than ₹{int(ROUND_TOLERANCE)}"
-                    )
-                )
-        else:
-            rc, ro = round2(payload.refund_cash), round2(payload.refund_online)
-            if abs(round2(rc + ro) - subtotal_return) > ROUND_TOLERANCE:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"cash+online ₹{round2(rc + ro):.2f} deviates from computed subtotal ₹{subtotal_return:.2f} "
-                        f"by more than ₹{int(ROUND_TOLERANCE)}"
-                    )
-                )
+        rc, ro, credit_amount = calculate_return_settlement(
+            session,
+            bill,
+            subtotal_return=subtotal_return,
+            refund_mode=payload.refund_mode,
+            requested_cash=round2(payload.refund_cash),
+            requested_online=round2(payload.refund_online),
+        )
 
         try:
             # ----- save Return header -----
             r = Return(
                 source_bill_id=payload.source_bill_id,
                 subtotal_return=subtotal_return,
+                credit_amount=credit_amount,
                 refund_cash=rc,
                 refund_online=ro,
                 notes=payload.notes,
@@ -849,9 +985,9 @@ def create_return(payload: ReturnCreate):
                     line_total=round2(line_total)
                 ))
 
-            # If refund was credited to the source bill, adjust that bill's outstanding.
-            if payload.refund_mode == "credit" and payload.source_bill_id:
-                apply_return_credit_to_bill(session, r, 0.0, subtotal_return)
+            # If any part was credited to the source bill, adjust that bill's outstanding.
+            if credit_amount > MONEY_EPSILON and payload.source_bill_id:
+                apply_return_credit_to_bill(session, r, 0.0, credit_amount)
 
             log_audit(
                 session,
@@ -863,6 +999,7 @@ def create_return(payload: ReturnCreate):
                     "source_bill_id": r.source_bill_id,
                     "return_value": subtotal_return,
                     "refund_mode": infer_refund_mode(r),
+                    "credit_amount": credit_amount,
                     "refund_cash": rc,
                     "refund_online": ro,
                     "items": [
@@ -1240,6 +1377,7 @@ def create_exchange(payload: ExchangeCreate):
                 source_bill_id=ret.source_bill_id,
                 subtotal_return=ret.subtotal_return,
                 refund_mode=infer_refund_mode(ret),
+                credit_amount=return_credit_amount(ret),
                 refund_cash=ret.refund_cash,
                 refund_online=ret.refund_online,
                 notes=ret.notes,

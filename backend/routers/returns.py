@@ -286,13 +286,43 @@ def calculate_return_settlement(
     existing_id = int(existing_return.id) if existing_return and existing_return.id is not None else None
     old_credit = return_credit_amount(existing_return) if existing_return else 0.0
     credit_capacity = round2(bill_outstanding_amount(bill) + old_credit)
-    credit = round2(min(subtotal, credit_capacity))
-    refund_needed = round2(subtotal - credit)
 
     paid_cash, paid_online = bill_paid_channel_totals(session, bill)
     used_cash, used_online = bill_return_refund_totals(session, int(bill.id or 0), exclude_return_id=existing_id)
     cash_available = round2(paid_cash - used_cash)
     online_available = round2(paid_online - used_online)
+
+    requested_direct = round2(
+        (requested_cash if mode in {"cash", "split"} else 0.0)
+        + (requested_online if mode in {"online", "split"} else 0.0)
+    )
+    if mode in {"cash", "online", "split"} and requested_direct > MONEY_EPSILON:
+        direct_refund = round2(min(subtotal, requested_direct))
+        refund_cash, refund_online = allocate_refund_channels(
+            amount=direct_refund,
+            cash_available=cash_available,
+            online_available=online_available,
+            mode=mode,
+            requested_cash=requested_cash,
+            requested_online=requested_online,
+        )
+        credit = round2(min(subtotal - refund_cash - refund_online, credit_capacity))
+        refund_needed = round2(subtotal - refund_cash - refund_online - credit)
+        if refund_needed > MONEY_EPSILON:
+            extra_cash, extra_online = allocate_refund_channels(
+                amount=refund_needed,
+                cash_available=round2(cash_available - refund_cash),
+                online_available=round2(online_available - refund_online),
+                mode=mode,
+                requested_cash=max(0.0, round2(requested_cash - refund_cash)),
+                requested_online=max(0.0, round2(requested_online - refund_online)),
+            )
+            refund_cash = round2(refund_cash + extra_cash)
+            refund_online = round2(refund_online + extra_online)
+        return refund_cash, refund_online, credit
+
+    credit = round2(min(subtotal, credit_capacity))
+    refund_needed = round2(subtotal - credit)
     refund_cash, refund_online = allocate_refund_channels(
         amount=refund_needed,
         cash_available=cash_available,

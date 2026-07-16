@@ -160,6 +160,15 @@ function balanceLabel(value: number) {
   return `Rs ${money(Math.abs(signed))} ${signed < 0 ? 'CR' : 'DR'}`
 }
 
+function billOutstanding(bill: any) {
+  return clamp2(Math.max(0, Number(bill?.total_amount || 0) - Number(bill?.paid_amount || 0) - Number(bill?.writeoff_amount || 0)))
+}
+
+function billPaymentLabel(bill: any) {
+  const mode = String(bill?.payment_mode || '').trim()
+  return mode ? mode.toUpperCase() : '-'
+}
+
 function parseCustomerFromNotes(raw: string): Pick<Customer, 'name' | 'phone' | 'address_line'> | null {
   const first = String(String(raw || '').split(/\r?\n/)[0] || '').trim()
   const match = /^customer\s*:\s*(.+)$/i.exec(first)
@@ -383,9 +392,12 @@ export default function ReturnsReport(props: {
     if (!detail || detail.kind !== 'return') return
     const mode = inferReturnRefundMode(detail) as 'cash' | 'online' | 'split' | 'credit'
     const returnValue = Number(detail.subtotal_return || 0)
+    const bill = detail.source_bill || {}
+    const cashPaid = Math.max(0, Number(bill.payment_cash || 0))
+    const onlinePaid = Math.max(0, Number(bill.payment_online || 0))
     setEditMode(mode)
-    setEditCash(String(mode === 'cash' ? Number(detail.refund_cash || returnValue) : Number(detail.refund_cash || 0)))
-    setEditOnline(String(mode === 'online' ? Number(detail.refund_online || returnValue) : Number(detail.refund_online || 0)))
+    setEditCash(String(mode === 'cash' ? Number(detail.refund_cash || Math.min(returnValue, cashPaid || returnValue)) : Number(detail.refund_cash || 0)))
+    setEditOnline(String(mode === 'online' ? Number(detail.refund_online || Math.min(returnValue, onlinePaid || returnValue)) : Number(detail.refund_online || 0)))
     setPaymentEditOpen(true)
   }
 
@@ -848,16 +860,67 @@ export default function ReturnsReport(props: {
             <Typography variant="body2" color="text.secondary">
               Sales return value: ₹{money(detail?.subtotal_return)}. Credit is recalculated against the source bill balance; cash and online are direct refunds. Amounts may differ by up to ₹5 for manual rounding.
             </Typography>
+            <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}>
+              <Stack gap={1}>
+                <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
+                  <Box>
+                    <Typography variant="subtitle2">Source Bill Payment</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Bill #{detail?.source_bill_id || '-'} | Mode {billPaymentLabel(detail?.source_bill)}
+                    </Typography>
+                  </Box>
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`Bill balance Rs ${money(billOutstanding(detail?.source_bill))}`}
+                    color={billOutstanding(detail?.source_bill) > 0 ? 'warning' : 'success'}
+                    sx={{ fontWeight: 800, alignSelf: { xs: 'flex-start', sm: 'center' } }}
+                  />
+                </Stack>
+                <Stack direction="row" flexWrap="wrap" gap={1}>
+                  <Chip size="small" variant="outlined" label={`Cash paid Rs ${money(detail?.source_bill?.payment_cash)}`} />
+                  <Chip size="small" variant="outlined" label={`Online paid Rs ${money(detail?.source_bill?.payment_online)}`} />
+                  <Chip size="small" variant="outlined" label={`Paid total Rs ${money(detail?.source_bill?.paid_amount)}`} />
+                  <Chip size="small" variant="outlined" label={`Current return credit Rs ${money(detail?.credit_amount)}`} />
+                </Stack>
+              </Stack>
+            </Paper>
+            <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
+                <Box>
+                  <Typography variant="subtitle2">Customer Balance</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {customerAccount ? `${customerAccount.name}${customerAccount.phone ? ` | ${customerAccount.phone}` : ''}` : 'No linked customer found for this bill.'}
+                  </Typography>
+                </Box>
+                {customerAccount ? (
+                  <Chip
+                    size="small"
+                    label={`Current ${balanceLabel(signedCustomerBalance(customerAccount))}`}
+                    color={signedCustomerBalance(customerAccount) > 0 ? 'error' : signedCustomerBalance(customerAccount) < 0 ? 'info' : 'success'}
+                    variant="outlined"
+                    sx={{ fontWeight: 800, alignSelf: { xs: 'flex-start', sm: 'center' } }}
+                  />
+                ) : null}
+              </Stack>
+            </Paper>
             <TextField
               select
               label="Settlement Mode"
               value={editMode}
               onChange={(event) => {
                 const next = event.target.value as 'cash' | 'online' | 'split' | 'credit'
-                const returnValue = String(Number(detail?.subtotal_return || 0))
+                const returnValue = Number(detail?.subtotal_return || 0)
+                const cashPaid = Math.max(0, Number(detail?.source_bill?.payment_cash || 0))
+                const onlinePaid = Math.max(0, Number(detail?.source_bill?.payment_online || 0))
                 setEditMode(next)
-                if (next === 'cash') { setEditCash(returnValue); setEditOnline('0') }
-                if (next === 'online') { setEditCash('0'); setEditOnline(returnValue) }
+                if (next === 'cash') { setEditCash(String(Math.min(returnValue, cashPaid || returnValue))); setEditOnline('0') }
+                if (next === 'online') { setEditCash('0'); setEditOnline(String(Math.min(returnValue, onlinePaid || returnValue))) }
+                if (next === 'split') {
+                  const cashPart = Math.min(returnValue, cashPaid)
+                  setEditCash(String(cashPart))
+                  setEditOnline(String(Math.min(Math.max(0, returnValue - cashPart), onlinePaid)))
+                }
                 if (next === 'credit') { setEditCash('0'); setEditOnline('0') }
               }}
             >

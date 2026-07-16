@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Box,
   Button,
+  Chip,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -20,8 +21,15 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 
 import { listReturns, getReturn, getExchangeByReturn, getReturnHistory, updateReturnRefundMode } from '../../services/returns'
 import { getBill } from '../../services/billing'
+import { fetchCustomers, getCustomerSummary } from '../../services/customers'
+import { fetchDebtorLedger, fetchParty, fetchPartyReceipts } from '../../services/parties'
 import { useToast } from '../../components/ui/Toaster'
 import { useUserSession } from '../../components/session/UserSessionProvider'
+import type { Customer, Party } from '../../lib/types'
+
+type CustomerBalanceAccount = Pick<Customer, 'name' | 'phone' | 'outstanding_amount' | 'advance_amount' | 'closing_balance' | 'closing_balance_type'> & {
+  party_id?: number | null
+}
 
 function toCSV(rows: string[][]) {
   return rows
@@ -46,6 +54,10 @@ function itemsPreview(items: any[], max = 6) {
 function money(n: number | string | undefined | null) {
   const v = Number(n || 0)
   return v.toFixed(2)
+}
+
+function clamp2(n: number) {
+  return Math.round(Number(n || 0) * 100) / 100
 }
 
 function formatDateTime(v: any) {
@@ -130,6 +142,41 @@ function actualRefundTotal(row: any) {
   return Number(row?.subtotal_return || 0)
 }
 
+function signedOpeningBalance(party?: Party | null) {
+  if (!party) return 0
+  const amount = Number(party.opening_balance || 0)
+  return party.opening_balance_type === 'CR' ? -amount : amount
+}
+
+function signedCustomerBalance(customer?: CustomerBalanceAccount | null) {
+  if (!customer) return 0
+  const amount = Number(customer.closing_balance || 0)
+  return customer.closing_balance_type === 'CR' ? -amount : amount
+}
+
+function balanceLabel(value: number) {
+  const signed = clamp2(value)
+  if (Math.abs(signed) <= 0.0001) return `Rs ${money(0)} Settled`
+  return `Rs ${money(Math.abs(signed))} ${signed < 0 ? 'CR' : 'DR'}`
+}
+
+function parseCustomerFromNotes(raw: string): Pick<Customer, 'name' | 'phone' | 'address_line'> | null {
+  const first = String(String(raw || '').split(/\r?\n/)[0] || '').trim()
+  const match = /^customer\s*:\s*(.+)$/i.exec(first)
+  if (!match) return null
+  const parts = String(match[1] || '')
+    .split('|')
+    .map((part) => part.trim())
+    .filter(Boolean)
+  const name = String(parts[0] || '').trim()
+  if (!name) return null
+  return {
+    name,
+    phone: String(parts[1] || '').trim() || null,
+    address_line: parts.slice(2).join(' | ').trim() || null,
+  }
+}
+
 function auditPaymentSummary(detailsJson?: string | null) {
   try {
     const details = JSON.parse(String(detailsJson || '{}'))
@@ -177,6 +224,61 @@ export default function ReturnsReport(props: {
   const [editMode, setEditMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
   const [editCash, setEditCash] = useState('0')
   const [editOnline, setEditOnline] = useState('0')
+  const [customerAccount, setCustomerAccount] = useState<CustomerBalanceAccount | null>(null)
+
+  async function loadBalanceAccountForBill(b: any): Promise<CustomerBalanceAccount | null> {
+    async function accountFromNotes() {
+      const parsed = parseCustomerFromNotes(String(b?.notes || ''))
+      if (!parsed) return null
+      const phoneDigits = String(parsed.phone || '').replace(/\D/g, '')
+      const searchKey = phoneDigits || parsed.name
+      const customers = await fetchCustomers({ q: searchKey, limit: 20 })
+      const normalizedName = String(parsed.name || '').trim().toLowerCase()
+      const matched = customers.find((customer) => (
+        phoneDigits
+          ? String(customer.phone || '').replace(/\D/g, '') === phoneDigits
+          : String(customer.name || '').trim().toLowerCase() === normalizedName
+      )) || customers.find((customer) => String(customer.name || '').trim().toLowerCase() === normalizedName)
+      if (matched?.id && Number(matched.id) > 0) {
+        const summary = await getCustomerSummary(Number(matched.id), { include_unlinked_notes: true })
+        return summary.customer
+      }
+      return null
+    }
+
+    if (!b) return null
+    if (Number(b.customer_id || 0) > 0) {
+      const summary = await getCustomerSummary(Number(b.customer_id), { include_unlinked_notes: false })
+      return summary.customer
+    }
+
+    if (Number(b.party_id || 0) <= 0) return accountFromNotes()
+    const party = await fetchParty(Number(b.party_id))
+    if (Number(party.legacy_customer_id || 0) > 0) {
+      const summary = await getCustomerSummary(Number(party.legacy_customer_id), { include_unlinked_notes: false })
+      return summary.customer
+    }
+    if (party.party_group !== 'SUNDRY_DEBTOR') return accountFromNotes()
+
+    const [ledgerRows, receipts] = await Promise.all([
+      fetchDebtorLedger(Number(party.id)),
+      fetchPartyReceipts(Number(party.id)),
+    ])
+    const outstanding = clamp2(ledgerRows.reduce((sum, row) => sum + Number(row.outstanding_amount || 0), 0))
+    const advance = clamp2(receipts
+      .filter((receipt) => !receipt.is_deleted)
+      .reduce((sum, receipt) => sum + Math.max(0, Number(receipt.unallocated_amount || 0)), 0))
+    const closing = clamp2(signedOpeningBalance(party) + outstanding - advance)
+    return {
+      name: party.name,
+      phone: party.phone,
+      party_id: Number(party.id),
+      outstanding_amount: outstanding,
+      advance_amount: advance,
+      closing_balance: Math.abs(closing),
+      closing_balance_type: closing < -0.0001 ? 'CR' : 'DR',
+    }
+  }
 
   const qRets = useInfiniteQuery({
     queryKey: ['rpt-returns', from, to],
@@ -227,6 +329,11 @@ export default function ReturnsReport(props: {
           sourceBill = await getBill(Number(ex.source_bill_id))
         } catch {}
       }
+      try {
+        setCustomerAccount(sourceBill ? await loadBalanceAccountForBill(sourceBill) : null)
+      } catch {
+        setCustomerAccount(null)
+      }
       setDetail({ kind: 'exchange', source_bill: sourceBill, ...ex })
       setOpen(true)
       return
@@ -243,6 +350,11 @@ export default function ReturnsReport(props: {
       try {
         sourceBill = await getBill(Number(r.source_bill_id))
       } catch {}
+    }
+    try {
+      setCustomerAccount(sourceBill ? await loadBalanceAccountForBill(sourceBill) : null)
+    } catch {
+      setCustomerAccount(null)
     }
     setDetail({ kind: 'return', source_bill: sourceBill, ...r })
     setOpen(true)
@@ -292,10 +404,10 @@ export default function ReturnsReport(props: {
       await qRets.refetch()
       await historyQ.refetch()
       queryClient.invalidateQueries()
-      toast.push('Sales return customer payment updated', 'success')
+      toast.push('Sales return settlement updated', 'success')
     },
     onError: (err: any) => {
-      toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to update customer payment'), 'error')
+      toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to update settlement'), 'error')
     },
   })
 
@@ -303,8 +415,18 @@ export default function ReturnsReport(props: {
   useEffect(() => {
     setExportDisabled(detailRows.length === 0)
     setExportFn(() => () => {
-      const header = ['Sales Return ID', 'Date/Time', 'Lines', 'Refund', 'Refund Mode', 'Notes']
-      const body = detailRows.map((r: any) => [r.id, r.date, r.linesCount, r.refund, r.refundMode, r.notes])
+      const header = ['Sales Return ID', 'Date/Time', 'Lines', 'Total Settled', 'Credit Adjusted', 'Cash Refund', 'Online Refund', 'Settlement Mode', 'Notes']
+      const body = detailRows.map((r: any) => [
+        r.id,
+        r.date,
+        r.linesCount,
+        r.refund,
+        money(r.raw?.credit_amount),
+        money(r.raw?.refund_cash),
+        money(r.raw?.refund_online),
+        r.refundMode,
+        r.notes,
+      ])
 
       const csv = toCSV([header, ...body])
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
@@ -326,8 +448,11 @@ export default function ReturnsReport(props: {
               <th>Sales Return ID</th>
               <th>Date/Time</th>
               <th>Lines</th>
-              <th>Refund</th>
-              <th>Refund Mode</th>
+              <th>Total Settled</th>
+              <th>Credit</th>
+              <th>Cash</th>
+              <th>Online</th>
+              <th>Mode</th>
               <th>Notes</th>
             </tr>
           </thead>
@@ -345,6 +470,9 @@ export default function ReturnsReport(props: {
                 <td>{r.date}</td>
                 <td>{r.linesCount}</td>
                 <td>{r.refund}</td>
+                <td>{money(r.raw?.credit_amount)}</td>
+                <td>{money(r.raw?.refund_cash)}</td>
+                <td>{money(r.raw?.refund_online)}</td>
                 <td>{String(r.refundMode || '').toUpperCase()}</td>
                 <td>{r.notes}</td>
               </tr>
@@ -352,7 +480,7 @@ export default function ReturnsReport(props: {
 
             {detailRows.length === 0 && !qRets.isLoading && (
               <tr>
-                <td colSpan={6}>
+                <td colSpan={9}>
                   <Box p={2} color="text.secondary">
                     No data.
                   </Box>
@@ -563,10 +691,52 @@ export default function ReturnsReport(props: {
                   </>
                 })()}
                 <Button size="small" variant="outlined" onClick={openPaymentEditor} disabled={!canEditPayment}>
-                  Edit Customer Payment
+                  Edit Settlement
                 </Button>
                 {!canEditPayment ? <Typography variant="caption" color="text.secondary">Manager access required to edit.</Typography> : null}
               </Stack>
+
+              <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
+                <Stack gap={1}>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
+                    <Box>
+                      <Typography variant="subtitle2">Customer Balance</Typography>
+                      {customerAccount ? (
+                        <Typography variant="body2" color="text.secondary">
+                          {customerAccount.name}{customerAccount.phone ? ` | ${customerAccount.phone}` : ''}
+                        </Typography>
+                      ) : (
+                        <Typography variant="body2" color="text.secondary">
+                          No linked customer found for this bill.
+                        </Typography>
+                      )}
+                    </Box>
+                    {customerAccount ? (
+                      <Chip
+                        size="small"
+                        label={`Current ${balanceLabel(signedCustomerBalance(customerAccount))}`}
+                        color={signedCustomerBalance(customerAccount) > 0 ? 'error' : signedCustomerBalance(customerAccount) < 0 ? 'info' : 'success'}
+                        variant="outlined"
+                        sx={{ fontWeight: 800, alignSelf: { xs: 'flex-start', sm: 'center' } }}
+                      />
+                    ) : null}
+                  </Stack>
+                  <Stack direction="row" flexWrap="wrap" gap={1}>
+                    <Chip size="small" variant="outlined" label={`Credit adjusted Rs ${money(detail.credit_amount)}`} />
+                    <Chip size="small" variant="outlined" label={`Cash refunded Rs ${money(detail.refund_cash)}`} />
+                    <Chip size="small" variant="outlined" label={`Online refunded Rs ${money(detail.refund_online)}`} />
+                    {customerAccount ? (
+                      <>
+                        <Chip size="small" variant="outlined" label={`Outstanding Rs ${money(customerAccount.outstanding_amount)}`} />
+                        <Chip size="small" variant="outlined" label={`Advance Rs ${money(customerAccount.advance_amount)}`} />
+                      </>
+                    ) : null}
+                  </Stack>
+                  <Typography variant="caption" color="text.secondary">
+                    Credit reduces the customer receivable. Cash and online refunds are reflected in Cashbook and Bank Book only.
+                  </Typography>
+                </Stack>
+              </Paper>
 
               <Divider />
 
@@ -672,11 +842,11 @@ export default function ReturnsReport(props: {
       </Dialog>
 
       <Dialog open={paymentEditOpen} onClose={() => setPaymentEditOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Edit Customer Payment</DialogTitle>
+        <DialogTitle>Edit Settlement</DialogTitle>
         <DialogContent dividers>
           <Stack gap={2} sx={{ pt: 0.5 }}>
             <Typography variant="body2" color="text.secondary">
-              Sales return value: ₹{money(detail?.subtotal_return)}. Amounts may differ by up to ₹5 for manual rounding.
+              Sales return value: ₹{money(detail?.subtotal_return)}. Credit is recalculated against the source bill balance; cash and online are direct refunds. Amounts may differ by up to ₹5 for manual rounding.
             </Typography>
             <TextField
               select
@@ -703,7 +873,7 @@ export default function ReturnsReport(props: {
               <TextField label="Online Paid to Customer" type="number" value={editOnline} onChange={(event) => setEditOnline(event.target.value)} inputProps={{ min: 0, step: 0.01 }} />
             ) : null}
             <Typography variant="body2">
-              Total paid now:{' '}
+              Direct refund now:{' '}
               <b>
                 ₹{money(
                   (editMode === 'cash' || editMode === 'split' ? Number(editCash || 0) : 0)
@@ -714,7 +884,7 @@ export default function ReturnsReport(props: {
             <Stack direction="row" justifyContent="flex-end" gap={1}>
               <Button onClick={() => setPaymentEditOpen(false)} disabled={mUpdatePayment.isPending}>Cancel</Button>
               <Button variant="contained" onClick={() => mUpdatePayment.mutate()} disabled={mUpdatePayment.isPending}>
-                Save Payment
+                Save Settlement
               </Button>
             </Stack>
           </Stack>

@@ -14,7 +14,7 @@ from sqlalchemy import and_, case, func, literal, or_, exists
 from sqlalchemy.orm import aliased
 
 from backend.accounting import sync_bill_vouchers
-from backend.controls import assert_financial_year_unlocked, log_audit
+from backend.controls import log_audit
 from backend.db import create_data_repair_backup, get_session
 from backend.models import (
     Bill,
@@ -2096,8 +2096,6 @@ def convert_manual_stock_adjustment_to_sale(
             sale_ts = datetime.fromisoformat(sale_ts).isoformat(timespec="seconds")
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid sale date")
-        assert_financial_year_unlocked(session, sale_ts, context="Stock adjustment sale conversion")
-
         replay_rows = session.exec(
             select(StockMovement).where(StockMovement.item_id == int(item.id))
         ).all()

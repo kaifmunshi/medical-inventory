@@ -1712,8 +1712,23 @@ export default function StockCardPage() {
             </Stack>
           </Stack>
 
-          <Box sx={{ overflowX: 'auto' }}>
-            <table className="table">
+          <Box
+            sx={{
+              width: '100%',
+              minWidth: 0,
+              overflowX: 'hidden',
+              '& .batch-grid': { tableLayout: 'fixed', width: '100%' },
+              '& .batch-grid th:nth-of-type(1), & .batch-grid td:nth-of-type(1)': { width: '9%' },
+              '& .batch-grid th:nth-of-type(2), & .batch-grid td:nth-of-type(2)': { width: '14%' },
+              '& .batch-grid th:nth-of-type(3), & .batch-grid td:nth-of-type(3)': { width: '8%' },
+              '& .batch-grid th:nth-of-type(4), & .batch-grid td:nth-of-type(4)': { width: '11%' },
+              '& .batch-grid th:nth-of-type(5), & .batch-grid td:nth-of-type(5)': { width: '7%' },
+              '& .batch-grid th:nth-of-type(6), & .batch-grid td:nth-of-type(6)': { width: '20%' },
+              '& .batch-grid th:nth-of-type(7), & .batch-grid td:nth-of-type(7)': { width: '31%' },
+              '& .batch-grid td': { verticalAlign: 'middle', minWidth: 0 },
+            }}
+          >
+            <table className="table batch-grid">
               <thead>
                 <tr>
                   <th>Batch</th>
@@ -1750,7 +1765,7 @@ export default function StockCardPage() {
                       </td>
                       <td>{batch.rack_number || 0}</td>
                       <td>
-                        <Stack direction="row" gap={1} flexWrap="wrap">
+                        <Stack direction="row" gap={0.75} flexWrap="wrap" justifyContent="flex-end">
                           {statusChip(batch.is_loose_stock ? 'Loose' : 'Pack', batch.is_loose_stock ? 'info' : 'default')}
                           {statusChip(Number(batch.stock || 0) > 0 ? 'In Stock' : 'Zero Stock', Number(batch.stock || 0) > 0 ? 'success' : 'default')}
                           {days != null && days <= 90 ? statusChip('Near Expiry', 'warning') : null}
@@ -1770,7 +1785,7 @@ export default function StockCardPage() {
                           >
                             Club
                           </Button>
-                          <Button size="small" onClick={openProductMaster}>
+                          <Button size="small" variant="text" onClick={openProductMaster} sx={{ whiteSpace: 'nowrap' }}>
                             Edit Product
                           </Button>
                         </Stack>
@@ -2099,11 +2114,11 @@ export default function StockCardPage() {
           <Alert severity="info">
             This converts the existing stock-out into a real sales bill. Stock will not be deducted again.
           </Alert>
-          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1.1fr 0.65fr 1fr' }, gap: 1.5, '& > *': { minWidth: 0 } }}>
             <TextField label="Sale Date" type="date" value={adjustSaleDate} onChange={(event) => setAdjustSaleDate(event.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
             <TextField label="Quantity" value={String(adjustSaleQuantity)} disabled fullWidth />
             <TextField label="Selling Price" type="number" value={adjustSalePrice} onChange={(event) => setAdjustSalePrice(event.target.value)} inputProps={{ min: 0, step: '0.01' }} fullWidth />
-          </Stack>
+          </Box>
           <Autocomplete
             options={adjustSaleCustomersQ.data || []}
             value={adjustSaleCustomer}
@@ -2121,11 +2136,11 @@ export default function StockCardPage() {
             <MenuItem value="credit">Credit</MenuItem>
           </TextField>
           {adjustSaleMode === 'split' ? (
-            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, minmax(0, 1fr))' }, gap: 1.5 }}>
               <TextField label="Cash" type="number" value={adjustSaleCash} onChange={(event) => setAdjustSaleCash(event.target.value)} inputProps={{ min: 0, step: '0.01' }} fullWidth />
               <TextField label="Online" type="number" value={adjustSaleOnline} onChange={(event) => setAdjustSaleOnline(event.target.value)} inputProps={{ min: 0, step: '0.01' }} fullWidth />
               <TextField label="Credit" value={money(Math.max(0, adjustSaleTotal - Number(adjustSaleCash || 0) - Number(adjustSaleOnline || 0)))} disabled fullWidth />
-            </Stack>
+            </Box>
           ) : null}
           <TextField label="Notes" value={adjustSaleNotes} onChange={(event) => setAdjustSaleNotes(event.target.value)} multiline minRows={2} fullWidth />
           <Paper variant="outlined" sx={{ p: 1.5, bgcolor: 'rgba(20,92,59,0.05)' }}>

@@ -2099,18 +2099,34 @@ def convert_manual_stock_adjustment_to_sale(
         replay_rows = session.exec(
             select(StockMovement).where(StockMovement.item_id == int(item.id))
         ).all()
-        replay_rows.sort(key=lambda row: (
-            sale_ts if int(row.id or 0) == int(movement.id or 0) else str(row.ts or ""),
-            int(row.id or 0),
-        ))
-        running_stock = 0
-        for row in replay_rows:
-            running_stock += int(row.delta or 0)
-            if running_stock < 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"This sale date would make the historical stock ledger negative after {row.reason} #{row.ref_id or row.id}",
-                )
+
+        def minimum_historical_balance(*, proposed_ts: Optional[str] = None) -> int:
+            ordered = sorted(
+                replay_rows,
+                key=lambda row: (
+                    proposed_ts
+                    if proposed_ts is not None and int(row.id or 0) == int(movement.id or 0)
+                    else str(row.ts or ""),
+                    int(row.id or 0),
+                ),
+            )
+            running = 0
+            minimum = 0
+            for row in ordered:
+                running += int(row.delta or 0)
+                minimum = min(minimum, running)
+            return minimum
+
+        # Legacy ledgers can already contain a historical gap. Reclassifying an
+        # existing stock-out must remain possible; only reject a date change that
+        # makes the historical position worse than it was before conversion.
+        existing_minimum = minimum_historical_balance()
+        proposed_minimum = minimum_historical_balance(proposed_ts=sale_ts)
+        if proposed_minimum < existing_minimum:
+            raise HTTPException(
+                status_code=400,
+                detail="This sale date would worsen the historical stock balance. Use the original adjustment date or a later valid date.",
+            )
 
         from backend.routers.billing import resolve_bill_party_links
         customer_id, party_id = resolve_bill_party_links(

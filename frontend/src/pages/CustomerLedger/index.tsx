@@ -28,7 +28,7 @@ import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchCustomers } from '../../services/customers'
+import { fetchCustomers, updateCustomer } from '../../services/customers'
 import {
   applyPartyReceipt,
   createPartyReceipt,
@@ -322,6 +322,11 @@ export default function CustomerLedgerPage() {
   const [params, setParams] = useSearchParams()
 
   const [customerId, setCustomerId] = useState('')
+  const [customerEditOpen, setCustomerEditOpen] = useState(false)
+  const [customerEditName, setCustomerEditName] = useState('')
+  const [customerEditPhone, setCustomerEditPhone] = useState('')
+  const [customerEditAddress, setCustomerEditAddress] = useState('')
+  const [customerEditOpening, setCustomerEditOpening] = useState('0')
   const [receiptOpen, setReceiptOpen] = useState(false)
   const [mode, setMode] = useState<'cash' | 'online' | 'split'>('cash')
   const [receiptAmount, setReceiptAmount] = useState('0')
@@ -390,6 +395,45 @@ export default function CustomerLedgerPage() {
       }),
     [partiesQ.data, selectedCustomer],
   )
+
+  const updateCustomerM = useMutation({
+    mutationFn: () => {
+      if (!selectedCustomer?.id) throw new Error('Select a customer first')
+      const name = customerEditName.trim()
+      const opening = Number(customerEditOpening || 0)
+      if (!name) throw new Error('Customer name is required')
+      if (!Number.isFinite(opening)) throw new Error('Opening balance must be a valid amount')
+      return updateCustomer(Number(selectedCustomer.id), {
+        name,
+        phone: customerEditPhone.trim(),
+        address_line: customerEditAddress.trim(),
+        opening_balance: opening,
+      })
+    },
+    onSuccess: () => {
+      toast.push('Customer updated', 'success')
+      setCustomerEditOpen(false)
+      queryClient.invalidateQueries({ queryKey: ['customer-ledger-customers'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-ledger-parties'] })
+      queryClient.invalidateQueries({ queryKey: ['customers'] })
+      queryClient.invalidateQueries({ queryKey: ['parties'] })
+      queryClient.invalidateQueries({ queryKey: ['debtors'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
+    },
+    onError: (err: any) => {
+      const message = err?.response?.data?.detail || err?.message || 'Failed to update customer'
+      toast.push(String(message), 'error')
+    },
+  })
+
+  function openCustomerEdit() {
+    if (!selectedCustomer) return
+    setCustomerEditName(String(selectedCustomer.name || ''))
+    setCustomerEditPhone(String(selectedCustomer.phone || ''))
+    setCustomerEditAddress(String(selectedCustomer.address_line || ''))
+    setCustomerEditOpening(String(signedPartyOpening(selectedParty)))
+    setCustomerEditOpen(true)
+  }
 
   useEffect(() => {
     const id = params.get('customer_id')
@@ -1170,7 +1214,12 @@ export default function CustomerLedgerPage() {
           <Stack gap={1.75}>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2} justifyContent="space-between" alignItems={{ md: 'flex-start' }}>
               <Box>
-                <Typography fontWeight={800}>{selectedCustomer.name}</Typography>
+                <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Typography fontWeight={800}>{selectedCustomer.name}</Typography>
+                  <Button size="small" variant="text" startIcon={<EditIcon />} onClick={openCustomerEdit}>
+                    Edit Customer
+                  </Button>
+                </Stack>
                 {[selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).length > 0 ? (
                   <Typography variant="body2" color="text.secondary">
                     {[selectedCustomer.phone, selectedCustomer.address_line].filter(Boolean).join(' • ')}
@@ -2395,6 +2444,49 @@ export default function CustomerLedgerPage() {
             </Stack>
           )}
         </DialogContent>
+      </Dialog>
+
+      <Dialog open={customerEditOpen} onClose={() => !updateCustomerM.isPending && setCustomerEditOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Edit Customer</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} mt={1}>
+            <TextField
+              label="Name"
+              value={customerEditName}
+              onChange={(event) => setCustomerEditName(event.target.value)}
+              required
+              fullWidth
+            />
+            <TextField
+              label="Phone (optional)"
+              value={customerEditPhone}
+              onChange={(event) => setCustomerEditPhone(event.target.value.replace(/\D/g, '').slice(0, 10))}
+              inputProps={{ maxLength: 10, inputMode: 'numeric' }}
+              fullWidth
+            />
+            <TextField
+              label="Address (optional)"
+              value={customerEditAddress}
+              onChange={(event) => setCustomerEditAddress(event.target.value)}
+              fullWidth
+            />
+            <TextField
+              label="Opening Balance"
+              type="number"
+              value={customerEditOpening}
+              onChange={(event) => setCustomerEditOpening(event.target.value)}
+              inputProps={{ step: '0.01' }}
+              helperText="Positive = customer owed us (DR). Negative = customer advance / we owed them (CR)."
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCustomerEditOpen(false)} disabled={updateCustomerM.isPending}>Cancel</Button>
+          <Button variant="contained" onClick={() => updateCustomerM.mutate()} disabled={updateCustomerM.isPending}>
+            {updateCustomerM.isPending ? 'Saving...' : 'Save Customer'}
+          </Button>
+        </DialogActions>
       </Dialog>
 
       <BillEditDialog

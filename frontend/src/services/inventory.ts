@@ -327,6 +327,30 @@ export async function deleteManualStockAdjustment(movementId: number): Promise<{
   return data
 }
 
+export async function updateManualStockAdjustment(
+  movementId: number,
+  payload: { delta: number; note?: string },
+): Promise<{ movement: StockMovementRow; previous_delta: number; item: Item }> {
+  const { data } = await api.patch(`/inventory/ledger/adjust/${movementId}`, payload)
+  return data
+}
+
+export async function convertManualStockAdjustmentToSale(
+  movementId: number,
+  payload: {
+    sale_date: string
+    unit_price: number
+    customer_id?: number
+    payment_mode: 'cash' | 'online' | 'split' | 'credit'
+    payment_cash?: number
+    payment_online?: number
+    notes?: string
+  },
+): Promise<{ bill_id: number; item_id: number; quantity: number; total_amount: number; payment_status: string }> {
+  const { data } = await api.post(`/inventory/ledger/adjust/${movementId}/sale`, payload)
+  return data
+}
+
 export async function clubPurchaseBatchToOpening(payload: {
   source_item_id: number
   target_item_id: number

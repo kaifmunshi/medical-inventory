@@ -347,11 +347,19 @@ export default function JournalEntryPage() {
 
   return (
     <Stack gap={2}>
-      <Typography variant="h5">Journal Entry</Typography>
+      <Box>
+        <Typography variant="h5" fontWeight={900}>Journal Voucher</Typography>
+        <Typography variant="body2" color="text.secondary">Record non-cash transfers with equal debit and credit postings</Typography>
+      </Box>
 
-      <Paper sx={{ p: 2 }}>
+      <Paper variant="outlined" sx={{ overflow: 'hidden', borderRadius: 2.5 }}>
         <Stack gap={2}>
-          <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5}>
+          <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1.5} sx={{ px: 2, py: 1.5, bgcolor: 'rgba(20,92,59,0.07)', borderBottom: '1px solid', borderColor: 'divider' }}>
+            <Box>
+              <Typography variant="overline" color="primary.main" fontWeight={900}>Journal Entry</Typography>
+              <Typography variant="h6" fontWeight={900}>{editingId ? `Editing JV #${editingId}` : 'New Journal Voucher'}</Typography>
+            </Box>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
             <TextField
               label="Date"
               type="date"
@@ -367,23 +375,18 @@ export default function JournalEntryPage() {
               placeholder="Auto"
               sx={{ width: { xs: '100%', md: 190 } }}
             />
-            <TextField
-              label="Narration"
-              value={narration}
-              onChange={(e) => setNarration(e.target.value)}
-              fullWidth
-            />
+            </Stack>
           </Stack>
 
-          <Box sx={{ overflowX: 'auto' }}>
-            <table className="table" style={{ minWidth: 980, tableLayout: 'fixed', width: '100%' }}>
+          <Box sx={{ px: 2, minWidth: 0, overflowX: 'hidden' }}>
+            <table className="table journal-voucher-grid" style={{ tableLayout: 'fixed', width: '100%' }}>
               <thead>
                 <tr>
-                  <th style={{ width: 360 }}>Ledger</th>
-                  <th style={{ width: 96 }}>Dr / Cr</th>
-                  <th style={{ width: 150 }}>Amount</th>
-                  <th>Narration</th>
-                  <th style={{ width: 64 }}></th>
+                  <th style={{ width: '52%' }}>Particulars</th>
+                  <th style={{ width: '8%', textAlign: 'center' }}>L.F.</th>
+                  <th style={{ width: '16%', textAlign: 'right' }}>Debit (₹)</th>
+                  <th style={{ width: '16%', textAlign: 'right' }}>Credit (₹)</th>
+                  <th style={{ width: '8%' }}></th>
                 </tr>
               </thead>
               <tbody>
@@ -412,7 +415,7 @@ export default function JournalEntryPage() {
                           }}
                           onChange={(_event, value) => updateLine(line.key, { ledger: value })}
                           noOptionsText={canSearchLedgers ? 'No ledgers found' : 'Type 2 letters'}
-                          renderInput={(params) => <TextField {...params} size="small" label="Ledger" />}
+                          renderInput={(params) => <TextField {...params} size="small" label={line.entry_type === 'DR' ? 'Account Dr.' : 'To Account'} />}
                           renderOption={(props, option) => (
                             <li {...props} key={option.id}>
                               <Stack sx={{ py: 0.35 }}>
@@ -434,34 +437,36 @@ export default function JournalEntryPage() {
                           </IconButton>
                         </Tooltip>
                       </Stack>
-                    </td>
-                    <td>
                       <TextField
-                        select
                         size="small"
-                        value={line.entry_type}
-                        onChange={(e) => updateLine(line.key, { entry_type: e.target.value as EntryType })}
+                        variant="standard"
+                        placeholder="Line narration (optional)"
+                        value={line.narration}
+                        onChange={(e) => updateLine(line.key, { narration: e.target.value })}
                         fullWidth
-                      >
-                        <MenuItem value="DR">Dr</MenuItem>
-                        <MenuItem value="CR">Cr</MenuItem>
-                      </TextField>
+                        sx={{ mt: 0.5 }}
+                      />
                     </td>
+                    <td style={{ textAlign: 'center', color: '#777' }}>—</td>
                     <td>
                       <TextField
                         size="small"
                         type="number"
-                        value={line.amount}
-                        onChange={(e) => updateLine(line.key, { amount: e.target.value })}
-                        inputProps={{ min: 0, step: '0.01' }}
+                        value={line.entry_type === 'DR' ? line.amount : ''}
+                        onChange={(e) => updateLine(line.key, { entry_type: 'DR', amount: e.target.value })}
+                        inputProps={{ min: 0, step: '0.01', style: { textAlign: 'right' } }}
+                        placeholder="0.00"
                         fullWidth
                       />
                     </td>
                     <td>
                       <TextField
                         size="small"
-                        value={line.narration}
-                        onChange={(e) => updateLine(line.key, { narration: e.target.value })}
+                        type="number"
+                        value={line.entry_type === 'CR' ? line.amount : ''}
+                        onChange={(e) => updateLine(line.key, { entry_type: 'CR', amount: e.target.value })}
+                        inputProps={{ min: 0, step: '0.01', style: { textAlign: 'right' } }}
+                        placeholder="0.00"
                         fullWidth
                       />
                     </td>
@@ -482,10 +487,22 @@ export default function JournalEntryPage() {
                   </tr>
                 ))}
               </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={2} style={{ textAlign: 'right', fontWeight: 900 }}>Total</td>
+                  <td style={{ textAlign: 'right', fontWeight: 900 }}>₹{money(debitTotal)}</td>
+                  <td style={{ textAlign: 'right', fontWeight: 900 }}>₹{money(creditTotal)}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
             </table>
           </Box>
 
-          <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} alignItems={{ md: 'center' }} justifyContent="space-between">
+          <Box sx={{ px: 2 }}>
+            <TextField label="Narration" value={narration} onChange={(e) => setNarration(e.target.value)} multiline minRows={2} fullWidth />
+          </Box>
+
+          <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} alignItems={{ md: 'center' }} justifyContent="space-between" sx={{ px: 2, pb: 2 }}>
             <Stack direction="row" gap={1} flexWrap="wrap">
               <Chip label={`Debit ${money(debitTotal)}`} color={isBalanced ? 'success' : 'default'} />
               <Chip label={`Credit ${money(creditTotal)}`} color={isBalanced ? 'success' : 'default'} />
@@ -512,7 +529,7 @@ export default function JournalEntryPage() {
         </Stack>
       </Paper>
 
-      <Paper sx={{ p: 2 }}>
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2.5, overflow: 'hidden' }}>
         <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} alignItems={{ md: 'center' }} sx={{ mb: 2 }}>
           <Typography variant="h6" sx={{ flex: 1 }}>Journal Register</Typography>
           <TextField
@@ -543,36 +560,35 @@ export default function JournalEntryPage() {
           />
         </Stack>
 
-        <Box sx={{ overflowX: 'auto' }}>
-          <table className="table" style={{ minWidth: 980 }}>
+        <Box sx={{ minWidth: 0, overflowX: 'hidden' }}>
+          <table className="table journal-register-grid" style={{ tableLayout: 'fixed', width: '100%' }}>
             <thead>
               <tr>
-                <th>Date</th>
-                <th>Voucher</th>
-                <th>Total</th>
-                <th>Entries</th>
-                <th>Narration</th>
-                <th>Status</th>
-                <th></th>
+                <th style={{ width: '11%' }}>Date</th>
+                <th style={{ width: '36%' }}>Particulars</th>
+                <th style={{ width: '11%' }}>Vch Type</th>
+                <th style={{ width: '11%' }}>Vch No.</th>
+                <th style={{ width: '11%', textAlign: 'right' }}>Debit (₹)</th>
+                <th style={{ width: '11%', textAlign: 'right' }}>Credit (₹)</th>
+                <th style={{ width: '9%' }}></th>
               </tr>
             </thead>
             <tbody>
               {journalRows.map((voucher) => (
                 <tr key={voucher.id} style={{ opacity: voucher.is_deleted ? 0.62 : 1 }}>
-                  <td style={{ minWidth: 110 }}>{voucher.voucher_date}</td>
-                  <td style={{ minWidth: 130 }}>{voucher.voucher_no}</td>
-                  <td style={{ minWidth: 100 }}>{money(voucher.total_amount)}</td>
-                  <td style={{ whiteSpace: 'normal', wordBreak: 'break-word', minWidth: 320 }}>{entrySummary(voucher)}</td>
-                  <td style={{ whiteSpace: 'normal', wordBreak: 'break-word', minWidth: 220 }}>{voucher.narration || '-'}</td>
                   <td>
-                    <Chip
-                      size="small"
-                      label={voucher.is_deleted ? 'Deleted' : 'Posted'}
-                      color={voucher.is_deleted ? 'default' : 'success'}
-                      variant={voucher.is_deleted ? 'outlined' : 'filled'}
-                    />
+                    {voucher.voucher_date}
+                    {voucher.is_deleted ? <Typography variant="caption" color="error" display="block">Deleted</Typography> : null}
                   </td>
-                  <td align="right" style={{ minWidth: 116 }}>
+                  <td title={`${entrySummary(voucher)}${voucher.narration ? ` | ${voucher.narration}` : ''}`}>
+                    <Typography variant="body2" fontWeight={800}>{entrySummary(voucher)}</Typography>
+                    {voucher.narration ? <Typography variant="caption" color="text.secondary">{voucher.narration}</Typography> : null}
+                  </td>
+                  <td>Journal</td>
+                  <td>{voucher.voucher_no}</td>
+                  <td style={{ textAlign: 'right', fontWeight: 800 }}>{money(voucher.total_amount)}</td>
+                  <td style={{ textAlign: 'right', fontWeight: 800 }}>{money(voucher.total_amount)}</td>
+                  <td align="right">
                     {voucher.is_deleted ? (
                       <Tooltip title="Restore">
                         <IconButton size="small" onClick={() => restoreM.mutate(Number(voucher.id))} disabled={restoreM.isPending}>

@@ -5,11 +5,13 @@ export interface CustomerCreatePayload {
   name: string
   phone?: string
   address_line?: string
+  opening_balance?: number
 }
 export interface CustomerUpdatePayload {
   name?: string
   phone?: string
   address_line?: string
+  opening_balance?: number
 }
 
 export interface CustomerSummaryTotals {

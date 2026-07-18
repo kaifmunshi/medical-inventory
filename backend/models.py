@@ -420,11 +420,13 @@ class CustomerCreate(SQLModel):
     name: str
     phone: Optional[str] = None
     address_line: Optional[str] = None
+    opening_balance: float = 0.0
 
 class CustomerUpdate(SQLModel):
     name: Optional[str] = None
     phone: Optional[str] = None
     address_line: Optional[str] = None
+    opening_balance: Optional[float] = None
 
 
 class CustomerOut(SQLModel):

@@ -21,6 +21,7 @@ import {
 import EditIcon from '@mui/icons-material/Edit'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
 import MergeTypeIcon from '@mui/icons-material/MergeType'
+import MenuBookIcon from '@mui/icons-material/MenuBook'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   createCustomer,
@@ -82,6 +83,7 @@ export default function CustomersPage() {
   const [name, setName] = useState('')
   const [phone, setPhone] = useState('')
   const [addressLine, setAddressLine] = useState('')
+  const [openingBalance, setOpeningBalance] = useState('0')
   const [nameError, setNameError] = useState('')
   const [editTarget, setEditTarget] = useState<Customer | null>(null)
   const [mergeOpen, setMergeOpen] = useState(false)
@@ -118,10 +120,14 @@ export default function CustomersPage() {
     mutationFn: createCustomer,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['customers'] })
+      queryClient.invalidateQueries({ queryKey: ['parties'] })
+      queryClient.invalidateQueries({ queryKey: ['debtors'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
       setOpen(false)
       setName('')
       setPhone('')
       setAddressLine('')
+      setOpeningBalance('0')
       setNameError('')
     },
     onError: (err: any) => {
@@ -130,14 +136,18 @@ export default function CustomersPage() {
     },
   })
   const updateM = useMutation({
-    mutationFn: ({ id, payload }: { id: number; payload: { name: string; phone?: string; address_line?: string } }) =>
+    mutationFn: ({ id, payload }: { id: number; payload: { name: string; phone?: string; address_line?: string; opening_balance?: number } }) =>
       updateCustomer(id, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['customers'] })
+      queryClient.invalidateQueries({ queryKey: ['parties'] })
+      queryClient.invalidateQueries({ queryKey: ['debtors'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
       setEditTarget(null)
       setName('')
       setPhone('')
       setAddressLine('')
+      setOpeningBalance('0')
       setNameError('')
     },
     onError: (err: any) => {
@@ -170,6 +180,7 @@ export default function CustomersPage() {
     setName('')
     setPhone('')
     setAddressLine('')
+    setOpeningBalance('0')
     setNameError('')
     setOpen(true)
   }
@@ -180,6 +191,7 @@ export default function CustomersPage() {
     setName(String(row.name || ''))
     setPhone(String(row.phone || ''))
     setAddressLine(String(row.address_line || ''))
+    setOpeningBalance(String(signedBalance(row.opening_balance, row.opening_balance_type)))
     setNameError('')
   }
 
@@ -189,10 +201,16 @@ export default function CustomersPage() {
       setNameError('Name is required')
       return
     }
+    const opening = Number(openingBalance || 0)
+    if (!Number.isFinite(opening)) {
+      toast.push('Opening balance must be a valid amount', 'error')
+      return
+    }
     createM.mutate({
       name: nm,
       phone: phone.trim() || undefined,
       address_line: addressLine.trim() || undefined,
+      opening_balance: opening,
     })
   }
   function saveEditedCustomer() {
@@ -202,12 +220,18 @@ export default function CustomersPage() {
       setNameError('Name is required')
       return
     }
+    const opening = Number(openingBalance || 0)
+    if (!Number.isFinite(opening)) {
+      toast.push('Opening balance must be a valid amount', 'error')
+      return
+    }
     updateM.mutate({
       id: Number(editTarget.id),
       payload: {
         name: nm,
-        phone: phone.trim() || undefined,
-        address_line: addressLine.trim() || undefined,
+        phone: phone.trim(),
+        address_line: addressLine.trim(),
+        opening_balance: opening,
       },
     })
   }
@@ -469,12 +493,50 @@ export default function CustomersPage() {
 
   const rows = customersQ.data || []
   const mergeOptions = rows.filter((customer) => customer.is_active !== false)
+  const activeRows = rows.filter((customer) => customer.is_active !== false)
+  const totalReceivable = activeRows.reduce((sum, customer) => {
+    const closing = signedBalance(customer.closing_balance, customer.closing_balance_type)
+    return sum + Math.max(0, closing)
+  }, 0)
+  const totalCustomerCredit = activeRows.reduce((sum, customer) => {
+    const closing = signedBalance(customer.closing_balance, customer.closing_balance_type)
+    return sum + Math.max(0, -closing)
+  }, 0)
 
   return (
     <Stack gap={2}>
-      <Typography variant="h5">Customers</Typography>
+      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1}>
+        <Box>
+          <Typography variant="h5" fontWeight={900}>Customer Master</Typography>
+          <Typography variant="body2" color="text.secondary">
+            Customer accounts, opening balances, outstanding bills and advances
+          </Typography>
+        </Box>
+        <Button variant="contained" onClick={openAdd} sx={{ alignSelf: { xs: 'stretch', sm: 'center' } }}>
+          Add Customer
+        </Button>
+      </Stack>
 
-      <Paper sx={{ p: 2 }}>
+      <Box
+        sx={{
+          display: 'grid',
+          gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, minmax(0, 1fr))' },
+          gap: 1.5,
+        }}
+      >
+        {[
+          { label: archivedOnly ? 'Archived Customers' : 'Active Customers', value: rows.length, color: 'primary.main' },
+          { label: 'Total Receivable (DR)', value: `₹${money(totalReceivable)}`, color: 'error.main' },
+          { label: 'Customer Credit (CR)', value: `₹${money(totalCustomerCredit)}`, color: 'info.main' },
+        ].map((item) => (
+          <Paper key={item.label} variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+            <Typography variant="caption" color="text.secondary" fontWeight={800}>{item.label}</Typography>
+            <Typography variant="h6" color={item.color} fontWeight={900}>{item.value}</Typography>
+          </Paper>
+        ))}
+      </Box>
+
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={2} alignItems={{ sm: 'center' }}>
           <TextField
             label="Search (name / phone / address)"
@@ -483,7 +545,7 @@ export default function CustomersPage() {
             fullWidth
           />
           <Button variant="outlined" startIcon={<MergeTypeIcon />} onClick={openMerge}>
-            Club
+            Club Customers
           </Button>
           <FormControlLabel
             control={
@@ -495,9 +557,6 @@ export default function CustomersPage() {
             label="Archived only"
             sx={{ m: 0, whiteSpace: 'nowrap' }}
           />
-          <Button variant="contained" onClick={openAdd}>
-            Add Customer
-          </Button>
         </Stack>
       </Paper>
 
@@ -507,15 +566,33 @@ export default function CustomersPage() {
       )}
 
       {!customersQ.isLoading && !customersQ.isError && (
-        <Paper sx={{ p: 2 }}>
-          <Box sx={{ overflowX: 'auto' }}>
-            <table className="table">
+        <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, minWidth: 0, overflow: 'hidden' }}>
+          <Box
+            sx={{
+              width: '100%',
+              minWidth: 0,
+              overflowX: 'hidden',
+              '& .customer-master-grid': { tableLayout: 'fixed' },
+              '& .customer-master-grid th:nth-of-type(1), & .customer-master-grid td:nth-of-type(1)': { width: '16%' },
+              '& .customer-master-grid th:nth-of-type(2), & .customer-master-grid td:nth-of-type(2)': { width: '10%' },
+              '& .customer-master-grid th:nth-of-type(3), & .customer-master-grid td:nth-of-type(3)': { width: '17%' },
+              '& .customer-master-grid th:nth-of-type(4), & .customer-master-grid td:nth-of-type(4)': { width: '12%' },
+              '& .customer-master-grid th:nth-of-type(5), & .customer-master-grid td:nth-of-type(5)': { width: '17%' },
+              '& .customer-master-grid th:nth-of-type(6), & .customer-master-grid td:nth-of-type(6)': { width: '14%' },
+              '& .customer-master-grid th:nth-of-type(7), & .customer-master-grid td:nth-of-type(7)': { width: '14%', overflow: 'visible' },
+              '& .customer-master-grid td': { verticalAlign: 'middle' },
+              '& .customer-master-grid td:nth-of-type(1)': { fontWeight: 800 },
+              '& .customer-master-grid .customer-actions': { justifyContent: 'flex-end', flexWrap: 'nowrap' },
+            }}
+          >
+            <table className="table customer-master-grid">
               <thead>
                 <tr>
                   <th>Name</th>
                   <th>Phone</th>
                   <th>Address</th>
-                  <th>Status</th>
+                  {/* <th>Status</th> */}
+                  <th>Opening</th>
                   <th>Closing</th>
                   <th>Created</th>
                   <th></th>
@@ -524,14 +601,12 @@ export default function CustomersPage() {
               <tbody>
                 {rows.map((r) => {
                   const archived = r.is_active === false
-                  const mergedInto = r.merged_into_customer_id
-                  const archivedAt = r.merged_at || r.deleted_at || undefined
                   return (
                     <tr key={r.id}>
-                      <td>{r.name}</td>
-                      <td>{r.phone || '-'}</td>
-                      <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{r.address_line || '-'}</td>
-                      <td>
+                      <td title={r.name}>{r.name}</td>
+                      <td title={r.phone || undefined}>{r.phone || '-'}</td>
+                      <td title={r.address_line || undefined}>{r.address_line || '-'}</td>
+                      {/* <td>
                         {archived ? (
                           <Stack gap={0.5}>
                             <Chip
@@ -549,7 +624,8 @@ export default function CustomersPage() {
                         ) : (
                           <Chip size="small" color="success" label="Active" sx={{ width: 'fit-content' }} />
                         )}
-                      </td>
+                      </td> */}
+                      <td>{balanceLabel(r.opening_balance, r.opening_balance_type)}</td>
                       <td>
                         <Stack gap={0.5}>
                           <Chip
@@ -565,10 +641,15 @@ export default function CustomersPage() {
                       </td>
                       <td>{formatDate(r.created_at)}</td>
                       <td>
-                        <Stack direction="row" gap={1}>
-                          <Button size="small" onClick={() => navigate(`/customer-ledger?customer_id=${r.id}`)}>
-                            Ledger
-                          </Button>
+                        <Stack className="customer-actions" direction="row" gap={0.25}>
+                          <IconButton
+                            size="small"
+                            color="primary"
+                            onClick={() => navigate(`/customer-ledger?customer_id=${r.id}`)}
+                            title="Open Ledger"
+                          >
+                            <MenuBookIcon fontSize="small" />
+                          </IconButton>
                           <IconButton
                             size="small"
                             color="primary"
@@ -636,6 +717,15 @@ export default function CustomersPage() {
               onChange={(e) => setAddressLine(e.target.value)}
               fullWidth
             />
+            <TextField
+              label="Opening Balance"
+              type="number"
+              value={openingBalance}
+              onChange={(e) => setOpeningBalance(e.target.value)}
+              inputProps={{ step: '0.01' }}
+              helperText="Positive = customer owed us (DR). Negative = customer advance / we owed them (CR)."
+              fullWidth
+            />
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -675,6 +765,15 @@ export default function CustomersPage() {
               label="Address (optional)"
               value={addressLine}
               onChange={(e) => setAddressLine(e.target.value)}
+              fullWidth
+            />
+            <TextField
+              label="Opening Balance"
+              type="number"
+              value={openingBalance}
+              onChange={(e) => setOpeningBalance(e.target.value)}
+              inputProps={{ step: '0.01' }}
+              helperText="Positive = customer owed us (DR). Negative = customer advance / we owed them (CR)."
               fullWidth
             />
           </Stack>

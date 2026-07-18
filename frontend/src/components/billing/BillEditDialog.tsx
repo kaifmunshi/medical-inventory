@@ -22,6 +22,7 @@ import { listItemsPage } from '../../services/inventory'
 import { createCustomer, fetchCustomers } from '../../services/customers'
 import { mapBillCustomer, updateBill } from '../../services/billing'
 import { openPack } from '../../services/lots'
+import { fetchCategories } from '../../services/products'
 import type { Customer } from '../../lib/types'
 import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
 import BillPaymentsPanel from './BillPaymentsPanel'
@@ -406,6 +407,7 @@ export default function BillEditDialog({
   const [editCreditReturnTotal, setEditCreditReturnTotal] = useState<number>(0)
   const [editFinalManuallyEdited, setEditFinalManuallyEdited] = useState(false)
   const [editItemQuery, setEditItemQuery] = useState('')
+  const [editCategoryId, setEditCategoryId] = useState<number | null>(null)
   const [debouncedEditItemQuery, setDebouncedEditItemQuery] = useState('')
   const [editPriceDraftByRow, setEditPriceDraftByRow] = useState<Record<number, string>>({})
   const [editDiscountDraftByRow, setEditDiscountDraftByRow] = useState<Record<number, string>>({})
@@ -422,11 +424,15 @@ export default function BillEditDialog({
   const [oldBillPassword, setOldBillPassword] = useState('')
   const editItemSearchTerm = editItemQuery.trim()
   const debouncedEditItemSearchTerm = debouncedEditItemQuery.trim()
-  const canSearchEditItems = (
-    open &&
+  const hasEditCategoryFilter = editCategoryId != null
+  const hasReadyEditSearchTerm = (
     editItemSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
     debouncedEditItemSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS &&
     editItemSearchTerm === debouncedEditItemSearchTerm
+  )
+  const canSearchEditItems = (
+    open &&
+    (hasEditCategoryFilter || hasReadyEditSearchTerm)
   )
 
   useEffect(() => {
@@ -503,6 +509,7 @@ export default function BillEditDialog({
     setEditFinalManuallyEdited(Math.abs(round2(billedTotal - sumByRows)) > 0.009)
     setEditItemQuery('')
     setDebouncedEditItemQuery('')
+    setEditCategoryId(null)
     setEditPriceDraftByRow({})
     setEditDiscountDraftByRow({})
     setEditSuggestionPage(0)
@@ -522,24 +529,31 @@ export default function BillEditDialog({
     return () => window.clearTimeout(timer)
   }, [open, editItemSearchTerm])
 
+  const { data: editProductCategories = [] } = useQuery({
+    queryKey: ['billing-product-categories'],
+    queryFn: () => fetchCategories({ active_only: true }),
+    enabled: open,
+    staleTime: 5 * 60_000,
+  })
+
   const qEditItems = useQuery({
-    queryKey: ['edit-bill-items', debouncedEditItemSearchTerm, editSuggestionPage],
+    queryKey: ['edit-bill-items', debouncedEditItemSearchTerm, editCategoryId, editSuggestionPage],
     enabled: canSearchEditItems,
     queryFn: async ({ signal }) => {
       if (
         !open ||
-        debouncedEditItemSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS ||
-        editItemSearchTerm !== debouncedEditItemSearchTerm
+        (!hasEditCategoryFilter && debouncedEditItemSearchTerm.length < PRODUCT_SEARCH_MIN_CHARS) ||
+        (!hasEditCategoryFilter && editItemSearchTerm !== debouncedEditItemSearchTerm)
       ) {
         return { items: [], total: 0, next_offset: null }
       }
       try {
         return await listItemsPage(
-          debouncedEditItemSearchTerm,
+          hasReadyEditSearchTerm ? debouncedEditItemSearchTerm : '',
           EDIT_SUGGESTIONS_PAGE_SIZE,
           editSuggestionPage * EDIT_SUGGESTIONS_PAGE_SIZE,
           undefined,
-          undefined,
+          editCategoryId != null ? { category_id: Number(editCategoryId) } : undefined,
           { signal },
         )
       } catch (err: any) {
@@ -693,7 +707,7 @@ export default function BillEditDialog({
 
   useEffect(() => {
     setEditSuggestionPage(0)
-  }, [editItemSearchTerm, open])
+  }, [editItemSearchTerm, editCategoryId, open])
 
   useEffect(() => {
     if (!open) return
@@ -1213,23 +1227,34 @@ export default function BillEditDialog({
 
             <Paper sx={{ p: 2 }}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
-                <TextField
-                  label="Add item (name/brand)"
-                  value={editItemQuery}
-                  onChange={(e) => {
-                    setEditItemQuery(e.target.value)
-                    setEditSuggestionPage(0)
-                  }}
-                  fullWidth
-                />
-                <Stack gap={0.5} sx={{ minWidth: 240 }}>
-                  <Typography variant="body2" color="text.secondary">Subtotal: ₹{money(editSubtotal)}</Typography>
-                  <Typography variant="body2" color="text.secondary">Discount: ₹{money(editDiscountAmount)}</Typography>
-                  <Typography variant="body2" color="text.secondary">Original Line Total: ₹{money(editFinalByRows)}</Typography>
-                  {editCreditReturnTotal > 0.009 ? (
-                    <Typography variant="body2" color="text.secondary">Less Credit Returns: ₹{money(editCreditReturnTotal)}</Typography>
-                  ) : null}
-                  <Typography variant="h6">Current Bill Balance: ₹{money(editSettlementTotal)}</Typography>
+                <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} sx={{ flex: 1 }}>
+                  <TextField
+                    select
+                    size="small"
+                    label="Category"
+                    value={editCategoryId ?? ''}
+                    onChange={(e) => {
+                      setEditCategoryId(e.target.value ? Number(e.target.value) : null)
+                      setEditSuggestionPage(0)
+                    }}
+                    sx={{ minWidth: 160 }}
+                  >
+                    <MenuItem value="">All</MenuItem>
+                    {editProductCategories.map((category) => (
+                      <MenuItem key={category.id} value={String(category.id)}>
+                        {category.name}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <TextField
+                    label="Add item (name/brand)"
+                    value={editItemQuery}
+                    onChange={(e) => {
+                      setEditItemQuery(e.target.value)
+                      setEditSuggestionPage(0)
+                    }}
+                    fullWidth
+                  />
                 </Stack>
               </Stack>
 
@@ -1464,30 +1489,40 @@ export default function BillEditDialog({
                 </Stack>
 
                 <Typography variant="caption" color="text.secondary">Discount Given: +{editEffectiveDiscountPercent.toFixed(2)}%</Typography>
-                <Typography variant="caption" color="text.secondary">Final Amount (sum of line totals): ₹{money(editFinalByRows)}</Typography>
-                <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
-                  <TextField
-                    label="Original Sale Amount"
-                    type="text"
-                    value={String(editFinalAmount)}
-                    onChange={(e) => {
-                      const v = parseNumText(e.target.value)
-                      const next = Number(v || 0)
-                      setEditFinalAmount(next)
-                      if (next <= 0) {
-                        setEditCash(0)
-                        setEditOnline(0)
-                      }
-                      setEditFinalManuallyEdited(true)
-                    }}
-                    onBlur={() => applyEditFinalAmountToRows(editFinalAmount)}
-                    onWheel={blurOnWheel}
-                    sx={{ width: 220, ...noSpinnerSx }}
-                    inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
-                  />
-                  <Button size="small" onClick={() => { const target = roundNearest10(editChosenFinal); setEditFinalAmount(target); setEditFinalManuallyEdited(true); applyEditFinalAmountToRows(target) }}>Round ±10</Button>
-                  <Button size="small" onClick={() => { const target = roundDown10(editChosenFinal); setEditFinalAmount(target); setEditFinalManuallyEdited(true); applyEditFinalAmountToRows(target) }}>Round -10</Button>
-                  <Button size="small" onClick={() => { const target = roundUp10(editChosenFinal); setEditFinalAmount(target); setEditFinalManuallyEdited(true); applyEditFinalAmountToRows(target) }}>Round +10</Button>
+                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'flex-start' }} gap={2}>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
+                    <TextField
+                      label="Original Sale Amount"
+                      type="text"
+                      value={String(editFinalAmount)}
+                      onChange={(e) => {
+                        const v = parseNumText(e.target.value)
+                        const next = Number(v || 0)
+                        setEditFinalAmount(next)
+                        if (next <= 0) {
+                          setEditCash(0)
+                          setEditOnline(0)
+                        }
+                        setEditFinalManuallyEdited(true)
+                      }}
+                      onBlur={() => applyEditFinalAmountToRows(editFinalAmount)}
+                      onWheel={blurOnWheel}
+                      sx={{ width: 220, ...noSpinnerSx }}
+                      inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
+                    />
+                    <Button size="small" onClick={() => { const target = roundNearest10(editChosenFinal); setEditFinalAmount(target); setEditFinalManuallyEdited(true); applyEditFinalAmountToRows(target) }}>Round ±10</Button>
+                    <Button size="small" onClick={() => { const target = roundDown10(editChosenFinal); setEditFinalAmount(target); setEditFinalManuallyEdited(true); applyEditFinalAmountToRows(target) }}>Round -10</Button>
+                    <Button size="small" onClick={() => { const target = roundUp10(editChosenFinal); setEditFinalAmount(target); setEditFinalManuallyEdited(true); applyEditFinalAmountToRows(target) }}>Round +10</Button>
+                  </Stack>
+                  <Stack gap={0.5} sx={{ minWidth: 240, textAlign: { xs: 'left', md: 'right' } }}>
+                    <Typography variant="body2" color="text.secondary">Subtotal: ₹{money(editSubtotal)}</Typography>
+                    <Typography variant="body2" color="text.secondary">Discount: ₹{money(editDiscountAmount)}</Typography>
+                    <Typography variant="body2" color="text.secondary">Original Line Total: ₹{money(editFinalByRows)}</Typography>
+                    {editCreditReturnTotal > 0.009 ? (
+                      <Typography variant="body2" color="text.secondary">Less Credit Returns: ₹{money(editCreditReturnTotal)}</Typography>
+                    ) : null}
+                    <Typography variant="h6">Current Bill Balance: ₹{money(editSettlementTotal)}</Typography>
+                  </Stack>
                 </Stack>
               </Stack>
             </Paper>

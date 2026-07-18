@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 import logging
+from math import isfinite
 import re
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from sqlmodel import select
@@ -12,12 +13,14 @@ from backend.utils.archive_rules import apply_archive_rules
 from sqlalchemy import and_, case, func, literal, or_, exists
 from sqlalchemy.orm import aliased
 
-from backend.controls import log_audit
+from backend.accounting import sync_bill_vouchers
+from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import create_data_repair_backup, get_session
 from backend.models import (
     Bill,
     BillItem,
     BillItemAllocation,
+    BillPayment,
     ExchangeRecord,
     InventoryLot,
     Item,
@@ -328,6 +331,35 @@ class ManualAdjustmentDeleteOut(BaseModel):
     item: ItemOut
     deleted_movement_id: int
     reversed_delta: int
+
+
+class ManualAdjustmentUpdateIn(BaseModel):
+    delta: int
+    note: Optional[str] = None
+
+
+class ManualAdjustmentUpdateOut(BaseModel):
+    item: ItemOut
+    movement: StockMovementOut
+    previous_delta: int
+
+
+class ManualAdjustmentSaleIn(BaseModel):
+    sale_date: str
+    unit_price: float
+    customer_id: Optional[int] = None
+    payment_mode: str = "cash"
+    payment_cash: float = 0.0
+    payment_online: float = 0.0
+    notes: Optional[str] = None
+
+
+class ManualAdjustmentSaleOut(BaseModel):
+    bill_id: int
+    item_id: int
+    quantity: int
+    total_amount: float
+    payment_status: str
 
 
 class OpeningClubIn(BaseModel):
@@ -1915,6 +1947,258 @@ def delete_manual_stock_adjustment(
             item=item,
             deleted_movement_id=int(movement_id),
             reversed_delta=int(-adjust_delta),
+        )
+
+
+@router.patch("/ledger/adjust/{movement_id}", response_model=ManualAdjustmentUpdateOut)
+def update_manual_stock_adjustment(
+    movement_id: int,
+    payload: ManualAdjustmentUpdateIn,
+) -> ManualAdjustmentUpdateOut:
+    require_min_role("MANAGER", context="Manual stock adjustment edit")
+    with get_session() as session:
+        movement = session.get(StockMovement, movement_id)
+        if not movement:
+            raise HTTPException(status_code=404, detail="Manual stock adjustment not found")
+        if (
+            str(movement.reason or "").upper() != "ADJUST"
+            or str(getattr(movement, "ref_type", "") or "").upper() != "MANUAL"
+        ):
+            raise HTTPException(status_code=400, detail="Only manual stock adjust rows can be edited")
+
+        next_delta = int(payload.delta)
+        if next_delta == 0:
+            raise HTTPException(status_code=400, detail="Adjustment cannot be zero; delete it instead")
+
+        item = session.get(Item, int(movement.item_id))
+        if not item:
+            raise HTTPException(status_code=404, detail="Inventory batch not found")
+
+        previous_delta = int(movement.delta or 0)
+        new_stock = int(item.stock or 0) + next_delta - previous_delta
+        if new_stock < 0:
+            raise HTTPException(status_code=400, detail=f"Editing this adjustment would make batch stock negative ({new_stock})")
+
+        replay_rows = session.exec(
+            select(StockMovement)
+            .where(StockMovement.item_id == int(item.id))
+            .order_by(StockMovement.ts.asc(), StockMovement.id.asc())
+        ).all()
+        running_stock = 0
+        movement_balance_before = 0
+        movement_balance_after = 0
+        for row in replay_rows:
+            if int(row.id or 0) == int(movement.id or 0):
+                movement_balance_before = running_stock
+            running_stock += next_delta if int(row.id or 0) == int(movement.id or 0) else int(row.delta or 0)
+            if int(row.id or 0) == int(movement.id or 0):
+                movement_balance_after = running_stock
+            if running_stock < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Editing this adjustment would make the ledger negative after {row.reason} #{row.ref_id or row.id}",
+                )
+
+        previous_note = movement.note
+        movement.delta = next_delta
+        movement.note = str(payload.note or "").strip() or None
+        item.stock = new_stock
+        item.updated_at = now_ts()
+        session.add(movement)
+        session.add(item)
+        apply_archive_rules(session, item)
+        sync_lot_quantity_for_item(session, item, ts=item.updated_at)
+        log_audit(
+            session,
+            entity_type="ITEM",
+            entity_id=int(item.id),
+            action="ADJUST_EDIT",
+            note=f"Edited manual stock adjustment #{movement_id}",
+            details={
+                "movement_id": int(movement_id),
+                "previous_delta": previous_delta,
+                "new_delta": next_delta,
+                "previous_note": previous_note,
+                "new_note": movement.note,
+                "new_stock": new_stock,
+            },
+        )
+        session.commit()
+        session.refresh(item)
+        session.refresh(movement)
+        _attach_last_incoming(session, [item])
+        _attach_lot_metadata(session, [item])
+        return ManualAdjustmentUpdateOut(
+            item=item,
+            movement=StockMovementOut(
+                id=int(movement.id),
+                ts=movement.ts,
+                delta=int(movement.delta or 0),
+                reason=movement.reason,
+                ref_type=movement.ref_type,
+                ref_id=movement.ref_id,
+                note=movement.note,
+                actor=movement.actor,
+                balance_before=movement_balance_before,
+                balance_after=movement_balance_after,
+            ),
+            previous_delta=previous_delta,
+        )
+
+
+@router.post("/ledger/adjust/{movement_id}/sale", response_model=ManualAdjustmentSaleOut)
+def convert_manual_stock_adjustment_to_sale(
+    movement_id: int,
+    payload: ManualAdjustmentSaleIn,
+) -> ManualAdjustmentSaleOut:
+    require_min_role("MANAGER", context="Convert stock adjustment to sale")
+    with get_session() as session:
+        movement = session.get(StockMovement, movement_id)
+        if not movement:
+            raise HTTPException(status_code=404, detail="Manual stock adjustment not found")
+        if (
+            str(movement.reason or "").upper() != "ADJUST"
+            or str(getattr(movement, "ref_type", "") or "").upper() != "MANUAL"
+            or int(movement.delta or 0) >= 0
+        ):
+            raise HTTPException(status_code=400, detail="Only a negative manual stock adjustment can be saved as a sale")
+
+        item = session.get(Item, int(movement.item_id))
+        if not item:
+            raise HTTPException(status_code=404, detail="Inventory batch not found")
+        quantity = abs(int(movement.delta or 0))
+        unit_price = round(float(payload.unit_price or 0.0), 2)
+        if not isfinite(unit_price) or unit_price <= 0:
+            raise HTTPException(status_code=400, detail="Selling price must be greater than zero")
+        total = round(quantity * unit_price, 2)
+        payment_mode = str(payload.payment_mode or "cash").strip().lower()
+        if payment_mode not in {"cash", "online", "split", "credit"}:
+            raise HTTPException(status_code=400, detail="Invalid payment mode")
+
+        cash = round(float(payload.payment_cash or 0.0), 2)
+        online = round(float(payload.payment_online or 0.0), 2)
+        if not isfinite(cash) or not isfinite(online) or cash < 0 or online < 0:
+            raise HTTPException(status_code=400, detail="Payment amounts must be valid non-negative amounts")
+        if payment_mode == "cash":
+            cash, online = total, 0.0
+        elif payment_mode == "online":
+            cash, online = 0.0, total
+        elif payment_mode == "credit":
+            cash, online = 0.0, 0.0
+        elif round(cash + online, 2) > total:
+            raise HTTPException(status_code=400, detail="Cash + online cannot exceed the sale total")
+
+        sale_date = str(payload.sale_date or "").strip()
+        if not sale_date:
+            raise HTTPException(status_code=400, detail="Sale date is required")
+        sale_ts = sale_date if "T" in sale_date else f"{sale_date}T00:00:00"
+        try:
+            sale_ts = datetime.fromisoformat(sale_ts).isoformat(timespec="seconds")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid sale date")
+        assert_financial_year_unlocked(session, sale_ts, context="Stock adjustment sale conversion")
+
+        replay_rows = session.exec(
+            select(StockMovement).where(StockMovement.item_id == int(item.id))
+        ).all()
+        replay_rows.sort(key=lambda row: (
+            sale_ts if int(row.id or 0) == int(movement.id or 0) else str(row.ts or ""),
+            int(row.id or 0),
+        ))
+        running_stock = 0
+        for row in replay_rows:
+            running_stock += int(row.delta or 0)
+            if running_stock < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"This sale date would make the historical stock ledger negative after {row.reason} #{row.ref_id or row.id}",
+                )
+
+        from backend.routers.billing import resolve_bill_party_links
+        customer_id, party_id = resolve_bill_party_links(
+            session,
+            customer_id=payload.customer_id,
+            party_id=None,
+            notes=payload.notes,
+        )
+        paid_amount = round(cash + online, 2)
+        pending = round(total - paid_amount, 2)
+        status = "PAID" if pending <= 0.009 else "UNPAID" if paid_amount <= 0.009 else "PARTIAL"
+        stored_mode = payment_mode
+        bill = Bill(
+            date_time=sale_ts,
+            customer_id=customer_id,
+            party_id=party_id,
+            discount_percent=0.0,
+            subtotal=total,
+            total_amount=total,
+            payment_mode=stored_mode,
+            payment_cash=cash,
+            payment_online=online,
+            notes=str(payload.notes or "").strip() or f"Converted from stock adjustment #{movement_id}",
+            is_credit=pending > 0.009,
+            payment_status=status,
+            paid_amount=paid_amount,
+            writeoff_amount=0.0,
+            paid_at=sale_ts if paid_amount > 0 else None,
+            is_deleted=False,
+            deleted_at=None,
+        )
+        session.add(bill)
+        session.flush()
+        session.add(BillItem(
+            bill_id=int(bill.id),
+            item_id=int(item.id),
+            item_name=item.name,
+            mrp=float(item.mrp or 0.0),
+            quantity=quantity,
+            line_total=total,
+        ))
+        if paid_amount > 0:
+            session.add(BillPayment(
+                bill_id=int(bill.id),
+                received_at=sale_ts,
+                mode=stored_mode,
+                cash_amount=cash,
+                online_amount=online,
+                writeoff_amount=0.0,
+                note="auto: payment at bill creation",
+                is_writeoff=False,
+                is_deleted=False,
+            ))
+
+        previous_note = movement.note
+        movement.ts = sale_ts
+        movement.reason = "SALE"
+        movement.ref_type = "BILL"
+        movement.ref_id = int(bill.id)
+        movement.note = f"Bill #{bill.id} | Converted from manual adjustment #{movement_id}"
+        session.add(movement)
+        sync_bill_vouchers(session, bill)
+        log_audit(
+            session,
+            entity_type="ITEM",
+            entity_id=int(item.id),
+            action="ADJUST_TO_SALE",
+            note=f"Converted stock adjustment #{movement_id} to bill #{bill.id}",
+            details={
+                "movement_id": int(movement_id),
+                "bill_id": int(bill.id),
+                "quantity": quantity,
+                "unit_price": unit_price,
+                "total_amount": total,
+                "customer_id": customer_id,
+                "payment_mode": stored_mode,
+                "previous_note": previous_note,
+            },
+        )
+        session.commit()
+        return ManualAdjustmentSaleOut(
+            bill_id=int(bill.id),
+            item_id=int(item.id),
+            quantity=quantity,
+            total_amount=total,
+            payment_status=status,
         )
 
 

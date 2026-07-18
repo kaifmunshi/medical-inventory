@@ -23,9 +23,17 @@ body {
 
 /* Table styling */
 .table {
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   border-collapse: collapse;
+  table-layout: fixed;
+}
+
+/* List grids must stay inside the page instead of creating a second horizontal viewport. */
+.table:not(.inventory-grid) {
+  width: 100% !important;
+  min-width: 0 !important;
 }
 
 .table th,
@@ -34,8 +42,33 @@ body {
   padding: 8px 10px;
   text-align: left;
   font-size: 0.84rem;
-  white-space: nowrap;
+  white-space: nowrap !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
   vertical-align: top;
+}
+
+.table td > *,
+.table th > * {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.table:not(.inventory-grid) th,
+.table:not(.inventory-grid) td {
+  min-width: 0 !important;
+  max-width: 100%;
+}
+
+.table td .MuiStack-root,
+.table th .MuiStack-root {
+  flex-wrap: nowrap !important;
+}
+
+.table td .MuiButton-root,
+.table th .MuiButton-root {
+  min-width: 0;
+  white-space: nowrap !important;
 }
 
 .table thead th {

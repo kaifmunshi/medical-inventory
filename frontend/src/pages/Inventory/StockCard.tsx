@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
   Chip,
@@ -38,14 +39,18 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 import { getBill, type Bill } from '../../services/billing'
+import { fetchCustomers } from '../../services/customers'
+import type { Customer } from '../../lib/types'
 import {
   clubPurchaseBatchToOpening,
+  convertManualStockAdjustmentToSale,
   deleteManualStockAdjustment,
   deleteOpeningStockMovement,
   getGroupLedger,
   getGroupLedgerSummary,
   getItemGroup,
   getStockLedgerReconciliation,
+  updateManualStockAdjustment,
 } from '../../services/inventory'
 import {
   createBrand,
@@ -490,6 +495,20 @@ export default function StockCardPage() {
   }, [queryClient])
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(requestedBatchId)
   const [selectedMovementId, setSelectedMovementId] = useState<number | null>(null)
+  const [editAdjustRow, setEditAdjustRow] = useState<any | null>(null)
+  const [editAdjustDelta, setEditAdjustDelta] = useState('')
+  const [editAdjustNote, setEditAdjustNote] = useState('')
+  const [adjustSaleRow, setAdjustSaleRow] = useState<any | null>(null)
+  const [adjustSaleDate, setAdjustSaleDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [adjustSalePrice, setAdjustSalePrice] = useState('0')
+  const [adjustSaleCustomer, setAdjustSaleCustomer] = useState<Customer | null>(null)
+  const [adjustSaleCustomerQ, setAdjustSaleCustomerQ] = useState('')
+  const [adjustSaleMode, setAdjustSaleMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
+  const [adjustSaleCash, setAdjustSaleCash] = useState('0')
+  const [adjustSaleOnline, setAdjustSaleOnline] = useState('0')
+  const [adjustSaleNotes, setAdjustSaleNotes] = useState('')
+  const adjustSaleQuantity = Math.abs(Number(adjustSaleRow?.delta || 0))
+  const adjustSaleTotal = Number((adjustSaleQuantity * Number(adjustSalePrice || 0)).toFixed(2))
   const [billOpen, setBillOpen] = useState(false)
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<Bill | null>(null)
@@ -537,6 +556,11 @@ export default function StockCardPage() {
     queryKey: ['stock-card-categories'],
     queryFn: () => fetchCategories({ active_only: true }),
     enabled: productOpen,
+  })
+  const adjustSaleCustomersQ = useQuery({
+    queryKey: ['stock-adjust-sale-customers', adjustSaleCustomerQ],
+    queryFn: () => fetchCustomers({ q: adjustSaleCustomerQ.trim() || undefined, limit: 200 }),
+    enabled: Boolean(adjustSaleRow),
   })
   const productsQ = useQuery({
     queryKey: ['stock-card-products', name],
@@ -987,6 +1011,79 @@ export default function StockCardPage() {
     },
   })
 
+  const mEditManualAdjust = useMutation({
+    mutationFn: () => {
+      if (!editAdjustRow?.id) throw new Error('Adjustment is missing')
+      const delta = Number(editAdjustDelta)
+      if (!Number.isInteger(delta) || delta === 0) throw new Error('Enter a non-zero whole number')
+      return updateManualStockAdjustment(Number(editAdjustRow.id), {
+        delta,
+        note: editAdjustNote.trim() || undefined,
+      })
+    },
+    onSuccess: () => {
+      setEditAdjustRow(null)
+      setEditAdjustDelta('')
+      setEditAdjustNote('')
+      setSelectedMovementId(null)
+      refreshLedgerAfterBillChange()
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      toast.push('Manual stock adjustment updated', 'success')
+    },
+    onError: (err: any) => {
+      const message = err?.response?.data?.detail || err?.message || 'Manual stock adjustment could not be updated'
+      toast.push(String(message), 'error')
+    },
+  })
+
+  const mConvertAdjustToSale = useMutation({
+    mutationFn: () => {
+      if (!adjustSaleRow?.id) throw new Error('Adjustment is missing')
+      const unitPrice = Number(adjustSalePrice || 0)
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0) throw new Error('Selling price must be greater than zero')
+      return convertManualStockAdjustmentToSale(Number(adjustSaleRow.id), {
+        sale_date: adjustSaleDate,
+        unit_price: unitPrice,
+        customer_id: adjustSaleCustomer?.id ? Number(adjustSaleCustomer.id) : undefined,
+        payment_mode: adjustSaleMode,
+        payment_cash: Number(adjustSaleCash || 0),
+        payment_online: Number(adjustSaleOnline || 0),
+        notes: adjustSaleNotes.trim() || undefined,
+      })
+    },
+    onSuccess: (result) => {
+      setAdjustSaleRow(null)
+      setEditAdjustRow(null)
+      setSelectedMovementId(null)
+      refreshLedgerAfterBillChange()
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['bills'] })
+      queryClient.invalidateQueries({ queryKey: ['sales-book-bills'] })
+      queryClient.invalidateQueries({ queryKey: ['sales-book-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
+      queryClient.invalidateQueries({ queryKey: ['rpt-sales'] })
+      queryClient.invalidateQueries({ queryKey: ['dash-credit-pending-total'] })
+      queryClient.invalidateQueries({ queryKey: ['voucher-day-book'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-day'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-all-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook-all-entries'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-day'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-payments-day'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-all-payments'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook-all-entries'] })
+      toast.push(`Saved as sale bill #${result.bill_id}`, 'success')
+    },
+    onError: (err: any) => {
+      const message = err?.response?.data?.detail || err?.message || 'Adjustment could not be saved as a sale'
+      toast.push(String(message), 'error')
+    },
+  })
+
   const mClubOpening = useMutation({
     mutationFn: () => {
       if (!clubSourceBatch || !clubTargetBatchId) throw new Error('Select the OP batch to keep')
@@ -1111,8 +1208,23 @@ export default function StockCardPage() {
 
     return (
       <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: 'hidden' }}>
-        <Box sx={{ overflowX: 'auto' }}>
-          <table className="table">
+        <Box
+          sx={{
+            width: '100%',
+            minWidth: 0,
+            overflowX: 'hidden',
+            '& .stock-ledger-grid': { tableLayout: 'fixed' },
+            '& .stock-ledger-grid th:nth-of-type(1), & .stock-ledger-grid td:nth-of-type(1)': { width: '13%' },
+            '& .stock-ledger-grid th:nth-of-type(2), & .stock-ledger-grid td:nth-of-type(2)': { width: '15%' },
+            '& .stock-ledger-grid th:nth-of-type(3), & .stock-ledger-grid td:nth-of-type(3)': { width: '41%' },
+            '& .stock-ledger-grid th:nth-of-type(4), & .stock-ledger-grid td:nth-of-type(4)': { width: '8%' },
+            '& .stock-ledger-grid th:nth-of-type(5), & .stock-ledger-grid td:nth-of-type(5)': { width: '8%' },
+            '& .stock-ledger-grid th:nth-of-type(6), & .stock-ledger-grid td:nth-of-type(6)': { width: '8%' },
+            '& .stock-ledger-grid th:nth-of-type(7), & .stock-ledger-grid td:nth-of-type(7)': { width: '7%', overflow: 'visible', textAlign: 'center' },
+            '& .stock-ledger-grid td': { verticalAlign: 'middle' },
+          }}
+        >
+          <table className="table stock-ledger-grid">
             <thead>
               <tr>
                 <th>Date</th>
@@ -1245,24 +1357,43 @@ export default function StockCardPage() {
                             </span>
                           </Tooltip>
                         ) : removableManualAdjust ? (
-                          <Tooltip title="Delete this manual stock adjustment" arrow>
-                            <span>
-                              <IconButton
-                                size="small"
-                                color="error"
-                                disabled={mDeleteManualAdjust.isPending}
-                                onClick={(event) => {
-                                  event.stopPropagation()
-                                  const ok = window.confirm(
-                                    `Delete manual stock adjustment ${formatSigned(delta)} from batch #${row.item_id}? Stock will be reversed by ${formatSigned(-delta)}.`
-                                  )
-                                  if (ok) mDeleteManualAdjust.mutate(Number(row.id))
-                                }}
-                              >
-                                <DeleteIcon fontSize="small" />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
+                          <Stack direction="row" gap={0.25} flexWrap="nowrap">
+                            <Tooltip title="Edit this manual stock adjustment" arrow>
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  color="primary"
+                                  disabled={mEditManualAdjust.isPending || mDeleteManualAdjust.isPending}
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    setEditAdjustRow(row)
+                                    setEditAdjustDelta(String(delta))
+                                    setEditAdjustNote(String(row.note || ''))
+                                  }}
+                                >
+                                  <EditIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                            <Tooltip title="Delete this manual stock adjustment" arrow>
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  color="error"
+                                  disabled={mDeleteManualAdjust.isPending || mEditManualAdjust.isPending}
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    const ok = window.confirm(
+                                      `Delete manual stock adjustment ${formatSigned(delta)} from batch #${row.item_id}? Stock will be reversed by ${formatSigned(-delta)}.`
+                                    )
+                                    if (ok) mDeleteManualAdjust.mutate(Number(row.id))
+                                  }}
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                          </Stack>
                         ) : null}
                       </td>
                     </tr>
@@ -1900,6 +2031,118 @@ export default function StockCardPage() {
           disabled={mCreateProductCategory.isPending}
         >
           Save Category
+        </Button>
+      </DialogActions>
+    </Dialog>
+
+    <Dialog open={Boolean(editAdjustRow)} onClose={() => !mEditManualAdjust.isPending && setEditAdjustRow(null)} fullWidth maxWidth="xs">
+      <DialogTitle>Edit Stock Adjustment</DialogTitle>
+      <DialogContent dividers>
+        <Stack gap={2} mt={1}>
+          <Typography variant="body2" color="text.secondary">
+            Batch #{editAdjustRow?.item_id} · {name}
+          </Typography>
+          <TextField
+            label="Change by"
+            type="number"
+            value={editAdjustDelta}
+            onChange={(event) => setEditAdjustDelta(event.target.value)}
+            inputProps={{ step: 1 }}
+            helperText="Use a positive or negative whole number. Use Delete to remove the adjustment."
+            autoFocus
+            fullWidth
+          />
+          <TextField
+            label="Reason / note"
+            value={editAdjustNote}
+            onChange={(event) => setEditAdjustNote(event.target.value)}
+            multiline
+            minRows={2}
+            fullWidth
+          />
+          <Alert severity="info">
+            If this stock movement was actually a sale, delete the adjustment and create the sale in Billing so revenue, customer/payment, and stock entries post together.
+          </Alert>
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        {Number(editAdjustRow?.delta || 0) < 0 ? (
+          <Button
+            color="secondary"
+            onClick={() => {
+              setAdjustSaleRow(editAdjustRow)
+              setAdjustSaleDate(String(editAdjustRow?.ts || '').slice(0, 10) || new Date().toISOString().slice(0, 10))
+              setAdjustSalePrice(String(editAdjustRow?.mrp ?? currentBatch?.mrp ?? 0))
+              setAdjustSaleCustomer(null)
+              setAdjustSaleCustomerQ('')
+              setAdjustSaleMode('cash')
+              setAdjustSaleCash('0')
+              setAdjustSaleOnline('0')
+              setAdjustSaleNotes(String(editAdjustRow?.note || ''))
+            }}
+            disabled={mEditManualAdjust.isPending}
+          >
+            Save as Sale
+          </Button>
+        ) : null}
+        <Button onClick={() => setEditAdjustRow(null)} disabled={mEditManualAdjust.isPending}>Cancel</Button>
+        <Button variant="contained" onClick={() => mEditManualAdjust.mutate()} disabled={mEditManualAdjust.isPending}>
+          {mEditManualAdjust.isPending ? 'Saving...' : 'Save Adjustment'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+
+    <Dialog open={Boolean(adjustSaleRow)} onClose={() => !mConvertAdjustToSale.isPending && setAdjustSaleRow(null)} fullWidth maxWidth="sm">
+      <DialogTitle>Save Stock Adjustment as Sale</DialogTitle>
+      <DialogContent dividers>
+        <Stack gap={2} mt={1}>
+          <Alert severity="info">
+            This converts the existing stock-out into a real sales bill. Stock will not be deducted again.
+          </Alert>
+          <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+            <TextField label="Sale Date" type="date" value={adjustSaleDate} onChange={(event) => setAdjustSaleDate(event.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+            <TextField label="Quantity" value={String(adjustSaleQuantity)} disabled fullWidth />
+            <TextField label="Selling Price" type="number" value={adjustSalePrice} onChange={(event) => setAdjustSalePrice(event.target.value)} inputProps={{ min: 0, step: '0.01' }} fullWidth />
+          </Stack>
+          <Autocomplete
+            options={adjustSaleCustomersQ.data || []}
+            value={adjustSaleCustomer}
+            inputValue={adjustSaleCustomerQ}
+            onInputChange={(_event, value) => setAdjustSaleCustomerQ(value)}
+            onChange={(_event, value) => setAdjustSaleCustomer(value)}
+            getOptionLabel={(option) => [option.name, option.phone].filter(Boolean).join(' · ')}
+            isOptionEqualToValue={(a, b) => Number(a.id) === Number(b.id)}
+            renderInput={(params) => <TextField {...params} label="Customer (optional)" helperText="Leave blank for an anonymous sale" />}
+          />
+          <TextField select label="Payment Mode" value={adjustSaleMode} onChange={(event) => setAdjustSaleMode(event.target.value as typeof adjustSaleMode)} fullWidth>
+            <MenuItem value="cash">Cash</MenuItem>
+            <MenuItem value="online">Online</MenuItem>
+            <MenuItem value="split">Split / Part Credit</MenuItem>
+            <MenuItem value="credit">Credit</MenuItem>
+          </TextField>
+          {adjustSaleMode === 'split' ? (
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+              <TextField label="Cash" type="number" value={adjustSaleCash} onChange={(event) => setAdjustSaleCash(event.target.value)} inputProps={{ min: 0, step: '0.01' }} fullWidth />
+              <TextField label="Online" type="number" value={adjustSaleOnline} onChange={(event) => setAdjustSaleOnline(event.target.value)} inputProps={{ min: 0, step: '0.01' }} fullWidth />
+              <TextField label="Credit" value={money(Math.max(0, adjustSaleTotal - Number(adjustSaleCash || 0) - Number(adjustSaleOnline || 0)))} disabled fullWidth />
+            </Stack>
+          ) : null}
+          <TextField label="Notes" value={adjustSaleNotes} onChange={(event) => setAdjustSaleNotes(event.target.value)} multiline minRows={2} fullWidth />
+          <Paper variant="outlined" sx={{ p: 1.5, bgcolor: 'rgba(20,92,59,0.05)' }}>
+            <Stack direction="row" justifyContent="space-between">
+              <Typography fontWeight={800}>Sale Total</Typography>
+              <Typography fontWeight={900}>₹{money(adjustSaleTotal)}</Typography>
+            </Stack>
+          </Paper>
+          {adjustSaleMode === 'credit' && !adjustSaleCustomer ? (
+            <Alert severity="warning">Anonymous credit will post to Sales Receivable Control and will not appear under an individual customer.</Alert>
+          ) : null}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setAdjustSaleRow(null)} disabled={mConvertAdjustToSale.isPending}>Cancel</Button>
+        <Button variant="contained" onClick={() => mConvertAdjustToSale.mutate()} disabled={mConvertAdjustToSale.isPending || !adjustSaleDate || Number(adjustSalePrice || 0) <= 0}>
+          {mConvertAdjustToSale.isPending ? 'Posting...' : 'Post Sale'}
         </Button>
       </DialogActions>
     </Dialog>

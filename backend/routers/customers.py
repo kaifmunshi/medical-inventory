@@ -1,4 +1,5 @@
 from datetime import datetime
+from math import isfinite
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
@@ -458,6 +459,14 @@ def create_customer(payload: CustomerCreate) -> CustomerOut:
             updated_at=now,
         )
         session.add(row)
+        session.flush()
+        party = _ensure_customer_party(session, row)
+        opening_balance = _round2(float(payload.opening_balance or 0.0))
+        if not isfinite(opening_balance):
+            raise HTTPException(status_code=400, detail="Opening balance must be a valid amount")
+        party.opening_balance = abs(opening_balance)
+        party.opening_balance_type = _balance_type(opening_balance)
+        session.add(party)
         session.commit()
         session.refresh(row)
         return _customer_account_balance_out(session, row)
@@ -520,6 +529,16 @@ def update_customer(customer_id: int, payload: CustomerUpdate) -> CustomerOut:
         if "address_line" in data:
             addr = data.get("address_line")
             row.address_line = str(addr).strip() if addr is not None and str(addr).strip() != "" else None
+
+        if "opening_balance" in data:
+            opening_balance = _round2(float(data.get("opening_balance") or 0.0))
+            if not isfinite(opening_balance):
+                raise HTTPException(status_code=400, detail="Opening balance must be a valid amount")
+            party = _ensure_customer_party(session, row)
+            party.opening_balance = abs(opening_balance)
+            party.opening_balance_type = _balance_type(opening_balance)
+            party.updated_at = datetime.now().isoformat(timespec="seconds")
+            session.add(party)
 
         row.updated_at = datetime.now().isoformat(timespec="seconds")
         session.add(row)
@@ -776,6 +795,14 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
 
         moved_ledgers = 0
         if remove_party and remove_party.id:
+            merged_opening = _round2(
+                _signed_opening_balance(keep_party) + _signed_opening_balance(remove_party)
+            )
+            keep_party.opening_balance = abs(merged_opening)
+            keep_party.opening_balance_type = _balance_type(merged_opening)
+            keep_party.updated_at = now
+            session.add(keep_party)
+
             ledgers = session.exec(select(Ledger).where(Ledger.party_id == int(remove_party.id))).all()
             for ledger in ledgers:
                 ledger.party_id = int(keep_party.id or 0)

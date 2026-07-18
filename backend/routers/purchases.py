@@ -56,7 +56,7 @@ def raw_purchase_gst_amount(subtotal: float, discount: float, items: List[Dict[s
 
 def purchase_total_amount(subtotal: float, discount: float, gst: float, rounding_adjustment: float) -> float:
     rounding_adjustment = round2(rounding_adjustment)
-    total = round2(round2(subtotal) + round2(gst) + rounding_adjustment)
+    total = round2(round2(subtotal) - round2(discount) + round2(gst) + rounding_adjustment)
     if total < 0:
         raise HTTPException(status_code=400, detail="Purchase total cannot be negative")
     return total

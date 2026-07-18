@@ -649,7 +649,12 @@ export default function PurchasesPage() {
   const freeStockTotalQty = freeStockItems.reduce((sum, item) => sum + Number(item.free_qty || 0), 0)
 
   const total = useMemo(
-    () => round2(round2(subtotal) + round2(invoiceGst(items, Number(discountAmount || 0))) + round2(Number(roundingAdjustment || 0))),
+    () => round2(
+      round2(subtotal)
+      - round2(Number(discountAmount || 0))
+      + round2(invoiceGst(items, Number(discountAmount || 0)))
+      + round2(Number(roundingAdjustment || 0)),
+    ),
     [subtotal, discountAmount, items, roundingAdjustment],
   )
   const gstTotal = useMemo(() => invoiceGst(items, Number(discountAmount || 0)), [discountAmount, items])
@@ -676,7 +681,7 @@ export default function PurchasesPage() {
   const editDiscountValue = Number(editDiscountAmount || 0)
   const editGstAmount = invoiceGst(selectedPurchase?.items || [], editDiscountValue)
   const editRoundingValue = Number(editRoundingAdjustment || 0)
-  const editBillAmount = round2(editSubtotal + editGstAmount + editRoundingValue)
+  const editBillAmount = round2(editSubtotal - editDiscountValue + editGstAmount + editRoundingValue)
   const editPaidAmount = Number(selectedPurchase?.paid_amount || 0)
   const editWriteoffAmount = Number(selectedPurchase?.writeoff_amount || 0)
   const editCoveredAmount = round2(editPaidAmount + editWriteoffAmount)
@@ -1527,10 +1532,10 @@ export default function PurchasesPage() {
                   <TextField size="small" label="Rate" type="number" value={batch.cost_price} onChange={(e) => patchItem(batch.key, { cost_price: Number(e.target.value) })} fullWidth />
                 </Grid>
                 <Grid item xs={6} md={1.2}>
-                  <TextField size="small" label="GST %" type="number" value={batch.gst_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { gst_percent: Number(e.target.value) })} fullWidth />
+                  <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchItem(batch.key, { discount_amount: Number(e.target.value) })} fullWidth />
                 </Grid>
                 <Grid item xs={6} md={1.2}>
-                  <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchItem(batch.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                  <TextField size="small" label="GST %" type="number" value={batch.gst_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { gst_percent: Number(e.target.value) })} fullWidth />
                 </Grid>
                 <Grid item xs={6} md={1.2}>
                   <TextField size="small" label="Round Off (+/-)" type="number" value={batch.rounding_adjustment ?? 0} onChange={(e) => patchItem(batch.key, { rounding_adjustment: e.target.value })} fullWidth />

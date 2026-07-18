@@ -185,6 +185,8 @@ export interface PurchaseItemPayload {
   cost_price: number
   mrp: number
   gst_percent?: number
+  discount_percent?: number
+  additional_discount_percent?: number
   discount_amount?: number
   rounding_adjustment?: number
   loose_sale_enabled?: boolean
@@ -223,6 +225,8 @@ export interface PurchaseItem {
   effective_cost_price: number
   mrp: number
   gst_percent: number
+  discount_percent: number
+  additional_discount_percent: number
   discount_amount: number
   rounding_adjustment: number
   line_total: number

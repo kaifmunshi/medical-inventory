@@ -80,6 +80,8 @@ function makeEmptyItem(): DraftItem {
     cost_price: 0,
     mrp: 0,
     gst_percent: 0,
+    discount_percent: 0,
+    additional_discount_percent: 0,
     discount_amount: 0,
     rounding_adjustment: 0,
     loose_sale_enabled: false,
@@ -114,7 +116,9 @@ function cloneItemForNewExpiry(item: DraftItem, copyPrices: boolean): DraftItem 
     cost_price: copyPrices ? Number(item.cost_price || 0) : 0,
     mrp: copyPrices ? Number(item.mrp || 0) : 0,
     gst_percent: copyPrices ? Number(item.gst_percent || 0) : 0,
-    discount_amount: copyPrices ? Number(item.discount_amount || 0) : 0,
+    discount_percent: copyPrices ? Number(item.discount_percent || 0) : 0,
+    additional_discount_percent: copyPrices ? Number(item.additional_discount_percent || 0) : 0,
+    discount_amount: 0,
     rounding_adjustment: copyPrices ? safeNumber(item.rounding_adjustment) : 0,
   }
 }
@@ -148,16 +152,19 @@ function lineGrossTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price'>) {
   return Number(item.sealed_qty || 0) * Number(item.cost_price || 0)
 }
 
-function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
-  return round2(lineGrossTotal(item) - Number(item.discount_amount || 0) + safeNumber(item.rounding_adjustment))
+function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'rounding_adjustment'>) {
+  const gross = lineGrossTotal(item)
+  const afterDiscount = gross * (1 - Math.min(100, Math.max(0, Number(item.discount_percent || 0))) / 100)
+  const afterAdditionalDiscount = afterDiscount * (1 - Math.min(100, Math.max(0, Number(item.additional_discount_percent || 0))) / 100)
+  return round2(afterAdditionalDiscount + safeNumber(item.rounding_adjustment))
 }
 
-function lineGstAmount(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment' | 'gst_percent'>) {
+function lineGstAmount(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'rounding_adjustment' | 'gst_percent'>) {
   return round2(Math.max(0, lineBaseTotal(item)) * Number(item.gst_percent || 0) / 100)
 }
 
 function invoiceGst(
-  items: Array<Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment' | 'gst_percent'>>,
+  items: Array<Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'rounding_adjustment' | 'gst_percent'>>,
   discountAmount: number,
 ) {
   const subtotal = round2(items.reduce((sum, item) => round2(sum + lineBaseTotal(item)), 0))
@@ -211,7 +218,8 @@ function hasDraftItemContent(item: DraftItem) {
     item.existing_stock_movement_id ||
     Number(item.mrp || 0) ||
     Number(item.cost_price || 0) ||
-    Number(item.discount_amount || 0) ||
+    Number(item.discount_percent || 0) ||
+    Number(item.additional_discount_percent || 0) ||
     safeNumber(item.rounding_adjustment),
   )
 }
@@ -1056,7 +1064,9 @@ export default function PurchasesPage() {
         cost_price: item.cost_price,
         mrp: item.mrp,
         gst_percent: item.gst_percent,
-        discount_amount: item.discount_amount,
+        discount_percent: item.discount_percent,
+        additional_discount_percent: item.additional_discount_percent,
+        discount_amount: 0,
         rounding_adjustment: item.rounding_adjustment || 0,
         loose_sale_enabled: false,
         parent_unit_name: '',
@@ -1110,6 +1120,8 @@ export default function PurchasesPage() {
       free_qty: Number(rest.free_qty || 0),
       cost_price: 0,
       gst_percent: 0,
+      discount_percent: 0,
+      additional_discount_percent: 0,
       discount_amount: 0,
       rounding_adjustment: 0,
     }))
@@ -1532,7 +1544,10 @@ export default function PurchasesPage() {
                   <TextField size="small" label="Rate" type="number" value={batch.cost_price} onChange={(e) => patchItem(batch.key, { cost_price: Number(e.target.value) })} fullWidth />
                 </Grid>
                 <Grid item xs={6} md={1.2}>
-                  <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchItem(batch.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                  <TextField size="small" label="Discount %" type="number" value={batch.discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { discount_percent: Number(e.target.value) })} fullWidth />
+                </Grid>
+                <Grid item xs={6} md={1.2}>
+                  <TextField size="small" label="Addl. Discount %" type="number" value={batch.additional_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { additional_discount_percent: Number(e.target.value) })} fullWidth />
                 </Grid>
                 <Grid item xs={6} md={1.2}>
                   <TextField size="small" label="GST %" type="number" value={batch.gst_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { gst_percent: Number(e.target.value) })} fullWidth />
@@ -1922,7 +1937,14 @@ export default function PurchasesPage() {
   }
 
   return (
-    <Stack gap={2}>
+    <Stack
+      gap={2}
+      onFocusCapture={(event) => {
+        const input = event.target as HTMLInputElement
+        if (input.type !== 'number' || input.value.trim() === '' || Number(input.value) !== 0) return
+        window.requestAnimationFrame(() => input.select())
+      }}
+    >
       {!addOpen && !freeStockOpen && !editItemsOpen ? (
       <>
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
@@ -2519,8 +2541,9 @@ export default function PurchasesPage() {
                       <th>Rate</th>
                       <th>Avg Rate</th>
                       <th>MRP</th>
+                      <th>Discount %</th>
+                      <th>Addl. Discount %</th>
                       <th>GST %</th>
-                      <th>Discount (Rs)</th>
                       <th>Round Off (+/-)</th>
                       <th>Item Total</th>
                     </tr>
@@ -2542,8 +2565,9 @@ export default function PurchasesPage() {
                         <td>{money(item.cost_price)}</td>
                         <td>{money(item.effective_cost_price)}</td>
                         <td>{money(item.mrp)}</td>
+                        <td>{money(item.discount_percent)}</td>
+                        <td>{money(item.additional_discount_percent)}</td>
                         <td>{money(item.gst_percent)}</td>
-                        <td>{money(item.discount_amount)}</td>
                         <td>{money(item.rounding_adjustment || 0)}</td>
                         <td>{money(item.line_total)}</td>
                       </tr>

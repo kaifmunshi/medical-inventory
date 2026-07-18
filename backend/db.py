@@ -2546,6 +2546,8 @@ def migrate_db():
                 effective_cost_price REAL NOT NULL DEFAULT 0,
                 mrp REAL NOT NULL DEFAULT 0,
                 gst_percent REAL NOT NULL DEFAULT 0,
+                discount_percent REAL NOT NULL DEFAULT 0,
+                additional_discount_percent REAL NOT NULL DEFAULT 0,
                 discount_amount REAL NOT NULL DEFAULT 0,
                 rounding_adjustment REAL NOT NULL DEFAULT 0,
                 line_total REAL NOT NULL DEFAULT 0
@@ -2563,6 +2565,21 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchaseitem ADD COLUMN stock_source TEXT NOT NULL DEFAULT 'CREATED'"))
         if "rounding_adjustment" not in purchase_item_col_names:
             session.exec(text("ALTER TABLE purchaseitem ADD COLUMN rounding_adjustment REAL NOT NULL DEFAULT 0"))
+        if "discount_percent" not in purchase_item_col_names:
+            session.exec(text("ALTER TABLE purchaseitem ADD COLUMN discount_percent REAL NOT NULL DEFAULT 0"))
+            session.exec(text("""
+                UPDATE purchaseitem
+                SET discount_percent = ROUND(
+                    CASE
+                        WHEN sealed_qty * cost_price > 0
+                        THEN MIN(100, MAX(0, discount_amount * 100.0 / (sealed_qty * cost_price)))
+                        ELSE 0
+                    END,
+                    4
+                )
+            """))
+        if "additional_discount_percent" not in purchase_item_col_names:
+            session.exec(text("ALTER TABLE purchaseitem ADD COLUMN additional_discount_percent REAL NOT NULL DEFAULT 0"))
 
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchasereturn (

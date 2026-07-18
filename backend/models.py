@@ -789,6 +789,8 @@ class PurchaseItem(SQLModel, table=True):
     effective_cost_price: float = 0.0
     mrp: float = 0.0
     gst_percent: float = 0.0
+    discount_percent: float = 0.0
+    additional_discount_percent: float = 0.0
     discount_amount: float = 0.0
     rounding_adjustment: float = 0.0
     line_total: float = 0.0
@@ -1054,6 +1056,8 @@ class PurchaseItemIn(SQLModel):
     cost_price: float
     mrp: float
     gst_percent: float = 0.0
+    discount_percent: float = 0.0
+    additional_discount_percent: float = 0.0
     discount_amount: float = 0.0
     rounding_adjustment: float = 0.0
     loose_sale_enabled: bool = False
@@ -1140,6 +1144,8 @@ class PurchaseItemOut(SQLModel):
     effective_cost_price: float
     mrp: float
     gst_percent: float
+    discount_percent: float = 0.0
+    additional_discount_percent: float = 0.0
     discount_amount: float
     rounding_adjustment: float = 0.0
     line_total: float

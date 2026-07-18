@@ -62,6 +62,22 @@ def purchase_total_amount(subtotal: float, discount: float, gst: float, rounding
     return total
 
 
+def purchase_line_discount(raw: PurchaseItemIn, quantity: int) -> tuple[float, float, float]:
+    first_percent = round2(raw.discount_percent)
+    additional_percent = round2(raw.additional_discount_percent)
+    if not 0 <= first_percent <= 100 or not 0 <= additional_percent <= 100:
+        raise HTTPException(status_code=400, detail="Discount percentages must be between 0 and 100")
+    gross = round2(int(quantity or 0) * float(raw.cost_price or 0))
+    if first_percent == 0 and additional_percent == 0 and round2(raw.discount_amount) != 0:
+        # Backward compatibility for older clients that submitted a rupee amount.
+        amount = min(gross, max(0.0, round2(raw.discount_amount)))
+        derived_percent = round2(amount * 100.0 / gross) if gross > 0 else 0.0
+        return amount, derived_percent, 0.0
+    first_amount = round2(gross * first_percent / 100.0)
+    additional_amount = round2(max(0.0, gross - first_amount) * additional_percent / 100.0)
+    return round2(first_amount + additional_amount), first_percent, additional_percent
+
+
 def purchase_snapshot(session, purchase: Purchase) -> dict:
     items = get_purchase_items(session, int(purchase.id))
     return {
@@ -88,6 +104,8 @@ def purchase_snapshot(session, purchase: Purchase) -> dict:
                 "sealed_qty": int(item.sealed_qty),
                 "free_qty": int(item.free_qty),
                 "cost_price": round2(item.cost_price),
+                "discount_percent": round2(item.discount_percent),
+                "additional_discount_percent": round2(item.additional_discount_percent),
                 "gst_percent": round2(item.gst_percent),
                 "discount_amount": round2(item.discount_amount),
                 "rounding_adjustment": round2(item.rounding_adjustment),
@@ -816,7 +834,8 @@ def purchase_item_matches_raw(raw: PurchaseItemIn, item: PurchaseItem) -> bool:
         and round2(raw.cost_price) == round2(item.cost_price)
         and round2(raw.mrp) == round2(item.mrp)
         and round2(raw.gst_percent) == round2(item.gst_percent)
-        and round2(raw.discount_amount) == round2(item.discount_amount)
+        and round2(raw.discount_percent) == round2(item.discount_percent)
+        and round2(raw.additional_discount_percent) == round2(item.additional_discount_percent)
         and round2(raw.rounding_adjustment) == round2(item.rounding_adjustment)
     )
 
@@ -886,7 +905,8 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
             )
 
         line_rounding = round2(raw.rounding_adjustment)
-        line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
+        line_discount, discount_percent, additional_discount_percent = purchase_line_discount(raw, qty)
+        line_total = round2((qty * float(raw.cost_price or 0)) - line_discount + line_rounding)
         effective_cost = round2(line_total / new_qty) if new_qty > 0 else round2(raw.cost_price)
         subtotal_amount = round2(subtotal_amount + line_total)
 
@@ -942,7 +962,9 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         item.effective_cost_price = effective_cost
         item.mrp = round2(raw.mrp)
         item.gst_percent = round2(raw.gst_percent)
-        item.discount_amount = round2(raw.discount_amount)
+        item.discount_percent = discount_percent
+        item.additional_discount_percent = additional_discount_percent
+        item.discount_amount = line_discount
         item.rounding_adjustment = line_rounding
         item.line_total = line_total
         session.add(item)
@@ -1155,7 +1177,8 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
 
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
             line_rounding = round2(raw.rounding_adjustment)
-            line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
+            line_discount, discount_percent, additional_discount_percent = purchase_line_discount(raw, qty)
+            line_total = round2((qty * float(raw.cost_price or 0)) - line_discount + line_rounding)
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
             opening_placeholder_movement = None
             convert_opening_to_purchase = False
@@ -1185,7 +1208,9 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     "effective_cost_price": effective_cost,
                     "mrp": round2(raw.mrp),
                     "gst_percent": round2(raw.gst_percent),
-                    "discount_amount": round2(raw.discount_amount),
+                    "discount_percent": discount_percent,
+                    "additional_discount_percent": additional_discount_percent,
+                    "discount_amount": line_discount,
                     "rounding_adjustment": line_rounding,
                     "line_total": line_total,
                 }
@@ -1379,6 +1404,8 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 effective_cost_price=entry["effective_cost_price"],
                 mrp=entry["mrp"],
                 gst_percent=entry["gst_percent"],
+                discount_percent=entry["discount_percent"],
+                additional_discount_percent=entry["additional_discount_percent"],
                 discount_amount=entry["discount_amount"],
                 rounding_adjustment=entry["rounding_adjustment"],
                 line_total=entry["line_total"],
@@ -1455,7 +1482,12 @@ def create_free_stock(payload: FreeStockCreate) -> PurchaseOut:
             raise HTTPException(status_code=400, detail="Free stock qty must be greater than 0")
         if round2(raw.cost_price) != 0:
             raise HTTPException(status_code=400, detail="Free stock rate must be 0")
-        if round2(raw.discount_amount) != 0 or round2(raw.rounding_adjustment) != 0:
+        if (
+            round2(raw.discount_amount) != 0
+            or round2(raw.discount_percent) != 0
+            or round2(raw.additional_discount_percent) != 0
+            or round2(raw.rounding_adjustment) != 0
+        ):
             raise HTTPException(status_code=400, detail="Free stock cannot have discount or round off")
         if raw.existing_inventory_item_id is not None:
             raise HTTPException(status_code=400, detail="Free stock must create a new stock batch")
@@ -2576,7 +2608,8 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                 )
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
             line_rounding = round2(raw.rounding_adjustment)
-            line_total = round2((qty * float(raw.cost_price or 0)) - float(raw.discount_amount or 0) + line_rounding)
+            line_discount, discount_percent, additional_discount_percent = purchase_line_discount(raw, qty)
+            line_total = round2((qty * float(raw.cost_price or 0)) - line_discount + line_rounding)
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
             opening_placeholder_movement = None
             convert_opening_to_purchase = False
@@ -2606,7 +2639,9 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     "effective_cost_price": effective_cost,
                     "mrp": round2(raw.mrp),
                     "gst_percent": round2(raw.gst_percent),
-                    "discount_amount": round2(raw.discount_amount),
+                    "discount_percent": discount_percent,
+                    "additional_discount_percent": additional_discount_percent,
+                    "discount_amount": line_discount,
                     "rounding_adjustment": line_rounding,
                     "line_total": line_total,
                 }
@@ -2758,6 +2793,8 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     effective_cost_price=entry["effective_cost_price"],
                     mrp=entry["mrp"],
                     gst_percent=entry["gst_percent"],
+                    discount_percent=entry["discount_percent"],
+                    additional_discount_percent=entry["additional_discount_percent"],
                     discount_amount=entry["discount_amount"],
                     rounding_adjustment=entry["rounding_adjustment"],
                     line_total=entry["line_total"],

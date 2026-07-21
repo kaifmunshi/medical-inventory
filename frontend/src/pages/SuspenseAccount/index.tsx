@@ -515,7 +515,7 @@ export default function SuspenseAccountPage() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={saleOpen} onClose={() => !convertSaleM.isPending && setSaleOpen(false)} fullWidth maxWidth="md">
+      <Dialog open={saleOpen} onClose={() => !convertSaleM.isPending && setSaleOpen(false)} fullWidth maxWidth="lg">
         <DialogTitle>Convert Suspense Receipt to Sale</DialogTitle>
         <DialogContent dividers>
           <Stack gap={2} sx={{ pt: 1 }}>
@@ -535,39 +535,60 @@ export default function SuspenseAccountPage() {
             />
             {saleLines.map((line, index) => {
               const categoryItems = datedSaleItems.filter((item) => (item.category_id ? String(item.category_id) : 'uncategorized') === line.categoryId)
-              const products = [...new Map(categoryItems.map((item) => {
+              const productSource = line.categoryId ? categoryItems : datedSaleItems
+              const products = [...new Map(productSource.map((item) => {
                 const key = `${item.product_id || 0}|${item.name}|${item.brand || ''}`
-                return [key, { key, label: `${item.name}${item.brand ? ` · ${item.brand}` : ''}` }]
+                return [key, {
+                  key,
+                  label: `${item.name}${item.brand ? ` · ${item.brand}` : ''}`,
+                  categoryId: item.category_id ? String(item.category_id) : 'uncategorized',
+                  categoryName: item.category_name || 'Uncategorized',
+                }]
               })).values()]
-              const batchOptions = categoryItems.filter((item) => `${item.product_id || 0}|${item.name}|${item.brand || ''}` === line.productKey)
+              const selectedProduct = products.find((product) => product.key === line.productKey) || null
+              const batchOptions = datedSaleItems.filter((item) => `${item.product_id || 0}|${item.name}|${item.brand || ''}` === line.productKey)
               const gross = Number(line.quantity || 0) * Number(line.unitPrice || 0)
               const discount = gross * Number(line.discountPercent || 0) / 100
               return (
-              <Paper key={index} variant="outlined" sx={{ p: 1.25 }}>
-              <Stack direction={{ xs: 'column', md: 'row' }} gap={1} alignItems={{ md: 'center' }} flexWrap="wrap">
+              <Paper key={index} variant="outlined" sx={{ p: 2 }}>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(180px, 0.8fr) minmax(260px, 1.2fr) minmax(300px, 1.4fr)' }, gap: 1.5 }}>
                 <TextField
                   select
-                  label="Category"
+                  label="Category filter"
                   value={line.categoryId}
                   onChange={(event) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, categoryId: event.target.value, productKey: '', item: null } : row))}
-                  sx={{ flex: '1 1 170px' }}
+                  fullWidth
                 >
+                  <MenuItem value=""><em>All categories</em></MenuItem>
                   {saleCategories.map((category) => <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>)}
                 </TextField>
-                <TextField
-                  select
-                  label="Product"
-                  value={line.productKey}
-                  disabled={!line.categoryId}
-                  onChange={(event) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, productKey: event.target.value, item: null } : row))}
-                  sx={{ flex: '1.4 1 220px' }}
-                >
-                  {products.map((product) => <MenuItem key={product.key} value={product.key}>{product.label}</MenuItem>)}
-                </TextField>
                 <Autocomplete
-                  sx={{ flex: '1.6 1 260px', minWidth: 0 }}
+                  options={products}
+                  value={selectedProduct}
+                  onChange={(_event, value) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? {
+                    ...row,
+                    categoryId: value?.categoryId || row.categoryId,
+                    productKey: value?.key || '',
+                    item: null,
+                    unitPrice: '',
+                  } : row))}
+                  getOptionLabel={(option) => option.label}
+                  isOptionEqualToValue={(a, b) => a.key === b.key}
+                  noOptionsText="No matching products"
+                  renderOption={(props, option) => (
+                    <li {...props} key={option.key}>
+                      <Box>
+                        <Typography variant="body2">{option.label}</Typography>
+                        <Typography variant="caption" color="text.secondary">{option.categoryName}</Typography>
+                      </Box>
+                    </li>
+                  )}
+                  renderInput={(params) => <TextField {...params} label="Search product" placeholder="Type a product name or brand" />}
+                />
+                <Autocomplete
                   options={batchOptions}
                   value={line.item}
+                  disabled={!line.productKey}
                   onChange={(_event, value) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? {
                     ...row,
                     item: value,
@@ -577,8 +598,9 @@ export default function SuspenseAccountPage() {
                   isOptionEqualToValue={(a, b) => Number(a.item_id) === Number(b.item_id)}
                   renderInput={(params) => <TextField {...params} label="Batch / dated availability" />}
                 />
+              </Box>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', sm: 'repeat(3, minmax(120px, 1fr)) auto auto' }, gap: 1.5, alignItems: 'center', mt: 1.5 }}>
                 <TextField
-                  sx={{ flex: 0.55 }}
                   label="Qty"
                   type="number"
                   value={line.quantity}
@@ -586,7 +608,6 @@ export default function SuspenseAccountPage() {
                   inputProps={{ min: 1, max: line.item?.available || undefined, step: 1 }}
                 />
                 <TextField
-                  sx={{ flex: 0.7 }}
                   label="Selling Price"
                   type="number"
                   value={line.unitPrice}
@@ -594,25 +615,25 @@ export default function SuspenseAccountPage() {
                   inputProps={{ min: 0, step: 0.01 }}
                 />
                 <TextField
-                  sx={{ flex: '0.6 1 115px' }}
                   label="Discount %"
                   type="number"
                   value={line.discountPercent}
                   onChange={(event) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, discountPercent: event.target.value } : row))}
                   inputProps={{ min: 0, max: 100, step: 0.01 }}
                 />
-                <Typography sx={{ minWidth: 105, textAlign: 'right', fontWeight: 800 }}>
-                  ₹{money(gross - discount)}
-                </Typography>
+                <Box sx={{ minWidth: 120, textAlign: { xs: 'left', sm: 'right' } }}>
+                  <Typography variant="caption" color="text.secondary">Line total</Typography>
+                  <Typography fontWeight={800}>₹{money(gross - discount)}</Typography>
+                </Box>
                 <IconButton
                   color="error"
                   disabled={saleLines.length === 1}
                   onClick={() => setSaleLines((current) => current.filter((_row, rowIndex) => rowIndex !== index))}
+                  aria-label={`Remove product ${index + 1}`}
                 >
                   <DeleteOutlineIcon />
                 </IconButton>
-              </Stack>
-              <Typography variant="caption" color="text.secondary">Gross ₹{money(gross)} · Discount ₹{money(discount)} · Net ₹{money(gross - discount)}</Typography>
+              </Box>
               </Paper>
             )})}
             <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setSaleLines((current) => [...current, { categoryId: '', productKey: '', item: null, quantity: '1', unitPrice: '', discountPercent: '0' }])}>

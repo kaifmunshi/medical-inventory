@@ -37,6 +37,7 @@ import {
 import { createCashbookEntry, updateCashbookEntry, type CashbookType } from '../../services/cashbook'
 import { createBankbookEntry, updateBankbookEntry, type BankbookMode, type BankbookType } from '../../services/bankbook'
 import { fetchCustomers } from '../../services/customers'
+import { fetchAllProducts, fetchCategories } from '../../services/products'
 
 type EntryType = 'DR' | 'CR'
 type EditSource = 'JOURNAL' | 'CASHBOOK' | 'BANKBOOK'
@@ -117,15 +118,31 @@ export default function SuspenseAccountPage() {
     queryFn: () => fetchCustomers({ limit: 1000 }),
     enabled: saleOpen,
   })
+  const saleProductsQ = useQuery({
+    queryKey: ['suspense-sale-products'],
+    queryFn: () => fetchAllProducts({ active_only: true }),
+    enabled: saleOpen,
+    staleTime: 60_000,
+  })
+  const saleProductCategoriesQ = useQuery({
+    queryKey: ['suspense-sale-product-categories'],
+    queryFn: () => fetchCategories({ active_only: true }),
+    enabled: saleOpen,
+    staleTime: 60_000,
+  })
   const datedSaleItems = saleItemsQ.data || []
   const saleCategories = useMemo(() => {
     const values = new Map<string, string>()
+    for (const category of saleProductCategoriesQ.data || []) {
+      values.set(String(category.id), category.name)
+    }
     for (const item of datedSaleItems) {
       const key = item.category_id ? String(item.category_id) : 'uncategorized'
       values.set(key, item.category_name || 'Uncategorized')
     }
+    if ((saleProductsQ.data || []).some((product) => !product.category_id)) values.set('uncategorized', 'Uncategorized')
     return [...values.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
-  }, [datedSaleItems])
+  }, [datedSaleItems, saleProductCategoriesQ.data, saleProductsQ.data])
 
   const suspense = statementQ.data?.ledger
   const counterpartOptions = useMemo(
@@ -534,17 +551,25 @@ export default function SuspenseAccountPage() {
               renderInput={(params) => <TextField {...params} label="Customer (optional)" />}
             />
             {saleLines.map((line, index) => {
-              const categoryItems = datedSaleItems.filter((item) => (item.category_id ? String(item.category_id) : 'uncategorized') === line.categoryId)
-              const productSource = line.categoryId ? categoryItems : datedSaleItems
-              const products = [...new Map(productSource.map((item) => {
+              const categoryNames = new Map(saleCategories.map((category) => [category.id, category.name]))
+              const catalogProducts = (saleProductsQ.data || []).map((product) => ({
+                key: `${product.id || 0}|${product.name}|${product.brand || ''}`,
+                label: `${product.name}${product.brand ? ` · ${product.brand}` : ''}`,
+                categoryId: product.category_id ? String(product.category_id) : 'uncategorized',
+                categoryName: categoryNames.get(product.category_id ? String(product.category_id) : 'uncategorized') || 'Uncategorized',
+              }))
+              const stockedProducts = datedSaleItems.map((item) => {
                 const key = `${item.product_id || 0}|${item.name}|${item.brand || ''}`
-                return [key, {
+                return {
                   key,
                   label: `${item.name}${item.brand ? ` · ${item.brand}` : ''}`,
                   categoryId: item.category_id ? String(item.category_id) : 'uncategorized',
                   categoryName: item.category_name || 'Uncategorized',
-                }]
-              })).values()]
+                }
+              })
+              const allProducts = [...new Map([...catalogProducts, ...stockedProducts].map((product) => [product.key, product])).values()]
+                .sort((a, b) => a.label.localeCompare(b.label))
+              const products = line.categoryId ? allProducts.filter((product) => product.categoryId === line.categoryId) : allProducts
               const selectedProduct = products.find((product) => product.key === line.productKey) || null
               const batchOptions = datedSaleItems.filter((item) => `${item.product_id || 0}|${item.name}|${item.brand || ''}` === line.productKey)
               const gross = Number(line.quantity || 0) * Number(line.unitPrice || 0)
@@ -565,6 +590,7 @@ export default function SuspenseAccountPage() {
                 <Autocomplete
                   options={products}
                   value={selectedProduct}
+                  loading={saleProductsQ.isLoading}
                   onChange={(_event, value) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? {
                     ...row,
                     categoryId: value?.categoryId || row.categoryId,
@@ -583,12 +609,13 @@ export default function SuspenseAccountPage() {
                       </Box>
                     </li>
                   )}
-                  renderInput={(params) => <TextField {...params} label="Search product" placeholder="Type a product name or brand" />}
+                  renderInput={(params) => <TextField {...params} label="Search product" placeholder="Type a product name or brand" helperText="All active products are searchable; batch stock is checked for the bill date." />}
                 />
                 <Autocomplete
                   options={batchOptions}
                   value={line.item}
                   disabled={!line.productKey}
+                  noOptionsText="No stock available for this product on the bill date"
                   onChange={(_event, value) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? {
                     ...row,
                     item: value,

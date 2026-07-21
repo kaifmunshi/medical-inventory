@@ -24,6 +24,7 @@ class Item(SQLModel, table=True):
 # --- UPDATED ---
 class Bill(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    bill_number: Optional[str] = Field(default=None, index=True)
     date_time: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     customer_id: Optional[int] = Field(default=None, index=True)
     party_id: Optional[int] = Field(default=None, index=True)
@@ -301,6 +302,7 @@ class BillItemOut(SQLModel):
 
 class BillOut(SQLModel):
     id: int
+    bill_number: Optional[str] = None
     date_time: str
     customer_id: Optional[int] = None
     party_id: Optional[int] = None
@@ -1283,6 +1285,7 @@ class SupplierLedgerSummary(SQLModel):
 
 class DebtorLedgerRow(SQLModel):
     bill_id: int
+    bill_number: Optional[str] = None
     bill_date: str
     customer_name: str
     total_amount: float
@@ -1320,6 +1323,7 @@ class CustomerReturnLedgerRow(SQLModel):
 
 class OpenBillOut(SQLModel):
     bill_id: int
+    bill_number: Optional[str] = None
     bill_date: str
     total_amount: float
     paid_amount: float

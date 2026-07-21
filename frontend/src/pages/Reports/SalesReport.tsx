@@ -52,6 +52,12 @@ function money(n: number | string | undefined | null) {
   return v.toFixed(2)
 }
 
+function displayDateTime(value: unknown) {
+  const raw = String(value || '').trim()
+  if (!raw) return '—'
+  return raw.replace('T', ' ').replace(/\.\d+(?=Z?$)/, '').replace(/Z$/, '')
+}
+
 function itemKindLabel(it: any) {
   return it?.is_loose_stock ? 'Loose' : 'Pack'
 }
@@ -234,6 +240,7 @@ export default function SalesReport(props: {
       return {
         raw: b,
         id: b.id,
+        billNumber: b.bill_number || String(b.id),
         date: b.date_time || b.created_at || '',
         itemsCount: (b.items || []).length,
         itemsPreview: itemsPreview(b.items || []),
@@ -337,7 +344,7 @@ export default function SalesReport(props: {
 
       // details export
       const header = [
-        'Bill ID',
+        'Bill Number',
         'Date/Time',
         'Items',
         'Subtotal',
@@ -351,7 +358,7 @@ export default function SalesReport(props: {
       ]
 
       const body = detailRows.map((r: any) => [
-        r.id,
+        r.billNumber,
         r.date,
         r.itemsCount,
         r.subtotal,
@@ -440,11 +447,25 @@ export default function SalesReport(props: {
         </Box>
       ) : (
         <>
-          <Box sx={{ overflowX: 'auto' }}>
-            <table className="table">
+          <Box sx={{ width: '100%', minWidth: 0, overflowX: 'hidden' }}>
+            <table className="table reports-sales-table">
+              <colgroup>
+                <col style={{ width: '9%' }} />
+                <col style={{ width: '16%' }} />
+                <col style={{ width: '5%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '6%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '10%' }} />
+                <col style={{ width: '6%' }} />
+              </colgroup>
               <thead>
                 <tr>
-                  <th>Bill ID</th>
+                  <th>Bill Number</th>
                   <th>Date/Time</th>
                   <th>Items</th>
                   <th>Subtotal</th>
@@ -467,11 +488,11 @@ export default function SalesReport(props: {
                     <td>
                       <Tooltip title={r.itemsPreview} arrow placement="top">
                         <Link component="button" onClick={() => openDetail(r)} underline="hover">
-                          {r.id}
+                          {r.billNumber}
                         </Link>
                       </Tooltip>
                     </td>
-                    <td>{r.date}</td>
+                    <td title={displayDateTime(r.date)}>{displayDateTime(r.date)}</td>
                     <td>{r.itemsCount}</td>
                     <td>{r.subtotal}</td>
                     <td>{r.discount}</td>
@@ -546,7 +567,7 @@ export default function SalesReport(props: {
       {/* Bill Detail dialog */}
       <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Bill Details {detail?.id ? `#${detail.id}` : ''}
+          Bill Details {detail?.id ? `#${detail.bill_number || detail.id}` : ''}
           <IconButton onClick={() => setOpen(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -559,7 +580,7 @@ export default function SalesReport(props: {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  ID: <b>{detail.id}</b>
+                  Bill Number: <b>{detail.bill_number || detail.id}</b>
                 </Typography>
                 <Typography variant="subtitle1">
                   Date/Time: <b>{detail.date_time || detail.created_at || '-'}</b>

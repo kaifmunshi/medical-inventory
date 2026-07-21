@@ -534,7 +534,7 @@ export default function SalesBookPage() {
           source: 'Bill',
           id: b.id,
           ts: b.date_time,
-          note: b.customer_name || b.notes || `Bill #${b.id}`,
+          note: b.customer_name || b.notes || `Bill #${b.bill_number || b.id}`,
           amount: Number(b.total_amount || 0),
           direction: 1,
           editable: true,

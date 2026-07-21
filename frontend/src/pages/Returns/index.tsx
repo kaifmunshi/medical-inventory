@@ -531,7 +531,7 @@ export default function Returns() {
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
           <TextField
-            label="Bill ID"
+            label="Bill Number"
             value={query}
             onChange={e => setQuery(e.target.value)}
             fullWidth
@@ -549,7 +549,7 @@ export default function Returns() {
         <Paper sx={{ p: 2 }}>
           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} sx={{ mb: 1 }}>
             <Typography variant="subtitle1">
-              Bill #{bill.id} — {rows.length} items
+              Bill #{bill.bill_number || bill.id} — {rows.length} items
             </Typography>
             <Button
               size="small"
@@ -789,7 +789,7 @@ export default function Returns() {
         open={billPickerOpen}
         onClose={() => setBillPickerOpen(false)}
         onPick={(b: any) => {
-          setQuery(String(b.id))
+          setQuery(String(b.bill_number || b.id))
           setTimeout(() => {
             handleLoadClick()
           }, 0)
@@ -797,7 +797,7 @@ export default function Returns() {
       />
 
       <Dialog open={billViewOpen} onClose={() => setBillViewOpen(false)} fullWidth maxWidth="lg">
-        <DialogTitle>Bill Details {bill?.id ? `#${bill.id}` : ''}</DialogTitle>
+        <DialogTitle>Bill Details {bill?.id ? `#${bill.bill_number || bill.id}` : ''}</DialogTitle>
         <DialogContent dividers>
           {!bill ? (
             <Box p={2} color="text.secondary">No bill loaded.</Box>

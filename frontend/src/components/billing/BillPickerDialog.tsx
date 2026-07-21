@@ -21,13 +21,13 @@ function previousFinancialYear(years: FinancialYear[], activeYear: FinancialYear
 }
 
 const BILL_PICKER_LIMIT = 20
-const BILL_SEARCH_PROMPT = `Type ${PRODUCT_SEARCH_MIN_CHARS} letters, or a bill ID, to search`
+const BILL_SEARCH_PROMPT = `Type ${PRODUCT_SEARCH_MIN_CHARS} letters, or a bill number, to search`
 
 export default function BillPickerDialog({
   open, onClose, onPick
 }:{ open:boolean; onClose:()=>void; onPick:(bill:Bill)=>void }){
 
-  // Server-side search over bill id, notes, item names, and brand.
+  // Server-side search over bill number, internal id, notes, item names, and brand.
   const [q, setQ] = useState('')
   const [from, setFrom] = useState(toYMD(new Date()))
   const [to, setTo] = useState(toYMD(new Date()))
@@ -66,7 +66,7 @@ export default function BillPickerDialog({
       <DialogContent>
         <Stack direction={{xs:'column', md:'row'}} gap={2} sx={{ mb:2 }}>
           <TextField
-            label="Search (bill ID / item / brand / notes)"
+            label="Search (bill number / item / brand / notes)"
             value={q}
             onChange={e=>{
               setOffset(0)
@@ -139,13 +139,13 @@ export default function BillPickerDialog({
           <table className="table">
             <thead>
               <tr>
-                <th>ID</th><th>Date/Time</th><th>Items</th><th>Total</th><th>Mode</th><th></th>
+                <th>Bill Number</th><th>Date/Time</th><th>Items</th><th>Total</th><th>Mode</th><th></th>
               </tr>
             </thead>
             <tbody>
               {rows.map((b)=>(
                 <tr key={b.id}>
-                  <td>{b.id}</td>
+                  <td>{b.bill_number || b.id}</td>
                   <td>{b.date_time}</td>
                   <td>{(b.items || []).length}</td>
                   <td>

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import AddIcon from '@mui/icons-material/Add'
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
 import {
   Autocomplete,
   Box,
@@ -21,17 +22,21 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { useToast } from '../../components/ui/Toaster'
-import type { Ledger, PostedVoucher } from '../../lib/types'
+import type { Customer, Ledger, PostedVoucher } from '../../lib/types'
 import {
   createJournalVoucher,
+  convertSuspenseReceiptToSale,
+  fetchSuspenseStockAvailability,
   fetchSuspenseStatement,
   listLedgers,
   updateJournalVoucher,
   type JournalVoucherPayload,
+  type DatedStock,
   type SuspenseBookEntry,
 } from '../../services/vouchers'
 import { createCashbookEntry, updateCashbookEntry, type CashbookType } from '../../services/cashbook'
 import { createBankbookEntry, updateBankbookEntry, type BankbookMode, type BankbookType } from '../../services/bankbook'
+import { fetchCustomers } from '../../services/customers'
 
 type EntryType = 'DR' | 'CR'
 type EditSource = 'JOURNAL' | 'CASHBOOK' | 'BANKBOOK'
@@ -45,6 +50,10 @@ function ymd(date: Date) {
 
 function money(value: number | string | null | undefined) {
   return Number(value || 0).toFixed(2)
+}
+
+function roundMoney(value: number) {
+  return Number(Number(value || 0).toFixed(2))
 }
 
 function balanceLabel(value: number) {
@@ -82,6 +91,11 @@ export default function SuspenseAccountPage() {
   const [bookEntryType, setBookEntryType] = useState<'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE'>('EXPENSE')
   const [bankMode, setBankMode] = useState<BankbookMode>('UPI')
   const [txnCharges, setTxnCharges] = useState('0')
+  const [saleOpen, setSaleOpen] = useState(false)
+  const [saleCustomer, setSaleCustomer] = useState<Customer | null>(null)
+  const [saleLines, setSaleLines] = useState<Array<{ categoryId: string; productKey: string; item: DatedStock | null; quantity: string; unitPrice: string; discountPercent: string }>>([
+    { categoryId: '', productKey: '', item: null, quantity: '1', unitPrice: '', discountPercent: '0' },
+  ])
 
   const statementQ = useQuery({
     queryKey: ['suspense-statement', fromDate, toDate],
@@ -93,6 +107,25 @@ export default function SuspenseAccountPage() {
     queryFn: () => listLedgers(),
     staleTime: 60_000,
   })
+  const saleItemsQ = useQuery({
+    queryKey: ['suspense-sale-items', entryDate],
+    queryFn: () => fetchSuspenseStockAvailability(entryDate),
+    enabled: saleOpen && Boolean(entryDate),
+  })
+  const saleCustomersQ = useQuery({
+    queryKey: ['suspense-sale-customers'],
+    queryFn: () => fetchCustomers({ limit: 1000 }),
+    enabled: saleOpen,
+  })
+  const datedSaleItems = saleItemsQ.data || []
+  const saleCategories = useMemo(() => {
+    const values = new Map<string, string>()
+    for (const item of datedSaleItems) {
+      const key = item.category_id ? String(item.category_id) : 'uncategorized'
+      values.set(key, item.category_name || 'Uncategorized')
+    }
+    return [...values.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+  }, [datedSaleItems])
 
   const suspense = statementQ.data?.ledger
   const counterpartOptions = useMemo(
@@ -139,8 +172,8 @@ export default function SuspenseAccountPage() {
         reference: `${entry.source_type === 'CASHBOOK' ? 'Cash' : 'Bank'} #${entry.source_id}`,
         particulars: `${entry.source_type === 'CASHBOOK' ? 'Cashbook' : 'Bank Book'} · ${entry.entry_type}${entry.mode ? ` · ${entry.mode}` : ''}`,
         note: entry.note || '',
-        debit: isReceipt ? Number(entry.amount || 0) : 0,
-        credit: isReceipt ? 0 : Number(entry.amount || 0),
+        debit: isReceipt ? 0 : Number(entry.amount || 0),
+        credit: isReceipt ? Number(entry.amount || 0) : 0,
         editable: true,
         voucher: null as PostedVoucher | null,
         bookEntry: entry,
@@ -276,6 +309,49 @@ export default function SuspenseAccountPage() {
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Could not save suspense entry'), 'error'),
   })
 
+  const saleTotal = saleLines.reduce(
+    (sum, line) => roundMoney(sum + roundMoney(Number(line.quantity || 0) * Number(line.unitPrice || 0) * (1 - Number(line.discountPercent || 0) / 100))),
+    0,
+  )
+  const convertSaleM = useMutation({
+    mutationFn: () => {
+      if (!editingId || !['CASHBOOK', 'BANKBOOK'].includes(editSource)) throw new Error('Suspense receipt is missing')
+      if (saleLines.some((line) => !line.item || Number(line.quantity || 0) <= 0 || Number(line.quantity || 0) > Number(line.item?.available || 0) || Number(line.unitPrice || 0) < 0 || Number(line.discountPercent || 0) < 0 || Number(line.discountPercent || 0) > 100)) {
+        throw new Error('Select every product and enter a valid quantity and selling price')
+      }
+      return convertSuspenseReceiptToSale(editSource as 'CASHBOOK' | 'BANKBOOK', editingId, {
+        bill_date: entryDate,
+        customer_id: saleCustomer?.id ? Number(saleCustomer.id) : undefined,
+        notes: narration.trim() || undefined,
+        items: saleLines.map((line) => ({
+          item_id: Number(line.item?.item_id),
+          quantity: Number(line.quantity),
+          unit_price: Number(line.unitPrice),
+          discount_percent: Number(line.discountPercent || 0),
+        })),
+      })
+    },
+    onSuccess: (result) => {
+      toast.push(`Bill #${result.bill_number} created`, 'success')
+      setSaleOpen(false)
+      resetDialog()
+      queryClient.invalidateQueries({ queryKey: ['suspense-statement'] })
+      queryClient.invalidateQueries({ queryKey: ['bills'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['voucher-day-book'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook'] })
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Could not convert suspense receipt'), 'error'),
+  })
+
+  function openSaleConversion() {
+    setSaleLines([{ categoryId: '', productKey: '', item: null, quantity: '1', unitPrice: '', discountPercent: '0' }])
+    setSaleCustomer(null)
+    setDialogOpen(false)
+    setSaleOpen(true)
+  }
+
   return (
     <Stack gap={2}>
       <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} gap={1}>
@@ -406,7 +482,7 @@ export default function SuspenseAccountPage() {
             </Stack>
             {editSource !== 'JOURNAL' ? (
               <Typography variant="caption" color="text.secondary">
-                Receipt means money came in (Debit Suspense). Withdrawal or Expense means money went out (Credit Suspense).
+                Receipt: Cash/Bank Dr, Suspense Cr. Withdrawal or Expense: Suspense Dr, Cash/Bank Cr.
               </Typography>
             ) : null}
             {editSource === 'JOURNAL' ? (
@@ -431,8 +507,133 @@ export default function SuspenseAccountPage() {
           </Stack>
         </DialogContent>
         <DialogActions>
+          {editingId && editSource !== 'JOURNAL' && bookEntryType === 'RECEIPT' ? (
+            <Button color="secondary" onClick={openSaleConversion}>Convert to Sale</Button>
+          ) : null}
           <Button onClick={resetDialog}>Cancel</Button>
           <Button variant="contained" onClick={() => saveM.mutate()} disabled={saveM.isPending}>Save</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={saleOpen} onClose={() => !convertSaleM.isPending && setSaleOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>Convert Suspense Receipt to Sale</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} sx={{ pt: 1 }}>
+            <Paper variant="outlined" sx={{ p: 1.5 }}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
+                <Typography><strong>{editSource === 'CASHBOOK' ? 'Cash' : 'Bank'} receipt:</strong> ₹{money(amount)}</Typography>
+                <Typography><strong>Bill date:</strong> {entryDate}</Typography>
+              </Stack>
+            </Paper>
+            <Autocomplete
+              options={saleCustomersQ.data || []}
+              value={saleCustomer}
+              onChange={(_event, value) => setSaleCustomer(value)}
+              getOptionLabel={(option) => [option.name, option.phone].filter(Boolean).join(' · ')}
+              isOptionEqualToValue={(a, b) => Number(a.id) === Number(b.id)}
+              renderInput={(params) => <TextField {...params} label="Customer (optional)" />}
+            />
+            {saleLines.map((line, index) => {
+              const categoryItems = datedSaleItems.filter((item) => (item.category_id ? String(item.category_id) : 'uncategorized') === line.categoryId)
+              const products = [...new Map(categoryItems.map((item) => {
+                const key = `${item.product_id || 0}|${item.name}|${item.brand || ''}`
+                return [key, { key, label: `${item.name}${item.brand ? ` · ${item.brand}` : ''}` }]
+              })).values()]
+              const batchOptions = categoryItems.filter((item) => `${item.product_id || 0}|${item.name}|${item.brand || ''}` === line.productKey)
+              const gross = Number(line.quantity || 0) * Number(line.unitPrice || 0)
+              const discount = gross * Number(line.discountPercent || 0) / 100
+              return (
+              <Paper key={index} variant="outlined" sx={{ p: 1.25 }}>
+              <Stack direction={{ xs: 'column', md: 'row' }} gap={1} alignItems={{ md: 'center' }} flexWrap="wrap">
+                <TextField
+                  select
+                  label="Category"
+                  value={line.categoryId}
+                  onChange={(event) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, categoryId: event.target.value, productKey: '', item: null } : row))}
+                  sx={{ flex: '1 1 170px' }}
+                >
+                  {saleCategories.map((category) => <MenuItem key={category.id} value={category.id}>{category.name}</MenuItem>)}
+                </TextField>
+                <TextField
+                  select
+                  label="Product"
+                  value={line.productKey}
+                  disabled={!line.categoryId}
+                  onChange={(event) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, productKey: event.target.value, item: null } : row))}
+                  sx={{ flex: '1.4 1 220px' }}
+                >
+                  {products.map((product) => <MenuItem key={product.key} value={product.key}>{product.label}</MenuItem>)}
+                </TextField>
+                <Autocomplete
+                  sx={{ flex: '1.6 1 260px', minWidth: 0 }}
+                  options={batchOptions}
+                  value={line.item}
+                  onChange={(_event, value) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? {
+                    ...row,
+                    item: value,
+                    unitPrice: value ? String(value.mrp || 0) : '',
+                  } : row))}
+                  getOptionLabel={(option) => `Batch #${option.item_id} · Exp ${option.expiry_date || '-'} · MRP ${money(option.mrp)} · Available ${option.available}`}
+                  isOptionEqualToValue={(a, b) => Number(a.item_id) === Number(b.item_id)}
+                  renderInput={(params) => <TextField {...params} label="Batch / dated availability" />}
+                />
+                <TextField
+                  sx={{ flex: 0.55 }}
+                  label="Qty"
+                  type="number"
+                  value={line.quantity}
+                  onChange={(event) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: event.target.value } : row))}
+                  inputProps={{ min: 1, max: line.item?.available || undefined, step: 1 }}
+                />
+                <TextField
+                  sx={{ flex: 0.7 }}
+                  label="Selling Price"
+                  type="number"
+                  value={line.unitPrice}
+                  onChange={(event) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: event.target.value } : row))}
+                  inputProps={{ min: 0, step: 0.01 }}
+                />
+                <TextField
+                  sx={{ flex: '0.6 1 115px' }}
+                  label="Discount %"
+                  type="number"
+                  value={line.discountPercent}
+                  onChange={(event) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, discountPercent: event.target.value } : row))}
+                  inputProps={{ min: 0, max: 100, step: 0.01 }}
+                />
+                <Typography sx={{ minWidth: 105, textAlign: 'right', fontWeight: 800 }}>
+                  ₹{money(gross - discount)}
+                </Typography>
+                <IconButton
+                  color="error"
+                  disabled={saleLines.length === 1}
+                  onClick={() => setSaleLines((current) => current.filter((_row, rowIndex) => rowIndex !== index))}
+                >
+                  <DeleteOutlineIcon />
+                </IconButton>
+              </Stack>
+              <Typography variant="caption" color="text.secondary">Gross ₹{money(gross)} · Discount ₹{money(discount)} · Net ₹{money(gross - discount)}</Typography>
+              </Paper>
+            )})}
+            <Button variant="outlined" startIcon={<AddIcon />} onClick={() => setSaleLines((current) => [...current, { categoryId: '', productKey: '', item: null, quantity: '1', unitPrice: '', discountPercent: '0' }])}>
+              Add Product
+            </Button>
+            <Paper variant="outlined" sx={{ p: 1.5, bgcolor: Math.abs(saleTotal - Number(amount || 0)) < 0.01 ? 'rgba(20,92,59,0.06)' : 'rgba(211,47,47,0.06)' }}>
+              <Stack direction="row" justifyContent="space-between">
+                <Typography fontWeight={800}>Sale Total</Typography>
+                <Typography fontWeight={900}>₹{money(saleTotal)} / Receipt ₹{money(amount)}</Typography>
+              </Stack>
+              {Math.abs(saleTotal - Number(amount || 0)) >= 0.01 ? (
+                <Typography variant="caption" color="error">Product total must equal the suspense receipt exactly.</Typography>
+              ) : null}
+            </Paper>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSaleOpen(false)} disabled={convertSaleM.isPending}>Cancel</Button>
+          <Button variant="contained" onClick={() => convertSaleM.mutate()} disabled={convertSaleM.isPending || Math.abs(saleTotal - Number(amount || 0)) >= 0.01}>
+            {convertSaleM.isPending ? 'Creating Bill…' : 'Create Backdated Bill'}
+          </Button>
         </DialogActions>
       </Dialog>
     </Stack>

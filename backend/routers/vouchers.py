@@ -1,4 +1,5 @@
 from datetime import datetime
+from math import isfinite
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -6,15 +7,18 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlmodel import delete, select
 
-from backend.accounting import ensure_accounting_setup
+from backend.accounting import ensure_accounting_setup, mark_voucher_deleted, sync_bill_vouchers
 from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import (
     Bill,
+    BillItem,
     BillPayment,
     BankbookEntry,
     CashbookEntry,
+    Category,
     ExchangeRecord,
+    Item,
     Ledger,
     LedgerGroup,
     LedgerGroupOut,
@@ -27,6 +31,7 @@ from backend.models import (
     PurchaseReturn,
     ReceiptBillAdjustment,
     Return,
+    StockMovement,
     Voucher,
     VoucherEntry,
     VoucherEntryOut,
@@ -78,12 +83,74 @@ class SuspenseStatementOut(BaseModel):
     book_entries: List[SuspenseBookEntryOut]
 
 
+class SuspenseSaleItemIn(BaseModel):
+    item_id: int
+    quantity: int
+    unit_price: float
+    discount_percent: float = 0.0
+
+
+class SuspenseSaleIn(BaseModel):
+    bill_date: str
+    customer_id: Optional[int] = None
+    notes: Optional[str] = None
+    items: List[SuspenseSaleItemIn]
+
+
+class SuspenseSaleOut(BaseModel):
+    bill_id: int
+    bill_number: str
+    total_amount: float
+
+
+class DatedStockOut(BaseModel):
+    item_id: int
+    product_id: Optional[int] = None
+    category_id: Optional[int] = None
+    category_name: Optional[str] = None
+    name: str
+    brand: Optional[str] = None
+    expiry_date: Optional[str] = None
+    mrp: float
+    available: int
+
+
+@router.get("/suspense-stock-availability", response_model=List[DatedStockOut])
+def suspense_stock_availability(date: str = Query(..., description="YYYY-MM-DD")):
+    normalized = _normalize_ymd(date, default_to_today=False)
+    end_ts = f"{normalized}T23:59:59.999999"
+    with get_session() as session:
+        rows = []
+        for item in session.exec(select(Item).where(Item.is_archived == False).order_by(Item.name, Item.expiry_date, Item.id)).all():  # noqa: E712
+            available = int(session.exec(
+                select(func.coalesce(func.sum(StockMovement.delta), 0)).where(
+                    StockMovement.item_id == int(item.id),
+                    StockMovement.ts <= end_ts,
+                )
+            ).one() or 0)
+            if available <= 0:
+                continue
+            category = session.get(Category, int(item.category_id)) if item.category_id else None
+            rows.append(DatedStockOut(
+                item_id=int(item.id),
+                product_id=item.product_id,
+                category_id=item.category_id,
+                category_name=category.name if category else None,
+                name=item.name,
+                brand=item.brand,
+                expiry_date=item.expiry_date,
+                mrp=float(item.mrp or 0),
+                available=available,
+            ))
+        return rows
+
+
 def _suspense_book_delta(entry_type: Optional[str], amount: float) -> float:
     normalized = str(entry_type or "").strip().upper()
     if normalized == "RECEIPT":
-        return float(amount or 0)
-    if normalized in {"WITHDRAWAL", "EXPENSE"}:
         return -float(amount or 0)
+    if normalized in {"WITHDRAWAL", "EXPENSE"}:
+        return float(amount or 0)
     return 0.0
 
 
@@ -103,6 +170,161 @@ def _parse_note_party(notes: Optional[str]) -> Optional[str]:
             return None
         return first.split(":", 1)[1].strip() or None
     return None
+
+
+@router.post("/suspense/{source_type}/{source_id}/sale", response_model=SuspenseSaleOut)
+def convert_suspense_receipt_to_sale(source_type: str, source_id: int, payload: SuspenseSaleIn):
+    require_min_role("MANAGER", context="Convert suspense receipt to sale")
+    source = str(source_type or "").strip().upper()
+    if source not in {"CASHBOOK", "BANKBOOK"}:
+        raise HTTPException(status_code=400, detail="Source must be CASHBOOK or BANKBOOK")
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Add at least one product")
+
+    raw_date = str(payload.bill_date or "").strip()
+    try:
+        bill_ts = datetime.fromisoformat(raw_date if "T" in raw_date else f"{raw_date}T00:00:00").isoformat(timespec="seconds")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Bill date must be valid")
+
+    with get_session() as session:
+        row = session.get(CashbookEntry if source == "CASHBOOK" else BankbookEntry, source_id)
+        if not row or not bool(getattr(row, "is_suspense", False)):
+            raise HTTPException(status_code=404, detail="Suspense book entry not found")
+        if str(row.entry_type or "").upper() != "RECEIPT":
+            raise HTTPException(status_code=400, detail="Only a Cash/Bank receipt can be converted into a sale")
+        if source == "BANKBOOK" and _round2(getattr(row, "txn_charges", 0.0)) != 0:
+            raise HTTPException(status_code=400, detail="Remove bank charges before converting this receipt into a sale")
+
+        source_amount = _round2(row.amount)
+        prepared = []
+        total = 0.0
+        gross_total = 0.0
+        seen = set()
+        for raw in payload.items:
+            if int(raw.item_id) in seen:
+                raise HTTPException(status_code=400, detail="Select each inventory batch only once")
+            seen.add(int(raw.item_id))
+            item = session.get(Item, int(raw.item_id))
+            quantity = int(raw.quantity or 0)
+            unit_price = _round2(raw.unit_price)
+            discount_percent = _round2(raw.discount_percent)
+            if not item:
+                raise HTTPException(status_code=404, detail=f"Inventory batch #{raw.item_id} not found")
+            if quantity <= 0 or quantity > int(item.stock or 0):
+                raise HTTPException(status_code=400, detail=f"Invalid quantity for {item.name}; available stock is {item.stock}")
+            if not isfinite(unit_price) or unit_price < 0:
+                raise HTTPException(status_code=400, detail="Selling prices must be valid non-negative amounts")
+            if not isfinite(discount_percent) or discount_percent < 0 or discount_percent > 100:
+                raise HTTPException(status_code=400, detail="Discount percentages must be between 0 and 100")
+            line_total = _round2(quantity * unit_price * (1 - discount_percent / 100.0))
+            gross_total = _round2(gross_total + _round2(quantity * unit_price))
+            total = _round2(total + line_total)
+            prepared.append((item, quantity, unit_price, line_total))
+        if abs(total - source_amount) > 0.009:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sale total ({total:.2f}) must equal the suspense receipt ({source_amount:.2f})",
+            )
+
+        # A backdated sale may inherit a legacy ledger gap, but it must not worsen it.
+        for item, quantity, _unit_price, _line_total in prepared:
+            movements = session.exec(select(StockMovement).where(StockMovement.item_id == int(item.id))).all()
+            ordered = sorted(movements, key=lambda movement: (str(movement.ts or ""), int(movement.id or 0)))
+            running = 0
+            existing_minimum = 0
+            for movement in ordered:
+                running += int(movement.delta or 0)
+                existing_minimum = min(existing_minimum, running)
+            proposed = [(str(movement.ts or ""), int(movement.id or 0), int(movement.delta or 0)) for movement in movements]
+            proposed.append((bill_ts, 10**18, -quantity))
+            running = 0
+            proposed_minimum = 0
+            for _ts, _id, delta in sorted(proposed):
+                running += delta
+                proposed_minimum = min(proposed_minimum, running)
+            if proposed_minimum < existing_minimum:
+                raise HTTPException(status_code=400, detail=f"Insufficient historical stock for {item.name} on {raw_date[:10]}")
+
+        from backend.routers.billing import assign_bill_number, resolve_bill_party_links
+        from backend.routers.inventory import sync_lot_quantity_for_item
+        from backend.utils.archive_rules import apply_archive_rules
+
+        customer_id, party_id = resolve_bill_party_links(
+            session,
+            customer_id=payload.customer_id,
+            party_id=None,
+            notes=payload.notes,
+        )
+        payment_mode = "cash" if source == "CASHBOOK" else "online"
+        effective_discount_percent = _round2((gross_total - total) * 100.0 / gross_total) if gross_total > 0 else 0.0
+        bill = Bill(
+            date_time=bill_ts,
+            customer_id=customer_id,
+            party_id=party_id,
+            discount_percent=effective_discount_percent,
+            subtotal=gross_total,
+            total_amount=total,
+            payment_mode=payment_mode,
+            payment_cash=total if source == "CASHBOOK" else 0.0,
+            payment_online=total if source == "BANKBOOK" else 0.0,
+            notes=str(payload.notes or row.note or "").strip() or f"Converted from {source.lower()} suspense #{source_id}",
+            is_credit=False,
+            payment_status="PAID",
+            paid_amount=total,
+            writeoff_amount=0.0,
+            paid_at=bill_ts,
+            is_deleted=False,
+        )
+        session.add(bill)
+        session.flush()
+        bill_number = assign_bill_number(session, bill, backdated=True)
+        for item, quantity, unit_price, line_total in prepared:
+            item.stock = int(item.stock or 0) - quantity
+            session.add(item)
+            apply_archive_rules(session, item)
+            sync_lot_quantity_for_item(session, item, ts=bill_ts)
+            session.add(BillItem(
+                bill_id=int(bill.id),
+                item_id=int(item.id),
+                item_name=item.name,
+                mrp=float(item.mrp or unit_price),
+                quantity=quantity,
+                line_total=line_total,
+            ))
+            session.add(StockMovement(
+                item_id=int(item.id),
+                ts=bill_ts,
+                delta=-quantity,
+                reason="SALE",
+                ref_type="BILL",
+                ref_id=int(bill.id),
+                note=f"Bill #{bill_number}",
+                actor="SYSTEM",
+            ))
+        session.add(BillPayment(
+            bill_id=int(bill.id),
+            received_at=bill_ts,
+            mode=payment_mode,
+            cash_amount=total if source == "CASHBOOK" else 0.0,
+            online_amount=total if source == "BANKBOOK" else 0.0,
+            note="auto: payment at bill creation",
+            is_writeoff=False,
+            is_deleted=False,
+        ))
+        mark_voucher_deleted(session, source_type=f"{source}_SUSPENSE", source_id=source_id)
+        session.delete(row)
+        sync_bill_vouchers(session, bill)
+        log_audit(
+            session,
+            entity_type="BILL",
+            entity_id=int(bill.id),
+            action="SUSPENSE_TO_SALE",
+            note=f"Converted {source.lower()} suspense #{source_id} to bill #{bill_number}",
+            details={"source_type": source, "source_id": source_id, "bill_number": bill_number, "total_amount": total},
+        )
+        session.commit()
+        return SuspenseSaleOut(bill_id=int(bill.id), bill_number=bill_number, total_amount=total)
 
 
 def _normalize_ymd(value: Optional[str], *, default_to_today: bool) -> str:
@@ -345,6 +567,7 @@ def suspense_statement(
                     VoucherEntry.ledger_id == suspense.id,
                     Voucher.voucher_date < normalized_from,
                     Voucher.is_deleted == False,  # noqa: E712
+                    Voucher.source_type.notin_(["CASHBOOK_SUSPENSE", "BANKBOOK_SUSPENSE"]),
                 )
             ).all()
             opening_balance = _round2(sum(
@@ -376,6 +599,7 @@ def suspense_statement(
             .where(
                 VoucherEntry.ledger_id == suspense.id,
                 Voucher.is_deleted == False,  # noqa: E712
+                Voucher.source_type.notin_(["CASHBOOK_SUSPENSE", "BANKBOOK_SUSPENSE"]),
             )
         )
         if normalized_from:

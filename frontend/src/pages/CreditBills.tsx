@@ -307,7 +307,7 @@ export default function CreditBills() {
       exchangeByNewBillId.set(Number(ex.new_bill_id), ex)
     }
 
-    // ✅ client-side search over id/notes/item names
+    // Search over bill number, internal id, notes, customer, and item names.
     const t = q.trim().toLowerCase()
     const searched =
       !t
@@ -316,6 +316,7 @@ export default function CreditBills() {
             const customerMeta = extractCustomerMeta(b.notes)
             // id
             if (String(b.id ?? '').includes(t)) return true
+            if (String(b.bill_number ?? '').toLowerCase().includes(t)) return true
             // notes
             if (String(b.notes ?? '').toLowerCase().includes(t)) return true
             if (String(customerMeta.label || '').toLowerCase().includes(t)) return true
@@ -354,6 +355,7 @@ export default function CreditBills() {
       return {
         raw: b,
         id: b.id,
+        bill_number: b.bill_number || String(b.id),
         notes: String(b.notes || ''),
         notePreview: customerMeta.notePreview,
         customerKey: customerMeta.key,
@@ -847,7 +849,7 @@ export default function CreditBills() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Bill ID</th>
+                  <th>Bill Number</th>
                   <th style={{ minWidth: 220 }}>Customer</th>
                   <th>Date/Time</th>
                   <th>Total</th>
@@ -887,7 +889,7 @@ export default function CreditBills() {
                           <td>
                             <Tooltip title={r.itemsPreview} arrow placement="top">
                               <Link component="button" onClick={() => openBillDetail(r)} underline="hover">
-                                {r.id}
+                                {r.bill_number || r.id}
                               </Link>
                             </Tooltip>
                             {r.exchange ? (
@@ -977,7 +979,7 @@ export default function CreditBills() {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  ID: <b>{detail.id}</b>
+                  Bill Number: <b>{detail.bill_number || detail.id}</b>
                 </Typography>
                 <Typography variant="subtitle1">
                   Date/Time: <b>{detail.date_time || detail.created_at || '-'}</b>
@@ -1292,7 +1294,7 @@ export default function CreditBills() {
       {/* ---------------- Receive Payment Dialog ---------------- */}
       <Dialog open={openPayDlg} onClose={() => setOpenPayDlg(false)} fullWidth maxWidth="sm">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          {payEntryType === 'writeoff' ? 'Write-off Bill' : 'Receive Payment'} (Bill #{payBill?.id})
+          {payEntryType === 'writeoff' ? 'Write-off Bill' : 'Receive Payment'} (Bill #{payBill?.bill_number || payBill?.id})
           <IconButton onClick={() => setOpenPayDlg(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -1394,7 +1396,7 @@ export default function CreditBills() {
 
       <Dialog open={Boolean(advanceBill)} onClose={() => !mApplyAdvance.isPending && closeAdvanceDialog()} fullWidth maxWidth="sm">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Adjust Advance (Bill #{advanceBill?.id})
+          Adjust Advance (Bill #{advanceBill?.bill_number || advanceBill?.id})
           <IconButton onClick={() => !mApplyAdvance.isPending && closeAdvanceDialog()} size="small">
             <CloseIcon />
           </IconButton>

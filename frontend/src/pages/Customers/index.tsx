@@ -357,7 +357,7 @@ export default function CustomersPage() {
               >
                 <Box>
                   <Typography variant="body2" fontWeight={600}>
-                    Bill #{bill.id}
+                    Bill #{bill.bill_number || bill.id}
                   </Typography>
 
                   <Typography variant="caption" color="text.secondary">

@@ -368,7 +368,7 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
           </div>
         </div>
         <div>
-          <div class="boxline"><span class="label">Bill No.</span> <b>${escapeHtml(bill?.id || '-')}</b></div>
+          <div class="boxline"><span class="label">Bill No.</span> <b>${escapeHtml(bill?.bill_number || bill?.id || '-')}</b></div>
           <div class="boxline"><span class="label">Date</span> <b>${escapeHtml(formatDateTime(bill?.date_time))}</b></div>
           <div class="boxline"><span class="label">Payment</span> <b>${escapeHtml(paymentLabel(bill))}</b></div>
         </div>
@@ -464,7 +464,7 @@ export default function BillSupplyPrintButton({
       onClick={printBill}
       disabled={disabled || !bill?.id}
       fullWidth={fullWidth}
-      aria-label={bill?.id ? `Print bill ${bill.id}` : 'Print bill'}
+      aria-label={bill?.id ? `Print bill ${bill.bill_number || bill.id}` : 'Print bill'}
       sx={{
         minWidth: fullWidth ? undefined : 86,
         height: size === 'medium' ? 36 : 32,
@@ -501,7 +501,7 @@ export default function BillSupplyPrintButton({
   )
 
   return (
-    <Tooltip title={bill?.id ? `Print Bill #${bill.id}` : 'Print bill'} arrow>
+    <Tooltip title={bill?.id ? `Print Bill #${bill.bill_number || bill.id}` : 'Print bill'} arrow>
       <span>{button}</span>
     </Tooltip>
   )

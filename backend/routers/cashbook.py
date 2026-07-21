@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlmodel import select
 from sqlalchemy import text  # ✅ use sqlalchemy.text (NOT sqlmodel.text)
 
+from backend.accounting import mark_voucher_deleted, sync_suspense_book_voucher
 from backend.controls import assert_financial_year_unlocked
 from backend.db import get_session
 from backend.models import (
@@ -319,6 +320,8 @@ def create_entry(payload: CashbookCreate):
             is_suspense=bool(payload.is_suspense),
         )
         session.add(row)
+        session.flush()
+        sync_suspense_book_voucher(session, row, book="CASHBOOK")
         session.commit()
         session.refresh(row)
         return row
@@ -358,6 +361,8 @@ def update_entry(entry_id: int, payload: CashbookCreate):
         if payload.is_suspense is not None:
             row.is_suspense = bool(payload.is_suspense)
         session.add(row)
+        session.flush()
+        sync_suspense_book_voucher(session, row, book="CASHBOOK")
         session.commit()
         session.refresh(row)
         return row
@@ -448,7 +453,7 @@ def delete_cashbook_entry(entry_id: int):
         if not row:
             raise HTTPException(status_code=404, detail="cashbook entry not found")
         assert_financial_year_unlocked(session, row.created_at, context="Cashbook entry delete")
-
+        mark_voucher_deleted(session, source_type="CASHBOOK_SUSPENSE", source_id=int(row.id))
         session.exec(text("DELETE FROM cashbookentry WHERE id = :id").bindparams(id=entry_id))
         session.commit()
 
@@ -493,6 +498,7 @@ def clear_last_cashbook_entry(
         row = session.exec(select(CashbookEntry).where(CashbookEntry.id == int(last_id))).first()
         if row:
             assert_financial_year_unlocked(session, row.created_at, context="Cashbook clear last")
+            mark_voucher_deleted(session, source_type="CASHBOOK_SUSPENSE", source_id=int(row.id))
 
         session.exec(text("DELETE FROM cashbookentry WHERE id = :id").bindparams(id=int(last_id)))
         session.commit()
@@ -513,6 +519,7 @@ def clear_today_cashbook():
         rows = session.exec(select(CashbookEntry).where(CashbookEntry.created_at >= f"{today}T00:00:00").where(CashbookEntry.created_at <= f"{today}T23:59:59.999999")).all()
         for row in rows:
             assert_financial_year_unlocked(session, row.created_at, context="Cashbook clear today")
+            mark_voucher_deleted(session, source_type="CASHBOOK_SUSPENSE", source_id=int(row.id))
         stmt = text(
             "DELETE FROM cashbookentry WHERE substr(created_at, 1, 10) = :d"
         ).bindparams(d=today)
@@ -531,6 +538,7 @@ def clear_all_cashbook():
         rows = session.exec(select(CashbookEntry)).all()
         for row in rows:
             assert_financial_year_unlocked(session, row.created_at, context="Cashbook clear all")
+            mark_voucher_deleted(session, source_type="CASHBOOK_SUSPENSE", source_id=int(row.id))
         session.exec(text("DELETE FROM cashbookentry"))
         session.commit()
 

@@ -77,6 +77,7 @@ export interface BillItem {
 
 export interface Bill {
   id: number
+  bill_number?: string | null
   date_time: string
   customer_id?: number | null
   party_id?: number | null
@@ -102,7 +103,7 @@ export interface Bill {
   items: BillItem[]
 }
 
-export async function getBill(id: number) {
+export async function getBill(id: number | string) {
   const { data } = await api.get<Bill>(`/billing/${id}/`)
   return data
 }

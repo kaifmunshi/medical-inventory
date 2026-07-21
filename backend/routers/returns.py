@@ -1334,6 +1334,8 @@ def create_exchange(payload: ExchangeCreate):
         )
         session.add(b)
         session.flush()
+        from backend.routers.billing import assign_bill_number
+        assign_bill_number(session, b)
         session.refresh(b)
 
         # new items: stock OUT + ledger

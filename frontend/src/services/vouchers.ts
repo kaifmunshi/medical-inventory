@@ -73,6 +73,37 @@ export async function fetchSuspenseStatement(params?: {
   return data
 }
 
+export async function convertSuspenseReceiptToSale(
+  sourceType: 'CASHBOOK' | 'BANKBOOK',
+  sourceId: number,
+  payload: {
+    bill_date: string
+    customer_id?: number
+    notes?: string
+    items: Array<{ item_id: number; quantity: number; unit_price: number; discount_percent?: number }>
+  },
+): Promise<{ bill_id: number; bill_number: string; total_amount: number }> {
+  const { data } = await api.post(`/vouchers/suspense/${sourceType}/${sourceId}/sale`, payload)
+  return data
+}
+
+export type DatedStock = {
+  item_id: number
+  product_id?: number | null
+  category_id?: number | null
+  category_name?: string | null
+  name: string
+  brand?: string | null
+  expiry_date?: string | null
+  mrp: number
+  available: number
+}
+
+export async function fetchSuspenseStockAvailability(date: string): Promise<DatedStock[]> {
+  const { data } = await api.get<DatedStock[]>('/vouchers/suspense-stock-availability', { params: { date } })
+  return data
+}
+
 export async function listJournalVouchers(params?: {
   from_date?: string
   to_date?: string

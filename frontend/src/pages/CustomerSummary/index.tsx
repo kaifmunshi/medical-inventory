@@ -243,7 +243,7 @@ export default function CustomerSummaryPage() {
                   <tr key={bill.id}>
                     <td>
                       <Link component="button" underline="hover" onClick={() => openBillDetail(Number(bill.id))}>
-                        #{bill.id}
+                        #{bill.bill_number || bill.id}
                       </Link>
                     </td>
                     <td>{formatDateTime(bill.date_time)}</td>
@@ -306,7 +306,7 @@ export default function CustomerSummaryPage() {
 
       <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Bill Details {billDetail?.id ? `#${billDetail.id}` : ''}
+          Bill Details {billDetail?.id ? `#${billDetail.bill_number || billDetail.id}` : ''}
           <IconButton onClick={() => setBillOpen(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -320,7 +320,7 @@ export default function CustomerSummaryPage() {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  ID: <b>{billDetail.id}</b>
+                  Bill Number: <b>{billDetail.bill_number || billDetail.id}</b>
                 </Typography>
                 <Typography variant="subtitle1">
                   Date/Time: <b>{billDetail.date_time || '-'}</b>

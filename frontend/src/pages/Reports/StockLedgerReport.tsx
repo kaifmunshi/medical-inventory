@@ -618,8 +618,19 @@ export default function StockLedgerReport(props: {
       <Divider />
 
       <Box sx={{ p: 2 }}>
-        <Box sx={{ overflowX: 'auto' }}>
-          <table className="table">
+        <Box sx={{ width: '100%', minWidth: 0, overflowX: 'hidden' }}>
+          <table className="table reports-stock-ledger-table">
+            <colgroup>
+              <col style={{ width: '6%' }} />
+              <col style={{ width: '16%' }} />
+              <col style={{ width: '8%' }} />
+              <col style={{ width: '13%' }} />
+              <col style={{ width: '20%' }} />
+              <col style={{ width: '13%' }} />
+              <col style={{ width: '7%' }} />
+              <col style={{ width: '7%' }} />
+              <col style={{ width: '10%' }} />
+            </colgroup>
             <thead>
               <tr>
                 <th>ID</th>

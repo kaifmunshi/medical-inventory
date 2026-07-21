@@ -330,7 +330,7 @@ export default function Exchange() {
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
-          <TextField label="Bill ID" value={query} onChange={(e) => setQuery(e.target.value)} fullWidth />
+          <TextField label="Bill Number" value={query} onChange={(e) => setQuery(e.target.value)} fullWidth />
           <Button variant="contained" onClick={load} disabled={!query}>Load Bill</Button>
           <Button variant="outlined" onClick={() => setBillPickerOpen(true)}>Find Bill</Button>
         </Stack>
@@ -339,7 +339,7 @@ export default function Exchange() {
       {bill && (
         <Paper sx={{ p: 2 }}>
           <Typography variant="subtitle1" sx={{ mb: 1 }}>
-            Return from Bill #{bill.id}
+            Return from Bill #{bill.bill_number || bill.id}
           </Typography>
 
           <Box sx={{ overflowX: 'auto' }}>

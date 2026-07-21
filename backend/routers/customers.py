@@ -181,6 +181,7 @@ def _to_bill_out(session, bill: Bill) -> BillOut:
     items = session.exec(select(BillItem).where(BillItem.bill_id == bill.id)).all()
     return BillOut(
         id=bill.id,
+        bill_number=getattr(bill, "bill_number", None) or str(bill.id),
         date_time=bill.date_time,
         customer_id=getattr(bill, "customer_id", None),
         party_id=getattr(bill, "party_id", None),

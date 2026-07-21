@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+import re
 from pydantic import BaseModel
 from sqlmodel import select
 from sqlalchemy import or_, exists, func, cast
@@ -134,6 +135,53 @@ def iso_date(s: Optional[str]) -> str:
 
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _alpha_suffix(index: int) -> str:
+    value = int(index)
+    out = ""
+    while value > 0:
+        value, remainder = divmod(value - 1, 26)
+        out = chr(65 + remainder) + out
+    return out
+
+
+def assign_bill_number(session, bill: Bill, *, backdated: bool = False) -> str:
+    if str(getattr(bill, "bill_number", "") or "").strip():
+        return str(bill.bill_number)
+    if not bill.id:
+        session.flush()
+    if not backdated:
+        bill.bill_number = str(bill.id)
+        session.add(bill)
+        return str(bill.bill_number)
+
+    bill_date = str(bill.date_time or "")[:10]
+    existing = session.exec(
+        select(Bill).where(
+            Bill.id != int(bill.id),
+            Bill.date_time >= f"{bill_date}T00:00:00",
+            Bill.date_time <= f"{bill_date}T23:59:59.999999",
+        )
+    ).all()
+    if not existing:
+        bill.bill_number = str(bill.id)
+    else:
+        used = {str(getattr(row, "bill_number", "") or row.id) for row in existing}
+        numeric_numbers = [int(number) for number in used if number.isdigit()]
+        if numeric_numbers:
+            base = max(numeric_numbers)
+        else:
+            numeric_prefixes = [int(match.group(1)) for number in used if (match := re.fullmatch(r"(\d+)[A-Z]+", number))]
+            base = max(numeric_prefixes) if numeric_prefixes else max(int(row.id or 0) for row in existing)
+        suffix_index = 1
+        candidate = f"{base}{_alpha_suffix(suffix_index)}"
+        while candidate in used:
+            suffix_index += 1
+            candidate = f"{base}{_alpha_suffix(suffix_index)}"
+        bill.bill_number = candidate
+    session.add(bill)
+    return str(bill.bill_number)
 
 
 def normalize_bill_ts(raw: Optional[str], fallback: str) -> str:
@@ -493,6 +541,7 @@ def list_bills(
             items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
             out.append(BillOut(
                 id=b.id,
+                bill_number=getattr(b, "bill_number", None) or str(b.id),
                 date_time=b.date_time,
                 customer_id=getattr(b, "customer_id", None),
                 party_id=getattr(b, "party_id", None),
@@ -524,7 +573,7 @@ def list_bills_paged(
     offset: int = Query(0, ge=0),
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
-    q: Optional[str] = Query(None, description="Search by id/item/notes"),
+    q: Optional[str] = Query(None, description="Search by bill number/id/item/notes"),
     deleted_filter: str = Query("active", pattern="^(active|deleted|all)$"),
     bill_filter: str = Query("all", pattern="^(all|credit|unmapped|unmapped_credit)$"),
 ):
@@ -571,6 +620,7 @@ def list_bills_paged(
                 id_filter = (Bill.id == int(qq))
 
             notes_match = func.lower(func.coalesce(Bill.notes, "")).like(like)
+            number_match = func.lower(func.coalesce(Bill.bill_number, "")).like(like)
 
             items_match = exists().where(
                 (BillItem.bill_id == Bill.id) &
@@ -584,9 +634,9 @@ def list_bills_paged(
             )
 
             if id_filter is not None:
-                stmt = stmt.where(or_(id_filter, notes_match, items_match, brand_match))
+                stmt = stmt.where(or_(id_filter, number_match, notes_match, items_match, brand_match))
             else:
-                stmt = stmt.where(or_(notes_match, items_match, brand_match))
+                stmt = stmt.where(or_(number_match, notes_match, items_match, brand_match))
 
         # ✅ Order + accurate pagination (limit+1)
         stmt = stmt.order_by(Bill.id.desc()).limit(limit + 1).offset(offset)
@@ -601,6 +651,7 @@ def list_bills_paged(
             items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
             out.append(BillOut(
                 id=b.id,
+                bill_number=getattr(b, "bill_number", None) or str(b.id),
                 date_time=b.date_time,
                 customer_id=getattr(b, "customer_id", None),
                 party_id=getattr(b, "party_id", None),
@@ -793,14 +844,18 @@ def list_payments(
 
 
 @router.get("/{bill_id}", response_model=BillOut)
-def get_bill(bill_id: int):
+def get_bill(bill_id: str):
     with get_session() as session:
-        b = session.get(Bill, bill_id)
+        key = str(bill_id or "").strip()
+        b = session.exec(select(Bill).where(func.lower(Bill.bill_number) == key.lower())).first()
+        if not b and key.isdigit():
+            b = session.get(Bill, int(key))
         if not b:
             raise HTTPException(status_code=404, detail="Bill not found")
         items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
         return BillOut(
             id=b.id,
+            bill_number=getattr(b, "bill_number", None) or str(b.id),
             date_time=b.date_time,
             customer_id=getattr(b, "customer_id", None),
             party_id=getattr(b, "party_id", None),
@@ -971,6 +1026,7 @@ def create_bill(payload: BillCreate):
 
             session.add(b)
             session.flush()  # ✅ ensures b.id is available without committing
+            assign_bill_number(session, b)
 
             # Deduct stock & create line items + SALE ledger
             for line in payload.items:
@@ -1032,6 +1088,7 @@ def create_bill(payload: BillCreate):
         items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
         return BillOut(
             id=b.id,
+            bill_number=getattr(b, "bill_number", None) or str(b.id),
             date_time=b.date_time,
             customer_id=getattr(b, "customer_id", None),
             party_id=getattr(b, "party_id", None),
@@ -1087,6 +1144,7 @@ def bill_to_out(session, b: Bill) -> BillOut:
     items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
     return BillOut(
         id=b.id,
+        bill_number=getattr(b, "bill_number", None) or str(b.id),
         date_time=b.date_time,
         customer_id=getattr(b, "customer_id", None),
         party_id=getattr(b, "party_id", None),

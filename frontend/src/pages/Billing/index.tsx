@@ -1223,7 +1223,7 @@ export default function Billing() {
           <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1.5}>
             <Stack spacing={0.25}>
               <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
-                Bill #{lastCreatedBill.id} created
+                Bill #{lastCreatedBill.bill_number || lastCreatedBill.id} created
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 Total Rs {money(lastCreatedBill.total_amount)} | {String(lastCreatedBill.payment_status || 'PAID')}

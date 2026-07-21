@@ -7,6 +7,8 @@ from sqlalchemy import func
 from backend.models import (
     Bill,
     BillPayment,
+    BankbookEntry,
+    CashbookEntry,
     Ledger,
     LedgerGroup,
     Party,
@@ -305,8 +307,8 @@ def post_sales_voucher(session, bill: Bill) -> Voucher:
         source_type="BILL",
         source_id=int(bill.id),
         voucher_date=str(bill.date_time or "")[:10],
-        voucher_no=f"S-{bill.id}",
-        narration=bill.notes or f"Sales bill #{bill.id}",
+        voucher_no=f"S-{getattr(bill, 'bill_number', None) or bill.id}",
+        narration=bill.notes or f"Sales bill #{getattr(bill, 'bill_number', None) or bill.id}",
         total_amount=total,
         lines=lines,
     )
@@ -517,6 +519,56 @@ def sync_purchase_vouchers(session, purchase: Purchase, party: Party) -> Voucher
     return post_purchase_voucher(session, purchase, party)
 
 
+def sync_suspense_book_voucher(session, row, *, book: str) -> Optional[Voucher]:
+    book_key = str(book or "").strip().upper()
+    if book_key not in {"CASHBOOK", "BANKBOOK"}:
+        raise ValueError("book must be CASHBOOK or BANKBOOK")
+    source_type = f"{book_key}_SUSPENSE"
+    source_id = int(row.id or 0)
+    entry_type = str(row.entry_type or "").strip().upper()
+    amount = round2(row.amount)
+    if not bool(getattr(row, "is_suspense", False)) or entry_type not in {"RECEIPT", "WITHDRAWAL", "EXPENSE"} or amount <= 0:
+        mark_voucher_deleted(session, source_type=source_type, source_id=source_id)
+        return None
+
+    ledgers = ensure_accounting_setup(session)
+    money_ledger = ledgers["CASH_IN_HAND" if book_key == "CASHBOOK" else "BANK_ACCOUNT"]
+    suspense = ledgers["SUSPENSE_ACCOUNT"]
+    charges = round2(getattr(row, "txn_charges", 0.0)) if book_key == "BANKBOOK" else 0.0
+    narration = row.note or f"{book_key.title()} suspense {entry_type.lower()}"
+    lines: List[PostingLine] = []
+    if entry_type == "RECEIPT":
+        net_bank = round2(amount - charges)
+        if net_bank < 0:
+            raise ValueError("Bank charges cannot exceed a suspense receipt")
+        if net_bank > 0:
+            lines.append({"ledger_id": int(money_ledger.id), "entry_type": "DR", "amount": net_bank, "narration": narration})
+        if charges > 0:
+            lines.append({"ledger_id": int(ledgers["BANK_CHARGES"].id), "entry_type": "DR", "amount": charges, "narration": narration})
+        lines.append({"ledger_id": int(suspense.id), "entry_type": "CR", "amount": amount, "narration": narration})
+        voucher_type = "RECEIPT"
+        voucher_total = amount
+    else:
+        lines.append({"ledger_id": int(suspense.id), "entry_type": "DR", "amount": amount, "narration": narration})
+        if charges > 0:
+            lines.append({"ledger_id": int(ledgers["BANK_CHARGES"].id), "entry_type": "DR", "amount": charges, "narration": narration})
+        lines.append({"ledger_id": int(money_ledger.id), "entry_type": "CR", "amount": round2(amount + charges), "narration": narration})
+        voucher_type = "PAYMENT"
+        voucher_total = round2(amount + charges)
+
+    return upsert_voucher(
+        session,
+        voucher_type=voucher_type,
+        source_type=source_type,
+        source_id=source_id,
+        voucher_date=str(row.created_at or "")[:10],
+        voucher_no=f"{'CB' if book_key == 'CASHBOOK' else 'BB'}-SUS-{source_id}",
+        narration=narration,
+        total_amount=voucher_total,
+        lines=lines,
+    )
+
+
 def sync_existing_vouchers(session) -> None:
     ensure_accounting_setup(session)
 
@@ -616,3 +668,8 @@ def sync_existing_vouchers(session) -> None:
         )
         if bool(getattr(payment, "is_deleted", False)) or bool(getattr(bill, "is_deleted", False)):
             mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(payment.id or 0))
+
+    for row in session.exec(select(CashbookEntry)).all():
+        sync_suspense_book_voucher(session, row, book="CASHBOOK")
+    for row in session.exec(select(BankbookEntry)).all():
+        sync_suspense_book_voucher(session, row, book="BANKBOOK")

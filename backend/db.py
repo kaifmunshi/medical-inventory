@@ -2137,9 +2137,13 @@ def migrate_db():
             session.exec(text(
                 "ALTER TABLE bill ADD COLUMN party_id INTEGER"
             ))
+        if "bill_number" not in bill_col_names:
+            session.exec(text("ALTER TABLE bill ADD COLUMN bill_number TEXT"))
+            session.exec(text("UPDATE bill SET bill_number = CAST(id AS TEXT) WHERE bill_number IS NULL OR trim(bill_number) = ''"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_bill_is_deleted ON bill (is_deleted)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_bill_customer_id ON bill (customer_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_bill_party_id ON bill (party_id)"))
+        session.exec(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_bill_bill_number ON bill (bill_number)"))
         session.commit()
 
         # ---------- billpayment table migration ----------

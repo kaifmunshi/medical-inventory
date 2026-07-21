@@ -119,17 +119,26 @@ export default function ItemSalesReport(props: {
         </Typography>
       </Stack>
 
-      <Box sx={{ overflowX: 'auto' }}>
-        <table className="table">
+      <Box sx={{ width: '100%', minWidth: 0, overflowX: 'hidden' }}>
+        <table className="table reports-item-sales-table">
+          <colgroup>
+            <col style={{ width: '7%' }} />
+            <col style={{ width: '25%' }} />
+            <col style={{ width: '13%' }} />
+            <col style={{ width: '18%' }} />
+            <col style={{ width: '11%' }} />
+            <col style={{ width: '11%' }} />
+            <col style={{ width: '15%' }} />
+          </colgroup>
           <thead>
             <tr>
-              <th style={{ width: 90 }}>ID</th>
+              <th>ID</th>
               <th>Item</th>
-              <th style={{ width: 130 }}>Type</th>
-              <th style={{ width: 180 }}>Brand</th>
-              <th style={{ width: 120 }}>Qty Sold</th>
-              <th style={{ width: 140 }}>Gross</th>
-              <th style={{ width: 200 }}>Last Sold</th>
+              <th>Type</th>
+              <th>Brand</th>
+              <th>Qty Sold</th>
+              <th>Gross</th>
+              <th>Last Sold</th>
             </tr>
           </thead>
 

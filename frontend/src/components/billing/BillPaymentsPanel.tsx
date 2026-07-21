@@ -451,7 +451,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
 
       <Dialog open={openPayDlg} onClose={() => setOpenPayDlg(false)} fullWidth maxWidth="sm">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Receive Payment (Bill #{bill?.id})
+          Receive Payment (Bill #{bill?.bill_number || bill?.id})
           <IconButton onClick={() => setOpenPayDlg(false)} size="small">
             <CloseIcon />
           </IconButton>

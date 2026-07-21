@@ -620,6 +620,7 @@ def debtor_ledger(party_id: int) -> List[DebtorLedgerRow]:
             out.append(
                 DebtorLedgerRow(
                     bill_id=bill.id,
+                    bill_number=getattr(bill, "bill_number", None) or str(bill.id),
                     bill_date=bill.date_time,
                     customer_name=customer_name,
                     total_amount=round(total, 2),
@@ -660,6 +661,7 @@ def debtor_open_bills(party_id: int) -> List[OpenBillOut]:
             out.append(
                 OpenBillOut(
                     bill_id=bill.id,
+                    bill_number=getattr(bill, "bill_number", None) or str(bill.id),
                     bill_date=bill.date_time,
                     total_amount=_round2(total),
                     paid_amount=_round2(paid),

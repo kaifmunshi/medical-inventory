@@ -227,7 +227,7 @@ export default function Reports() {
 
             {tab === 'sales' && viewMode === 'details' && (
               <TextField
-                label="Search (id/item/notes)"
+                label="Search (bill no./item/notes)"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
               />

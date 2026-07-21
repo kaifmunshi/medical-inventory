@@ -372,6 +372,7 @@ export interface PackOpenEvent {
 
 export interface DebtorLedgerRow {
   bill_id: ID
+  bill_number?: string | null
   bill_date: string
   customer_name: string
   total_amount: number
@@ -407,6 +408,7 @@ export interface CustomerReturnLedgerRow {
 
 export interface OpenBill {
   bill_id: ID
+  bill_number?: string | null
   bill_date: string
   total_amount: number
   paid_amount: number

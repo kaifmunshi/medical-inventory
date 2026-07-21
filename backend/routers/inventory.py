@@ -2128,7 +2128,7 @@ def convert_manual_stock_adjustment_to_sale(
                 detail="This sale date would worsen the historical stock balance. Use the original adjustment date or a later valid date.",
             )
 
-        from backend.routers.billing import resolve_bill_party_links
+        from backend.routers.billing import assign_bill_number, resolve_bill_party_links
         customer_id, party_id = resolve_bill_party_links(
             session,
             customer_id=payload.customer_id,
@@ -2160,6 +2160,7 @@ def convert_manual_stock_adjustment_to_sale(
         )
         session.add(bill)
         session.flush()
+        bill_number = assign_bill_number(session, bill, backdated=True)
         session.add(BillItem(
             bill_id=int(bill.id),
             item_id=int(item.id),
@@ -2186,7 +2187,7 @@ def convert_manual_stock_adjustment_to_sale(
         movement.reason = "SALE"
         movement.ref_type = "BILL"
         movement.ref_id = int(bill.id)
-        movement.note = f"Bill #{bill.id} | Converted from manual adjustment #{movement_id}"
+        movement.note = f"Bill #{bill_number} | Converted from manual adjustment #{movement_id}"
         session.add(movement)
         sync_bill_vouchers(session, bill)
         log_audit(

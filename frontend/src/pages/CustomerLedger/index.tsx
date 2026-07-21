@@ -1339,7 +1339,7 @@ export default function CustomerLedgerPage() {
                             onClick={() => openBillDetail(billId)}
                             sx={{ fontWeight: 800 }}
                           >
-                            Bill #{row.bill_id}
+                            Bill #{row.bill_number || row.bill_id}
                           </Link>
                         </Stack>
                       </td>
@@ -1439,7 +1439,7 @@ export default function CustomerLedgerPage() {
                             onClick={() => openBillDetail(billId)}
                             sx={{ fontWeight: 800 }}
                           >
-                            Bill #{row.bill_id}
+                            Bill #{row.bill_number || row.bill_id}
                           </Link>
                         </Stack>
                       </td>
@@ -1966,7 +1966,7 @@ export default function CustomerLedgerPage() {
                             onClick={() => openBillDetail(Number(bill.bill_id))}
                             sx={{ p: 0, fontWeight: 800, textAlign: 'left' }}
                           >
-                            Bill #{bill.bill_id}
+                            Bill #{bill.bill_number || bill.bill_id}
                           </Link>
                           <Typography variant="caption" color="text.secondary">
                             {billDate.time ? `${billDate.date} | ${billDate.time}` : billDate.date}
@@ -2127,7 +2127,7 @@ export default function CustomerLedgerPage() {
                               onClick={() => openBillDetail(Number(bill.bill_id))}
                               sx={{ p: 0, fontWeight: 800, textAlign: 'left' }}
                             >
-                              Bill #{bill.bill_id}
+                              Bill #{bill.bill_number || bill.bill_id}
                             </Link>
                             <Typography variant="caption" color="text.secondary">
                               {billDate.time ? `${billDate.date} | ${billDate.time}` : billDate.date}
@@ -2331,7 +2331,7 @@ export default function CustomerLedgerPage() {
 
       <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Bill Details {billDetail?.id ? `#${billDetail.id}` : ''}
+          Bill Details {billDetail?.id ? `#${billDetail.bill_number || billDetail.id}` : ''}
           <IconButton onClick={() => setBillOpen(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -2345,7 +2345,7 @@ export default function CustomerLedgerPage() {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  ID: <b>{billDetail.id}</b>
+                  Bill Number: <b>{billDetail.bill_number || billDetail.id}</b>
                 </Typography>
                 <Typography variant="subtitle1">
                   Date/Time: <b>{billDetail.date_time || billDetail.created_at || '-'}</b>

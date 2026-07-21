@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text
 from sqlmodel import select
 
+from backend.accounting import mark_voucher_deleted, sync_suspense_book_voucher
 from backend.controls import assert_financial_year_unlocked
 from backend.db import get_session
 from backend.models import (
@@ -379,6 +380,8 @@ def create_entry(payload: BankbookCreate):
             is_suspense=bool(payload.is_suspense),
         )
         session.add(row)
+        session.flush()
+        sync_suspense_book_voucher(session, row, book="BANKBOOK")
         session.commit()
         session.refresh(row)
         return row
@@ -427,6 +430,8 @@ def update_entry(entry_id: int, payload: BankbookCreate):
         if payload.is_suspense is not None:
             row.is_suspense = bool(payload.is_suspense)
         session.add(row)
+        session.flush()
+        sync_suspense_book_voucher(session, row, book="BANKBOOK")
         session.commit()
         session.refresh(row)
         return row
@@ -513,7 +518,7 @@ def delete_bankbook_entry(entry_id: int):
         if not row:
             raise HTTPException(status_code=404, detail="bankbook entry not found")
         assert_financial_year_unlocked(session, row.created_at, context="Bankbook entry delete")
-
+        mark_voucher_deleted(session, source_type="BANKBOOK_SUSPENSE", source_id=int(row.id))
         session.exec(text("DELETE FROM bankbookentry WHERE id = :id").bindparams(id=entry_id))
         session.commit()
 
@@ -552,6 +557,7 @@ def clear_last_bankbook_entry(
         row = session.exec(select(BankbookEntry).where(BankbookEntry.id == int(last_id))).first()
         if row:
             assert_financial_year_unlocked(session, row.created_at, context="Bankbook clear last")
+            mark_voucher_deleted(session, source_type="BANKBOOK_SUSPENSE", source_id=int(row.id))
 
         session.exec(text("DELETE FROM bankbookentry WHERE id = :id").bindparams(id=int(last_id)))
         session.commit()
@@ -568,6 +574,7 @@ def clear_today_bankbook():
         rows = session.exec(select(BankbookEntry).where(BankbookEntry.created_at >= f"{today}T00:00:00").where(BankbookEntry.created_at <= f"{today}T23:59:59.999999")).all()
         for row in rows:
             assert_financial_year_unlocked(session, row.created_at, context="Bankbook clear today")
+            mark_voucher_deleted(session, source_type="BANKBOOK_SUSPENSE", source_id=int(row.id))
         stmt = text("DELETE FROM bankbookentry WHERE substr(created_at, 1, 10) = :d").bindparams(d=today)
         session.exec(stmt)
         session.commit()
@@ -582,6 +589,7 @@ def clear_all_bankbook():
         rows = session.exec(select(BankbookEntry)).all()
         for row in rows:
             assert_financial_year_unlocked(session, row.created_at, context="Bankbook clear all")
+            mark_voucher_deleted(session, source_type="BANKBOOK_SUSPENSE", source_id=int(row.id))
         session.exec(text("DELETE FROM bankbookentry"))
         session.commit()
 

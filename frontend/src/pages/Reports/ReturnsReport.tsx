@@ -62,7 +62,7 @@ function clamp2(n: number) {
 
 function formatDateTime(v: any) {
   const s = String(v || '').trim()
-  return s || '-'
+  return s ? s.replace('T', ' ').replace(/\.\d+(?=Z?$)/, '').replace(/Z$/, '') : '-'
 }
 
 function formatExpiry(v: any) {
@@ -453,8 +453,19 @@ export default function ReturnsReport(props: {
 
   return (
     <>
-      <Box sx={{ overflowX: 'auto' }}>
-        <table className="table">
+      <Box sx={{ width: '100%', minWidth: 0, overflowX: 'hidden' }}>
+        <table className="table reports-returns-table">
+          <colgroup>
+            <col style={{ width: '11%' }} />
+            <col style={{ width: '18%' }} />
+            <col style={{ width: '6%' }} />
+            <col style={{ width: '12%' }} />
+            <col style={{ width: '10%' }} />
+            <col style={{ width: '9%' }} />
+            <col style={{ width: '9%' }} />
+            <col style={{ width: '10%' }} />
+            <col style={{ width: '15%' }} />
+          </colgroup>
           <thead>
             <tr>
               <th>Sales Return ID</th>
@@ -479,7 +490,7 @@ export default function ReturnsReport(props: {
                     </Link>
                   </Tooltip>
                 </td>
-                <td>{r.date}</td>
+                <td title={formatDateTime(r.date)}>{formatDateTime(r.date)}</td>
                 <td>{r.linesCount}</td>
                 <td>{r.refund}</td>
                 <td>{money(r.raw?.credit_amount)}</td>
@@ -956,7 +967,7 @@ export default function ReturnsReport(props: {
 
       <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Bill Details {billDetail?.id ? `#${billDetail.id}` : ''}
+          Bill Details {billDetail?.id ? `#${billDetail.bill_number || billDetail.id}` : ''}
           <IconButton onClick={() => setBillOpen(false)} size="small">
             <CloseIcon />
           </IconButton>
@@ -968,7 +979,7 @@ export default function ReturnsReport(props: {
             <Stack gap={2}>
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Typography variant="subtitle1">
-                  Bill ID: <b>{billDetail.id}</b>
+                  Bill Number: <b>{billDetail.bill_number || billDetail.id}</b>
                 </Typography>
                 <Typography variant="subtitle1">
                   Bill Date: <b>{formatDateTime(billDetail.date_time || billDetail.created_at)}</b>

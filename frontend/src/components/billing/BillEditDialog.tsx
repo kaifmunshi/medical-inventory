@@ -1167,7 +1167,7 @@ export default function BillEditDialog({
     <>
       <Dialog open={open} onClose={onClose} fullWidth maxWidth="xl" PaperProps={{ sx: { minHeight: '82vh' } }}>
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          Edit Bill #{editBillId || ''}
+          Edit Bill #{bill?.bill_number || editBillId || ''}
           <IconButton onClick={onClose} size="small">
             <CloseIcon />
           </IconButton>

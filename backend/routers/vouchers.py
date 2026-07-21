@@ -120,14 +120,22 @@ def suspense_stock_availability(date: str = Query(..., description="YYYY-MM-DD")
     normalized = _normalize_ymd(date, default_to_today=False)
     end_ts = f"{normalized}T23:59:59.999999"
     with get_session() as session:
+        # Item.stock is the authoritative current balance. Some migrated client
+        # databases do not have an OPENING movement for their legacy stock, so
+        # summing movements from zero incorrectly hides otherwise valid batches.
+        # Rewind the current balance instead, using the same effective-date logic
+        # as the inventory stock ledger (including backdated purchase invoices).
+        from backend.routers.inventory import _future_delta_after_effective_ts
+
         rows = []
-        for item in session.exec(select(Item).where(Item.is_archived == False).order_by(Item.name, Item.expiry_date, Item.id)).all():  # noqa: E712
-            available = int(session.exec(
-                select(func.coalesce(func.sum(StockMovement.delta), 0)).where(
-                    StockMovement.item_id == int(item.id),
-                    StockMovement.ts <= end_ts,
-                )
-            ).one() or 0)
+        # Do not filter archived batches here: a batch that is empty/archived now
+        # may legitimately have had stock on the requested historical date.
+        for item in session.exec(select(Item).order_by(Item.name, Item.expiry_date, Item.id)).all():
+            current_available = max(0, int(item.stock or 0))
+            historical_available = current_available - _future_delta_after_effective_ts(session, [int(item.id)], end_ts)
+            # Converting the missed sale also deducts stock now, so the selectable
+            # amount cannot exceed either the historical or current balance.
+            available = min(current_available, historical_available)
             if available <= 0:
                 continue
             category = session.get(Category, int(item.category_id)) if item.category_id else None
@@ -227,24 +235,23 @@ def convert_suspense_receipt_to_sale(source_type: str, source_id: int, payload: 
                 detail=f"Sale total ({total:.2f}) must equal the suspense receipt ({source_amount:.2f})",
             )
 
-        # A backdated sale may inherit a legacy ledger gap, but it must not worsen it.
+        # Validate against the reconstructed balance at the sale timestamp. This
+        # starts from authoritative current stock and rewinds later movements, so
+        # it also works for migrated databases whose legacy opening stock has no
+        # corresponding StockMovement row.
+        from backend.routers.inventory import _future_delta_after_effective_ts
+
         for item, quantity, _unit_price, _line_total in prepared:
-            movements = session.exec(select(StockMovement).where(StockMovement.item_id == int(item.id))).all()
-            ordered = sorted(movements, key=lambda movement: (str(movement.ts or ""), int(movement.id or 0)))
-            running = 0
-            existing_minimum = 0
-            for movement in ordered:
-                running += int(movement.delta or 0)
-                existing_minimum = min(existing_minimum, running)
-            proposed = [(str(movement.ts or ""), int(movement.id or 0), int(movement.delta or 0)) for movement in movements]
-            proposed.append((bill_ts, 10**18, -quantity))
-            running = 0
-            proposed_minimum = 0
-            for _ts, _id, delta in sorted(proposed):
-                running += delta
-                proposed_minimum = min(proposed_minimum, running)
-            if proposed_minimum < existing_minimum:
-                raise HTTPException(status_code=400, detail=f"Insufficient historical stock for {item.name} on {raw_date[:10]}")
+            available_at_sale = int(item.stock or 0) - _future_delta_after_effective_ts(
+                session,
+                [int(item.id)],
+                bill_ts,
+            )
+            if quantity > available_at_sale:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient historical stock for {item.name} on {raw_date[:10]}; available stock was {available_at_sale}",
+                )
 
         from backend.routers.billing import assign_bill_number, resolve_bill_party_links
         from backend.routers.inventory import sync_lot_quantity_for_item

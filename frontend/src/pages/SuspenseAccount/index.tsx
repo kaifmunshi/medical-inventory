@@ -57,6 +57,11 @@ function roundMoney(value: number) {
   return Number(Number(value || 0).toFixed(2))
 }
 
+function saleProductKey(name: string, brand?: string | null) {
+  const normalize = (value: string) => value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
+  return `${normalize(name)}|${normalize(brand || '')}`
+}
+
 function balanceLabel(value: number) {
   if (Math.abs(value) < 0.005) return '0.00'
   return `${money(Math.abs(value))} ${value > 0 ? 'Dr' : 'Cr'}`
@@ -553,13 +558,13 @@ export default function SuspenseAccountPage() {
             {saleLines.map((line, index) => {
               const categoryNames = new Map(saleCategories.map((category) => [category.id, category.name]))
               const catalogProducts = (saleProductsQ.data || []).map((product) => ({
-                key: `${product.id || 0}|${product.name}|${product.brand || ''}`,
+                key: saleProductKey(product.name, product.brand),
                 label: `${product.name}${product.brand ? ` · ${product.brand}` : ''}`,
                 categoryId: product.category_id ? String(product.category_id) : 'uncategorized',
                 categoryName: categoryNames.get(product.category_id ? String(product.category_id) : 'uncategorized') || 'Uncategorized',
               }))
               const stockedProducts = datedSaleItems.map((item) => {
-                const key = `${item.product_id || 0}|${item.name}|${item.brand || ''}`
+                const key = saleProductKey(item.name, item.brand)
                 return {
                   key,
                   label: `${item.name}${item.brand ? ` · ${item.brand}` : ''}`,
@@ -567,11 +572,13 @@ export default function SuspenseAccountPage() {
                   categoryName: item.category_name || 'Uncategorized',
                 }
               })
-              const allProducts = [...new Map([...catalogProducts, ...stockedProducts].map((product) => [product.key, product])).values()]
+              // Legacy client inventory can have stocked Item rows without product_id. Name + brand
+              // is the durable link in those databases; catalog metadata wins when both exist.
+              const allProducts = [...new Map([...stockedProducts, ...catalogProducts].map((product) => [product.key, product])).values()]
                 .sort((a, b) => a.label.localeCompare(b.label))
               const products = line.categoryId ? allProducts.filter((product) => product.categoryId === line.categoryId) : allProducts
               const selectedProduct = products.find((product) => product.key === line.productKey) || null
-              const batchOptions = datedSaleItems.filter((item) => `${item.product_id || 0}|${item.name}|${item.brand || ''}` === line.productKey)
+              const batchOptions = datedSaleItems.filter((item) => saleProductKey(item.name, item.brand) === line.productKey)
               const gross = Number(line.quantity || 0) * Number(line.unitPrice || 0)
               const discount = gross * Number(line.discountPercent || 0) / 100
               return (

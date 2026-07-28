@@ -153,10 +153,15 @@ function lineGrossTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price'>) {
 }
 
 function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'rounding_adjustment'>) {
-  const gross = lineGrossTotal(item)
-  const afterDiscount = gross * (1 - Math.min(100, Math.max(0, Number(item.discount_percent || 0))) / 100)
-  const afterAdditionalDiscount = afterDiscount * (1 - Math.min(100, Math.max(0, Number(item.additional_discount_percent || 0))) / 100)
-  return round2(afterAdditionalDiscount + safeNumber(item.rounding_adjustment))
+  // Keep this cent-for-cent identical to the server. Each discount component is
+  // rounded before the next one is calculated; rounding only the final result can
+  // make the UI's chosen invoice total differ from the value that is persisted.
+  const gross = round2(lineGrossTotal(item))
+  const firstPercent = Math.min(100, Math.max(0, Number(item.discount_percent || 0)))
+  const additionalPercent = Math.min(100, Math.max(0, Number(item.additional_discount_percent || 0)))
+  const firstDiscount = round2(gross * firstPercent / 100)
+  const additionalDiscount = round2(Math.max(0, gross - firstDiscount) * additionalPercent / 100)
+  return round2(gross - firstDiscount - additionalDiscount + safeNumber(item.rounding_adjustment))
 }
 
 function lineGstAmount(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'rounding_adjustment' | 'gst_percent'>) {

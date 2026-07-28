@@ -9,7 +9,7 @@ from sqlmodel import select
 from sqlalchemy import or_, exists, func, cast
 from sqlalchemy.types import Integer, Float
 from backend.accounting import mark_voucher_deleted, post_bill_payment_voucher, post_party_receipt_voucher, sync_bill_vouchers
-from backend.controls import assert_financial_year_unlocked, get_active_financial_year, normalize_ymd
+from backend.controls import assert_financial_year_unlocked, get_active_financial_year, log_audit, normalize_ymd
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
@@ -1262,6 +1262,25 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                     raise HTTPException(status_code=403, detail="Incorrect password for old bill edit")
 
         existing_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+        before_snapshot = {
+            "bill": {
+                "discount_percent": round2(as_f(b.discount_percent)),
+                "subtotal": round2(as_f(b.subtotal)),
+                "total_amount": round2(as_f(b.total_amount)),
+                "payment_cash": round2(as_f(b.payment_cash)),
+                "payment_online": round2(as_f(b.payment_online)),
+                "payment_mode": b.payment_mode,
+            },
+            "items": [
+                {
+                    "item_id": int(it.item_id),
+                    "quantity": int(it.quantity),
+                    "mrp": round2(as_f(it.mrp)),
+                    "line_total": round2(as_f(it.line_total)),
+                }
+                for it in existing_items
+            ],
+        }
         old_qty_by_item: Dict[int, int] = {}
         for it in existing_items:
             old_qty_by_item[it.item_id] = old_qty_by_item.get(it.item_id, 0) + as_i(it.quantity)
@@ -1492,8 +1511,9 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                 for iid, qty in new_qty_by_item.items()
             )
 
+        bill_lines_unchanged = _bill_item_signature() == _payload_item_signature()
         customer_link_only_edit = (
-            _bill_item_signature() == _payload_item_signature()
+            bill_lines_unchanged
             and round2(as_f(payload.discount_percent)) == round2(as_f(b.discount_percent))
             and round2(total) == round2(as_f(b.total_amount))
             and round2(cash) == round2(as_f(b.payment_cash))
@@ -1592,8 +1612,15 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             b.date_time = bill_ts
             b.customer_id = linked_customer_id
             b.party_id = linked_party_id
-            b.discount_percent = payload.discount_percent
-            b.subtotal = subtotal
+            # The bill editor submits persisted per-line selling prices (already
+            # inclusive of the original header discount) with a zero calculation
+            # discount to avoid applying it twice. Do not erase the saved discount
+            # metadata as a side effect of editing an otherwise unchanged bill.
+            if round2(as_f(payload.discount_percent)) != 0 or round2(as_f(b.discount_percent)) == 0:
+                b.discount_percent = payload.discount_percent
+            # Date/payment/customer/note edits must not normalize an old bill's
+            # saved subtotal from its persisted selling-price lines.
+            b.subtotal = b.subtotal if bill_lines_unchanged else subtotal
             b.total_amount = total
             b.payment_mode = effective_payment_mode
             b.payment_cash = cash
@@ -1606,6 +1633,37 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             b.paid_at = paid_at
 
             session.add(b)
+            session.flush()
+            saved_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
+            log_audit(
+                session,
+                entity_type="BILL",
+                entity_id=int(b.id or bill_id),
+                action="UPDATE",
+                note=f"Updated bill #{b.id or bill_id}",
+                details={
+                    "before": before_snapshot,
+                    "after": {
+                        "bill": {
+                            "discount_percent": round2(as_f(b.discount_percent)),
+                            "subtotal": round2(as_f(b.subtotal)),
+                            "total_amount": round2(as_f(b.total_amount)),
+                            "payment_cash": round2(as_f(b.payment_cash)),
+                            "payment_online": round2(as_f(b.payment_online)),
+                            "payment_mode": b.payment_mode,
+                        },
+                        "items": [
+                            {
+                                "item_id": int(it.item_id),
+                                "quantity": int(it.quantity),
+                                "mrp": round2(as_f(it.mrp)),
+                                "line_total": round2(as_f(it.line_total)),
+                            }
+                            for it in saved_items
+                        ],
+                    },
+                },
+            )
             session.commit()
             session.refresh(b)
             sync_bill_vouchers(session, b)

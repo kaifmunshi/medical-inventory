@@ -407,8 +407,170 @@ def create_data_repair_backup(label: str) -> str:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_label = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(label or "repair"))
     backup_path = backup_dir / f"{DB_FILE.stem}.{safe_label}_{stamp}{DB_FILE.suffix}"
-    shutil.copy2(DB_FILE, backup_path)
+    # Use SQLite's online backup API rather than copying the main file. A plain
+    # file copy can miss committed pages still held in a WAL file on the client.
+    with sqlite3.connect(str(DB_FILE)) as source, sqlite3.connect(str(backup_path)) as destination:
+        source.backup(destination)
     return str(backup_path)
+
+
+def repair_saved_monetary_values_v1(session) -> tuple[int, int, str | None]:
+    """Repair only high-confidence monetary damage caused by old edit clients.
+
+    1. Old Supplier Ledger item edits sent GST=0 for every saved row. Audit
+       snapshots let us restore those fields without guessing, but only while
+       the current rows still match that broken "after" snapshot.
+    2. Purchase invoices with a non-zero final round-off are intended to land on
+       a whole rupee. A one-paise UI/server calculation disagreement previously
+       persisted totals such as 4908.99 instead of the entered 4909.00.
+    """
+    gst_repairs: list[dict] = []
+    rounding_repairs: list[dict] = []
+
+    logs = session.exec(text("""
+        SELECT id, entity_id, details_json
+        FROM auditlog
+        WHERE entity_type = 'PURCHASE'
+          AND action = 'UPDATE_ITEMS'
+          AND details_json IS NOT NULL
+        ORDER BY id DESC
+    """)).all()
+    handled_purchase_ids: set[int] = set()
+    for log_id, entity_id, details_json in logs:
+        purchase_id = int(entity_id or 0)
+        if purchase_id <= 0 or purchase_id in handled_purchase_ids:
+            continue
+        # Only the latest item-edit snapshot may describe current intent.
+        handled_purchase_ids.add(purchase_id)
+        try:
+            details = json.loads(str(details_json or "{}"))
+            before_items = details.get("before", {}).get("items", [])
+            after_items = details.get("after", {}).get("items", [])
+        except (TypeError, ValueError):
+            continue
+        if not before_items or len(before_items) != len(after_items):
+            continue
+        before_by_id = {int(row.get("id") or 0): row for row in before_items}
+        after_by_id = {int(row.get("id") or 0): row for row in after_items}
+        if set(before_by_id) != set(after_by_id) or 0 in before_by_id:
+            continue
+        # Signature of the known broken editor: at least one GST rate existed,
+        # then every row was written as zero.
+        if not any(abs(float(row.get("gst_percent") or 0)) >= 0.005 for row in before_items):
+            continue
+        if any(abs(float(row.get("gst_percent") or 0)) >= 0.005 for row in after_items):
+            continue
+
+        current_rows = session.exec(text("""
+            SELECT id, gst_percent, discount_percent, additional_discount_percent,
+                   discount_amount, rounding_adjustment, sealed_qty, cost_price
+            FROM purchaseitem WHERE purchase_id = :purchase_id
+        """).bindparams(purchase_id=purchase_id)).all()
+        current_by_id = {int(row[0]): row for row in current_rows}
+        if set(current_by_id) != set(after_by_id):
+            continue
+        # Never overwrite a later intentional edit.
+        if any(
+            round(float(current_by_id[item_id][1] or 0), 2)
+            != round(float(after_by_id[item_id].get("gst_percent") or 0), 2)
+            for item_id in current_by_id
+        ):
+            continue
+        gst_repairs.append({
+            "audit_log_id": int(log_id),
+            "purchase_id": purchase_id,
+            "items": before_by_id,
+        })
+
+    rounding_rows = session.exec(text("""
+        SELECT id, invoice_number, total_amount, rounding_adjustment
+        FROM purchase
+        WHERE COALESCE(is_deleted, 0) = 0
+          AND ABS(COALESCE(rounding_adjustment, 0)) >= 0.005
+          AND ABS(total_amount - ROUND(total_amount, 0)) BETWEEN 0.004 AND 0.011
+    """)).all()
+    for row in rounding_rows:
+        target = round(float(row[2] or 0))
+        rounding_repairs.append({
+            "purchase_id": int(row[0]),
+            "invoice_number": str(row[1] or ""),
+            "before_total": round(float(row[2] or 0), 2),
+            "after_total": float(target),
+            "before_rounding": round(float(row[3] or 0), 2),
+            "after_rounding": round(float(row[3] or 0) + target - float(row[2] or 0), 2),
+        })
+
+    if not gst_repairs and not rounding_repairs:
+        return 0, 0, None
+    session.commit()
+    backup_path = create_data_repair_backup("before_saved_monetary_values_v1")
+
+    for repair in gst_repairs:
+        purchase_id = int(repair["purchase_id"])
+        for item_id, before in repair["items"].items():
+            session.exec(text("""
+                UPDATE purchaseitem
+                SET gst_percent = :gst,
+                    discount_percent = :discount,
+                    additional_discount_percent = :additional
+                WHERE id = :item_id AND purchase_id = :purchase_id
+            """).bindparams(
+                gst=round(float(before.get("gst_percent") or 0), 2),
+                discount=round(float(before.get("discount_percent") or 0), 2),
+                additional=round(float(before.get("additional_discount_percent") or 0), 2),
+                item_id=int(item_id),
+                purchase_id=purchase_id,
+            ))
+        # Preserve saved line totals/discount rupees; only restore the lost tax
+        # rates and recompute the header GST using those authoritative lines.
+        subtotal_row = session.exec(text(
+            "SELECT COALESCE(SUM(line_total), 0) FROM purchaseitem WHERE purchase_id = :id"
+        ).bindparams(id=purchase_id)).one()
+        subtotal = round(float(subtotal_row[0] or 0), 2)
+        discount_row = session.exec(text(
+            "SELECT discount_amount, rounding_adjustment FROM purchase WHERE id = :id"
+        ).bindparams(id=purchase_id)).one()
+        header_discount = round(float(discount_row[0] or 0), 2)
+        factor = max(0.0, subtotal - header_discount) / subtotal if subtotal > 0 else 0.0
+        gst_row = session.exec(text("""
+            SELECT COALESCE(SUM(ROUND(MAX(0, line_total) * gst_percent / 100.0, 2)), 0)
+            FROM purchaseitem WHERE purchase_id = :id
+        """).bindparams(id=purchase_id)).one()
+        gst = round(float(gst_row[0] or 0) * factor, 2)
+        total = round(subtotal - header_discount + gst + float(discount_row[1] or 0), 2)
+        session.exec(text("""
+            UPDATE purchase
+            SET subtotal_amount = :subtotal, gst_amount = :gst, total_amount = :total
+            WHERE id = :id
+        """).bindparams(subtotal=subtotal, gst=gst, total=total, id=purchase_id))
+
+    for repair in rounding_repairs:
+        session.exec(text("""
+            UPDATE purchase
+            SET rounding_adjustment = :rounding, total_amount = :total
+            WHERE id = :id
+        """).bindparams(
+            rounding=repair["after_rounding"],
+            total=repair["after_total"],
+            id=repair["purchase_id"],
+        ))
+
+    session.exec(text("""
+        INSERT INTO auditlog
+        (event_ts, entity_type, entity_id, action, note, details_json, actor)
+        VALUES (:ts, 'SYSTEM', NULL, 'MONETARY_INTEGRITY_REPAIR',
+                :note, :details, 'migration')
+    """).bindparams(
+        ts=_now_ts(),
+        note=f"Restored {len(gst_repairs)} purchase GST edit(s) and {len(rounding_repairs)} round-off total(s)",
+        details=json.dumps({
+            "backup": backup_path,
+            "gst_repairs": gst_repairs,
+            "rounding_repairs": rounding_repairs,
+        }, sort_keys=True),
+    ))
+    session.commit()
+    return len(gst_repairs), len(rounding_repairs), backup_path
 
 
 def merge_kalonji_1693_into_1527_once(session) -> tuple[int, str | None]:
@@ -3515,6 +3677,12 @@ def migrate_db():
                 ),
             )
             session.commit()
+
+        # Keep this independent from the credit-line migration above. Previously
+        # it was accidentally nested inside that migration's first-run branch,
+        # so a database with one marker but not the other could skip this repair.
+        if not client_repair_done:
+            session.commit()
             ts_repair = _now_ts()
             loose_syncs, loose_stock_repairs, bill_total_repairs, voucher_syncs, backup_path, warning_count = (
                 auto_repair_client_loose_conversion_and_credit_returns()
@@ -3537,6 +3705,29 @@ def migrate_db():
                     ts=ts_repair,
                 ),
             )
+            session.commit()
+
+        # ---------- one-time repair: monetary fields reset by legacy editors ----------
+        saved_money_repair_key = "repair_saved_monetary_values_v1"
+        saved_money_repair_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=saved_money_repair_key),
+        ).first()
+        if not saved_money_repair_done:
+            session.commit()
+            gst_repairs, rounding_repairs, backup_path = repair_saved_monetary_values_v1(session)
+            session.exec(text("""
+                INSERT INTO appmeta (key, value, updated_at)
+                VALUES (:k, :value, :ts)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """).bindparams(
+                k=saved_money_repair_key,
+                value=(
+                    f"done;gst_repairs:{gst_repairs};"
+                    f"rounding_repairs:{rounding_repairs};"
+                    f"backup:{backup_path or ''}"
+                ),
+                ts=_now_ts(),
+            ))
             session.commit()
 
         # ---------- one-time backfill: deleted bill stock + ledger ----------

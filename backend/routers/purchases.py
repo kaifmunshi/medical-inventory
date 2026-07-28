@@ -742,7 +742,7 @@ def make_purchase_payment_out(payment: PurchasePayment, party_id: Optional[int] 
 
 
 def purchase_item_output(session, item: PurchaseItem) -> PurchaseItemOut:
-    data = item.dict()
+    data = item.model_dump()
     if not clean_date(data.get("expiry_date")):
         lot = session.get(InventoryLot, int(item.lot_id)) if item.lot_id else None
         inventory_item = session.get(Item, int(item.inventory_item_id)) if item.inventory_item_id else None
@@ -840,6 +840,28 @@ def purchase_item_matches_raw(raw: PurchaseItemIn, item: PurchaseItem) -> bool:
     )
 
 
+def purchase_item_money_matches_raw(raw: PurchaseItemIn, item: PurchaseItem) -> bool:
+    """Whether saving this row should preserve its stored monetary values exactly."""
+    percentages_match = (
+        round2(raw.discount_percent) == round2(item.discount_percent)
+        and round2(raw.additional_discount_percent) == round2(item.additional_discount_percent)
+    )
+    discount_matches = percentages_match and (
+        round2(raw.discount_percent) != 0
+        or round2(raw.additional_discount_percent) != 0
+        or round2(raw.discount_amount) == round2(item.discount_amount)
+    )
+    return (
+        int(raw.sealed_qty or 0) == int(item.sealed_qty or 0)
+        and int(raw.free_qty or 0) == int(item.free_qty or 0)
+        and round2(raw.cost_price) == round2(item.cost_price)
+        and round2(raw.mrp) == round2(item.mrp)
+        and round2(raw.gst_percent) == round2(item.gst_percent)
+        and discount_matches
+        and round2(raw.rounding_adjustment) == round2(item.rounding_adjustment)
+    )
+
+
 def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[PurchaseItemIn]) -> PurchaseOut:
     """Safely adjust existing purchase lines without recreating sold batches."""
     before_snapshot = purchase_snapshot(session, purchase)
@@ -904,10 +926,30 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
                 detail=f"Purchase item #{item.id} cannot reduce stock below 0",
             )
 
-        line_rounding = round2(raw.rounding_adjustment)
-        line_discount, discount_percent, additional_discount_percent = purchase_line_discount(raw, qty)
-        line_total = round2((qty * float(raw.cost_price or 0)) - line_discount + line_rounding)
-        effective_cost = round2(line_total / new_qty) if new_qty > 0 else round2(raw.cost_price)
+        stored_expected_line_total = round2(
+            int(item.sealed_qty or 0) * float(item.cost_price or 0)
+            - float(item.discount_amount or 0)
+            + float(item.rounding_adjustment or 0)
+        )
+        money_unchanged = (
+            purchase_item_money_matches_raw(raw, item)
+            # Preserve deliberate invoice allocation paise. Only repair a
+            # clearly stale/corrupt stored line when it differs materially from
+            # its own saved inputs (for example the historical zero-line bug).
+            and abs(round2(item.line_total) - stored_expected_line_total) <= 0.05
+        )
+        if money_unchanged:
+            line_rounding = round2(item.rounding_adjustment)
+            line_discount = round2(item.discount_amount)
+            discount_percent = round2(item.discount_percent)
+            additional_discount_percent = round2(item.additional_discount_percent)
+            line_total = round2(item.line_total)
+            effective_cost = round2(item.effective_cost_price)
+        else:
+            line_rounding = round2(raw.rounding_adjustment)
+            line_discount, discount_percent, additional_discount_percent = purchase_line_discount(raw, qty)
+            line_total = round2((qty * float(raw.cost_price or 0)) - line_discount + line_rounding)
+            effective_cost = round2(line_total / new_qty) if new_qty > 0 else round2(raw.cost_price)
         subtotal_amount = round2(subtotal_amount + line_total)
 
         inventory_item.expiry_date = new_expiry
@@ -1717,7 +1759,7 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
         before_snapshot = purchase_snapshot(session, row)
         old_invoice_number = row.invoice_number
 
-        data = payload.dict(exclude_unset=True)
+        data = payload.model_dump(exclude_unset=True)
         if "party_id" in data:
             supplier = ensure_supplier(session, int(data["party_id"]))
             row.party_id = supplier.id
@@ -1750,13 +1792,22 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
             row.invoice_date = invoice_date
         if "notes" in data:
             row.notes = clean_text(data["notes"])
+        discount_changed = (
+            "discount_amount" in data
+            and round2(data["discount_amount"]) != round2(row.discount_amount)
+        )
         if "discount_amount" in data:
             row.discount_amount = round2(data["discount_amount"])
-        row.gst_amount = purchase_gst_amount(
-            row.subtotal_amount,
-            row.discount_amount,
-            get_purchase_items(session, int(row.id)),
-        )
+        # Header-only edits must not rewrite a previously saved GST value. Older
+        # invoices may have been imported or calculated under an earlier rounding
+        # rule, and merely editing the date, notes, supplier, or round-off must
+        # preserve their saved monetary components exactly.
+        if discount_changed:
+            row.gst_amount = purchase_gst_amount(
+                row.subtotal_amount,
+                row.discount_amount,
+                get_purchase_items(session, int(row.id)),
+            )
         if "rounding_adjustment" in data:
             row.rounding_adjustment = round2(data["rounding_adjustment"])
 

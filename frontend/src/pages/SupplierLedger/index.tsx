@@ -78,6 +78,8 @@ function makeEmptyItem(): DraftItem {
     cost_price: 0,
     mrp: 0,
     gst_percent: 0,
+    discount_percent: 0,
+    additional_discount_percent: 0,
     discount_amount: 0,
     rounding_adjustment: 0,
     loose_sale_enabled: false,
@@ -99,6 +101,8 @@ function cloneItemForNewExpiry(item: DraftItem, copyPrices: boolean): DraftItem 
     cost_price: copyPrices ? Number(item.cost_price || 0) : 0,
     mrp: copyPrices ? Number(item.mrp || 0) : 0,
     gst_percent: copyPrices ? Number(item.gst_percent || 0) : 0,
+    discount_percent: copyPrices ? Number(item.discount_percent || 0) : 0,
+    additional_discount_percent: copyPrices ? Number(item.additional_discount_percent || 0) : 0,
     discount_amount: copyPrices ? Number(item.discount_amount || 0) : 0,
     rounding_adjustment: copyPrices ? safeNumber(item.rounding_adjustment) : 0,
   }
@@ -974,7 +978,9 @@ export default function SupplierLedgerPage() {
       free_qty: item.free_qty,
       cost_price: item.cost_price,
       mrp: item.mrp,
-      gst_percent: 0,
+      gst_percent: item.gst_percent,
+      discount_percent: item.discount_percent,
+      additional_discount_percent: item.additional_discount_percent,
       discount_amount: item.discount_amount,
       rounding_adjustment: item.rounding_adjustment || 0,
       loose_sale_enabled: false,
@@ -1074,7 +1080,7 @@ export default function SupplierLedgerPage() {
       alias: item.alias?.trim() || undefined,
       brand: item.brand?.trim() || undefined,
       expiry_date: item.expiry_date?.trim() || undefined,
-      gst_percent: 0,
+      gst_percent: Number(item.gst_percent || 0),
       rounding_adjustment: safeNumber(item.rounding_adjustment),
       parent_unit_name: item.parent_unit_name?.trim() || undefined,
       child_unit_name: item.child_unit_name?.trim() || undefined,
@@ -1418,7 +1424,7 @@ export default function SupplierLedgerPage() {
                     <TextField size="small" label="MRP" type="number" value={item.mrp} onChange={(e) => patchEditItem(item.key, { mrp: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
-                    <TextField size="small" label="Discount (Rs)" type="number" value={item.discount_amount || 0} onChange={(e) => patchEditItem(item.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                    <TextField size="small" label="Discount (Rs)" type="number" value={item.discount_amount || 0} onChange={(e) => patchEditItem(item.key, { discount_amount: Number(e.target.value), discount_percent: 0, additional_discount_percent: 0 })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
                     <TextField size="small" label="Round Off (+/-)" type="number" value={item.rounding_adjustment ?? 0} onChange={(e) => patchEditItem(item.key, { rounding_adjustment: e.target.value })} fullWidth />
@@ -1483,7 +1489,7 @@ export default function SupplierLedgerPage() {
                             <TextField size="small" label="MRP" type="number" value={batch.mrp} onChange={(e) => patchEditItem(batch.key, { mrp: Number(e.target.value) })} fullWidth />
                           </Grid>
                           <Grid item xs={6} md={1.2}>
-                            <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchEditItem(batch.key, { discount_amount: Number(e.target.value) })} fullWidth />
+                            <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchEditItem(batch.key, { discount_amount: Number(e.target.value), discount_percent: 0, additional_discount_percent: 0 })} fullWidth />
                           </Grid>
                           <Grid item xs={6} md={1.2}>
                             <TextField size="small" label="Round Off (+/-)" type="number" value={batch.rounding_adjustment ?? 0} onChange={(e) => patchEditItem(batch.key, { rounding_adjustment: e.target.value })} fullWidth />

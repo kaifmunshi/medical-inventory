@@ -229,6 +229,17 @@ function hasDraftItemContent(item: DraftItem) {
   )
 }
 
+function withSingleTrailingEmptyPurchaseRow(rows: DraftItem[]) {
+  const populated = rows.filter(hasDraftItemContent)
+  const existingTrailingEmpty = rows.length > 0 && !hasDraftItemContent(rows[rows.length - 1])
+    ? rows[rows.length - 1]
+    : null
+  const trailingEmpty = existingTrailingEmpty || makeEmptyItem()
+  const next = [...populated, trailingEmpty]
+  const unchanged = next.length === rows.length && next.every((row, index) => row.key === rows[index]?.key)
+  return unchanged ? rows : next
+}
+
 function fmtDate(value?: string | null) {
   const raw = String(value || '')
   if (!raw) return '-'
@@ -348,6 +359,23 @@ export default function PurchasesPage() {
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false)
   const productSearchTerm = productSearch.trim()
   const canSearchProducts = productSearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS || productSearchCategoryId !== null
+
+  // Add Purchase always keeps exactly one ready row at the end. Completing that
+  // row creates the next one automatically; abandoned/duplicate empty rows are
+  // collapsed so they can never leak into validation or the saved payload.
+  useEffect(() => {
+    if (!addOpen) return
+    setItems((current) => withSingleTrailingEmptyPurchaseRow(current))
+  }, [addOpen, items])
+
+  useEffect(() => {
+    if (!addOpen) return
+    const trailing = items[items.length - 1]
+    if (!trailing || hasDraftItemContent(trailing)) return
+    setExpandedDraftLines((current) => current[trailing.key]
+      ? current
+      : { ...current, [trailing.key]: true })
+  }, [addOpen, items])
   const inventorySearchTerm = inventorySearch.trim()
   const canSearchInventoryBatches = inventorySearchTerm.length >= PRODUCT_SEARCH_MIN_CHARS || inventorySearchCategoryId !== null
 
@@ -1398,6 +1426,7 @@ export default function PurchasesPage() {
     options?: { freeOnly?: boolean },
   ) {
     const freeOnly = Boolean(options?.freeOnly)
+    const savedRowCount = draftItems.filter(hasDraftItemContent).length
     const patchItem = freeOnly ? updateFreeStockItem : (editMode ? updateEditItem : updateItem)
     const expandedLines = freeOnly ? expandedFreeStockLines : (editMode ? expandedEditLines : expandedDraftLines)
     const setExpandedLines = freeOnly ? setExpandedFreeStockLines : (editMode ? setExpandedEditLines : setExpandedDraftLines)
@@ -1585,7 +1614,7 @@ export default function PurchasesPage() {
             <Typography variant="caption" color="text.secondary">
               {freeOnly
                 ? `${draftItems.length} item${draftItems.length === 1 ? '' : 's'} · Pure free stock · No supplier balance`
-                : `${draftItems.length} batch${draftItems.length === 1 ? '' : 'es'} · Items net ${money(draftSubtotal)} · Free qty reduces average rate`}
+                : `${savedRowCount} batch${savedRowCount === 1 ? '' : 'es'} · Items net ${money(draftSubtotal)} · Free qty reduces average rate`}
             </Typography>
           </Box>
           <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
@@ -1596,17 +1625,23 @@ export default function PurchasesPage() {
                 sx={{ m: 0 }}
               />
             ) : null}
-            <Button
-              variant="outlined"
-              startIcon={<AddIcon />}
-              onClick={() => {
-                const next = freeOnly ? makeFreeStockItem() : makeEmptyItem()
-                setDraftItems((prev) => [...prev, next])
-                setExpandedLines((prev) => ({ ...prev, [next.key]: true }))
-              }}
-            >
-              Add Product
-            </Button>
+            {editMode || freeOnly ? (
+              <Button
+                variant="outlined"
+                startIcon={<AddIcon />}
+                onClick={() => {
+                  const next = freeOnly ? makeFreeStockItem() : makeEmptyItem()
+                  setDraftItems((prev) => [...prev, next])
+                  setExpandedLines((prev) => ({ ...prev, [next.key]: true }))
+                }}
+              >
+                Add Product
+              </Button>
+            ) : (
+              <Typography variant="caption" color="text.secondary">
+                Next row is added automatically
+              </Typography>
+            )}
           </Stack>
         </Stack>
 

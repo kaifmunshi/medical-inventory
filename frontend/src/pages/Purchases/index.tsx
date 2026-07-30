@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import {
   Autocomplete,
   Box,
@@ -322,6 +322,9 @@ export default function PurchasesPage() {
   const [editingDraftPaymentKey, setEditingDraftPaymentKey] = useState<string | null>(null)
   const [paymentContext, setPaymentContext] = useState<'saved' | 'draft'>('saved')
   const [expandedDraftLines, setExpandedDraftLines] = useState<Record<string, boolean>>({})
+  const [supplierContextOpen, setSupplierContextOpen] = useState(false)
+  const [purchaseExtrasOpen, setPurchaseExtrasOpen] = useState(false)
+  const autoCollapsedPurchaseKeys = useRef<Set<string>>(new Set())
   const [copyExpiryPrices, setCopyExpiryPrices] = useState(true)
   const [freeStockPartyId, setFreeStockPartyId] = useState<number | null>(null)
   const [freeStockInvoiceNumber, setFreeStockInvoiceNumber] = useState('')
@@ -366,6 +369,35 @@ export default function PurchasesPage() {
   useEffect(() => {
     if (!addOpen) return
     setItems((current) => withSingleTrailingEmptyPurchaseRow(current))
+  }, [addOpen, items])
+
+  useEffect(() => {
+    if (!addOpen) return
+    const completedGroupKeys = items.flatMap((item, index) => {
+      const groupKey = item.batch_group_key || item.key
+      if (items.findIndex((row) => (row.batch_group_key || row.key) === groupKey) !== index) return []
+      if (autoCollapsedPurchaseKeys.current.has(groupKey)) return []
+      const groupRows = items.filter((row) => (row.batch_group_key || row.key) === groupKey)
+      const complete = groupRows.every((row) => (
+        Boolean(row.product_name?.trim()) &&
+        Boolean(row.expiry_date?.trim()) &&
+        lineTotalQty(row) > 0 &&
+        Number(row.mrp || 0) > 0
+      ))
+      return complete ? [groupKey] : []
+    })
+    if (completedGroupKeys.length === 0) return
+    completedGroupKeys.forEach((key) => autoCollapsedPurchaseKeys.current.add(key))
+    setExpandedDraftLines((current) => {
+      const next = { ...current }
+      completedGroupKeys.forEach((groupKey) => {
+        delete next[groupKey]
+        items
+          .filter((row) => (row.batch_group_key || row.key) === groupKey)
+          .forEach((row) => delete next[row.key])
+      })
+      return next
+    })
   }, [addOpen, items])
 
   useEffect(() => {
@@ -805,6 +837,9 @@ export default function PurchasesPage() {
     setDraftPayments([])
     setEditingDraftPaymentKey(null)
     setExpandedDraftLines({ [firstItem.key]: true })
+    setSupplierContextOpen(false)
+    setPurchaseExtrasOpen(false)
+    autoCollapsedPurchaseKeys.current.clear()
   }
 
   function resetFreeStockForm() {
@@ -1540,21 +1575,22 @@ export default function PurchasesPage() {
     }
     const renderBatchBlock = (batch: DraftItem, batchIndex: number, groupCount: number) => (
       <Grid item xs={12} key={batch.key}>
-        <Box sx={{ p: 1.5, border: '1px solid', borderColor: '#dce6df', borderLeft: '4px solid', borderLeftColor: batchIndex === 0 ? 'primary.main' : '#9bc3ad', borderRadius: 1, bgcolor: '#fbfcfb' }}>
-          <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 1 }}>
-            <Typography variant="subtitle2" fontWeight={800}>
-              Expiry {batchIndex + 1}
+        <Box sx={{ p: 1, border: '1px solid', borderColor: '#e2e9e5', borderRadius: 1, bgcolor: '#fcfdfc' }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 0.75 }}>
+            <Typography variant="caption" color="text.secondary" fontWeight={800}>
+              Batch {batchIndex + 1}
             </Typography>
             <Button
               color="error"
               size="small"
               variant="text"
               onClick={() => removeBatch(batch.key)}
+              sx={{ minHeight: 24, py: 0, px: 0.5 }}
             >
               {groupCount > 1 ? 'Remove Expiry' : 'Remove'}
             </Button>
           </Stack>
-          <Grid container spacing={1.25} alignItems="center">
+          <Grid container spacing={0.75} alignItems="center">
             <Grid item xs={6} md={1.6}>
               <TextField size="small" label="Expiry" type="date" value={batch.expiry_date || ''} onChange={(e) => patchItem(batch.key, { expiry_date: e.target.value })} InputLabelProps={{ shrink: true }} required fullWidth />
             </Grid>
@@ -1607,7 +1643,7 @@ export default function PurchasesPage() {
           justifyContent="space-between"
           alignItems={{ md: 'center' }}
           gap={1}
-          sx={{ px: 2, py: 1.5, bgcolor: '#f7faf8', borderBottom: '1px solid', borderColor: '#dce6df' }}
+          sx={{ px: 1.25, py: 0.85, bgcolor: '#f7faf8', borderBottom: '1px solid', borderColor: '#dce6df' }}
         >
           <Box>
             <Typography variant="subtitle1" fontWeight={700}>{freeOnly ? 'Free Stock Items' : 'Purchase Items'}</Typography>
@@ -1618,6 +1654,22 @@ export default function PurchasesPage() {
             </Typography>
           </Box>
           <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
+            {!editMode && !freeOnly ? (
+              <>
+                <Button
+                  size="small"
+                  onClick={() => setExpandedLines({})}
+                >
+                  Collapse all
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => setExpandedLines(Object.fromEntries(draftItems.map((row) => [row.batch_group_key || row.key, true])))}
+                >
+                  Expand all
+                </Button>
+              </>
+            ) : null}
             {!freeOnly ? (
               <FormControlLabel
                 control={<Checkbox size="small" checked={copyExpiryPrices} onChange={(e) => setCopyExpiryPrices(e.target.checked)} />}
@@ -1638,9 +1690,7 @@ export default function PurchasesPage() {
                 Add Product
               </Button>
             ) : (
-              <Typography variant="caption" color="text.secondary">
-                Next row is added automatically
-              </Typography>
+              <Chip size="small" variant="outlined" label="Auto rows" />
             )}
           </Stack>
         </Stack>
@@ -1663,12 +1713,11 @@ export default function PurchasesPage() {
                 <Stack
                   direction="row"
                   justifyContent="space-between"
-                  alignItems="flex-start"
-                  gap={1.5}
-                  flexWrap="wrap"
-                  sx={{ px: 1.75, py: 1.25, bgcolor: '#fbfdfb', borderLeft: '4px solid', borderLeftColor: 'primary.main' }}
+                  alignItems="center"
+                  gap={0.75}
+                  sx={{ px: 1, py: 0.5, minHeight: 42, bgcolor: '#fbfdfb', borderLeft: '3px solid', borderLeftColor: 'primary.main' }}
                 >
-                  <Stack gap={0.35} sx={{ minWidth: 0, flex: '1 1 420px' }}>
+                  <Stack gap={0.25} sx={{ minWidth: 0, flex: 1 }}>
                     <Typography variant="subtitle2" fontWeight={800} sx={{ lineHeight: 1.25 }}>
                       Item {index + 1} · {item.product_name || 'New purchase item'}
                     </Typography>
@@ -1686,18 +1735,9 @@ export default function PurchasesPage() {
                   {!freeOnly ? (
                     <Stack
                       direction="row"
-                      gap={2}
-                      flexWrap="wrap"
-                      justifyContent="flex-end"
-                      sx={{
-                        px: 1.25,
-                        py: 0.75,
-                        color: 'text.secondary',
-                        bgcolor: '#ffffff',
-                        border: '1px solid',
-                        borderColor: '#e0e8e3',
-                        borderRadius: 1,
-                      }}
+                      gap={1.5}
+                      flexShrink={0}
+                      sx={{ px: 1, py: 0.5, color: 'text.secondary', bgcolor: '#ffffff', border: '1px solid', borderColor: '#e0e8e3', borderRadius: 1 }}
                     >
                       <Box>
                         <Typography variant="caption" display="block">Subtotal</Typography>
@@ -1713,33 +1753,35 @@ export default function PurchasesPage() {
                       </Box>
                     </Stack>
                   ) : null}
-                  <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
+                  <Stack direction="row" gap={0.5} flexShrink={0}>
                     <Button
                       size="small"
-                      variant="outlined"
+                      variant="text"
                       onClick={() => setExpandedLines((prev) => ({ ...prev, [groupKey]: !(prev[groupKey] || prev[item.key]) }))}
+                      sx={{ minWidth: 30, px: 0.5 }}
                     >
-                      {isExpanded ? 'Collapse' : 'Expand'}
+                      {isExpanded ? '−' : '+'}
                     </Button>
                     {!freeOnly ? (
-                      <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => addExpiryBatch(item)}>
-                        Add Expiry
+                      <Button size="small" variant="text" onClick={() => addExpiryBatch(item)} sx={{ px: 0.75, minWidth: 0 }}>
+                        + Expiry
                       </Button>
                     ) : null}
                     <Button
                       color="error"
                       size="small"
-                      variant="outlined"
-                      startIcon={<DeleteIcon />}
+                      variant="text"
                       onClick={() => removeProductGroup(groupKey)}
+                      aria-label={`Remove item ${index + 1}`}
+                      sx={{ minWidth: 30, px: 0.5 }}
                     >
-                      Remove
+                      <DeleteIcon fontSize="small" />
                     </Button>
                   </Stack>
                 </Stack>
                 {isExpanded ? (
-                <Box sx={{ px: 1.75, pb: 1.75 }}>
-                <Grid container spacing={1.25} alignItems="center">
+                <Box sx={{ px: 1, pb: 0.9 }}>
+                <Grid container spacing={0.9} alignItems="center">
                   <Grid item xs={12} md={3}>
                     <Stack direction="row" gap={1}>
                       <TextField size="small" select label="Category" value={item.category_id ?? ''} onChange={(e) => patchSharedProductFields(item.key, { category_id: e.target.value ? Number(e.target.value) : undefined })} fullWidth>
@@ -1900,24 +1942,14 @@ export default function PurchasesPage() {
                   </Grid>
 
                   <Grid item xs={12}>
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      fontWeight={800}
-                      sx={{ display: 'block', px: 1, py: 0.75, bgcolor: '#f6f8f7', border: '1px solid', borderColor: '#e4ebe7', borderRadius: 1 }}
-                    >
-                      {freeOnly ? 'Batch and quantity' : 'Batch, quantity, and invoice math'}
-                    </Typography>
-                  </Grid>
-                  <Grid item xs={12}>
-                    <Stack gap={1}>
+                    <Stack gap={0.75}>
                       <FormControlLabel
                         control={<Checkbox size="small" checked={Boolean(item.loose_sale_enabled)} onChange={(e) => patchSharedProductFields(item.key, { loose_sale_enabled: e.target.checked })} />}
-                        label="Loose"
-                        sx={{ m: 0 }}
+                        label="Loose sale"
+                        sx={{ m: 0, minHeight: 28, '& .MuiFormControlLabel-label': { fontSize: '0.8rem' } }}
                       />
                       {item.loose_sale_enabled && (
-                        <Grid container spacing={1.25}>
+                        <Grid container spacing={0.75}>
                           <Grid item xs={12} md={4}>
                             <TextField size="small" label="Parent Unit" value={item.parent_unit_name || ''} onChange={(e) => patchSharedProductFields(item.key, { parent_unit_name: e.target.value })} fullWidth />
                           </Grid>
@@ -2213,8 +2245,8 @@ export default function PurchasesPage() {
       </Dialog>
 
       {addOpen ? (
-      <Paper variant="outlined" sx={{ overflow: 'hidden' }}>
-        <Box sx={{ p: 2 }}>
+      <Paper variant="outlined" sx={{ overflow: 'visible' }}>
+        <Box sx={{ px: 1.5, py: 1, position: 'sticky', top: 0, zIndex: 5, bgcolor: 'background.paper', borderBottom: '1px solid', borderColor: 'divider' }}>
           <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
             <Box>
               <Typography variant="h6">Add Purchase</Typography>
@@ -2228,31 +2260,30 @@ export default function PurchasesPage() {
             </Stack>
           </Stack>
         </Box>
-        <Divider />
-        <Box sx={{ p: 2 }}>
-          <Stack gap={2}>
+        <Box sx={{ p: { xs: 1, md: 1.5 } }}>
+          <Stack gap={1.25}>
             {partyId && (
-              <Paper variant="outlined" sx={{ p: 2, bgcolor: 'rgba(31,107,74,0.04)' }}>
-                <Stack gap={1.5}>
+              <Paper variant="outlined" sx={{ px: 1.25, py: 0.9, bgcolor: 'rgba(31,107,74,0.04)' }}>
+                <Stack gap={1}>
                   <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                     <Box>
-                      <Typography variant="subtitle1" fontWeight={800}>{supplierNameFor(partyId)}</Typography>
-                      <Typography variant="caption" color="text.secondary">Supplier snapshot before saving this purchase</Typography>
+                      <Typography variant="body2" fontWeight={800}>{supplierNameFor(partyId)}</Typography>
+                      <Typography variant="caption" color="text.secondary">Supplier balance</Typography>
                     </Box>
                     {ledgerQ.data ? (
-                      <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
-                        <Chip label={`Purchases ${money(ledgerQ.data.total_purchases)}`} />
-                        <Chip label={`Returns ${money(ledgerQ.data.total_returns || 0)}`} color="secondary" variant="outlined" />
-                        <Chip label={`Paid ${money(ledgerQ.data.total_paid)}`} color="success" variant="outlined" />
-                        <Chip label={`Write-off ${money(ledgerQ.data.total_writeoff)}`} variant="outlined" />
-                        <Chip label={`Outstanding ${money(ledgerQ.data.outstanding_amount)}`} color="warning" />
+                      <Stack direction="row" gap={0.75} flexWrap="wrap" useFlexGap alignItems="center">
+                        <Chip size="small" label={`Outstanding ${money(ledgerQ.data.outstanding_amount)}`} color="warning" />
+                        <Chip size="small" label={`Paid ${money(ledgerQ.data.total_paid)}`} color="success" variant="outlined" />
+                        <Button size="small" onClick={() => setSupplierContextOpen((open) => !open)}>
+                          {supplierContextOpen ? 'Hide history' : 'History'}
+                        </Button>
                       </Stack>
                     ) : (
                       <Typography variant="body2" color="text.secondary">Loading supplier summary...</Typography>
                     )}
                   </Stack>
 
-                  {(supplierLedgerQ.data || []).length > 0 ? (
+                  {supplierContextOpen && (supplierLedgerQ.data || []).length > 0 ? (
                     <Box sx={{ overflowX: 'auto' }}>
                       <table className="table">
                         <thead>
@@ -2283,87 +2314,89 @@ export default function PurchasesPage() {
                         </tbody>
                       </table>
                     </Box>
-                  ) : (
+                  ) : supplierContextOpen ? (
                     <Typography variant="body2" color="text.secondary">
                       {supplierLedgerQ.isLoading ? 'Loading recent ledger...' : 'No previous purchases for this supplier.'}
                     </Typography>
-                  )}
+                  ) : null}
                 </Stack>
               </Paper>
             )}
 
-            <Paper variant="outlined" sx={{ p: 2 }}>
-              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Supplier & Invoice</Typography>
-              <Grid container spacing={2}>
+            <Paper variant="outlined" sx={{ p: 1.25 }}>
+              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+                <Typography variant="subtitle2" fontWeight={800}>Invoice</Typography>
+                <Button size="small" onClick={() => setPurchaseExtrasOpen((open) => !open)}>
+                  {purchaseExtrasOpen ? 'Hide notes' : notes.trim() ? 'Edit notes' : 'Add notes'}
+                </Button>
+              </Stack>
+              <Grid container spacing={1}>
                 <Grid item xs={12} md={4}>
                   <Stack direction="row" gap={1}>
-                    <TextField select label="Supplier" value={partyId ?? ''} onChange={(e) => setPartyId(e.target.value ? Number(e.target.value) : null)} fullWidth>
+                    <TextField size="small" select label="Supplier" value={partyId ?? ''} onChange={(e) => setPartyId(e.target.value ? Number(e.target.value) : null)} fullWidth>
                       {suppliers.map((supplier) => (
                         <MenuItem key={supplier.id} value={supplier.id}>{supplier.name}</MenuItem>
                       ))}
                     </TextField>
-                    <Button variant="outlined" onClick={() => setSupplierDialogOpen(true)} sx={{ whiteSpace: 'nowrap' }}>New</Button>
+                    <Button size="small" variant="outlined" onClick={() => setSupplierDialogOpen(true)} sx={{ whiteSpace: 'nowrap' }}>New</Button>
                   </Stack>
                 </Grid>
                 <Grid item xs={12} md={4}>
-                  <TextField label="Invoice Number" value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} fullWidth />
+                  <TextField size="small" label="Invoice Number" value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} fullWidth />
                 </Grid>
                 <Grid item xs={12} md={4}>
-                  <TextField label="Invoice Date" type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+                  <TextField size="small" label="Invoice Date" type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
                 </Grid>
-                <Grid item xs={12}>
-                  <TextField label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} multiline minRows={2} fullWidth />
-                </Grid>
+                {purchaseExtrasOpen ? (
+                  <Grid item xs={12}>
+                    <TextField size="small" label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} multiline minRows={1} fullWidth />
+                  </Grid>
+                ) : null}
               </Grid>
             </Paper>
 
             {itemEditor(items, setItems)}
 
-            <Paper variant="outlined" sx={{ p: 2 }}>
-              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Totals & Settlement</Typography>
-              <Grid container spacing={2} alignItems="center">
-                <Grid item xs={12} md={3}>
+            <Paper variant="outlined" sx={{ p: 1.25 }}>
+              <Typography variant="subtitle2" fontWeight={800} sx={{ mb: 1 }}>Totals & Settlement</Typography>
+              <Grid container spacing={1} alignItems="center">
+                <Grid item xs={6} md={2}>
                   <Typography variant="caption" color="text.secondary">Items Net Total</Typography>
-                  <Typography variant="h6">{money(subtotal)}</Typography>
+                  <Typography variant="body1" fontWeight={800}>{money(subtotal)}</Typography>
                 </Grid>
-                <Grid item xs={12} md={3}>
-                  <TextField label="Invoice Discount (Rs)" type="number" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} fullWidth />
+                <Grid item xs={6} md={2}>
+                  <TextField size="small" label="Invoice Discount (Rs)" type="number" value={discountAmount} onChange={(e) => setDiscountAmount(e.target.value)} fullWidth />
                 </Grid>
-                <Grid item xs={12} md={3}>
+                <Grid item xs={6} md={2}>
                   <Typography variant="caption" color="text.secondary">Input GST</Typography>
-                  <Typography variant="h6">{money(gstTotal)}</Typography>
+                  <Typography variant="body1" fontWeight={800}>{money(gstTotal)}</Typography>
                 </Grid>
-                <Grid item xs={12} md={3}>
-                  <TextField label="Final Round Off (+/-)" type="number" value={roundingAdjustment} onChange={(e) => setRoundingAdjustment(e.target.value)} fullWidth />
+                <Grid item xs={6} md={2}>
+                  <TextField size="small" label="Final Round Off (+/-)" type="number" value={roundingAdjustment} onChange={(e) => setRoundingAdjustment(e.target.value)} fullWidth />
                 </Grid>
-                <Grid item xs={12} md={3}>
+                <Grid item xs={6} md={2}>
                   <Typography variant="caption" color="text.secondary">Total</Typography>
-                  <Typography variant="h5" fontWeight={800}>{money(total)}</Typography>
+                  <Typography variant="h6" color="primary.main" fontWeight={900}>{money(total)}</Typography>
                 </Grid>
-                <Grid item xs={12}>
-                  <Paper sx={{ p: 1.5, bgcolor: 'rgba(31,107,74,0.05)' }}>
-                    <Typography variant="caption" color="text.secondary">
-                      Free product impact
-                    </Typography>
-                    <Typography variant="body2" fontWeight={700}>
-                      Average rate is recalculated per item as net item amount divided by total inward quantity including free units.
-                    </Typography>
-                  </Paper>
+                <Grid item xs={6} md={2}>
+                  <Button
+                    size="small"
+                    fullWidth
+                    variant="outlined"
+                    startIcon={<PaymentsIcon />}
+                    onClick={openDraftPaymentDialog}
+                  >
+                    Payment
+                  </Button>
                 </Grid>
+                {draftPayments.length > 0 ? (
                 <Grid item xs={12}>
-                  <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1} sx={{ mb: 1 }}>
+                  <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1} sx={{ mb: 0.5 }}>
                     <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
                       <Chip label={`Payments ${money(draftPaidTotal)}`} color="success" variant="outlined" />
                       <Chip label={`Write-off ${money(draftWriteoffTotal)}`} variant="outlined" />
                       <Chip label={`Outstanding ${money(round2(Math.max(0, total - draftPaymentTotal)))}`} color="warning" variant="outlined" />
                     </Stack>
-                    <Button
-	                      variant="contained"
-	                      startIcon={<PaymentsIcon />}
-	                      onClick={openDraftPaymentDialog}
-	                    >
-                      Add Payment / Write-off
-                    </Button>
                   </Stack>
                   <Box sx={{ overflowX: 'auto' }}>
                     <table className="table">
@@ -2403,24 +2436,21 @@ export default function PurchasesPage() {
                             </td>
                           </tr>
                         ))}
-                        {draftPayments.length === 0 ? (
-                          <tr>
-                            <td colSpan={11}>
-                              <Box p={2} color="text.secondary">No payments added yet.</Box>
-                            </td>
-                          </tr>
-                        ) : null}
                       </tbody>
                     </table>
                   </Box>
                 </Grid>
+                ) : null}
               </Grid>
             </Paper>
           </Stack>
         </Box>
-        <Stack direction="row" justifyContent="flex-end" gap={1} sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'grey.50' }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ px: 1.5, py: 1, position: 'sticky', bottom: 0, zIndex: 5, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
+          <Typography variant="body1" fontWeight={900}>Total {money(total)}</Typography>
+          <Stack direction="row" gap={1}>
           <Button onClick={() => setAddOpen(false)}>Back to Purchases</Button>
           <Button variant="contained" onClick={submit} disabled={createM.isPending}>Save Purchase</Button>
+          </Stack>
         </Stack>
       </Paper>
       ) : null}

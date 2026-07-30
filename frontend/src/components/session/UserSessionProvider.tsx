@@ -90,6 +90,7 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
   const lastActivityRef = useRef(Date.now())
   const lastPersistedActivityRef = useRef(0)
   const sessionLockPaused = isSessionLockPausedPath(location.pathname)
+  const isOwner = session?.user?.role === 'OWNER'
 
   useEffect(() => {
     const stored = loadStoredUserSession()
@@ -97,8 +98,9 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
       const activityAt = readStoredLastActivity(stored.user.id) || Date.now()
       lastActivityRef.current = activityAt
       lastPersistedActivityRef.current = activityAt
-      setIsLocked(sessionLockPaused ? false : shouldRestoreSessionLocked(stored.user.id))
-      if (sessionLockPaused) {
+      const storedUserIsOwner = stored.user.role === 'OWNER'
+      setIsLocked(storedUserIsOwner || sessionLockPaused ? false : shouldRestoreSessionLocked(stored.user.id))
+      if (storedUserIsOwner || sessionLockPaused) {
         clearStoredSessionLock(stored.user.id)
         saveStoredLastActivity(stored.user.id, Date.now())
       }
@@ -125,6 +127,11 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
   const lockSession = useCallback(() => {
     const userId = session?.user?.id
     if (!userId) return
+    if (session?.user?.role === 'OWNER') {
+      clearStoredSessionLock(userId)
+      setIsLocked(false)
+      return
+    }
     if (isSessionLockPausedPath(window.location.pathname)) {
       rememberActivity(userId)
       clearStoredSessionLock(userId)
@@ -136,13 +143,18 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
     setLoginOpen(false)
     setPin('')
     setUnlockPin('')
-  }, [session?.user?.id, rememberActivity])
+  }, [session?.user?.id, session?.user?.role, rememberActivity])
 
   useEffect(() => {
     const userId = session?.user?.id
     if (!userId || isLocked) return undefined
 
     const now = Date.now()
+    if (isOwner) {
+      clearStoredSessionLock(userId)
+      rememberActivity(userId, now)
+      return undefined
+    }
     if (sessionLockPaused) {
       rememberActivity(userId, now)
       clearStoredSessionLock(userId)
@@ -200,7 +212,7 @@ export function UserSessionProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('focus', handleWake)
       document.removeEventListener('visibilitychange', handleWake)
     }
-  }, [session?.user?.id, isLocked, lockSession, rememberActivity, sessionLockPaused])
+  }, [session?.user?.id, isLocked, isOwner, lockSession, rememberActivity, sessionLockPaused])
 
   const usersQ = useQuery<AppUser[], Error>({
     queryKey: ['session-active-users'],

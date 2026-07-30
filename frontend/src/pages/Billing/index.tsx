@@ -686,8 +686,13 @@ export default function Billing() {
     applyFinalAmountToRows(safe)
   }
 
-  function commitFinalAmountBlur() {
-    const safe = round2(Math.max(0, Number(finalAmount || 0)))
+  function commitFinalAmountBlur(rawValue?: string) {
+    // Read from the input on blur instead of relying only on React state. Selecting
+    // another product immediately after typing can blur this field before the last
+    // state update is visible here; applying that stale value (often 0) would make
+    // every existing line a 100% discount.
+    const parsed = rawValue === undefined ? finalAmount : parseNumText(rawValue)
+    const safe = round2(Math.max(0, Number(parsed || 0)))
     setFinalAmount(safe)
     syncPaymentFieldsFromFinal(safe)
     applyFinalAmountToRows(safe)
@@ -1732,7 +1737,7 @@ export default function Billing() {
                       }
                       setFinalManuallyEdited(true)
                     }}
-                    onBlur={commitFinalAmountBlur}
+                    onBlur={(e) => commitFinalAmountBlur(e.currentTarget.value)}
                     onWheel={blurOnWheel}
                     sx={{ ...noSpinnerSx }}
                     inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}

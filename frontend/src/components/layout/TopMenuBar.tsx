@@ -75,10 +75,12 @@ export default function TopMenuBar({
   const location = useLocation()
   const navigate = useNavigate()
   const { currentUser, isLocked, shortcuts, signOut, promptSwitchUser } = useUserSession()
+  const hasFullAccess = currentUser?.role === 'OWNER' && !isLocked
   const [userMenuAnchor, setUserMenuAnchor] = useState<HTMLElement | null>(null)
   const yearsQ = useQuery({
     queryKey: ['topbar-financial-years'],
     queryFn: fetchFinancialYears,
+    enabled: hasFullAccess,
   })
 
   const activeItem = useMemo(
@@ -92,7 +94,7 @@ export default function TopMenuBar({
   const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
   const shortcutLinks = useMemo(
     () => {
-      if (isLocked) return []
+      if (!hasFullAccess) return []
       return shortcuts
         .map((shortcut) => {
           const item = allMenuItems.find((entry) => entry.to === shortcut.to)
@@ -108,12 +110,12 @@ export default function TopMenuBar({
           } => Boolean(entry),
         )
     },
-    [shortcuts, isLocked],
+    [shortcuts, hasFullAccess],
   )
 
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
-      if (isLocked) return
+      if (!hasFullAccess) return
       if (isTypingTarget(event.target)) return
 
       const customMatch = shortcutLinks.find((entry) => hotkeyMatches(event, entry.hotkey))
@@ -131,7 +133,7 @@ export default function TopMenuBar({
 
     window.addEventListener('keydown', handleKeydown)
     return () => window.removeEventListener('keydown', handleKeydown)
-  }, [navigate, shortcutLinks, isLocked])
+  }, [navigate, shortcutLinks, hasFullAccess])
 
   function openUserMenu(event: MouseEvent<HTMLElement>) {
     setUserMenuAnchor(event.currentTarget)
@@ -295,7 +297,7 @@ export default function TopMenuBar({
             </Typography>
           </Box>
         ) : null}
-        {!isLocked ? (
+        {hasFullAccess ? (
           <MenuItem
             dense
             onClick={() => {
@@ -308,7 +310,7 @@ export default function TopMenuBar({
             Switch User
           </MenuItem>
         ) : null}
-        {!isLocked ? (
+        {hasFullAccess ? (
           <MenuItem
             dense
             onClick={() => {

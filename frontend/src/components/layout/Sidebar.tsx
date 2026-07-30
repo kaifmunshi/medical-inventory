@@ -26,12 +26,13 @@ type SidebarProps = {
 
 export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed = false }: SidebarProps) {
   const { pathname } = useLocation()
-  const { isLocked } = useUserSession()
+  const { currentUser, isLocked } = useUserSession()
+  const hasFullAccess = currentUser?.role === 'OWNER' && !isLocked
   const year = new Date().getFullYear()
   const [expandedGroupKey, setExpandedGroupKey] = useState('')
 
   const visibleMenuGroups = useMemo(() => {
-    if (!isLocked) return appMenuGroups
+    if (hasFullAccess) return appMenuGroups
     return appMenuGroups
       .map((group) => {
         const items = group.items.filter((item) => isLockAllowedPath(item.to))
@@ -41,7 +42,7 @@ export default function Sidebar({ mobileOpen = false, onCloseMobile, collapsed =
         return { ...group, items }
       })
       .filter((group) => group.items.length > 0)
-  }, [isLocked])
+  }, [hasFullAccess])
 
   const activeGroupKey = useMemo(() => {
     const group = visibleMenuGroups.find((entry) =>

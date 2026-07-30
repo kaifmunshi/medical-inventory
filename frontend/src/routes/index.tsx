@@ -33,11 +33,12 @@ import SupplierLedgerPage from '../pages/SupplierLedger'
 import CustomerLedgerPage from '../pages/CustomerLedger'
 import SuspenseAccountPage from '../pages/SuspenseAccount'
 
-function SessionLockRoute({ children }: { children: ReactNode }) {
+function SessionAccessRoute({ children }: { children: ReactNode }) {
   const location = useLocation()
-  const { isLocked } = useUserSession()
+  const { currentUser, isLocked } = useUserSession()
+  const isOwner = currentUser?.role === 'OWNER'
 
-  if (isLocked && !isLockAllowedPath(location.pathname)) {
+  if (((currentUser && !isOwner) || isLocked) && !isLockAllowedPath(location.pathname)) {
     return <Navigate to="/inventory" replace />
   }
 
@@ -50,9 +51,9 @@ export default function AppRoutes() {
       <Route
         path="/"
         element={(
-          <SessionLockRoute>
+          <SessionAccessRoute>
             <AppLayout />
-          </SessionLockRoute>
+          </SessionAccessRoute>
         )}
       >
         <Route index element={<Dashboard />} />

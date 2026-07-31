@@ -1096,9 +1096,9 @@ export default function Billing() {
     setPriceDraftByRow((prev) => ({ ...prev, [i]: raw }))
   }
 
-  function commitCustomPrice(i: number) {
+  function commitCustomPrice(i: number, rawValue?: string) {
     if (Number(rows[i]?.item_id || 0) <= 0) return
-    const raw = String(priceDraftByRow[i] ?? '').trim()
+    const raw = String(rawValue ?? priceDraftByRow[i] ?? '').trim()
     if (raw === '') {
       setPriceDraftByRow((prev) => {
         const next = { ...prev }
@@ -1147,9 +1147,9 @@ export default function Billing() {
     setDiscountDraftByRow((prev) => ({ ...prev, [i]: raw }))
   }
 
-  function commitRowDiscount(i: number) {
+  function commitRowDiscount(i: number, rawValue?: string) {
     if (Number(rows[i]?.item_id || 0) <= 0) return
-    const raw = String(discountDraftByRow[i] ?? '').trim()
+    const raw = String(rawValue ?? discountDraftByRow[i] ?? '').trim()
     if (raw === '') {
       setDiscountDraftByRow((prev) => {
         const next = { ...prev }
@@ -1531,7 +1531,7 @@ export default function Billing() {
                           : String(Number(r.item_discount_percent || 0).toFixed(2))
                       }
                       onChange={(e) => handleRowDiscountChange(i, e.target.value)}
-                      onBlur={() => commitRowDiscount(i)}
+                      onBlur={(e) => commitRowDiscount(i, e.currentTarget.value)}
                       onWheel={blurOnWheel}
                       onFocus={(e) => e.target.select()}
                       sx={{ width: 96, ...GRID_INPUT_SX, ...noSpinnerSx }}
@@ -1549,7 +1549,7 @@ export default function Billing() {
                           : String(Number(r.custom_unit_price || 0).toFixed(2))
                       }
                       onChange={(e) => handleCustomPriceChange(i, e.target.value)}
-                      onBlur={() => commitCustomPrice(i)}
+                      onBlur={(e) => commitCustomPrice(i, e.currentTarget.value)}
                       onWheel={blurOnWheel}
                       onFocus={(e) => e.target.select()}
                       sx={{ width: 108, ...GRID_INPUT_SX, ...noSpinnerSx }}

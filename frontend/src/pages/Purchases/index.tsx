@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
 import {
   Autocomplete,
   Box,
@@ -324,7 +324,6 @@ export default function PurchasesPage() {
   const [expandedDraftLines, setExpandedDraftLines] = useState<Record<string, boolean>>({})
   const [supplierContextOpen, setSupplierContextOpen] = useState(false)
   const [purchaseExtrasOpen, setPurchaseExtrasOpen] = useState(false)
-  const autoCollapsedPurchaseKeys = useRef<Set<string>>(new Set())
   const [copyExpiryPrices, setCopyExpiryPrices] = useState(true)
   const [freeStockPartyId, setFreeStockPartyId] = useState<number | null>(null)
   const [freeStockInvoiceNumber, setFreeStockInvoiceNumber] = useState('')
@@ -365,39 +364,10 @@ export default function PurchasesPage() {
 
   // Add Purchase always keeps exactly one ready row at the end. Completing that
   // row creates the next one automatically; abandoned/duplicate empty rows are
-  // collapsed so they can never leak into validation or the saved payload.
+  // removed so they can never leak into validation or the saved payload.
   useEffect(() => {
     if (!addOpen) return
     setItems((current) => withSingleTrailingEmptyPurchaseRow(current))
-  }, [addOpen, items])
-
-  useEffect(() => {
-    if (!addOpen) return
-    const completedGroupKeys = items.flatMap((item, index) => {
-      const groupKey = item.batch_group_key || item.key
-      if (items.findIndex((row) => (row.batch_group_key || row.key) === groupKey) !== index) return []
-      if (autoCollapsedPurchaseKeys.current.has(groupKey)) return []
-      const groupRows = items.filter((row) => (row.batch_group_key || row.key) === groupKey)
-      const complete = groupRows.every((row) => (
-        Boolean(row.product_name?.trim()) &&
-        Boolean(row.expiry_date?.trim()) &&
-        lineTotalQty(row) > 0 &&
-        Number(row.mrp || 0) > 0
-      ))
-      return complete ? [groupKey] : []
-    })
-    if (completedGroupKeys.length === 0) return
-    completedGroupKeys.forEach((key) => autoCollapsedPurchaseKeys.current.add(key))
-    setExpandedDraftLines((current) => {
-      const next = { ...current }
-      completedGroupKeys.forEach((groupKey) => {
-        delete next[groupKey]
-        items
-          .filter((row) => (row.batch_group_key || row.key) === groupKey)
-          .forEach((row) => delete next[row.key])
-      })
-      return next
-    })
   }, [addOpen, items])
 
   useEffect(() => {
@@ -839,7 +809,6 @@ export default function PurchasesPage() {
     setExpandedDraftLines({ [firstItem.key]: true })
     setSupplierContextOpen(false)
     setPurchaseExtrasOpen(false)
-    autoCollapsedPurchaseKeys.current.clear()
   }
 
   function resetFreeStockForm() {

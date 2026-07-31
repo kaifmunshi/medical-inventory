@@ -909,9 +909,9 @@ export default function CustomerLedgerPage() {
     setDraft(billId, money(Math.min(Number(bill.outstanding_amount || 0), remaining)))
   }
 
-  function clampBillAdjustment(bill: OpenBill) {
+  function clampBillAdjustment(bill: OpenBill, rawValue?: string) {
     const billId = Number(bill.bill_id)
-    const raw = Number(adjustmentDrafts[billId] || 0)
+    const raw = Number(rawValue ?? adjustmentDrafts[billId] ?? 0)
     if (!Number.isFinite(raw) || raw <= 0) {
       setDraft(billId, '0')
       return
@@ -981,9 +981,9 @@ export default function CustomerLedgerPage() {
     setApplyDraft(billId, money(Math.min(Number(bill.outstanding_amount || 0), remaining)))
   }
 
-  function clampApplyAdjustment(bill: OpenBill) {
+  function clampApplyAdjustment(bill: OpenBill, rawValue?: string) {
     const billId = Number(bill.bill_id)
-    const raw = Number(applyDrafts[billId] || 0)
+    const raw = Number(rawValue ?? applyDrafts[billId] ?? 0)
     if (!Number.isFinite(raw) || raw <= 0) {
       setApplyDraft(billId, '0')
       return
@@ -1981,7 +1981,7 @@ export default function CustomerLedgerPage() {
                           value={adjustmentDrafts[Number(bill.bill_id)] ?? '0'}
                           onChange={(e) => setDraft(Number(bill.bill_id), e.target.value)}
                           onFocus={() => fillBillAdjustmentOnFocus(bill)}
-                          onBlur={() => clampBillAdjustment(bill)}
+                          onBlur={(e) => clampBillAdjustment(bill, e.currentTarget.value)}
                           helperText="Focus to fill"
                           sx={{ width: 150 }}
                         />
@@ -2142,7 +2142,7 @@ export default function CustomerLedgerPage() {
                             value={applyDrafts[Number(bill.bill_id)] ?? '0'}
                             onChange={(e) => setApplyDraft(Number(bill.bill_id), e.target.value)}
                             onFocus={() => fillApplyAdjustmentOnFocus(bill)}
-                            onBlur={() => clampApplyAdjustment(bill)}
+                            onBlur={(e) => clampApplyAdjustment(bill, e.currentTarget.value)}
                             helperText="Focus to fill"
                             sx={{ width: 150 }}
                           />

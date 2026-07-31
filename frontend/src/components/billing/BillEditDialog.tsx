@@ -816,8 +816,8 @@ export default function BillEditDialog({
     setEditPriceDraftByRow((prev) => ({ ...prev, [idx]: raw }))
   }
 
-  function commitEditCustomPrice(idx: number) {
-    const raw = String(editPriceDraftByRow[idx] ?? '').trim()
+  function commitEditCustomPrice(idx: number, rawValue?: string) {
+    const raw = String(rawValue ?? editPriceDraftByRow[idx] ?? '').trim()
     if (raw === '') {
       setEditPriceDraftByRow((prev) => {
         const next = { ...prev }
@@ -868,8 +868,8 @@ export default function BillEditDialog({
     setEditDiscountDraftByRow((prev) => ({ ...prev, [idx]: raw }))
   }
 
-  function commitEditDiscount(idx: number) {
-    const raw = String(editDiscountDraftByRow[idx] ?? '').trim()
+  function commitEditDiscount(idx: number, rawValue?: string) {
+    const raw = String(rawValue ?? editDiscountDraftByRow[idx] ?? '').trim()
     if (raw === '') {
       setEditDiscountDraftByRow((prev) => {
         const next = { ...prev }
@@ -1397,7 +1397,7 @@ export default function BillEditDialog({
                             type="text"
                             value={Object.prototype.hasOwnProperty.call(editDiscountDraftByRow, idx) ? editDiscountDraftByRow[idx] : String(Number(it.item_discount_percent || 0).toFixed(2))}
                             onChange={(e) => handleEditDiscountChange(idx, e.target.value)}
-                            onBlur={() => commitEditDiscount(idx)}
+                            onBlur={(e) => commitEditDiscount(idx, e.currentTarget.value)}
                             onWheel={blurOnWheel}
                             onFocus={(e) => e.target.select()}
                             sx={{ width: 96, ...GRID_INPUT_SX, ...noSpinnerSx }}
@@ -1410,7 +1410,7 @@ export default function BillEditDialog({
                             type="text"
                             value={Object.prototype.hasOwnProperty.call(editPriceDraftByRow, idx) ? editPriceDraftByRow[idx] : String(Number(it.custom_unit_price || 0).toFixed(2))}
                             onChange={(e) => handleEditCustomPriceChange(idx, e.target.value)}
-                            onBlur={() => commitEditCustomPrice(idx)}
+                            onBlur={(e) => commitEditCustomPrice(idx, e.currentTarget.value)}
                             onWheel={blurOnWheel}
                             onFocus={(e) => e.target.select()}
                             sx={{ width: 108, ...GRID_INPUT_SX, ...noSpinnerSx }}
@@ -1505,7 +1505,7 @@ export default function BillEditDialog({
                         }
                         setEditFinalManuallyEdited(true)
                       }}
-                      onBlur={() => applyEditFinalAmountToRows(editFinalAmount)}
+                      onBlur={(e) => applyEditFinalAmountToRows(Number(parseNumText(e.currentTarget.value) || 0))}
                       onWheel={blurOnWheel}
                       sx={{ width: 220, ...noSpinnerSx }}
                       inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}

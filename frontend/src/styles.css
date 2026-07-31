@@ -89,3 +89,27 @@ body {
 .table tbody tr:hover {
   background-color: rgba(31, 107, 74, 0.04);
 }
+
+/* Credit bills need room for three row actions. Preserve that space and let the
+   existing scroll container handle narrower viewports instead of crushing labels. */
+.table.credit-bills-table {
+  width: 100% !important;
+  min-width: 1060px !important;
+  max-width: none;
+}
+
+.table.credit-bills-table th:last-child,
+.table.credit-bills-table td.credit-bill-actions-cell {
+  width: 110px;
+  min-width: 110px !important;
+  text-align: center;
+}
+
+.table.credit-bills-table td.credit-bill-date-cell {
+  white-space: normal !important;
+  line-height: 1.2;
+}
+
+.table.credit-bills-table td.credit-bill-actions-cell .MuiButton-root {
+  min-width: 76px;
+}

@@ -1,5 +1,5 @@
 // F:\medical-inventory\frontend\src\pages\CreditBills.tsx
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useMemo, useState, type MouseEvent } from 'react'
 import {
   Box,
   Button,
@@ -10,6 +10,7 @@ import {
   Divider,
   IconButton,
   Link,
+  Menu,
   MenuItem,
   Paper,
   Stack,
@@ -50,6 +51,17 @@ function money(n: number | string | undefined | null) {
 
 function round2(n: number) {
   return Math.round(n * 100) / 100
+}
+
+function creditDateTimeParts(value: unknown) {
+  const raw = String(value || '').trim()
+  if (!raw) return { date: '—', time: '' }
+  const normalized = raw.replace(' ', 'T')
+  const [date, rawTime = ''] = normalized.split('T')
+  return {
+    date,
+    time: rawTime.slice(0, 5),
+  }
 }
 
 function computeBillProration(bill: any) {
@@ -192,6 +204,8 @@ export default function CreditBills() {
   const [advanceAmount, setAdvanceAmount] = useState<number | ''>('')
   const [advanceDate, setAdvanceDate] = useState(todayFrom)
   const [advanceNote, setAdvanceNote] = useState('')
+  const [rowActionsAnchor, setRowActionsAnchor] = useState<HTMLElement | null>(null)
+  const [rowActionsBill, setRowActionsBill] = useState<any | null>(null)
   const payPending = useMemo(
     () =>
       round2(
@@ -222,6 +236,17 @@ export default function CreditBills() {
     queryClient.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
     queryClient.invalidateQueries({ queryKey: ['dash-credit-pending-total'] })
     queryClient.invalidateQueries({ queryKey: ['rpt-sales'] })
+  }
+
+  function openRowActions(event: MouseEvent<HTMLElement>, row: any) {
+    event.stopPropagation()
+    setRowActionsAnchor(event.currentTarget)
+    setRowActionsBill(row)
+  }
+
+  function closeRowActions() {
+    setRowActionsAnchor(null)
+    setRowActionsBill(null)
   }
 
   const qBills = useQuery({
@@ -846,7 +871,19 @@ export default function CreditBills() {
 
         <Paper sx={{ p: 2 }}>
           <Box sx={{ overflowX: 'auto' }}>
-            <table className="table">
+            <table className="table credit-bills-table">
+              <colgroup>
+                <col style={{ width: 95 }} />
+                <col style={{ width: 210 }} />
+                <col style={{ width: 100 }} />
+                <col style={{ width: 90 }} />
+                <col style={{ width: 90 }} />
+                <col style={{ width: 90 }} />
+                <col style={{ width: 100 }} />
+                <col style={{ width: 100 }} />
+                <col style={{ width: 75 }} />
+                <col style={{ width: 110 }} />
+              </colgroup>
               <thead>
                 <tr>
                   <th>Bill Number</th>
@@ -858,7 +895,7 @@ export default function CreditBills() {
                   <th>Pending</th>
                   <th>Status</th>
                   <th>Mode</th>
-                  <th></th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -909,7 +946,17 @@ export default function CreditBills() {
                               </Typography>
                             </Stack>
                           </td>
-                          <td>{r.date}</td>
+                          <td className="credit-bill-date-cell">
+                            {(() => {
+                              const parts = creditDateTimeParts(r.date)
+                              return (
+                                <Stack gap={0.15}>
+                                  <span>{parts.date}</span>
+                                  {parts.time ? <span>{parts.time}</span> : null}
+                                </Stack>
+                              )
+                            })()}
+                          </td>
                           <td>{r.total}</td>
                           <td>{r.paid}</td>
                           <td>{r.writeoff}</td>
@@ -918,28 +965,20 @@ export default function CreditBills() {
                             <StatusChip status={r.status} />
                           </td>
                           <td>{r.mode}</td>
-                          <td>
+                          <td className="credit-bill-actions-cell">
                             {isSettled ? (
                               <Typography variant="body2" color="text.secondary">
                                 —
                               </Typography>
                             ) : (
-                              <Stack direction={{ xs: 'column', md: 'row' }} gap={1}>
-                                <Button size="small" variant="contained" onClick={() => openReceivePayment(r)}>
-                                  Receive
-                                </Button>
-                                <Button
-                                  size="small"
-                                  variant="outlined"
-                                  onClick={() => openAdjustAdvance(r.raw)}
-                                  disabled={!debtorPartyForBill(r.raw)}
-                                >
-                                  Adjust Advance
-                                </Button>
-                                <Button size="small" variant="outlined" color="warning" onClick={() => openWriteoff(r)}>
-                                  Write-off
-                                </Button>
-                              </Stack>
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                onClick={(event) => openRowActions(event, r)}
+                                aria-haspopup="menu"
+                              >
+                                Actions
+                              </Button>
                             )}
                           </td>
                         </tr>
@@ -959,6 +998,42 @@ export default function CreditBills() {
                 )}
               </tbody>
             </table>
+            <Menu
+              anchorEl={rowActionsAnchor}
+              open={Boolean(rowActionsAnchor)}
+              onClose={closeRowActions}
+              anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+            >
+              <MenuItem
+                onClick={() => {
+                  const row = rowActionsBill
+                  closeRowActions()
+                  if (row) openReceivePayment(row)
+                }}
+              >
+                Receive Payment
+              </MenuItem>
+              <MenuItem
+                disabled={!rowActionsBill || !debtorPartyForBill(rowActionsBill.raw)}
+                onClick={() => {
+                  const row = rowActionsBill
+                  closeRowActions()
+                  if (row) openAdjustAdvance(row.raw)
+                }}
+              >
+                Adjust Advance
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  const row = rowActionsBill
+                  closeRowActions()
+                  if (row) openWriteoff(row)
+                }}
+              >
+                Write-off
+              </MenuItem>
+            </Menu>
           </Box>
         </Paper>
       </Stack>

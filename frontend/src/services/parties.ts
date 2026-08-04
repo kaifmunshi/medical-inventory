@@ -114,6 +114,7 @@ export async function updatePartyReceipt(
     online_amount?: number
     note?: string
     payment_date?: string
+    adjustments?: Array<{ bill_id: number; amount: number }>
   },
 ): Promise<PartyReceipt> {
   const res = await api.patch<PartyReceipt>(`/parties/${partyId}/receipts/${receiptId}`, payload)

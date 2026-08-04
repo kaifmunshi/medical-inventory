@@ -1059,7 +1059,53 @@ def update_party_receipt(party_id: int, receipt_id: int, payload: PartyReceiptUp
             _active_receipt_adjustments(session, int(receipt.id)),
             key=lambda row: (str(row.created_at or ""), int(row.id or 0)),
         )
-        adjusted_total = _round2(sum(_as_float(row.adjusted_amount) for row in active_adjustments))
+        affected_bill_ids = {int(row.bill_id) for row in active_adjustments}
+        if payload.adjustments is not None:
+            for adjustment in active_adjustments:
+                if adjustment.bill_payment_id is not None:
+                    payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+                    if payment:
+                        payment.is_deleted = True
+                        payment.deleted_at = datetime.now().isoformat(timespec="seconds")
+                        session.add(payment)
+                        mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(payment.id))
+                session.delete(adjustment)
+            session.flush()
+            for bill_id in affected_bill_ids:
+                bill = session.get(Bill, bill_id)
+                if bill:
+                    _recalculate_bill_payment_state(session, bill)
+                    session.add(bill)
+
+            customer_name = _party_customer_name(session, party)
+            customer_bills = {int(b.id): b for b in session.exec(select(Bill).where(Bill.is_deleted == False).where(_bill_matches_party_expr(party, customer_name))).all()}  # noqa: E712
+            by_bill: dict[int, float] = {}
+            for item in payload.adjustments:
+                amount = _round2(item.amount)
+                if amount <= 0:
+                    continue
+                by_bill[int(item.bill_id)] = _round2(by_bill.get(int(item.bill_id), 0) + amount)
+            adjusted_total = _round2(sum(by_bill.values()))
+            if adjusted_total > total_amount + 0.0001:
+                raise HTTPException(status_code=400, detail="Applied bill amount cannot exceed receipt total")
+            remaining_cash, remaining_online = cash, online
+            active_adjustments = []
+            for bill_id, amount in by_bill.items():
+                bill = customer_bills.get(bill_id)
+                if not bill:
+                    raise HTTPException(status_code=400, detail=f"Bill {bill_id} does not belong to this customer")
+                outstanding = _round2(max(0, _as_float(bill.total_amount) - _as_float(bill.paid_amount) - _as_float(getattr(bill, "writeoff_amount", 0))))
+                if amount > outstanding + 0.0001:
+                    raise HTTPException(status_code=400, detail=f"Adjustment for bill {bill_id} exceeds outstanding amount of {outstanding:.2f}")
+                cash_share, online_share = _allocate_receipt_channels(amount, remaining_cash, remaining_online)
+                remaining_cash = _round2(remaining_cash - cash_share); remaining_online = _round2(remaining_online - online_share)
+                payment = BillPayment(bill_id=bill_id, received_at=receipt_ts, mode="split" if cash_share and online_share else "cash" if cash_share else "online", cash_amount=cash_share, online_amount=online_share, writeoff_amount=0, note=f"party receipt #{receipt.id}", is_writeoff=False, is_deleted=False)
+                session.add(payment); session.flush()
+                adjustment = ReceiptBillAdjustment(receipt_id=int(receipt.id), bill_id=bill_id, bill_payment_id=int(payment.id), adjusted_amount=amount, created_at=receipt_ts)
+                session.add(adjustment); active_adjustments.append(adjustment); affected_bill_ids.add(bill_id)
+                _recalculate_bill_payment_state(session, bill); session.add(bill)
+        else:
+            adjusted_total = _round2(sum(_as_float(row.adjusted_amount) for row in active_adjustments))
         if total_amount + 0.0001 < adjusted_total:
             raise HTTPException(status_code=400, detail="Receipt total cannot be less than applied bill amount")
 
@@ -1074,7 +1120,6 @@ def update_party_receipt(party_id: int, receipt_id: int, payload: PartyReceiptUp
 
         remaining_cash = cash
         remaining_online = online
-        affected_bill_ids = set()
         for adjustment in active_adjustments:
             amount = _round2(_as_float(adjustment.adjusted_amount))
             if amount <= 0:

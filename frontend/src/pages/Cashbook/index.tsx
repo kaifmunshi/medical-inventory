@@ -48,13 +48,15 @@ import { getBill, listPayments } from '../../services/billing'
 import { listPurchasePayments } from '../../services/purchases'
 import { fetchPurchaseReturns } from '../../services/purchaseReturns'
 import { listExchangeRecords, listReturns } from '../../services/returns'
-import { fetchReceipts } from '../../services/parties'
+import { fetchParties, fetchReceipts } from '../../services/parties'
+import { createCustomer } from '../../services/customers'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 import { useToast } from '../../components/ui/Toaster'
 import { fetchFinancialYears } from '../../services/settings'
 import { financialYearDisplayName } from '../../lib/financialYear'
+import { addLoanAdjustment, createOpeningLoanWithReturn, fetchLoanAdjustmentByEntry, fetchLoans, reconcileLoanEntry, updateLoanAdjustment } from '../../services/loans'
 
 function money(n: number | string | null | undefined) {
   return Number(n || 0).toFixed(2)
@@ -131,6 +133,8 @@ function typeChipProps(type: string) {
   if (t === 'CONTRA') {
     return { label: 'Contra', sx: { ...baseSx, bgcolor: 'secondary.light', color: 'secondary.dark' } }
   }
+  if (t === 'LOAN') return { label: 'Loan', sx: { ...baseSx, bgcolor: '#ede9fe', color: '#5b21b6' } }
+  if (t === 'LOAN_REPAYMENT') return { label: 'Loan Return', sx: { ...baseSx, bgcolor: '#ccfbf1', color: '#115e59' } }
   return { label: 'Expense', sx: { ...baseSx, bgcolor: 'error.light', color: 'error.dark' } }
 }
 
@@ -142,6 +146,8 @@ const typeFilterOptions = [
   { value: 'WITHDRAWAL', label: 'Withdrawal' },
   { value: 'PAYMENT', label: 'Payment' },
   { value: 'CONTRA', label: 'Contra' },
+  { value: 'LOAN', label: 'Loan' },
+  { value: 'LOAN_REPAYMENT', label: 'Loan Return' },
   { value: 'RETURN', label: 'Sales Return' },
   { value: 'SPLIT', label: 'Split' },
 ]
@@ -357,6 +363,12 @@ export default function CashbookPage() {
   const [amount, setAmount] = useState('')
   const [note, setNote] = useState('')
   const [isSuspense, setIsSuspense] = useState(false)
+  const [loanPartyId, setLoanPartyId] = useState('')
+  const [, setLoanReturnTarget] = useState('')
+  const [legacyReturnMode,setLegacyReturnMode]=useState(false); const [legacyOpeningAmount,setLegacyOpeningAmount]=useState(''); const [legacyOpeningDate,setLegacyOpeningDate]=useState(today)
+  const [newClientOpen, setNewClientOpen] = useState(false)
+  const [newClientName, setNewClientName] = useState('')
+  const [newClientPhone, setNewClientPhone] = useState('')
   const [billOpen, setBillOpen] = useState(false)
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<any | null>(null)
@@ -367,6 +379,10 @@ export default function CashbookPage() {
   const [editAmount, setEditAmount] = useState('')
   const [editNote, setEditNote] = useState('')
   const [editIsSuspense, setEditIsSuspense] = useState(false)
+  const [editLoanPartyId, setEditLoanPartyId] = useState('')
+  const [editLoanReturnTarget, setEditLoanReturnTarget] = useState('')
+  const [editLoanAdjustmentId, setEditLoanAdjustmentId] = useState<number | null>(null)
+  const [editLegacyReturnMode,setEditLegacyReturnMode]=useState(false); const [editLegacyOpeningAmount,setEditLegacyOpeningAmount]=useState(''); const [editLegacyOpeningDate,setEditLegacyOpeningDate]=useState(today)
   const [deleteRow, setDeleteRow] = useState<any | null>(null)
 
   useEffect(() => {
@@ -390,6 +406,10 @@ export default function CashbookPage() {
     queryFn: fetchFinancialYears,
   })
   const activeYear = useMemo(() => (yearsQ.data || []).find((year) => year.is_active) || null, [yearsQ.data])
+  const debtorsQ = useQuery({ queryKey: ['cashbook-loan-debtors'], queryFn: () => fetchParties({ party_group: 'SUNDRY_DEBTOR', is_active: true }) })
+  const returnLoansQ = useQuery({ queryKey: ['cashbook-return-loans', loanPartyId], queryFn: () => fetchLoans({ party_id: Number(loanPartyId), open_only: true }), enabled: entryType === 'LOAN_REPAYMENT' && Boolean(loanPartyId) })
+  const editReturnLoansQ = useQuery({ queryKey: ['cashbook-edit-return-loans', editLoanPartyId], queryFn: () => fetchLoans({ party_id: Number(editLoanPartyId), open_only: false }), enabled: editType === 'LOAN_REPAYMENT' && Boolean(editLoanPartyId) })
+  const createClientM = useMutation({ mutationFn: async () => { const customer = await createCustomer({ name: newClientName.trim(), phone: newClientPhone.trim() || undefined }); const parties = await fetchParties({ party_group: 'SUNDRY_DEBTOR', is_active: true }); const party = parties.find(p => Number(p.legacy_customer_id) === Number(customer.id)) || parties.find(p => p.name.trim().toLowerCase() === customer.name.trim().toLowerCase()); if (!party) throw new Error('Customer account link was not created'); return party }, onSuccess: (party) => { setLoanPartyId(String(party.id)); setNewClientOpen(false); setNewClientName(''); setNewClientPhone(''); qc.invalidateQueries({ queryKey: ['cashbook-loan-debtors'] }); qc.invalidateQueries({ queryKey: ['customer-ledger-customers'] }); toast.push('Client added', 'success') }, onError: (err:any) => toast.push(errorMessage(err, 'Failed to add client'), 'error') })
 
   const allRange = useMemo(() => {
     if (allView === 'WEEK') return weekRange(debouncedAllAnchorDate)
@@ -501,30 +521,37 @@ export default function CashbookPage() {
   const qDayBankbookContra = useQuery({
     queryKey: ['cashbook-bankbook-contra-day', selectedDate],
     queryFn: () =>
-      fetchPagedRows((limit, offset) => listBankbookEntries({ from_date: selectedDate, to_date: selectedDate, limit, offset }), 500),
+      fetchPagedRows((limit, offset) => listBankbookEntries({ from_date: selectedDate, to_date: selectedDate, entry_type: 'CONTRA', limit, offset }), 500),
     enabled: recordsFilter === 'DAY',
   })
 
   const qAllBankbookContra = useQuery({
     queryKey: ['cashbook-bankbook-contra-all', allView, allRange.from, allRange.to],
     queryFn: () =>
-      fetchPagedRows((limit, offset) => listBankbookEntries({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 500),
+      fetchPagedRows((limit, offset) => listBankbookEntries({ from_date: allRange.from, to_date: allRange.to, entry_type: 'CONTRA', limit, offset }), 500),
     enabled: canLoadAllRange,
   })
 
   const mCreate = useMutation({
-    mutationFn: () =>
-      createCashbookEntry({
+    mutationFn: () => entryType === 'LOAN_REPAYMENT'
+      ? legacyReturnMode
+        ? createOpeningLoanWithReturn({party_id:Number(loanPartyId),opening_date:legacyOpeningDate,opening_amount:Number(legacyOpeningAmount),return_date:entryDate,return_amount:Number(amount),settlement_book:'CASH',note:note.trim()||undefined})
+        : (() => { const selected=[...(returnLoansQ.data||[])].sort((a,b)=>a.loan_date.localeCompare(b.loan_date)).find(l=>l.outstanding_amount+0.0001>=Number(amount)); if(!selected) throw new Error('Client does not have enough outstanding loan balance'); return addLoanAdjustment(selected.loan_book, selected.loan_entry_id, { adjustment_type: 'MONEY', amount: Number(amount), adjustment_date: entryDate, settlement_book: 'CASH', note: note.trim() || undefined }) })()
+      : createCashbookEntry({
         entry_type: entryType,
         amount: Number(amount),
         note: note.trim() || undefined,
         entry_date: entryDate,
         is_suspense: !['OPENING', 'CONTRA'].includes(entryType) && isSuspense,
+        party_id: entryType === 'LOAN' ? Number(loanPartyId) : undefined,
       }),
     onSuccess: () => {
       setAmount('')
       setNote('')
       setIsSuspense(false)
+      setLoanPartyId('')
+      setLoanReturnTarget('')
+      setLegacyReturnMode(false); setLegacyOpeningAmount('')
       setAddOpen(false)
       setSelectedDate(entryDate)
       qc.invalidateQueries({ queryKey: ['cashbook-day'] })
@@ -533,21 +560,27 @@ export default function CashbookPage() {
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-day'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
+      if (entryType === 'CONTRA') {
+        qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+        qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
+        qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
+        qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
+      }
+      qc.invalidateQueries({ queryKey: ['loans'] })
+      qc.invalidateQueries({ queryKey: ['cashbook-return-loans'] })
     },
   })
 
   const mUpdate = useMutation({
-    mutationFn: () =>
-      updateCashbookEntry(Number(editRow?.id), {
+    mutationFn: () => editType === 'LOAN_REPAYMENT'
+      ? (()=>{const automatic=[...(editReturnLoansQ.data||[])].sort((a,b)=>a.loan_date.localeCompare(b.loan_date)).find(l=>l.outstanding_amount+(editLoanAdjustmentId&&`${l.loan_book}:${l.loan_entry_id}`===editLoanReturnTarget?Number(editRow?.amount||0):0)+0.0001>=Number(editAmount));const [currentBook,currentId]=editLoanReturnTarget.split(':');const book=(editLoanAdjustmentId?currentBook:automatic?.loan_book) as 'CASH'|'BANK'|'OPENING';const id=editLoanAdjustmentId?Number(currentId):Number(automatic?.loan_entry_id);return editLoanAdjustmentId ? updateLoanAdjustment(editLoanAdjustmentId,{adjustment_type:'MONEY',amount:Number(editAmount),adjustment_date:editDate,note:editNote.trim()||undefined,settlement_book:'CASH',party_id:Number(editLoanPartyId),target_loan_book:book,target_loan_entry_id:id}) : reconcileLoanEntry({book:'CASH',entry_id:Number(editRow?.id),role:'REPAYMENT',party_id:Number(editLoanPartyId),target_loan_book:editLegacyReturnMode?undefined:book,target_loan_entry_id:editLegacyReturnMode?undefined:id,amount:Number(editAmount),entry_date:editDate,note:editNote.trim()||undefined,create_opening_amount:editLegacyReturnMode?Number(editLegacyOpeningAmount):undefined,create_opening_date:editLegacyReturnMode?editLegacyOpeningDate:undefined})})()
+      : updateCashbookEntry(Number(editRow?.id), {
         entry_type: editType,
         amount: Number(editAmount),
         note: editNote.trim() || undefined,
         entry_date: editDate,
         is_suspense: !['OPENING', 'CONTRA'].includes(editType) && editIsSuspense,
+        party_id: editType === 'LOAN' ? Number(editLoanPartyId || 0) || undefined : undefined,
       }),
     onSuccess: (updated: any) => {
       setEditRow(null)
@@ -558,10 +591,16 @@ export default function CashbookPage() {
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-day'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
+      if (editType === 'CONTRA' || String(editRow?.entry_type || '').toUpperCase() === 'CONTRA') {
+        qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+        qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
+        qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
+        qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
+      }
+      if (editType === 'LOAN' || editType === 'LOAN_REPAYMENT') {
+        qc.invalidateQueries({ queryKey: ['loans'] })
+        qc.invalidateQueries({ queryKey: ['cashbook-edit-return-loans'] })
+      }
     },
     onError: (err: any) => {
       toast.push(errorMessage(err, 'Failed to update entry'), 'error')
@@ -580,10 +619,12 @@ export default function CashbookPage() {
       qc.invalidateQueries({ queryKey: ['dash-cashbook'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history'] })
       qc.invalidateQueries({ queryKey: ['dash-cashbook-history-summary'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-day'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
-      qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
+      if (String(row?.entry_type || '').toUpperCase() === 'CONTRA') {
+        qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+        qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
+        qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-day'] })
+        qc.invalidateQueries({ queryKey: ['bankbook-cashbook-contra-all'] })
+      }
     },
     onError: (err: any) => {
       toast.push(errorMessage(err, 'Failed to delete entry'), 'error')
@@ -604,6 +645,12 @@ export default function CashbookPage() {
       toast.push('Enter an amount greater than 0 before saving', 'warning')
       return
     }
+    if (entryType === 'LOAN' && !loanPartyId) { toast.push('Select or add a client for this loan', 'warning'); return }
+    if (entryType === 'LOAN_REPAYMENT' && !loanPartyId) { toast.push('Select the client returning the loan', 'warning'); return }
+    if (entryType === 'LOAN_REPAYMENT' && !legacyReturnMode && returnLoansQ.isLoading) { toast.push('Loading this client’s loan balance', 'info'); return }
+    if (entryType === 'LOAN_REPAYMENT' && !legacyReturnMode && !(returnLoansQ.data||[]).some(l=>l.outstanding_amount+0.0001>=Number(amount))) { toast.push('This client does not have enough outstanding loan balance. Create an opening loan if it predates the system.', 'warning'); return }
+    if (entryType === 'LOAN_REPAYMENT' && legacyReturnMode && (Number(legacyOpeningAmount)<Number(amount)||!legacyOpeningDate)) { toast.push('Opening loan balance must cover this return','warning'); return }
+    if (entryType === 'LOAN_REPAYMENT' && legacyReturnMode && legacyOpeningDate>entryDate) { toast.push('Opening loan date cannot be after the return date','warning'); return }
     mCreate.mutate()
   }
 
@@ -621,6 +668,10 @@ export default function CashbookPage() {
       toast.push('Enter an amount greater than 0 before saving', 'warning')
       return
     }
+    if (editType === 'LOAN' && !editLoanPartyId) { toast.push('Select a client for this loan','warning'); return }
+    if (editType === 'LOAN_REPAYMENT' && !editLoanPartyId) { toast.push('Select the client returning the loan','warning'); return }
+    if (editType==='LOAN_REPAYMENT'&&editLegacyReturnMode&&(Number(editLegacyOpeningAmount)<Number(editAmount)||!editLegacyOpeningDate)){toast.push('Opening loan balance must cover this return','warning');return}
+    if (editType==='LOAN_REPAYMENT'&&editLegacyReturnMode&&editLegacyOpeningDate>editDate){toast.push('Opening loan date cannot be after the return date','warning');return}
     mUpdate.mutate()
   }
 
@@ -639,13 +690,25 @@ export default function CashbookPage() {
     }
   }
 
-  function openEdit(row: any) {
+  async function openEdit(row: any) {
     setEditRow(row)
     setEditType(String(row.entry_type || 'RECEIPT').toUpperCase() as CashbookType)
     setEditDate(isoDate(row.created_at) === '-' ? today : isoDate(row.created_at))
     setEditAmount(String(Number(row.amount || 0)))
     setEditNote(String(row.note || ''))
     setEditIsSuspense(Boolean(row.is_suspense))
+    setEditLoanPartyId(row.party_id ? String(row.party_id) : '')
+    setEditLoanAdjustmentId(null)
+    setEditLoanReturnTarget('')
+    setEditLegacyReturnMode(false); setEditLegacyOpeningAmount(''); setEditLegacyOpeningDate(isoDate(row.created_at)==='-'?today:isoDate(row.created_at))
+    if (String(row.entry_type || '').toUpperCase() === 'LOAN_REPAYMENT') {
+      try {
+        const adjustment = await fetchLoanAdjustmentByEntry('CASH', Number(row.id))
+        setEditLoanAdjustmentId(adjustment.id)
+        setEditLoanPartyId(String(adjustment.party_id))
+        setEditLoanReturnTarget(`${adjustment.loan_book}:${adjustment.loan_entry_id}`)
+      } catch (err:any) { toast.push(errorMessage(err,'Could not load loan return details'),'error'); setEditRow(null) }
+    }
   }
 
   const billCashRowsDay = useMemo(() => {
@@ -852,16 +915,31 @@ export default function CashbookPage() {
   }, [ledgerRows, recordsFilter])
 
   const qDailySummary = useQuery({
-    queryKey: ['cashbook-daily-summary', allLedgerDates.join(',')],
-    queryFn: () => getCashbookDailySummary({ dates: allLedgerDates }),
+    queryKey: ['cashbook-daily-summary', 'seed', allLedgerDates[0]],
+    queryFn: () => getCashbookDailySummary({ dates: allLedgerDates.slice(0, 1) }),
     enabled: recordsFilter === 'ALL' && allLedgerDates.length > 0,
   })
 
   const dailySummaryByDate = useMemo(() => {
     const out: Record<string, any> = {}
-    for (const row of qDailySummary.data || []) out[String(row.date)] = row
+    if (!allLedgerDates.length || !(qDailySummary.data || []).length) return out
+    let opening = Number(qDailySummary.data?.[0]?.opening_balance || 0)
+    for (const date of allLedgerDates) {
+      let receipts = 0, withdrawals = 0, expenses = 0
+      for (const row of ledgerRows as any[]) {
+        if (isoDate(row.created_at) !== date || String(row.entry_type || '').toUpperCase() === 'OPENING') continue
+        const type = String(row.entry_type || '').toUpperCase(); const value = Number(row.amount || 0)
+        if (type === 'RECEIPT' || type === 'LOAN_REPAYMENT') receipts += value
+        else if (type === 'WITHDRAWAL' || type === 'CONTRA') withdrawals += value
+        else expenses += value
+      }
+      const netChange = receipts - withdrawals - expenses
+      const closing = opening + netChange
+      out[date] = { date, opening_balance: opening, closing_balance: closing, summary: { receipts, withdrawals, expenses, cash_out: withdrawals + expenses, net_change: netChange } }
+      opening = closing
+    }
     return out
-  }, [qDailySummary.data])
+  }, [allLedgerDates, ledgerRows, qDailySummary.data])
 
   const visibleRows = useMemo(
     () => ledgerRows.filter((row: any) => matchesFilters(row, typeFilter, noteFilter)),
@@ -889,7 +967,7 @@ export default function CashbookPage() {
       const t = String(r.entry_type || '').toUpperCase()
       const amt = Number(r.amount || 0)
       if (t === 'OPENING') continue
-      if (t === 'RECEIPT') receipts += amt
+      if (t === 'RECEIPT' || t === 'LOAN_REPAYMENT') receipts += amt
       else if (t === 'WITHDRAWAL' || t === 'CONTRA') withdrawals += amt
       else expenses += amt
     }
@@ -1101,7 +1179,16 @@ export default function CashbookPage() {
               <MenuItem value="EXPENSE">Expense (Cash Out)</MenuItem>
               <MenuItem value="WITHDRAWAL">Withdrawal (Cash Out)</MenuItem>
               <MenuItem value="CONTRA">Contra (Cash to Bank)</MenuItem>
+              <MenuItem value="LOAN">Loan (Cash Given)</MenuItem>
+              <MenuItem value="LOAN_REPAYMENT">Loan Return (Cash Received)</MenuItem>
             </TextField>
+            {['LOAN','LOAN_REPAYMENT'].includes(entryType) ? <Stack direction="row" spacing={1} sx={{minWidth:300}}>
+              <TextField select label="Client" value={loanPartyId} onChange={(e)=>{setLoanPartyId(e.target.value);setLoanReturnTarget('')}} sx={{minWidth:220,flex:1}}>{(debtorsQ.data||[]).map(p=><MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}</TextField>
+              <Button variant="outlined" onClick={()=>setNewClientOpen(true)}>New</Button>
+            </Stack> : null}
+            {entryType === 'LOAN_REPAYMENT'&&loanPartyId&&!legacyReturnMode ? <Alert severity="info">Outstanding loan balance: Rs {money((returnLoansQ.data||[]).reduce((sum,l)=>sum+l.outstanding_amount,0))}. The return is applied automatically to the oldest eligible loan.</Alert> : null}
+            {entryType==='LOAN_REPAYMENT'?<Button variant={legacyReturnMode?'contained':'outlined'} onClick={()=>{setLegacyReturnMode(v=>!v);setLoanReturnTarget('')}}>{legacyReturnMode?'Using Opening Loan':'No loan account? Create Opening Loan'}</Button>:null}
+            {entryType==='LOAN_REPAYMENT'&&legacyReturnMode?<><TextField label="Loan balance before this return" type="number" value={legacyOpeningAmount} onChange={e=>setLegacyOpeningAmount(e.target.value)} inputProps={{min:Number(amount)||0,step:'0.01'}}/><TextField label="Opening loan date" type="date" value={legacyOpeningDate} onChange={e=>setLegacyOpeningDate(e.target.value)} InputLabelProps={{shrink:true}} inputProps={{max:entryDate}}/></>:null}
             <TextField
               label="Entry Date"
               type="date"
@@ -1126,7 +1213,7 @@ export default function CashbookPage() {
             <FormControlLabel
               control={<Checkbox checked={isSuspense} onChange={(e) => setIsSuspense(e.target.checked)} />}
               label="Suspense A/c"
-              disabled={entryType === 'OPENING' || entryType === 'CONTRA'}
+              disabled={entryType === 'OPENING' || entryType === 'CONTRA' || entryType === 'LOAN' || entryType === 'LOAN_REPAYMENT'}
               sx={{ minWidth: 150 }}
             />
             <Button
@@ -1144,6 +1231,8 @@ export default function CashbookPage() {
           ) : null}
         </Collapse>
       </Paper>
+
+      <Dialog open={newClientOpen} onClose={()=>!createClientM.isPending&&setNewClientOpen(false)} fullWidth maxWidth="xs"><DialogTitle>Add Client</DialogTitle><DialogContent><Stack spacing={2} sx={{mt:1}}><TextField required label="Client name" value={newClientName} onChange={e=>setNewClientName(e.target.value)}/><TextField label="Phone" value={newClientPhone} onChange={e=>setNewClientPhone(e.target.value)}/></Stack></DialogContent><DialogActions><Button onClick={()=>setNewClientOpen(false)}>Cancel</Button><Button variant="contained" disabled={!newClientName.trim()||createClientM.isPending} onClick={()=>createClientM.mutate()}>Add Client</Button></DialogActions></Dialog>
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} sx={{ mb: 1.5 }}>
@@ -1244,7 +1333,7 @@ export default function CashbookPage() {
                 (visibleRows || []).map((row: any, idx: number) => {
                   const t = String(row.entry_type || '').toUpperCase()
                   const chipType = row.source === 'RETURN' ? 'RETURN' : String(row.pill_type || t).toUpperCase()
-                  const isIn = t === 'RECEIPT'
+                  const isIn = t === 'RECEIPT' || t === 'LOAN_REPAYMENT'
                   const chip = typeChipProps(chipType)
                   const date = isoDate(row.created_at)
                   const prevDate = idx > 0 ? isoDate((visibleRows as any[])[idx - 1]?.created_at) : date
@@ -1356,7 +1445,7 @@ export default function CashbookPage() {
                                       mDelete.reset()
                                       setDeleteRow(row)
                                     }}
-                                    disabled={mUpdate.isPending || mDelete.isPending}
+                                    disabled={mUpdate.isPending || mDelete.isPending || t === 'LOAN_REPAYMENT'}
                                   >
                                     <DeleteIcon fontSize="small" />
                                   </IconButton>
@@ -1587,7 +1676,13 @@ export default function CashbookPage() {
               <MenuItem value="EXPENSE">Expense (Cash Out)</MenuItem>
               <MenuItem value="WITHDRAWAL">Withdrawal (Cash Out)</MenuItem>
               <MenuItem value="CONTRA">Contra (Cash to Bank)</MenuItem>
+              <MenuItem value="LOAN">Loan (Cash Given)</MenuItem>
+              <MenuItem value="LOAN_REPAYMENT">Loan Return (Cash Received)</MenuItem>
             </TextField>
+            {['LOAN','LOAN_REPAYMENT'].includes(editType) ? <TextField select required label="Client" value={editLoanPartyId} onChange={e=>{setEditLoanPartyId(e.target.value);setEditLoanReturnTarget('')}} fullWidth>{(debtorsQ.data||[]).map(p=><MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}</TextField> : null}
+            {editType==='LOAN_REPAYMENT'&&editLoanPartyId&&!editLegacyReturnMode?<Alert severity="info">The return remains automatically adjusted against this client’s applicable loan.</Alert>:null}
+            {editType==='LOAN_REPAYMENT'&&!editLoanAdjustmentId?<Button variant={editLegacyReturnMode?'contained':'outlined'} onClick={()=>{setEditLegacyReturnMode(v=>!v);setEditLoanReturnTarget('')}}>{editLegacyReturnMode?'Using Opening Loan':'No loan account? Create Opening Loan'}</Button>:null}
+            {editType==='LOAN_REPAYMENT'&&editLegacyReturnMode?<Stack direction={{xs:'column',sm:'row'}} spacing={1}><TextField fullWidth label="Loan balance before this return" type="number" value={editLegacyOpeningAmount} onChange={e=>setEditLegacyOpeningAmount(e.target.value)} inputProps={{min:Number(editAmount)||0,step:'0.01'}}/><TextField fullWidth label="Opening loan date" type="date" value={editLegacyOpeningDate} onChange={e=>setEditLegacyOpeningDate(e.target.value)} InputLabelProps={{shrink:true}} inputProps={{max:editDate}}/></Stack>:null}
             <TextField
               label="Entry Date"
               type="date"
@@ -1615,7 +1710,7 @@ export default function CashbookPage() {
             <FormControlLabel
               control={<Checkbox checked={editIsSuspense} onChange={(e) => setEditIsSuspense(e.target.checked)} />}
               label="Show in Suspense A/c"
-              disabled={editType === 'OPENING' || editType === 'CONTRA'}
+              disabled={editType === 'OPENING' || editType === 'CONTRA' || editType === 'LOAN' || editType === 'LOAN_REPAYMENT'}
             />
             {mUpdate.isError ? (
               <Alert severity="error">{errorMessage(mUpdate.error, 'Failed to update entry.')}</Alert>

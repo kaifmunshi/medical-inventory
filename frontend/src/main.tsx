@@ -16,6 +16,7 @@ const client = new QueryClient({
     queries: {
       // ✅ feels smoother on slow networks
       refetchOnWindowFocus: false,
+      staleTime: 30_000,
       retry: 1,
     },
   },

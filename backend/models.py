@@ -607,6 +607,7 @@ class CashbookEntry(SQLModel, table=True):
     amount: float                        # always store positive number
     note: Optional[str] = None
     is_suspense: bool = Field(default=False, index=True)
+    party_id: Optional[int] = Field(default=None, index=True)
 
 
 # --- Cashbook Schemas ---
@@ -616,6 +617,7 @@ class CashbookCreate(SQLModel):
     note: Optional[str] = None
     entry_date: Optional[str] = None  # YYYY-MM-DD (optional; defaults to today)
     is_suspense: Optional[bool] = None
+    party_id: Optional[int] = None
 
 
 class CashbookOut(SQLModel):
@@ -625,6 +627,110 @@ class CashbookOut(SQLModel):
     amount: float
     note: Optional[str] = None
     is_suspense: bool = False
+    party_id: Optional[int] = None
+
+
+class LoanAdjustment(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    loan_entry_id: int = Field(index=True)
+    loan_book: str = Field(default="CASH", index=True)
+    party_id: int = Field(index=True)
+    cashbook_entry_id: Optional[int] = Field(default=None, index=True)
+    bankbook_entry_id: Optional[int] = Field(default=None, index=True)
+    settlement_book: Optional[str] = Field(default=None, index=True)
+    adjustment_type: str = Field(index=True)  # MONEY | WRITE_OFF | PRODUCT
+    amount: float
+    product_reference: Optional[str] = None
+    note: Optional[str] = None
+    adjusted_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"), index=True)
+    is_deleted: bool = Field(default=False, index=True)
+
+
+class LoanAdjustmentCreate(SQLModel):
+    adjustment_type: str
+    amount: float
+    product_reference: Optional[str] = None
+    note: Optional[str] = None
+    adjustment_date: Optional[str] = None
+    settlement_book: Optional[str] = None
+    bank_mode: Optional[str] = None
+
+
+class LoanAdjustmentUpdate(LoanAdjustmentCreate):
+    target_loan_book: Optional[str] = None
+    target_loan_entry_id: Optional[int] = None
+    party_id: Optional[int] = None
+
+
+class LoanAdjustmentOut(SQLModel):
+    id: int
+    loan_entry_id: int
+    loan_book: str = "CASH"
+    party_id: int
+    cashbook_entry_id: Optional[int] = None
+    bankbook_entry_id: Optional[int] = None
+    settlement_book: Optional[str] = None
+    adjustment_type: str
+    amount: float
+    product_reference: Optional[str] = None
+    note: Optional[str] = None
+    adjusted_at: str
+    is_deleted: bool = False
+
+
+class LoanAccountOut(SQLModel):
+    loan_entry_id: int
+    loan_book: str = "CASH"
+    party_id: int
+    party_name: str
+    loan_date: str
+    principal_amount: float
+    adjusted_amount: float
+    outstanding_amount: float
+    note: Optional[str] = None
+    adjustments: List[LoanAdjustmentOut] = Field(default_factory=list)
+
+
+class LoanOpening(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    party_id: int = Field(index=True)
+    opening_date: str = Field(index=True)
+    amount: float
+    note: Optional[str] = None
+    is_deleted: bool = Field(default=False, index=True)
+    created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+
+
+class LoanOpeningCreate(SQLModel):
+    party_id: int
+    opening_date: str
+    amount: float
+    note: Optional[str] = None
+
+
+class OpeningLoanReturnCreate(SQLModel):
+    party_id: int
+    opening_date: str
+    opening_amount: float
+    return_date: str
+    return_amount: float
+    settlement_book: str
+    bank_mode: Optional[str] = None
+    note: Optional[str] = None
+
+
+class LoanReconcileCreate(SQLModel):
+    book: str
+    entry_id: int
+    role: str  # DISBURSEMENT | REPAYMENT
+    party_id: int
+    target_loan_book: Optional[str] = None
+    target_loan_entry_id: Optional[int] = None
+    amount: Optional[float] = None
+    entry_date: Optional[str] = None
+    note: Optional[str] = None
+    create_opening_amount: Optional[float] = None
+    create_opening_date: Optional[str] = None
 
 
 class CashbookSummary(SQLModel):
@@ -649,6 +755,7 @@ class BankbookEntry(SQLModel, table=True):
     txn_charges: float = 0.0
     note: Optional[str] = None
     is_suspense: bool = Field(default=False, index=True)
+    party_id: Optional[int] = Field(default=None, index=True)
 
 
 # --- Bankbook Schemas ---
@@ -660,6 +767,7 @@ class BankbookCreate(SQLModel):
     note: Optional[str] = None
     entry_date: Optional[str] = None
     is_suspense: Optional[bool] = None
+    party_id: Optional[int] = None
 
 
 class BankbookOut(SQLModel):
@@ -671,6 +779,7 @@ class BankbookOut(SQLModel):
     txn_charges: float = 0.0
     note: Optional[str] = None
     is_suspense: bool = False
+    party_id: Optional[int] = None
 
 
 class BankbookSummary(SQLModel):
@@ -1359,6 +1468,7 @@ class PartyReceiptUpdate(SQLModel):
     online_amount: float = 0.0
     note: Optional[str] = None
     payment_date: Optional[str] = None
+    adjustments: Optional[List[ReceiptAdjustmentIn]] = None
 
 
 class ReceiptBillAdjustmentOut(SQLModel):

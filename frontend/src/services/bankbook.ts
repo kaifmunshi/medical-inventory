@@ -1,6 +1,6 @@
 import api from './api'
 
-export type BankbookType = 'RECEIPT' | 'DEPOSIT' | 'DEPOSITS' | 'WITHDRAWAL' | 'WITHDRAWALS' | 'EXPENSE' | 'OPENING' | 'CONTRA'
+export type BankbookType = 'RECEIPT' | 'DEPOSIT' | 'DEPOSITS' | 'WITHDRAWAL' | 'WITHDRAWALS' | 'EXPENSE' | 'OPENING' | 'CONTRA' | 'LOAN' | 'LOAN_REPAYMENT'
 export type BankbookMode = 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | 'BANK_DEPOSIT' | 'OPENING'
 
 export type BankbookCreate = {
@@ -11,6 +11,7 @@ export type BankbookCreate = {
   note?: string
   entry_date?: string
   is_suspense?: boolean
+  party_id?: number
 }
 
 export type BankbookSummary = {
@@ -32,6 +33,7 @@ export type BankbookEntry = {
   txn_charges: number
   note?: string | null
   is_suspense: boolean
+  party_id?: number | null
 }
 
 export type BankbookDay = {
@@ -78,6 +80,7 @@ export async function getBankbookDailySummary(params: { from_date?: string; to_d
 export async function listBankbookEntries(params: {
   from_date?: string
   to_date?: string
+  entry_type?: BankbookType
   limit?: number
   offset?: number
 }) {

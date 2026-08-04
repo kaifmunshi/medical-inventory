@@ -47,6 +47,8 @@ SYSTEM_GROUPS = {
     "INDIRECT_INCOME": ("Indirect Incomes", "INCOME"),
     "INDIRECT_EXPENSE": ("Indirect Expenses", "EXPENSE"),
     "SUSPENSE_ACCOUNTS": ("Suspense Accounts", "ASSET"),
+    "LOANS_ADVANCES": ("Loans & Advances", "ASSET"),
+    "CAPITAL_ACCOUNTS": ("Capital Accounts", "LIABILITY"),
 }
 
 
@@ -62,6 +64,8 @@ SYSTEM_LEDGERS = {
     "PURCHASE_WRITE_OFF": ("Purchase Write-off", "INDIRECT_INCOME"),
     "BANK_CHARGES": ("Bank Charges", "INDIRECT_EXPENSE"),
     "SUSPENSE_ACCOUNT": ("Suspense Account", "SUSPENSE_ACCOUNTS"),
+    "LOAN_RECEIVABLE": ("Loan Account", "LOANS_ADVANCES"),
+    "OPENING_BALANCE_EQUITY": ("Opening Balance Equity", "CAPITAL_ACCOUNTS"),
 }
 
 
@@ -466,6 +470,72 @@ def post_party_receipt_voucher(session, receipt_id: int, party: Party, received_
         narration=note or f"Receipt from {party.name}",
         total_amount=round2(total_amount),
         lines=lines,
+    )
+
+
+def post_loan_voucher(session, row, party: Party, *, book: str = "CASH") -> Voucher:
+    ledgers = ensure_accounting_setup(session)
+    amount = round2(row.amount)
+    narration = row.note or f"Loan given to {party.name}"
+    book_key = str(book or "CASH").upper()
+    money_ledger = ledgers["BANK_ACCOUNT" if book_key == "BANK" else "CASH_IN_HAND"]
+    return upsert_voucher(
+        session,
+        voucher_type="PAYMENT",
+        source_type=f"{book_key}_LOAN",
+        source_id=int(row.id),
+        voucher_date=str(row.created_at)[:10],
+        voucher_no=f"{'BLN' if book_key == 'BANK' else 'CLN'}-{row.id}",
+        narration=narration,
+        total_amount=amount,
+        lines=[
+            {"ledger_id": int(ledgers["LOAN_RECEIVABLE"].id), "entry_type": "DR", "amount": amount, "narration": narration},
+            {"ledger_id": int(money_ledger.id), "entry_type": "CR", "amount": amount, "narration": narration},
+        ],
+    )
+
+
+def post_opening_loan_voucher(session, row, party: Party) -> Voucher:
+    ledgers = ensure_accounting_setup(session)
+    amount = round2(row.amount)
+    narration = row.note or f"Opening loan balance for {party.name}"
+    return upsert_voucher(
+        session, voucher_type="OPENING", source_type="OPENING_LOAN", source_id=int(row.id),
+        voucher_date=str(row.opening_date)[:10], voucher_no=f"OLN-{row.id}", narration=narration,
+        total_amount=amount, lines=[
+            {"ledger_id": int(ledgers["LOAN_RECEIVABLE"].id), "entry_type": "DR", "amount": amount, "narration": narration},
+            {"ledger_id": int(ledgers["OPENING_BALANCE_EQUITY"].id), "entry_type": "CR", "amount": amount, "narration": narration},
+        ],
+    )
+
+
+def post_loan_adjustment_voucher(session, adjustment, party: Party) -> Voucher:
+    ledgers = ensure_accounting_setup(session)
+    amount = round2(adjustment.amount)
+    kind = str(adjustment.adjustment_type or "").upper()
+    narration = adjustment.note or f"{kind.title()} adjustment from {party.name}"
+    if kind == "MONEY":
+        debit = ledgers["BANK_ACCOUNT" if str(getattr(adjustment, "settlement_book", "CASH") or "CASH").upper() == "BANK" else "CASH_IN_HAND"]
+        voucher_type = "RECEIPT"
+    elif kind == "WRITE_OFF":
+        debit = ledgers["CUSTOMER_WRITE_OFF"]
+        voucher_type = "WRITE_OFF"
+    else:
+        debit = ledgers["PURCHASE_ACCOUNT"]
+        voucher_type = "JOURNAL"
+    return upsert_voucher(
+        session,
+        voucher_type=voucher_type,
+        source_type="LOAN_ADJUSTMENT",
+        source_id=int(adjustment.id),
+        voucher_date=str(adjustment.adjusted_at)[:10],
+        voucher_no=f"LA-{adjustment.id}",
+        narration=narration,
+        total_amount=amount,
+        lines=[
+            {"ledger_id": int(debit.id), "entry_type": "DR", "amount": amount, "narration": narration},
+            {"ledger_id": int(ledgers["LOAN_RECEIVABLE"].id), "entry_type": "CR", "amount": amount, "narration": narration},
+        ],
     )
 
 

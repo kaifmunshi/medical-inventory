@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlmodel import select
 from sqlalchemy import text  # ✅ use sqlalchemy.text (NOT sqlmodel.text)
 
-from backend.accounting import mark_voucher_deleted, sync_suspense_book_voucher
+from backend.accounting import mark_voucher_deleted, post_loan_voucher, sync_suspense_book_voucher
 from backend.controls import assert_financial_year_unlocked
 from backend.db import get_session
 from backend.models import (
@@ -18,6 +18,8 @@ from backend.models import (
     CashbookOut,
     ExchangeRecord,
     PartyReceipt,
+    Party,
+    LoanAdjustment,
     Purchase,
     PurchasePayment,
     PurchaseReturn,
@@ -49,7 +51,7 @@ def _range_bounds(from_date: Optional[str], to_date: Optional[str]):
     return start_iso, end_iso
 
 
-VALID_ENTRY_TYPES = {"RECEIPT", "WITHDRAWAL", "EXPENSE", "CONTRA", "OPENING"}
+VALID_ENTRY_TYPES = {"RECEIPT", "WITHDRAWAL", "EXPENSE", "CONTRA", "OPENING", "LOAN", "LOAN_REPAYMENT"}
 
 
 def _sum_rows(rows: List[CashbookEntry]):
@@ -61,9 +63,9 @@ def _sum_rows(rows: List[CashbookEntry]):
         amt = float(r.amount or 0)
         if et == "OPENING":
             continue
-        if et == "RECEIPT":
+        if et in {"RECEIPT", "LOAN_REPAYMENT"}:
             receipts += amt
-        elif et in ("WITHDRAWAL", "CONTRA"):
+        elif et in ("WITHDRAWAL", "CONTRA", "LOAN"):
             withdrawals += amt
         else:
             expenses += amt
@@ -297,8 +299,10 @@ def create_entry(payload: CashbookCreate):
     if et not in VALID_ENTRY_TYPES:
         raise HTTPException(
             status_code=400,
-            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, CONTRA or OPENING",
+            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, CONTRA, OPENING, LOAN or LOAN_REPAYMENT",
         )
+    if et == "LOAN_REPAYMENT":
+        raise HTTPException(status_code=400, detail="Record loan returns from Loans & Advances")
 
     amt = float(payload.amount or 0)
     if amt <= 0:
@@ -311,16 +315,24 @@ def create_entry(payload: CashbookCreate):
         created_at = f"{day_dt.date().isoformat()}T{now_time}"
 
     with get_session() as session:
+        party = None
+        if et == "LOAN":
+            party = session.get(Party, payload.party_id) if payload.party_id else None
+            if not party or party.party_group != "SUNDRY_DEBTOR" or not party.is_active:
+                raise HTTPException(status_code=400, detail="Select an active customer for the loan")
         assert_financial_year_unlocked(session, created_at, context="Cashbook entry")
         row = CashbookEntry(
             entry_type=et,
             amount=amt,
-            note=(payload.note or None),
+            note=(payload.note or (f"Loan to {party.name}" if party else None)),
             created_at=created_at,
             is_suspense=bool(payload.is_suspense),
+            party_id=int(party.id) if party else None,
         )
         session.add(row)
         session.flush()
+        if et == "LOAN":
+            post_loan_voucher(session, row, party, book="CASH")
         sync_suspense_book_voucher(session, row, book="CASHBOOK")
         session.commit()
         session.refresh(row)
@@ -334,8 +346,10 @@ def update_entry(entry_id: int, payload: CashbookCreate):
     if et not in VALID_ENTRY_TYPES:
         raise HTTPException(
             status_code=400,
-            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, CONTRA or OPENING",
+            detail="entry_type must be RECEIPT, WITHDRAWAL, EXPENSE, CONTRA, OPENING, LOAN or LOAN_REPAYMENT",
         )
+    if et == "LOAN_REPAYMENT":
+        raise HTTPException(status_code=400, detail="Loan returns are managed from Loans & Advances")
 
     amt = float(payload.amount or 0)
     if amt <= 0:
@@ -345,6 +359,17 @@ def update_entry(entry_id: int, payload: CashbookCreate):
         row = session.exec(select(CashbookEntry).where(CashbookEntry.id == entry_id)).first()
         if not row:
             raise HTTPException(status_code=404, detail="cashbook entry not found")
+        managed_adjustment = session.exec(select(LoanAdjustment).where(LoanAdjustment.cashbook_entry_id == entry_id, LoanAdjustment.is_deleted == False)).first()  # noqa: E712
+        if managed_adjustment:
+            raise HTTPException(status_code=409, detail="This receipt is managed by a loan adjustment; edit it from Loans & Advances")
+        party = None
+        if et == "LOAN":
+            party = session.get(Party, payload.party_id) if payload.party_id else None
+            if not party or party.party_group != "SUNDRY_DEBTOR" or not party.is_active:
+                raise HTTPException(status_code=400, detail="Select an active customer for the loan")
+            adjusted = sum(float(x.amount or 0) for x in session.exec(select(LoanAdjustment).where(LoanAdjustment.loan_book == "CASH", LoanAdjustment.loan_entry_id == entry_id, LoanAdjustment.is_deleted == False)).all())  # noqa: E712
+            if amt + 0.0001 < adjusted:
+                raise HTTPException(status_code=400, detail=f"Loan amount cannot be below adjusted amount of {adjusted:.2f}")
 
         assert_financial_year_unlocked(session, row.created_at, context="Cashbook entry edit")
         created_at = row.created_at
@@ -356,12 +381,18 @@ def update_entry(entry_id: int, payload: CashbookCreate):
 
         row.entry_type = et
         row.amount = amt
-        row.note = payload.note or None
+        row.note = payload.note or (f"Loan to {party.name}" if party else None)
         row.created_at = created_at
+        row.party_id = int(party.id) if party else None
         if payload.is_suspense is not None:
             row.is_suspense = bool(payload.is_suspense)
         session.add(row)
         session.flush()
+        if et == "LOAN":
+            post_loan_voucher(session, row, party, book="CASH")
+        else:
+            mark_voucher_deleted(session, source_type="CASH_LOAN", source_id=int(row.id))
+            mark_voucher_deleted(session, source_type="LOAN", source_id=int(row.id))
         sync_suspense_book_voucher(session, row, book="CASHBOOK")
         session.commit()
         session.refresh(row)
@@ -372,6 +403,7 @@ def update_entry(entry_id: int, payload: CashbookCreate):
 def list_entries(
     from_date: Optional[str] = Query(default=None),
     to_date: Optional[str] = Query(default=None),
+    entry_type: Optional[str] = Query(default=None),
     limit: int = Query(default=200, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
 ):
@@ -381,6 +413,11 @@ def list_entries(
         stmt = select(CashbookEntry)
         if start_iso and end_iso:
             stmt = stmt.where(CashbookEntry.created_at >= start_iso).where(CashbookEntry.created_at <= end_iso)
+        if entry_type:
+            normalized_type = str(entry_type).strip().upper()
+            if normalized_type not in VALID_ENTRY_TYPES:
+                raise HTTPException(status_code=400, detail="Invalid entry_type filter")
+            stmt = stmt.where(CashbookEntry.entry_type == normalized_type)
 
         stmt = stmt.order_by(CashbookEntry.id.desc()).offset(offset).limit(limit)
         rows = session.exec(stmt).all()
@@ -452,8 +489,17 @@ def delete_cashbook_entry(entry_id: int):
         row = session.exec(select(CashbookEntry).where(CashbookEntry.id == entry_id)).first()
         if not row:
             raise HTTPException(status_code=404, detail="cashbook entry not found")
+        managed_adjustment = session.exec(select(LoanAdjustment).where(LoanAdjustment.cashbook_entry_id == entry_id, LoanAdjustment.is_deleted == False)).first()  # noqa: E712
+        if managed_adjustment:
+            raise HTTPException(status_code=409, detail="This receipt is managed by a loan adjustment; delete it from Loans & Advances")
+        if row.entry_type == "LOAN":
+            has_adjustments = session.exec(select(LoanAdjustment).where(LoanAdjustment.loan_book == "CASH", LoanAdjustment.loan_entry_id == entry_id, LoanAdjustment.is_deleted == False)).first()  # noqa: E712
+            if has_adjustments:
+                raise HTTPException(status_code=409, detail="Delete loan adjustments before deleting this loan")
         assert_financial_year_unlocked(session, row.created_at, context="Cashbook entry delete")
         mark_voucher_deleted(session, source_type="CASHBOOK_SUSPENSE", source_id=int(row.id))
+        mark_voucher_deleted(session, source_type="CASH_LOAN", source_id=int(row.id))
+        mark_voucher_deleted(session, source_type="LOAN", source_id=int(row.id))
         session.exec(text("DELETE FROM cashbookentry WHERE id = :id").bindparams(id=entry_id))
         session.commit()
 
@@ -497,6 +543,8 @@ def clear_last_cashbook_entry(
 
         row = session.exec(select(CashbookEntry).where(CashbookEntry.id == int(last_id))).first()
         if row:
+            if row.entry_type == "LOAN" or session.exec(select(LoanAdjustment).where(LoanAdjustment.cashbook_entry_id == int(row.id), LoanAdjustment.is_deleted == False)).first():  # noqa: E712
+                raise HTTPException(status_code=409, detail="The last entry belongs to Loans & Advances and cannot be cleared here")
             assert_financial_year_unlocked(session, row.created_at, context="Cashbook clear last")
             mark_voucher_deleted(session, source_type="CASHBOOK_SUSPENSE", source_id=int(row.id))
 
@@ -517,6 +565,10 @@ def clear_today_cashbook():
 
     with get_session() as session:
         rows = session.exec(select(CashbookEntry).where(CashbookEntry.created_at >= f"{today}T00:00:00").where(CashbookEntry.created_at <= f"{today}T23:59:59.999999")).all()
+        protected_ids = {int(r.id) for r in rows if r.entry_type == "LOAN"}
+        protected_ids.update(int(x.cashbook_entry_id) for x in session.exec(select(LoanAdjustment).where(LoanAdjustment.cashbook_entry_id.is_not(None), LoanAdjustment.is_deleted == False)).all() if x.cashbook_entry_id)  # noqa: E712
+        if any(int(r.id) in protected_ids for r in rows):
+            raise HTTPException(status_code=409, detail="Today's cashbook contains loan entries; remove them from Loans & Advances first")
         for row in rows:
             assert_financial_year_unlocked(session, row.created_at, context="Cashbook clear today")
             mark_voucher_deleted(session, source_type="CASHBOOK_SUSPENSE", source_id=int(row.id))
@@ -536,6 +588,8 @@ def clear_all_cashbook():
     require_min_role("OWNER", context="Cashbook clear all")
     with get_session() as session:
         rows = session.exec(select(CashbookEntry)).all()
+        if any(row.entry_type == "LOAN" for row in rows) or session.exec(select(LoanAdjustment).where(LoanAdjustment.cashbook_entry_id.is_not(None), LoanAdjustment.is_deleted == False)).first():  # noqa: E712
+            raise HTTPException(status_code=409, detail="Cashbook contains loan entries; remove them from Loans & Advances first")
         for row in rows:
             assert_financial_year_unlocked(session, row.created_at, context="Cashbook clear all")
             mark_voucher_deleted(session, source_type="CASHBOOK_SUSPENSE", source_id=int(row.id))

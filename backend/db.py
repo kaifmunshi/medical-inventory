@@ -2186,6 +2186,44 @@ def merge_safe_duplicate_products(session) -> tuple[int, str | None]:
 
 def migrate_db():
     with Session(engine) as session:
+        cashbook_cols = {c[1] for c in session.exec(text("PRAGMA table_info(cashbookentry)")).all()}
+        if "party_id" not in cashbook_cols:
+            session.exec(text("ALTER TABLE cashbookentry ADD COLUMN party_id INTEGER"))
+            session.exec(text("CREATE INDEX IF NOT EXISTS ix_cashbookentry_party_id ON cashbookentry (party_id)"))
+            session.commit()
+        bankbook_cols = {c[1] for c in session.exec(text("PRAGMA table_info(bankbookentry)")).all()}
+        if "party_id" not in bankbook_cols:
+            session.exec(text("ALTER TABLE bankbookentry ADD COLUMN party_id INTEGER"))
+            session.exec(text("CREATE INDEX IF NOT EXISTS ix_bankbookentry_party_id ON bankbookentry (party_id)"))
+            session.commit()
+        loan_adjustment_cols = {c[1] for c in session.exec(text("PRAGMA table_info(loanadjustment)")).all()}
+        for column, ddl in {
+            "loan_book": "TEXT NOT NULL DEFAULT 'CASH'",
+            "cashbook_entry_id": "INTEGER",
+            "bankbook_entry_id": "INTEGER",
+            "settlement_book": "TEXT",
+        }.items():
+            if column not in loan_adjustment_cols:
+                session.exec(text(f"ALTER TABLE loanadjustment ADD COLUMN {column} {ddl}"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_loanadjustment_loan_book ON loanadjustment (loan_book)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_loanadjustment_cashbook_entry_id ON loanadjustment (cashbook_entry_id)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_loanadjustment_bankbook_entry_id ON loanadjustment (bankbook_entry_id)"))
+        session.exec(text("""
+            UPDATE cashbookentry SET entry_type = 'LOAN_REPAYMENT'
+            WHERE entry_type = 'RECEIPT' AND id IN (
+                SELECT cashbook_entry_id FROM loanadjustment
+                WHERE cashbook_entry_id IS NOT NULL AND COALESCE(is_deleted, 0) = 0
+            )
+        """))
+        session.exec(text("""
+            UPDATE bankbookentry SET entry_type = 'LOAN_REPAYMENT'
+            WHERE entry_type = 'RECEIPT' AND id IN (
+                SELECT bankbook_entry_id FROM loanadjustment
+                WHERE bankbook_entry_id IS NOT NULL AND COALESCE(is_deleted, 0) = 0
+            )
+        """))
+        session.commit()
+
         # ---------- item table migration ----------
         cols = session.exec(text("PRAGMA table_info(item)")).all()
         col_names = {c[1] for c in cols}
@@ -3211,6 +3249,10 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_stockmovement_reason ON stockmovement (reason)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_stockmovement_ref_type ON stockmovement (ref_type)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_stockmovement_ref_id ON stockmovement (ref_id)"))
+        # Cross-book contra views filter by both fields. Without these composite
+        # indexes SQLite may scan years of unrelated cash/bank rows on every sync.
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_cashbookentry_type_created ON cashbookentry (entry_type, created_at)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_bankbookentry_type_created ON bankbookentry (entry_type, created_at)"))
         session.commit()
 
         session.exec(text("""

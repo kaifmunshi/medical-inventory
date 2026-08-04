@@ -24,6 +24,7 @@ from backend.routers import settings
 from backend.routers import lots
 from backend.routers import vouchers
 from backend.routers import users
+from backend.routers import loans
 app = FastAPI(title="Ayurvedic Medical Inventory System")
 
 extra_origins = [
@@ -106,6 +107,7 @@ app.include_router(settings.router, prefix="/settings", tags=["Settings"])
 app.include_router(lots.router, prefix="/lots", tags=["Lots"])
 app.include_router(vouchers.router, prefix="/vouchers", tags=["Vouchers"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
+app.include_router(loans.router, prefix="/loans", tags=["Loans & Advances"])
 app.include_router(
     requested_items.router,
     prefix="/requested-items",

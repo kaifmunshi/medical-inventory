@@ -1,7 +1,7 @@
 // frontend/src/services/cashbook.ts
 import api from './api'
 
-export type CashbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE' | 'CONTRA' | 'OPENING'
+export type CashbookType = 'RECEIPT' | 'WITHDRAWAL' | 'EXPENSE' | 'CONTRA' | 'OPENING' | 'LOAN' | 'LOAN_REPAYMENT'
 
 export type CashbookCreate = {
   entry_type: CashbookType
@@ -9,6 +9,7 @@ export type CashbookCreate = {
   note?: string
   entry_date?: string
   is_suspense?: boolean
+  party_id?: number
 }
 
 export type CashbookSummary = {
@@ -27,6 +28,7 @@ export type CashbookEntry = {
   amount: number
   note?: string | null
   is_suspense: boolean
+  party_id?: number | null
 }
 
 export async function createCashbookEntry(payload: CashbookCreate) {
@@ -73,6 +75,7 @@ export async function getCashbookDailySummary(params: { from_date?: string; to_d
 export async function listCashbookEntries(params: {
   from_date?: string
   to_date?: string
+  entry_type?: CashbookType
   limit?: number
   offset?: number
 }) {

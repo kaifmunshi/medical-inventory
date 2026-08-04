@@ -12,6 +12,7 @@ import {
   Divider,
   IconButton,
   Link,
+  Menu,
   MenuItem,
   Paper,
   Stack,
@@ -21,9 +22,7 @@ import {
   Typography,
 } from '@mui/material'
 import CloseIcon from '@mui/icons-material/Close'
-import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
-import RestoreIcon from '@mui/icons-material/Restore'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight'
 import { useSearchParams } from 'react-router-dom'
@@ -42,7 +41,8 @@ import {
   recoverPartyReceipt,
   updatePartyReceipt,
 } from '../../services/parties'
-import { getBill, listPayments, undoBillPayment, type BillPaymentRow } from '../../services/billing'
+import { getBill, listPayments, receivePayment, undoBillPayment, type BillPaymentRow } from '../../services/billing'
+import { fetchLoans } from '../../services/loans'
 import type {
   Customer,
   CustomerReturnLedgerRow,
@@ -58,6 +58,11 @@ import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 
 function money(n: number | string | undefined | null) {
   return Number(n || 0).toFixed(2)
+}
+
+function LedgerDateCell({ value }: { value?: string | null }) {
+  const parts = formatLedgerDateTime(value || '')
+  return <Stack gap={0.1}><Typography variant="body2" fontWeight={700} lineHeight={1.15}>{parts.date}</Typography>{parts.time ? <Typography variant="caption" color="text.secondary" lineHeight={1.1}>{parts.time}</Typography> : null}</Stack>
 }
 
 function normalizeAmountInput(raw: string) {
@@ -274,6 +279,7 @@ const billGridSx = {
   '& .amount-col': { width: 96, textAlign: 'right' },
   '& .status-col': { width: 100 },
   '& .notes-col': { width: 220, whiteSpace: 'normal', wordBreak: 'break-word' },
+  '& .action-col': { width: 138, textAlign: 'right' },
   '& .clip-text': {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
@@ -288,12 +294,12 @@ const receiptGridSx = {
     minWidth: 980,
     tableLayout: 'fixed',
   },
-  '& .receipt-col': { width: 118 },
+  '& .receipt-col': { width: 178, whiteSpace: 'normal', wordBreak: 'normal' },
   '& .date-col': { width: 98 },
   '& .mode-col': { width: 78 },
   '& .amount-col': { width: 82, textAlign: 'right' },
-  '& .allocation-col': { width: 150, maxWidth: 150, minWidth: 0 },
-  '& .action-col': { width: 136, textAlign: 'right' },
+  '& .allocation-col': { width: 280, whiteSpace: 'normal', overflowWrap: 'anywhere' },
+  '& .action-col': { width: 104, textAlign: 'right' },
 } as const
 
 type ReceiptHistoryRow = {
@@ -344,6 +350,9 @@ export default function CustomerLedgerPage() {
   const [recoverReceiptTarget, setRecoverReceiptTarget] = useState<ReceiptHistoryRow | null>(null)
   const [applyTarget, setApplyTarget] = useState<ReceiptHistoryRow | null>(null)
   const [advancePickerOpen, setAdvancePickerOpen] = useState(false)
+  const [advanceTargetBillId, setAdvanceTargetBillId] = useState<number | null>(null)
+  const [writeoffBill, setWriteoffBill] = useState<OpenBill | null>(null)
+  const [writeoffAmount, setWriteoffAmount] = useState('')
   const [applyDate, setApplyDate] = useState(today)
   const [applyNote, setApplyNote] = useState('')
   const [applyDrafts, setApplyDrafts] = useState<Record<number, string>>({})
@@ -353,6 +362,11 @@ export default function CustomerLedgerPage() {
   const [editReceiptOnline, setEditReceiptOnline] = useState('0')
   const [editReceiptDate, setEditReceiptDate] = useState(today)
   const [editReceiptNote, setEditReceiptNote] = useState('')
+  const [editAdjustmentDrafts, setEditAdjustmentDrafts] = useState<Record<number, string>>({})
+  const [billActionsAnchor, setBillActionsAnchor] = useState<HTMLElement | null>(null)
+  const [billActionsRow, setBillActionsRow] = useState<OpenBill | null>(null)
+  const [receiptActionsAnchor, setReceiptActionsAnchor] = useState<HTMLElement | null>(null)
+  const [receiptActionsRow, setReceiptActionsRow] = useState<ReceiptHistoryRow | null>(null)
   const [receiptAdvanceConfirmOpen, setReceiptAdvanceConfirmOpen] = useState(false)
   const [openBillSort, setOpenBillSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
   const [ledgerSort, setLedgerSort] = useState<SortState<BillSortKey>>({ key: 'bill_date', direction: 'desc' })
@@ -456,6 +470,8 @@ export default function CustomerLedgerPage() {
     queryFn: () => fetchOpenBills(Number(selectedParty?.id)),
     enabled: Boolean(selectedParty?.id),
   })
+  const loansQ = useQuery({ queryKey: ['customer-ledger-loans', selectedParty?.id], queryFn: () => fetchLoans({ party_id: Number(selectedParty?.id) }), enabled: Boolean(selectedParty?.id) })
+  const writeoffM = useMutation({ mutationFn: () => receivePayment(Number(writeoffBill?.bill_id), { mode: 'cash', is_writeoff: true, writeoff_amount: Number(writeoffAmount), cash_amount: 0, online_amount: 0, payment_date: today, note: 'Customer bill write-off' }), onSuccess: () => { setWriteoffBill(null); setWriteoffAmount(''); queryClient.invalidateQueries({ queryKey: ['customer-ledger'] }); queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] }); queryClient.invalidateQueries({ queryKey: ['customer-ledger-payments'] }); toast.push('Bill write-off recorded', 'success') }, onError: (err:any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Write-off failed'), 'error') })
 
   const returnsQ = useQuery<CustomerReturnLedgerRow[], Error>({
     queryKey: ['customer-returns', selectedParty?.id],
@@ -585,6 +601,7 @@ export default function CustomerLedgerPage() {
         online_amount?: number
         note?: string
         payment_date?: string
+        adjustments?: Array<{ bill_id: number; amount: number }>
       }
     }) => updatePartyReceipt(partyId, receiptId, payload),
     onSuccess: () => {
@@ -620,7 +637,7 @@ export default function CustomerLedgerPage() {
   const editReceiptTotal = Number(editReceiptAmount || 0)
   const editReceiptCashAmount = editReceiptMode === 'cash' ? editReceiptTotal : editReceiptMode === 'online' ? 0 : Number(editReceiptCash || 0)
   const editReceiptOnlineAmount = editReceiptMode === 'online' ? editReceiptTotal : editReceiptMode === 'cash' ? 0 : Number(editReceiptOnline || 0)
-  const editReceiptApplied = Number(editReceiptTarget?.adjusted || 0)
+  const editReceiptApplied = Object.values(editAdjustmentDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
   const editReceiptAdvance = Math.max(0, editReceiptTotal - editReceiptApplied)
   const onAccountAmount = Math.max(0, receiptTotal - adjustmentTotal)
   const applyAvailable = Number(applyTarget?.onAccount || 0)
@@ -654,6 +671,9 @@ export default function CustomerLedgerPage() {
     }
     return map
   }, [adjustments])
+  const editReceiptAllocations = editReceiptTarget?.sourceType === 'party_receipt'
+    ? adjustmentDetails.get(Number(editReceiptTarget.receiptId)) || []
+    : []
 
   const receiptHistory = useMemo<ReceiptHistoryRow[]>(() => {
     const billIds = new Set(ledgerRows.map((row) => Number(row.bill_id)))
@@ -720,7 +740,6 @@ export default function CustomerLedgerPage() {
   const receiptHistoryOnAccountTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
   const openingBalance = signedPartyOpening(selectedParty)
   const closingBalance = round2(openingBalance + totalOutstanding - receiptHistoryOnAccountTotal)
-  const remainingOutstandingAfterReceipt = Math.max(0, totalOutstanding - adjustmentTotal)
   const availableAdvanceReceipts = activeReceiptHistory.filter(
     (row) => row.sourceType === 'party_receipt' && Number(row.onAccount || 0) > 0.0001,
   )
@@ -806,6 +825,19 @@ export default function CustomerLedgerPage() {
     setOnlineAmount('0')
     setPaymentDate(today)
     setNote('')
+    setReceiptOpen(true)
+  }
+
+  function openReceiptForBill(bill: OpenBill) {
+    const billId = Number(bill.bill_id)
+    const pending = round2(Number(bill.outstanding_amount || 0))
+    setAdjustmentDrafts(Object.fromEntries(openBills.map((row) => [Number(row.bill_id), Number(row.bill_id) === billId ? money(pending) : '0'])))
+    setMode('cash')
+    setReceiptAmount(money(pending))
+    setCashAmount(money(pending))
+    setOnlineAmount('0')
+    setPaymentDate(today)
+    setNote(`Payment against Bill #${bill.bill_number || bill.bill_id}`)
     setReceiptOpen(true)
   }
 
@@ -936,11 +968,15 @@ export default function CustomerLedgerPage() {
     )
   }
 
-  function openApplyAdvance(row: ReceiptHistoryRow) {
+  function openApplyAdvance(row: ReceiptHistoryRow, targetBillId: number | null = null) {
     setApplyTarget(row)
     setApplyDate(today)
     setApplyNote('')
-    setApplyDrafts(Object.fromEntries(openBillsForReceipt.map((bill) => [Number(bill.bill_id), '0'])))
+    setApplyDrafts(Object.fromEntries(openBillsForReceipt.map((bill) => {
+      const matches = targetBillId === null || Number(bill.bill_id) === targetBillId
+      const amount = matches && targetBillId !== null ? Math.min(Number(bill.outstanding_amount || 0), Number(row.onAccount || 0)) : 0
+      return [Number(bill.bill_id), amount > 0 ? money(amount) : '0']
+    })))
   }
 
   function openEditReceipt(row: ReceiptHistoryRow) {
@@ -957,6 +993,8 @@ export default function CustomerLedgerPage() {
             ? 'split'
             : 'cash'
     setEditReceiptTarget(row)
+    const lines = adjustmentDetails.get(Number(row.receiptId)) || []
+    setEditAdjustmentDrafts(Object.fromEntries(lines.map((line) => [Number(line.bill_id), money(line.adjusted_amount)])))
     setEditReceiptMode(normalizedMode)
     setEditReceiptAmount(money(total))
     setEditReceiptCash(money(cash))
@@ -1078,7 +1116,7 @@ export default function CustomerLedgerPage() {
       toast.push('Receipt amount must be greater than 0', 'warning')
       return
     }
-    if (!confirmAdvance && onAccountAmount > 0.0001 && remainingOutstandingAfterReceipt > 0.0001) {
+    if (!confirmAdvance && adjustmentTotal > 0.0001 && onAccountAmount > 0.0001) {
       setReceiptAdvanceConfirmOpen(true)
       return
     }
@@ -1143,6 +1181,10 @@ export default function CustomerLedgerPage() {
       toast.push('Receipt amount must be greater than 0', 'warning')
       return
     }
+    if (editReceiptApplied > editReceiptTotal + 0.0001) {
+      toast.push('Amounts adjusted against bills cannot exceed the receipt total', 'warning')
+      return
+    }
     editReceiptM.mutate({
       partyId: Number(selectedParty.id),
       receiptId: Number(editReceiptTarget.receiptId),
@@ -1152,6 +1194,7 @@ export default function CustomerLedgerPage() {
         online_amount: editReceiptOnlineAmount,
         payment_date: editReceiptDate,
         note: editReceiptNote.trim() || undefined,
+        adjustments: Object.entries(editAdjustmentDrafts).map(([billId, amount]) => ({ bill_id: Number(billId), amount: Number(amount || 0) })).filter((row) => row.amount > 0),
       },
     })
   }
@@ -1261,7 +1304,7 @@ export default function CustomerLedgerPage() {
                 display: 'grid',
                 gridTemplateColumns: {
                   xs: '1fr 1fr',
-                  md: 'repeat(5, minmax(120px, 1fr))',
+                  md: 'repeat(6, minmax(110px, 1fr))',
                 },
                 borderTop: '1px solid',
                 borderColor: 'divider',
@@ -1275,6 +1318,7 @@ export default function CustomerLedgerPage() {
                 { label: 'Receipts', value: `Rs ${money(receiptHistoryTotal)}`, color: 'success.main' },
                 { label: 'Returns', value: `Rs ${money(totalReturnCredit + totalReturnRefund)}`, color: 'warning.main' },
                 { label: 'Open Bills', value: String(openBills.length), color: 'primary.main' },
+                { label: 'Loan Due', value: `Rs ${money((loansQ.data || []).reduce((sum, loan) => sum + Number(loan.outstanding_amount || 0), 0))}`, color: 'error.main' },
               ].map((item) => (
                 <Box key={item.label}>
                   <Typography variant="caption" color="text.secondary" fontWeight={800}>
@@ -1289,6 +1333,11 @@ export default function CustomerLedgerPage() {
           </Stack>
         </Paper>
       )}
+
+      {selectedParty && (loansQ.data || []).length > 0 ? <Paper sx={{p:2}}><Stack spacing={1}>
+        <Typography variant="h6" fontWeight={800}>Loan Account</Typography>
+        {(loansQ.data || []).map(loan=><Box key={`${loan.loan_book}-${loan.loan_entry_id}`} sx={{display:'grid',gridTemplateColumns:{xs:'1fr 1fr',md:'1.5fr repeat(3,1fr)'},gap:1,p:1,border:'1px solid',borderColor:'divider',borderRadius:1}}><Box><Typography fontWeight={800}>{loan.loan_book==='OPENING'?'Opening':loan.loan_book==='BANK'?'Bank':'Cash'} Loan #{loan.loan_entry_id}</Typography><Typography variant="caption" color="text.secondary">{loan.loan_date.slice(0,10)}{loan.note?` · ${loan.note}`:''}</Typography></Box><Typography>Principal<br/><b>Rs {money(loan.principal_amount)}</b></Typography><Typography>Adjusted<br/><b>Rs {money(loan.adjusted_amount)}</b></Typography><Typography color={loan.outstanding_amount?'error.main':'success.main'}>Outstanding<br/><b>Rs {money(loan.outstanding_amount)}</b></Typography></Box>)}
+      </Stack></Paper> : null}
 
       <CollapsibleLedgerSection
         title="Open Bills"
@@ -1314,6 +1363,7 @@ export default function CustomerLedgerPage() {
                 <SortableHeader label="Pending" sortKey="outstanding_amount" sort={openBillSort} onSort={(key) => setOpenBillSort((prev) => nextSort(prev, key))} className="amount-col" />
                 <SortableHeader label="Status" sortKey="payment_status" sort={openBillSort} onSort={(key) => setOpenBillSort((prev) => nextSort(prev, key))} className="status-col" />
                 <th className="notes-col">Notes</th>
+                <th className="action-col">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1344,7 +1394,7 @@ export default function CustomerLedgerPage() {
                         </Stack>
                       </td>
                       <td className="date-col">
-                        <Typography variant="body2">{row.bill_date || '-'}</Typography>
+                        <LedgerDateCell value={row.bill_date} />
                       </td>
                       <td className="amount-col"><MoneyCell value={row.total_amount} tone="total" /></td>
                       <td className="amount-col"><MoneyCell value={row.paid_amount} tone="paid" /></td>
@@ -1354,10 +1404,11 @@ export default function CustomerLedgerPage() {
                       <td className="notes-col">
                         <Typography variant="body2" className="clip-text">{row.notes || '-'}</Typography>
                       </td>
+                      <td className="action-col"><Button size="small" variant="outlined" onClick={(event)=>{setBillActionsAnchor(event.currentTarget);setBillActionsRow(row)}}>Actions</Button></td>
                     </tr>
                     {isExpanded ? (
                       <tr className="detail-row">
-                        <td colSpan={9}>
+                        <td colSpan={10}>
                           <Stack gap={1}>
                             <Typography variant="body2" sx={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
                               <b>Notes:</b> {row.notes || '-'}
@@ -1378,7 +1429,7 @@ export default function CustomerLedgerPage() {
               })}
               {openBills.length === 0 && (
                 <tr>
-                  <td colSpan={9}>
+                  <td colSpan={10}>
                     <Box p={2} color="text.secondary">
                       {selectedParty ? 'No open bills for this customer.' : 'Select a customer to view open bills.'}
                     </Box>
@@ -1388,6 +1439,11 @@ export default function CustomerLedgerPage() {
             </tbody>
           </table>
         </Box>
+        <Menu anchorEl={billActionsAnchor} open={Boolean(billActionsAnchor)} onClose={()=>{setBillActionsAnchor(null);setBillActionsRow(null)}}>
+          <MenuItem onClick={()=>{const row=billActionsRow;setBillActionsAnchor(null);setBillActionsRow(null);if(row)openReceiptForBill(row)}}>Receive Payment</MenuItem>
+          <MenuItem disabled={availableAdvanceReceipts.length===0} onClick={()=>{const row=billActionsRow;setBillActionsAnchor(null);setBillActionsRow(null);if(row){setAdvanceTargetBillId(Number(row.bill_id));setAdvancePickerOpen(true)}}}>Adjust Advance</MenuItem>
+          <MenuItem onClick={()=>{const row=billActionsRow;setBillActionsAnchor(null);setBillActionsRow(null);if(row){setWriteoffBill(row);setWriteoffAmount(String(row.outstanding_amount))}}}>Write-off</MenuItem>
+        </Menu>
       </CollapsibleLedgerSection>
 
       <CollapsibleLedgerSection
@@ -1444,7 +1500,7 @@ export default function CustomerLedgerPage() {
                         </Stack>
                       </td>
                       <td className="date-col">
-                        <Typography variant="body2">{row.bill_date || '-'}</Typography>
+                        <LedgerDateCell value={row.bill_date} />
                       </td>
                       <td className="amount-col"><MoneyCell value={row.total_amount} tone="total" /></td>
                       <td className="amount-col"><MoneyCell value={row.paid_amount} tone="paid" /></td>
@@ -1546,7 +1602,7 @@ export default function CustomerLedgerPage() {
                         </Stack>
                       </td>
                       <td className="date-col">
-                        <Typography variant="body2">{row.date_time || '-'}</Typography>
+                        <LedgerDateCell value={row.date_time} />
                       </td>
                       <td>
                         {row.source_bill_id ? (
@@ -1662,7 +1718,7 @@ export default function CustomerLedgerPage() {
             <thead>
               <tr>
                 <th className="expand-col"></th>
-                <SortableHeader label="Receipt" sortKey="receiptId" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="receipt-col" />
+                <SortableHeader label="Receipt / Payment" sortKey="receiptId" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="receipt-col" />
                 <SortableHeader label="Date" sortKey="when" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="date-col" />
                 <SortableHeader label="Mode" sortKey="mode" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="mode-col" />
                 <SortableHeader label="Cash" sortKey="cash" sort={receiptSort} onSort={(key) => setReceiptSort((prev) => nextSort(prev, key))} className="amount-col" />
@@ -1694,7 +1750,7 @@ export default function CustomerLedgerPage() {
                           {isExpanded ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
                         </IconButton>
                       </td>
-                      <td>
+                      <td className="receipt-col">
                         <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
                           <Typography variant="body2" fontWeight={700} lineHeight={1.2}>{receipt.source} #{receipt.receiptId}</Typography>
                           {receipt.isDeleted ? <Chip size="small" color="error" variant="outlined" label="Deleted" /> : null}
@@ -1717,93 +1773,9 @@ export default function CustomerLedgerPage() {
                       <td className="amount-col"><MoneyCell value={receipt.adjusted} tone="paid" /></td>
                       <td className="amount-col"><MoneyCell value={receipt.onAccount} tone={Number(receipt.onAccount || 0) > 0 ? 'total' : 'paid'} /></td>
                       <td className="allocation-col">
-                        <Tooltip title={receipt.allocation || '-'} placement="top" arrow>
-                          <Typography
-                            variant="body2"
-                            className="clip-text"
-                            sx={{ maxWidth: '100%', minWidth: 0 }}
-                          >
-                            {receipt.allocation}
-                          </Typography>
-                        </Tooltip>
+                        <Typography variant="body2" sx={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{renderBillRefs(receipt.allocation)}</Typography>
                       </td>
-                      <td align="right">
-                        <Stack direction="row" gap={0.5} justifyContent="flex-end" alignItems="center">
-                          {receipt.sourceType === 'party_receipt' && !receipt.isDeleted && Number(receipt.adjusted || 0) <= 0 && Number(receipt.onAccount || 0) > 0 ? (
-                            <Tooltip title="Delete advance payment" arrow>
-                              <span>
-                                <Button
-                                  size="small"
-                                  variant="outlined"
-                                  color="error"
-                                  onClick={() => setDeleteTarget(receipt)}
-                                  disabled={deleteReceiptM.isPending}
-                                  sx={{ minWidth: 58, px: 1 }}
-                                >
-                                  Delete
-                                </Button>
-                              </span>
-                            </Tooltip>
-                          ) : null}
-                          {receipt.sourceType === 'party_receipt' && receipt.isDeleted ? (
-                            <Tooltip title="Recover receipt" arrow>
-                              <span>
-                                <IconButton
-                                  size="small"
-                                  color="success"
-                                  onClick={() => setRecoverReceiptTarget(receipt)}
-                                  disabled={recoverReceiptM.isPending}
-                                >
-                                  <RestoreIcon fontSize="small" />
-                                </IconButton>
-                              </span>
-                            </Tooltip>
-                          ) : null}
-                          {receipt.sourceType === 'party_receipt' && !receipt.isDeleted ? (
-                            <Tooltip title="Edit receipt" arrow>
-                              <span>
-                                <IconButton
-                                  size="small"
-                                  color="primary"
-                                  onClick={() => openEditReceipt(receipt)}
-                                  disabled={editReceiptM.isPending}
-                                >
-                                  <EditIcon fontSize="small" />
-                                </IconButton>
-                              </span>
-                            </Tooltip>
-                          ) : null}
-                          {receipt.sourceType === 'party_receipt' && !receipt.isDeleted && Number(receipt.onAccount || 0) > 0 ? (
-                            <Tooltip title="Apply advance to open bills" arrow>
-                              <span>
-                                <Button
-                                  size="small"
-                                  variant="outlined"
-                                  onClick={() => openApplyAdvance(receipt)}
-                                  disabled={applyReceiptM.isPending}
-                                  sx={{ minWidth: 54, px: 1 }}
-                                >
-                                  Adjust
-                                </Button>
-                              </span>
-                            </Tooltip>
-                          ) : null}
-                          {!receipt.isDeleted && !(receipt.sourceType === 'party_receipt' && Number(receipt.adjusted || 0) <= 0 && Number(receipt.onAccount || 0) > 0) ? (
-                            <Tooltip title={receipt.sourceType === 'party_receipt' ? 'Delete receipt' : 'Delete bill payment'} arrow>
-                              <span>
-                                <IconButton
-                                  size="small"
-                                  color="error"
-                                  onClick={() => setDeleteTarget(receipt)}
-                                  disabled={deleteReceiptM.isPending}
-                                >
-                                  <DeleteIcon fontSize="small" />
-                                </IconButton>
-                              </span>
-                            </Tooltip>
-                          ) : null}
-                        </Stack>
-                      </td>
+                      <td className="action-col"><Button size="small" variant="outlined" onClick={(event)=>{setReceiptActionsAnchor(event.currentTarget);setReceiptActionsRow(receipt)}}>Actions</Button></td>
                     </tr>
                     {isExpanded ? (
                       <tr className="detail-row">
@@ -1846,6 +1818,11 @@ export default function CustomerLedgerPage() {
               )}
             </tbody>
           </table>
+          <Menu anchorEl={receiptActionsAnchor} open={Boolean(receiptActionsAnchor)} onClose={()=>{setReceiptActionsAnchor(null);setReceiptActionsRow(null)}}>
+            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openEditReceipt(row)}}>Edit Receipt</MenuItem>
+            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.isDeleted || Number(receiptActionsRow.onAccount||0)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openApplyAdvance(row)}}>Adjust Advance</MenuItem>
+            {receiptActionsRow?.isDeleted ? <MenuItem onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setRecoverReceiptTarget(row)}}>Recover Receipt</MenuItem> : <MenuItem sx={{color:'error.main'}} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setDeleteTarget(row)}}>Delete</MenuItem>}
+          </Menu>
         </Box>
       </CollapsibleLedgerSection>
 
@@ -1859,7 +1836,7 @@ export default function CustomerLedgerPage() {
         <DialogContent dividers>
           <Stack gap={2}>
             <Alert severity="warning">
-              This receipt leaves Rs {money(onAccountAmount)} unapplied while Rs {money(remainingOutstandingAfterReceipt)} is still pending in open bills.
+              Rs {money(adjustmentTotal)} will be applied against bills. The remaining Rs {money(onAccountAmount)} will be recorded as customer advance.
             </Alert>
             <Typography variant="body2" color="text.secondary">
               If you continue, the unapplied amount will be posted as customer advance / credit balance in this customer account. It can be adjusted against bills later from Adjust Advance.
@@ -1868,7 +1845,7 @@ export default function CustomerLedgerPage() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setReceiptAdvanceConfirmOpen(false)} disabled={receiptM.isPending}>
-            Go Back
+            Correct Amount
           </Button>
           <Button
             variant="contained"
@@ -1876,7 +1853,7 @@ export default function CustomerLedgerPage() {
             onClick={() => saveReceipt(true)}
             disabled={receiptM.isPending}
           >
-            Keep as Advance
+            Save Rs {money(onAccountAmount)} as Advance
           </Button>
         </DialogActions>
       </Dialog>
@@ -2045,7 +2022,8 @@ export default function CustomerLedgerPage() {
                 color="inherit"
                 onClick={() => {
                   setAdvancePickerOpen(false)
-                  openApplyAdvance(receipt)
+                  openApplyAdvance(receipt, advanceTargetBillId)
+                  setAdvanceTargetBillId(null)
                 }}
                 sx={{ justifyContent: 'space-between', textTransform: 'none' }}
               >
@@ -2059,7 +2037,7 @@ export default function CustomerLedgerPage() {
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setAdvancePickerOpen(false)}>Cancel</Button>
+          <Button onClick={() => {setAdvancePickerOpen(false);setAdvanceTargetBillId(null)}}>Cancel</Button>
         </DialogActions>
       </Dialog>
 
@@ -2241,6 +2219,36 @@ export default function CustomerLedgerPage() {
               minRows={2}
               fullWidth
             />
+            <Paper variant="outlined" sx={{ p: 1.5 }}>
+              <Typography fontWeight={800} mb={1}>Amounts Adjusted Against Bills</Typography>
+              {editReceiptAllocations.length > 0 ? (
+                <Stack gap={0.75}>
+                  {editReceiptAllocations.map((line) => (
+                    <Stack key={line.id} direction="row" justifyContent="space-between" gap={2}>
+                      <Link component="button" underline="hover" onClick={() => openBillDetail(Number(line.bill_id))} sx={{ fontWeight: 700 }}>
+                        Bill #{line.bill_id}
+                      </Link>
+                      <TextField size="small" type="number" value={editAdjustmentDrafts[Number(line.bill_id)] ?? '0'} onChange={(event)=>setEditAdjustmentDrafts(prev=>({...prev,[Number(line.bill_id)]:normalizeAmountInput(event.target.value)}))} inputProps={{min:0,step:0.01}} sx={{width:150}} />
+                    </Stack>
+                  ))}
+                  {openBillsForReceipt.filter((bill) => !editReceiptAllocations.some((line) => Number(line.bill_id) === Number(bill.bill_id))).map((bill) => (
+                    <Stack key={`open-${bill.bill_id}`} direction="row" justifyContent="space-between" alignItems="center" gap={2}>
+                      <Link component="button" underline="hover" onClick={() => openBillDetail(Number(bill.bill_id))} sx={{ fontWeight: 700 }}>
+                        Bill #{bill.bill_number || bill.bill_id} · Pending Rs {money(bill.outstanding_amount)}
+                      </Link>
+                      <TextField size="small" type="number" value={editAdjustmentDrafts[Number(bill.bill_id)] ?? '0'} onChange={(event)=>setEditAdjustmentDrafts(prev=>({...prev,[Number(bill.bill_id)]:normalizeAmountInput(event.target.value)}))} inputProps={{min:0,max:bill.outstanding_amount,step:0.01}} sx={{width:150}} />
+                    </Stack>
+                  ))}
+                  <Divider />
+                  <Stack direction="row" justifyContent="space-between" gap={2}>
+                    <Typography fontWeight={800}>Total Applied</Typography>
+                    <Typography fontWeight={900}>Rs {money(editReceiptApplied)}</Typography>
+                  </Stack>
+                </Stack>
+              ) : (
+                <Typography variant="body2" color="text.secondary">No amount from this receipt is currently adjusted against a bill.</Typography>
+              )}
+            </Paper>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
               <Typography>Receipt Total: {money(editReceiptTotal)}</Typography>
               <Typography>Applied to Bills: {money(editReceiptApplied)}</Typography>
@@ -2487,6 +2495,12 @@ export default function CustomerLedgerPage() {
             {updateCustomerM.isPending ? 'Saving...' : 'Save Customer'}
           </Button>
         </DialogActions>
+      </Dialog>
+
+      <Dialog open={!!writeoffBill} onClose={()=>!writeoffM.isPending&&setWriteoffBill(null)} fullWidth maxWidth="xs">
+        <DialogTitle>Write off Open Bill</DialogTitle>
+        <DialogContent><Stack spacing={2} sx={{mt:1}}><Alert severity="warning">Bill #{writeoffBill?.bill_id} has Rs {money(writeoffBill?.outstanding_amount)} pending.</Alert><TextField autoFocus label="Write-off amount" type="number" value={writeoffAmount} onChange={e=>setWriteoffAmount(e.target.value)} inputProps={{min:0.01,max:writeoffBill?.outstanding_amount,step:0.01}} /></Stack></DialogContent>
+        <DialogActions><Button onClick={()=>setWriteoffBill(null)}>Cancel</Button><Button variant="contained" color="warning" disabled={writeoffM.isPending||Number(writeoffAmount)<=0||Number(writeoffAmount)>Number(writeoffBill?.outstanding_amount)} onClick={()=>writeoffM.mutate()}>Confirm Write-off</Button></DialogActions>
       </Dialog>
 
       <BillEditDialog

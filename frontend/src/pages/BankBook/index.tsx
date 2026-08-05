@@ -49,8 +49,7 @@ import { getBill, listPayments } from '../../services/billing'
 import { listPurchasePayments } from '../../services/purchases'
 import { fetchPurchaseReturns } from '../../services/purchaseReturns'
 import { listExchangeRecords, listReturns } from '../../services/returns'
-import { fetchParties, fetchReceipts } from '../../services/parties'
-import { createCustomer } from '../../services/customers'
+import { createParty, fetchParties, fetchReceipts } from '../../services/parties'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
@@ -401,6 +400,7 @@ export default function BankBookPage() {
   const [, setLoanReturnTarget] = useState('')
   const [legacyReturnMode,setLegacyReturnMode]=useState(false); const [legacyOpeningAmount,setLegacyOpeningAmount]=useState(''); const [legacyOpeningDate,setLegacyOpeningDate]=useState(today)
   const [newClientOpen, setNewClientOpen] = useState(false); const [newClientName, setNewClientName] = useState(''); const [newClientPhone, setNewClientPhone] = useState('')
+  const [newClientForEdit,setNewClientForEdit]=useState(false)
   const [billOpen, setBillOpen] = useState(false)
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<any | null>(null)
@@ -435,7 +435,7 @@ export default function BankBookPage() {
   const debtorsQ = useQuery({queryKey:['bankbook-loan-debtors'],queryFn:()=>fetchParties({party_group:'SUNDRY_DEBTOR',is_active:true})})
   const returnLoansQ=useQuery({queryKey:['bankbook-return-loans',loanPartyId],queryFn:()=>fetchLoans({party_id:Number(loanPartyId),open_only:true}),enabled:entryType==='LOAN_REPAYMENT'&&Boolean(loanPartyId)})
   const editReturnLoansQ=useQuery({queryKey:['bankbook-edit-return-loans',editLoanPartyId],queryFn:()=>fetchLoans({party_id:Number(editLoanPartyId),open_only:false}),enabled:editType==='LOAN_REPAYMENT'&&Boolean(editLoanPartyId)})
-  const createClientM = useMutation({mutationFn:async()=>{const c=await createCustomer({name:newClientName.trim(),phone:newClientPhone.trim()||undefined});const ps=await fetchParties({party_group:'SUNDRY_DEBTOR',is_active:true});const p=ps.find(x=>Number(x.legacy_customer_id)===Number(c.id))||ps.find(x=>x.name.trim().toLowerCase()===c.name.trim().toLowerCase());if(!p)throw new Error('Customer account link was not created');return p},onSuccess:p=>{setLoanPartyId(String(p.id));setNewClientOpen(false);setNewClientName('');setNewClientPhone('');qc.invalidateQueries({queryKey:['bankbook-loan-debtors']});toast.push('Client added','success')},onError:(e:any)=>toast.push(String(e?.response?.data?.detail||e?.message||'Failed to add client'),'error')})
+  const createClientM = useMutation({mutationFn:()=>createParty({name:newClientName.trim(),phone:newClientPhone.trim()||undefined,party_group:'SUNDRY_DEBTOR',notes:'Loan-only borrower account'}),onSuccess:p=>{if(newClientForEdit)setEditLoanPartyId(String(p.id));else setLoanPartyId(String(p.id));setNewClientOpen(false);setNewClientForEdit(false);setNewClientName('');setNewClientPhone('');qc.invalidateQueries({queryKey:['bankbook-loan-debtors']});toast.push('Loan borrower account created','success')},onError:(e:any)=>toast.push(String(e?.response?.data?.detail||e?.message||'Failed to add borrower'),'error')})
 
   useEffect(() => {
     if (entryMode !== 'BANK_DEPOSIT' && entryType !== 'CONTRA') return
@@ -1422,7 +1422,7 @@ export default function BankBookPage() {
                 <MenuItem value="LOAN">Loan (Bank Transfer Out)</MenuItem>
                 <MenuItem value="LOAN_REPAYMENT">Loan Return (Bank Received)</MenuItem>
               </TextField>
-              {['LOAN','LOAN_REPAYMENT'].includes(entryType)?<Stack direction="row" spacing={1} sx={{minWidth:300}}><TextField select label="Client" value={loanPartyId} onChange={e=>{setLoanPartyId(e.target.value);setLoanReturnTarget('')}} sx={{minWidth:220,flex:1}}>{(debtorsQ.data||[]).map(p=><MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}</TextField><Button variant="outlined" onClick={()=>setNewClientOpen(true)}>New</Button></Stack>:null}
+              {['LOAN','LOAN_REPAYMENT'].includes(entryType)?<Stack direction="row" spacing={1} sx={{minWidth:300}}><TextField select label="Client / Borrower" value={loanPartyId} onChange={e=>{setLoanPartyId(e.target.value);setLoanReturnTarget('')}} sx={{minWidth:220,flex:1}}>{(debtorsQ.data||[]).map(p=><MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}</TextField><Button variant="outlined" onClick={()=>{setNewClientForEdit(false);setNewClientOpen(true)}}>New</Button></Stack>:null}
               {entryType==='LOAN_REPAYMENT'&&loanPartyId&&!legacyReturnMode?<Alert severity="info">Outstanding loan balance: Rs {money((returnLoansQ.data||[]).reduce((sum,l)=>sum+l.outstanding_amount,0))}. The return is applied automatically to the oldest eligible loan.</Alert>:null}
               {entryType==='LOAN_REPAYMENT'?<Button variant={legacyReturnMode?'contained':'outlined'} onClick={()=>{setLegacyReturnMode(v=>!v);setLoanReturnTarget('')}}>{legacyReturnMode?'Using Opening Loan':'No loan account? Create Opening Loan'}</Button>:null}
               {entryType==='LOAN_REPAYMENT'&&legacyReturnMode?<><TextField label="Loan balance before this return" type="number" value={legacyOpeningAmount} onChange={e=>setLegacyOpeningAmount(e.target.value)} inputProps={{min:Number(amount)||0,step:'0.01'}}/><TextField label="Opening loan date" type="date" value={legacyOpeningDate} onChange={e=>setLegacyOpeningDate(e.target.value)} InputLabelProps={{shrink:true}} inputProps={{max:entryDate}}/></>:null}
@@ -1842,7 +1842,7 @@ export default function BankBookPage() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={newClientOpen} onClose={()=>!createClientM.isPending&&setNewClientOpen(false)} fullWidth maxWidth="xs"><DialogTitle>Add Client</DialogTitle><DialogContent><Stack spacing={2} sx={{mt:1}}><TextField required label="Client name" value={newClientName} onChange={e=>setNewClientName(e.target.value)}/><TextField label="Phone" value={newClientPhone} onChange={e=>setNewClientPhone(e.target.value)}/></Stack></DialogContent><DialogActions><Button onClick={()=>setNewClientOpen(false)}>Cancel</Button><Button variant="contained" disabled={!newClientName.trim()||createClientM.isPending} onClick={()=>createClientM.mutate()}>Add Client</Button></DialogActions></Dialog>
+      <Dialog open={newClientOpen} onClose={()=>!createClientM.isPending&&setNewClientOpen(false)} fullWidth maxWidth="xs"><DialogTitle>Add Loan Borrower</DialogTitle><DialogContent><Stack spacing={2} sx={{mt:1}}><Alert severity="info">Creates a loan-only debtor account, not a sales customer.</Alert><TextField required label="Borrower name" value={newClientName} onChange={e=>setNewClientName(e.target.value)}/><TextField label="Phone" value={newClientPhone} onChange={e=>setNewClientPhone(e.target.value)}/></Stack></DialogContent><DialogActions><Button onClick={()=>setNewClientOpen(false)}>Cancel</Button><Button variant="contained" disabled={!newClientName.trim()||createClientM.isPending} onClick={()=>createClientM.mutate()}>Create Borrower</Button></DialogActions></Dialog>
 
       <Dialog open={billOpen} onClose={() => setBillOpen(false)} fullWidth maxWidth="md">
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -2005,7 +2005,7 @@ export default function BankBookPage() {
               <MenuItem value="LOAN">Loan (Bank Transfer Out)</MenuItem>
               <MenuItem value="LOAN_REPAYMENT">Loan Return (Bank Received)</MenuItem>
             </TextField>
-            {['LOAN','LOAN_REPAYMENT'].includes(editType)?<TextField select required label="Client" value={editLoanPartyId} onChange={e=>{setEditLoanPartyId(e.target.value);setEditLoanReturnTarget('')}} fullWidth>{(debtorsQ.data||[]).map(p=><MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}</TextField>:null}
+            {['LOAN','LOAN_REPAYMENT'].includes(editType)?<Stack direction="row" gap={1}><TextField select required label="Client / Borrower" value={editLoanPartyId} onChange={e=>{setEditLoanPartyId(e.target.value);setEditLoanReturnTarget('')}} fullWidth>{(debtorsQ.data||[]).map(p=><MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}</TextField><Button variant="outlined" onClick={()=>{setNewClientForEdit(true);setNewClientOpen(true)}}>New</Button></Stack>:null}
             {editType==='LOAN_REPAYMENT'&&editLoanPartyId&&!editLegacyReturnMode?<Alert severity="info">The return remains automatically adjusted against this client’s applicable loan.</Alert>:null}
             {editType==='LOAN_REPAYMENT'&&!editLoanAdjustmentId?<Button variant={editLegacyReturnMode?'contained':'outlined'} onClick={()=>{setEditLegacyReturnMode(v=>!v);setEditLoanReturnTarget('')}}>{editLegacyReturnMode?'Using Opening Loan':'No loan account? Create Opening Loan'}</Button>:null}
             {editType==='LOAN_REPAYMENT'&&editLegacyReturnMode?<Stack direction={{xs:'column',sm:'row'}} spacing={1}><TextField fullWidth label="Loan balance before this return" type="number" value={editLegacyOpeningAmount} onChange={e=>setEditLegacyOpeningAmount(e.target.value)} inputProps={{min:Number(editAmount)||0,step:'0.01'}}/><TextField fullWidth label="Opening loan date" type="date" value={editLegacyOpeningDate} onChange={e=>setEditLegacyOpeningDate(e.target.value)} InputLabelProps={{shrink:true}} inputProps={{max:editDate}}/></Stack>:null}

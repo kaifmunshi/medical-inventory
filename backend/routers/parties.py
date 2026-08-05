@@ -283,7 +283,7 @@ def _receipt_adjustment_outs_by_receipt(
         receipt_id = int(adjustment.receipt_id)
         out.setdefault(receipt_id, []).append(
             ReceiptBillAdjustmentOut(
-                **adjustment.dict(),
+                **adjustment.model_dump(),
                 cash_amount=cash_amount,
                 online_amount=online_amount,
             )
@@ -305,7 +305,7 @@ def _party_receipt_outs(session, receipts: List[PartyReceipt]) -> List[PartyRece
     )
     out: List[PartyReceiptOut] = []
     for receipt in receipts:
-        data = receipt.dict()
+        data = receipt.model_dump()
         data["adjustments"] = adjustments_by_receipt.get(int(receipt.id or 0), [])
         out.append(PartyReceiptOut(**data))
     return out
@@ -1062,9 +1062,11 @@ def update_party_receipt(party_id: int, receipt_id: int, payload: PartyReceiptUp
         affected_bill_ids = {int(row.bill_id) for row in active_adjustments}
         if payload.adjustments is not None:
             for adjustment in active_adjustments:
+                assert_financial_year_unlocked(session, adjustment.created_at, context="Customer receipt allocation edit")
                 if adjustment.bill_payment_id is not None:
                     payment = session.get(BillPayment, int(adjustment.bill_payment_id))
                     if payment:
+                        assert_financial_year_unlocked(session, payment.received_at, context="Customer receipt allocation edit")
                         payment.is_deleted = True
                         payment.deleted_at = datetime.now().isoformat(timespec="seconds")
                         session.add(payment)

@@ -13,6 +13,7 @@ import {
   FormControlLabel,
   Grid,
   Link,
+  Menu,
   MenuItem,
   Paper,
   Stack,
@@ -277,6 +278,15 @@ export default function SupplierLedgerPage() {
   const [ledgerFromDate, setLedgerFromDate] = useState('')
   const [ledgerToDate, setLedgerToDate] = useState('')
   const [showDeletedLedgerRows, setShowDeletedLedgerRows] = useState(false)
+  const [actionsAnchor, setActionsAnchor] = useState<HTMLElement | null>(null)
+  const [actionsPurchase, setActionsPurchase] = useState<Purchase | null>(null)
+  const [actionsPayment, setActionsPayment] = useState<PurchasePaymentBookRow | PurchasePayment | null>(null)
+
+  function closeActions() {
+    setActionsAnchor(null)
+    setActionsPurchase(null)
+    setActionsPayment(null)
+  }
 
   const suppliersQ = useQuery<Party[], Error>({
     queryKey: ['suppliers-ledger-select'],
@@ -1649,7 +1659,14 @@ export default function SupplierLedgerPage() {
           </Button>
         </Stack>
         <Box sx={{ overflowX: 'auto' }}>
-          <table className="table">
+          <table className="table supplier-ledger-grid" style={{ minWidth: 1180, tableLayout: 'fixed' }}>
+            <colgroup>
+              <col style={{ width: 115 }} />
+              <col style={{ width: 225 }} />
+              {Array.from({ length: 8 }).map((_, index) => <col key={`amount-col-${index}`} style={{ width: 80 }} />)}
+              <col style={{ width: 170 }} />
+              <col style={{ width: 96 }} />
+            </colgroup>
             <thead>
               <tr>
                 <th>Date</th>
@@ -1687,7 +1704,7 @@ export default function SupplierLedgerPage() {
                       opacity: row.isDeleted ? 0.62 : 1,
                     }}
                   >
-                    <td>{row.date}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>{row.date}</td>
                     <td>
                       <Stack gap={0.2}>
                         {Number(row.purchaseId || 0) > 0 ? (
@@ -1729,64 +1746,16 @@ export default function SupplierLedgerPage() {
                         </Typography>
                       </Stack>
                     </td>
-                    <td>{money(row.balanceBefore)}</td>
-                    <td>{row.purchaseAmount ? money(row.purchaseAmount) : '-'}</td>
-                    <td>{row.returnAmount ? money(row.returnAmount) : '-'}</td>
-                    <td>{row.paidAmount ? money(row.paidAmount) : '-'}</td>
-                    <td>{row.refundAmount ? money(row.refundAmount) : '-'}</td>
-                    <td>{row.writeoffAmount ? money(row.writeoffAmount) : '-'}</td>
-                    <td>{row.writeoffReversalAmount ? money(row.writeoffReversalAmount) : '-'}</td>
-                    <td>{money(row.balanceAfter)}</td>
+                    <td style={{ textAlign: 'right' }}>{money(row.balanceBefore)}</td>
+                    <td style={{ textAlign: 'right' }}>{row.purchaseAmount ? money(row.purchaseAmount) : '-'}</td>
+                    <td style={{ textAlign: 'right' }}>{row.returnAmount ? money(row.returnAmount) : '-'}</td>
+                    <td style={{ textAlign: 'right' }}>{row.paidAmount ? money(row.paidAmount) : '-'}</td>
+                    <td style={{ textAlign: 'right' }}>{row.refundAmount ? money(row.refundAmount) : '-'}</td>
+                    <td style={{ textAlign: 'right' }}>{row.writeoffAmount ? money(row.writeoffAmount) : '-'}</td>
+                    <td style={{ textAlign: 'right' }}>{row.writeoffReversalAmount ? money(row.writeoffReversalAmount) : '-'}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 800 }}>{money(row.balanceAfter)}</td>
                     <td style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>{row.note || '-'}</td>
-	                    <td>
-	                      {canAddForRow ? (
-	                        <Button size="small" variant="outlined" onClick={() => openPaymentDialog(purchase)}>
-	                          Add Payment / Write-off
-	                        </Button>
-	                      ) : payment ? (
-	                        <Stack direction="row" gap={1}>
-	                          {payment.is_deleted ? (
-                              <>
-                                {Number(payment.purchase_id || 0) > 0 ? (
-                                  <Button
-                                    size="small"
-                                    variant="outlined"
-                                    onClick={() => openPaymentInBill(Number(payment.purchase_id), Number(payment.id))}
-                                  >
-                                    View
-                                  </Button>
-                                ) : null}
-                                <Button
-                                  size="small"
-                                  variant="outlined"
-                                  disabled={!partyId || restorePaymentM.isPending}
-                                  onClick={() => restorePaymentM.mutate({ supplierId: Number(partyId), paymentId: Number(payment.id) })}
-                                >
-                                  Restore
-                                </Button>
-                              </>
-	                          ) : (
-	                            <>
-                                {Number(payment.purchase_id || 0) > 0 ? (
-                                  <Button
-                                    size="small"
-                                    variant="outlined"
-                                    onClick={() => openPaymentInBill(Number(payment.purchase_id), Number(payment.id))}
-                                  >
-                                    View
-                                  </Button>
-                                ) : null}
-	                              <Button size="small" variant="outlined" onClick={() => openEditPayment(payment)}>
-	                                Edit
-	                              </Button>
-	                              <Button size="small" color="error" variant="outlined" onClick={() => setDeletePaymentTarget(payment)}>
-	                                Delete
-	                              </Button>
-	                            </>
-	                          )}
-	                        </Stack>
-	                      ) : null}
-	                    </td>
+	                    <td>{canAddForRow || payment ? <Button size="small" variant="outlined" onClick={(event)=>{setActionsAnchor(event.currentTarget);setActionsPurchase(purchase);setActionsPayment(payment)}}>Actions</Button> : null}</td>
                   </tr>
                 )
               })}
@@ -1801,6 +1770,13 @@ export default function SupplierLedgerPage() {
               )}
             </tbody>
           </table>
+          <Menu anchorEl={actionsAnchor} open={Boolean(actionsAnchor)} onClose={closeActions}>
+            {actionsPurchase && !actionsPayment ? <MenuItem onClick={()=>{const purchase=actionsPurchase;closeActions();if(purchase)openPaymentDialog(purchase)}}>Add Payment / Write-off</MenuItem> : null}
+            {actionsPayment && Number(actionsPayment.purchase_id||0)>0 ? <MenuItem onClick={()=>{const payment=actionsPayment;closeActions();if(payment)openPaymentInBill(Number(payment.purchase_id),Number(payment.id))}}>View Purchase & Payment</MenuItem> : null}
+            {actionsPayment && !actionsPayment.is_deleted ? <MenuItem onClick={()=>{const payment=actionsPayment;closeActions();if(payment)openEditPayment(payment)}}>Edit</MenuItem> : null}
+            {actionsPayment?.is_deleted ? <MenuItem disabled={!partyId||restorePaymentM.isPending} onClick={()=>{const payment=actionsPayment;const supplierId=Number(partyId);closeActions();if(payment&&supplierId)restorePaymentM.mutate({supplierId,paymentId:Number(payment.id)})}}>Restore</MenuItem> : null}
+            {actionsPayment && !actionsPayment.is_deleted ? <MenuItem sx={{color:'error.main'}} onClick={()=>{const payment=actionsPayment;closeActions();if(payment)setDeletePaymentTarget(payment)}}>Delete</MenuItem> : null}
+          </Menu>
         </Box>
       </Paper>
 
@@ -2203,27 +2179,7 @@ export default function SupplierLedgerPage() {
                         <td>{money(payment.amount)}</td>
                         <td>{payment.note || '-'}</td>
                         <td>{payment.is_deleted ? <Chip size="small" label="Deleted" /> : <Chip size="small" color="success" variant="outlined" label="Active" />}</td>
-                        <td>
-	                          {payment.is_deleted ? (
-	                            <Button
-	                              size="small"
-	                              variant="outlined"
-	                              disabled={restorePaymentM.isPending}
-	                              onClick={() => restorePaymentM.mutate({ supplierId: Number(selectedPurchase.party_id), paymentId: Number(payment.id) })}
-	                            >
-	                              Restore
-	                            </Button>
-	                          ) : (
-	                            <Stack direction="row" gap={1}>
-	                              <Button size="small" variant="outlined" onClick={() => openEditPayment(payment)}>
-	                                Edit
-	                              </Button>
-	                              <Button size="small" color="error" variant="outlined" onClick={() => setDeletePaymentTarget(payment)}>
-	                                Delete
-	                              </Button>
-	                            </Stack>
-	                          )}
-                        </td>
+                        <td><Button size="small" variant="outlined" onClick={(event)=>{setActionsAnchor(event.currentTarget);setActionsPurchase(selectedPurchase);setActionsPayment(payment)}}>Actions</Button></td>
                       </tr>
                     ))}
                     {(selectedPurchase.payments || []).length === 0 && (

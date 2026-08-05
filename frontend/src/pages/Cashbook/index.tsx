@@ -48,8 +48,7 @@ import { getBill, listPayments } from '../../services/billing'
 import { listPurchasePayments } from '../../services/purchases'
 import { fetchPurchaseReturns } from '../../services/purchaseReturns'
 import { listExchangeRecords, listReturns } from '../../services/returns'
-import { fetchParties, fetchReceipts } from '../../services/parties'
-import { createCustomer } from '../../services/customers'
+import { createParty, fetchParties, fetchReceipts, updatePartyReceipt } from '../../services/parties'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
@@ -208,6 +207,12 @@ function buildReceiptPaymentRows(payments: any[], amountField: 'cash_amount' | '
       note: `${label} customer receipt #${receiptId}`,
       source: 'PARTY_RECEIPT' as const,
       receipt_note: receipt?.note || '',
+      party_id: receipt?.party_id,
+      receipt_mode: receipt?.mode || fallbackPayment?.mode || 'cash',
+      receipt_cash: Number(receipt?.cash_amount || 0),
+      receipt_online: Number(receipt?.online_amount || 0),
+      receipt_total: Number(receipt?.total_amount || 0),
+      receipt_unallocated: Number(receipt?.unallocated_amount || 0),
       plain_amount: 0,
       subRows: [],
     }
@@ -369,6 +374,7 @@ export default function CashbookPage() {
   const [newClientOpen, setNewClientOpen] = useState(false)
   const [newClientName, setNewClientName] = useState('')
   const [newClientPhone, setNewClientPhone] = useState('')
+  const [newClientForEdit, setNewClientForEdit] = useState(false)
   const [billOpen, setBillOpen] = useState(false)
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<any | null>(null)
@@ -380,6 +386,7 @@ export default function CashbookPage() {
   const [editNote, setEditNote] = useState('')
   const [editIsSuspense, setEditIsSuspense] = useState(false)
   const [editLoanPartyId, setEditLoanPartyId] = useState('')
+  const [editAdvanceRow,setEditAdvanceRow]=useState<any|null>(null); const [editAdvanceCash,setEditAdvanceCash]=useState(''); const [editAdvanceDate,setEditAdvanceDate]=useState(today); const [editAdvanceNote,setEditAdvanceNote]=useState('')
   const [editLoanReturnTarget, setEditLoanReturnTarget] = useState('')
   const [editLoanAdjustmentId, setEditLoanAdjustmentId] = useState<number | null>(null)
   const [editLegacyReturnMode,setEditLegacyReturnMode]=useState(false); const [editLegacyOpeningAmount,setEditLegacyOpeningAmount]=useState(''); const [editLegacyOpeningDate,setEditLegacyOpeningDate]=useState(today)
@@ -409,7 +416,8 @@ export default function CashbookPage() {
   const debtorsQ = useQuery({ queryKey: ['cashbook-loan-debtors'], queryFn: () => fetchParties({ party_group: 'SUNDRY_DEBTOR', is_active: true }) })
   const returnLoansQ = useQuery({ queryKey: ['cashbook-return-loans', loanPartyId], queryFn: () => fetchLoans({ party_id: Number(loanPartyId), open_only: true }), enabled: entryType === 'LOAN_REPAYMENT' && Boolean(loanPartyId) })
   const editReturnLoansQ = useQuery({ queryKey: ['cashbook-edit-return-loans', editLoanPartyId], queryFn: () => fetchLoans({ party_id: Number(editLoanPartyId), open_only: false }), enabled: editType === 'LOAN_REPAYMENT' && Boolean(editLoanPartyId) })
-  const createClientM = useMutation({ mutationFn: async () => { const customer = await createCustomer({ name: newClientName.trim(), phone: newClientPhone.trim() || undefined }); const parties = await fetchParties({ party_group: 'SUNDRY_DEBTOR', is_active: true }); const party = parties.find(p => Number(p.legacy_customer_id) === Number(customer.id)) || parties.find(p => p.name.trim().toLowerCase() === customer.name.trim().toLowerCase()); if (!party) throw new Error('Customer account link was not created'); return party }, onSuccess: (party) => { setLoanPartyId(String(party.id)); setNewClientOpen(false); setNewClientName(''); setNewClientPhone(''); qc.invalidateQueries({ queryKey: ['cashbook-loan-debtors'] }); qc.invalidateQueries({ queryKey: ['customer-ledger-customers'] }); toast.push('Client added', 'success') }, onError: (err:any) => toast.push(errorMessage(err, 'Failed to add client'), 'error') })
+  const createClientM = useMutation({ mutationFn: () => createParty({ name: newClientName.trim(), phone: newClientPhone.trim() || undefined, party_group: 'SUNDRY_DEBTOR', notes: 'Loan-only borrower account' }), onSuccess: (party) => { if(newClientForEdit)setEditLoanPartyId(String(party.id));else setLoanPartyId(String(party.id)); setNewClientOpen(false); setNewClientForEdit(false); setNewClientName(''); setNewClientPhone(''); qc.invalidateQueries({ queryKey: ['cashbook-loan-debtors'] }); toast.push('Loan borrower account created', 'success') }, onError: (err:any) => toast.push(errorMessage(err, 'Failed to add borrower'), 'error') })
+  const editAdvanceM=useMutation({mutationFn:()=>updatePartyReceipt(Number(editAdvanceRow?.party_id),Number(editAdvanceRow?.receipt_id),{mode:editAdvanceRow?.receipt_mode||'cash',cash_amount:Number(editAdvanceCash),online_amount:Number(editAdvanceRow?.receipt_online||0),payment_date:editAdvanceDate,note:editAdvanceNote.trim()||undefined}),onSuccess:()=>{setEditAdvanceRow(null);qc.invalidateQueries({queryKey:['cashbook-receipts-day']});qc.invalidateQueries({queryKey:['cashbook-all-receipts']});qc.invalidateQueries({queryKey:['cashbook-day']});qc.invalidateQueries({queryKey:['cashbook-daily-summary']});qc.invalidateQueries({queryKey:['customer-receipts']});qc.invalidateQueries({queryKey:['customer-ledger']});toast.push('Customer advance receipt updated','success')},onError:(e:any)=>toast.push(errorMessage(e,'Failed to update customer receipt'),'error')})
 
   const allRange = useMemo(() => {
     if (allView === 'WEEK') return weekRange(debouncedAllAnchorDate)
@@ -1184,7 +1192,7 @@ export default function CashbookPage() {
             </TextField>
             {['LOAN','LOAN_REPAYMENT'].includes(entryType) ? <Stack direction="row" spacing={1} sx={{minWidth:300}}>
               <TextField select label="Client" value={loanPartyId} onChange={(e)=>{setLoanPartyId(e.target.value);setLoanReturnTarget('')}} sx={{minWidth:220,flex:1}}>{(debtorsQ.data||[]).map(p=><MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}</TextField>
-              <Button variant="outlined" onClick={()=>setNewClientOpen(true)}>New</Button>
+              <Button variant="outlined" onClick={()=>{setNewClientForEdit(false);setNewClientOpen(true)}}>New</Button>
             </Stack> : null}
             {entryType === 'LOAN_REPAYMENT'&&loanPartyId&&!legacyReturnMode ? <Alert severity="info">Outstanding loan balance: Rs {money((returnLoansQ.data||[]).reduce((sum,l)=>sum+l.outstanding_amount,0))}. The return is applied automatically to the oldest eligible loan.</Alert> : null}
             {entryType==='LOAN_REPAYMENT'?<Button variant={legacyReturnMode?'contained':'outlined'} onClick={()=>{setLegacyReturnMode(v=>!v);setLoanReturnTarget('')}}>{legacyReturnMode?'Using Opening Loan':'No loan account? Create Opening Loan'}</Button>:null}
@@ -1232,7 +1240,7 @@ export default function CashbookPage() {
         </Collapse>
       </Paper>
 
-      <Dialog open={newClientOpen} onClose={()=>!createClientM.isPending&&setNewClientOpen(false)} fullWidth maxWidth="xs"><DialogTitle>Add Client</DialogTitle><DialogContent><Stack spacing={2} sx={{mt:1}}><TextField required label="Client name" value={newClientName} onChange={e=>setNewClientName(e.target.value)}/><TextField label="Phone" value={newClientPhone} onChange={e=>setNewClientPhone(e.target.value)}/></Stack></DialogContent><DialogActions><Button onClick={()=>setNewClientOpen(false)}>Cancel</Button><Button variant="contained" disabled={!newClientName.trim()||createClientM.isPending} onClick={()=>createClientM.mutate()}>Add Client</Button></DialogActions></Dialog>
+      <Dialog open={newClientOpen} onClose={()=>!createClientM.isPending&&setNewClientOpen(false)} fullWidth maxWidth="xs"><DialogTitle>Add Loan Borrower</DialogTitle><DialogContent><Stack spacing={2} sx={{mt:1}}><Alert severity="info">Creates a loan-only debtor account, not a sales customer.</Alert><TextField required label="Borrower name" value={newClientName} onChange={e=>setNewClientName(e.target.value)}/><TextField label="Phone" value={newClientPhone} onChange={e=>setNewClientPhone(e.target.value)}/></Stack></DialogContent><DialogActions><Button onClick={()=>setNewClientOpen(false)}>Cancel</Button><Button variant="contained" disabled={!newClientName.trim()||createClientM.isPending} onClick={()=>createClientM.mutate()}>Create Borrower</Button></DialogActions></Dialog>
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} sx={{ mb: 1.5 }}>
@@ -1427,7 +1435,7 @@ export default function CashbookPage() {
                         </TableCell>
                         <TableCell>{row.source === 'BILL' ? 'Bill' : row.source === 'PARTY_RECEIPT' ? 'Customer receipt' : row.source === 'PURCHASE_PAYMENT' ? 'Purchase' : row.source === 'RETURN' ? 'Sales Return' : row.source === 'EXCHANGE' ? 'Exchange' : row.source === 'CONTRA' ? 'Contra' : row.source === 'SYSTEM' ? 'System' : 'Cashbook'}</TableCell>
                         <TableCell align="right">
-                          {row.source === 'CASHBOOK' ? (
+                          {row.source === 'PARTY_RECEIPT' ? <Tooltip title="Edit customer receipt / advance"><span><IconButton size="small" onClick={()=>{setEditAdvanceRow(row);setEditAdvanceCash(String(row.receipt_cash||0));setEditAdvanceDate(isoDate(row.created_at));setEditAdvanceNote(String(row.receipt_note||''))}}><EditIcon fontSize="small"/></IconButton></span></Tooltip> : row.source === 'CASHBOOK' ? (
                             <Stack direction="row" spacing={0.5} justifyContent="flex-end">
                               <Tooltip title="Edit entry">
                                 <span>
@@ -1679,7 +1687,7 @@ export default function CashbookPage() {
               <MenuItem value="LOAN">Loan (Cash Given)</MenuItem>
               <MenuItem value="LOAN_REPAYMENT">Loan Return (Cash Received)</MenuItem>
             </TextField>
-            {['LOAN','LOAN_REPAYMENT'].includes(editType) ? <TextField select required label="Client" value={editLoanPartyId} onChange={e=>{setEditLoanPartyId(e.target.value);setEditLoanReturnTarget('')}} fullWidth>{(debtorsQ.data||[]).map(p=><MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}</TextField> : null}
+            {['LOAN','LOAN_REPAYMENT'].includes(editType) ? <Stack direction="row" gap={1}><TextField select required label="Client / Borrower" value={editLoanPartyId} onChange={e=>{setEditLoanPartyId(e.target.value);setEditLoanReturnTarget('')}} fullWidth>{(debtorsQ.data||[]).map(p=><MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}</TextField><Button variant="outlined" onClick={()=>{setNewClientForEdit(true);setNewClientOpen(true)}}>New</Button></Stack> : null}
             {editType==='LOAN_REPAYMENT'&&editLoanPartyId&&!editLegacyReturnMode?<Alert severity="info">The return remains automatically adjusted against this client’s applicable loan.</Alert>:null}
             {editType==='LOAN_REPAYMENT'&&!editLoanAdjustmentId?<Button variant={editLegacyReturnMode?'contained':'outlined'} onClick={()=>{setEditLegacyReturnMode(v=>!v);setEditLoanReturnTarget('')}}>{editLegacyReturnMode?'Using Opening Loan':'No loan account? Create Opening Loan'}</Button>:null}
             {editType==='LOAN_REPAYMENT'&&editLegacyReturnMode?<Stack direction={{xs:'column',sm:'row'}} spacing={1}><TextField fullWidth label="Loan balance before this return" type="number" value={editLegacyOpeningAmount} onChange={e=>setEditLegacyOpeningAmount(e.target.value)} inputProps={{min:Number(editAmount)||0,step:'0.01'}}/><TextField fullWidth label="Opening loan date" type="date" value={editLegacyOpeningDate} onChange={e=>setEditLegacyOpeningDate(e.target.value)} InputLabelProps={{shrink:true}} inputProps={{max:editDate}}/></Stack>:null}
@@ -1728,6 +1736,7 @@ export default function CashbookPage() {
           </Button>
         </DialogActions>
       </Dialog>
+      <Dialog open={!!editAdvanceRow} onClose={()=>!editAdvanceM.isPending&&setEditAdvanceRow(null)} fullWidth maxWidth="sm"><DialogTitle>Edit Customer Receipt #{editAdvanceRow?.receipt_id}</DialogTitle><DialogContent dividers><Stack spacing={2} sx={{pt:1}}><Alert severity="info">Applied to bills: Rs {money(Number(editAdvanceRow?.receipt_total||0)-Number(editAdvanceRow?.receipt_unallocated||0))} · Advance / on account: Rs {money(editAdvanceRow?.receipt_unallocated)}</Alert><TextField label={editAdvanceRow?.receipt_mode==='split'?'Cash portion':'Receipt amount'} type="number" value={editAdvanceCash} onChange={e=>setEditAdvanceCash(e.target.value)} inputProps={{min:0,step:0.01}}/><TextField label="Date" type="date" value={editAdvanceDate} onChange={e=>setEditAdvanceDate(e.target.value)} InputLabelProps={{shrink:true}}/><TextField label="Note" value={editAdvanceNote} onChange={e=>setEditAdvanceNote(e.target.value)} multiline minRows={2}/>{Number(editAdvanceRow?.receipt_online||0)>0?<Typography variant="body2" color="text.secondary">Online portion preserved: Rs {money(editAdvanceRow?.receipt_online)}</Typography>:null}</Stack></DialogContent><DialogActions><Button onClick={()=>setEditAdvanceRow(null)}>Cancel</Button><Button variant="contained" disabled={editAdvanceM.isPending||Number(editAdvanceCash)<0||Number(editAdvanceCash)+Number(editAdvanceRow?.receipt_online||0)<Number(editAdvanceRow?.receipt_total||0)-Number(editAdvanceRow?.receipt_unallocated||0)} onClick={()=>editAdvanceM.mutate()}>Save Changes</Button></DialogActions></Dialog>
       <Dialog
         open={!!deleteRow}
         onClose={() => {

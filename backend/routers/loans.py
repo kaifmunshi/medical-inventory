@@ -1,13 +1,15 @@
 from datetime import datetime
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from sqlalchemy import func
 from sqlmodel import select
 
 from backend.accounting import mark_voucher_deleted, post_loan_adjustment_voucher, post_loan_voucher, post_opening_loan_voucher
 from backend.controls import assert_financial_year_unlocked
 from backend.db import get_session
-from backend.models import BankbookEntry, CashbookEntry, LoanAccountOut, LoanAdjustment, LoanAdjustmentCreate, LoanAdjustmentUpdate, LoanOpening, LoanOpeningCreate, LoanReconcileCreate, OpeningLoanReturnCreate, Party
+from backend.models import BankbookEntry, Bill, CashbookEntry, LoanAccountOut, LoanAdjustment, LoanAdjustmentCreate, LoanAdjustmentUpdate, LoanOpening, LoanOpeningCreate, LoanReconcileCreate, OpeningLoanReturnCreate, Party
 from backend.security import require_min_role
 
 router = APIRouter()
@@ -21,6 +23,10 @@ def _loan_model(book: str):
     return LoanOpening if book == "OPENING" else BankbookEntry if book == "BANK" else CashbookEntry
 
 
+def _loan_date(loan) -> str:
+    return str(getattr(loan, "opening_date", None) or getattr(loan, "created_at", ""))[:10]
+
+
 @router.get("/reconciliation-candidates")
 def reconciliation_candidates():
     with get_session() as session:
@@ -28,8 +34,9 @@ def reconciliation_candidates():
         managed_bank = {int(x.bankbook_entry_id) for x in session.exec(select(LoanAdjustment).where(LoanAdjustment.bankbook_entry_id.is_not(None), LoanAdjustment.is_deleted == False)).all() if x.bankbook_entry_id}  # noqa: E712
         out = []
         for book, model, managed in (("CASH", CashbookEntry, managed_cash), ("BANK", BankbookEntry, managed_bank)):
-            for row in session.exec(select(model).where(model.entry_type != "LOAN").order_by(model.created_at.desc())).all():
-                if int(row.id) in managed or "loan" not in str(row.note or "").lower():
+            stmt = select(model).where(model.entry_type != "LOAN", func.lower(func.coalesce(model.note, "")).like("%loan%")).order_by(model.created_at.desc())
+            for row in session.exec(stmt).all():
+                if int(row.id) in managed:
                     continue
                 role = "REPAYMENT" if str(row.entry_type or "").upper() in {"RECEIPT", "LOAN_REPAYMENT"} else "DISBURSEMENT"
                 out.append({"book": book, "entry_id": int(row.id), "entry_type": row.entry_type, "date": row.created_at,
@@ -93,6 +100,8 @@ def reconcile_existing_entry(payload: LoanReconcileCreate):
             account = _account(session, loan, target_book)
             if float(row.amount or 0) > account.outstanding_amount + 0.0001:
                 raise HTTPException(status_code=400, detail="Repayment exceeds the selected loan outstanding")
+            if str(row.created_at)[:10] < _loan_date(loan):
+                raise HTTPException(status_code=400, detail="Repayment date cannot be before the loan date")
             if str(row.entry_type).upper() not in {"RECEIPT", "LOAN_REPAYMENT"}:
                 raise HTTPException(status_code=400, detail="Only a receipt can be reconciled as repayment")
             row.entry_type = "LOAN_REPAYMENT"
@@ -111,7 +120,7 @@ def reconcile_existing_entry(payload: LoanReconcileCreate):
 def _account(session, loan, book: str = "CASH") -> LoanAccountOut:
     party = session.get(Party, loan.party_id)
     if not party:
-        raise HTTPException(status_code=409, detail="Loan customer no longer exists")
+        raise HTTPException(status_code=409, detail="Loan borrower account no longer exists")
     adjustments = session.exec(
         select(LoanAdjustment)
         .where(LoanAdjustment.loan_book == book, LoanAdjustment.loan_entry_id == loan.id, LoanAdjustment.is_deleted == False)  # noqa: E712
@@ -239,7 +248,21 @@ def add_adjustment(loan_book: str, loan_entry_id: int, payload: LoanAdjustmentCr
                 raise HTTPException(status_code=400, detail="adjustment_date must be YYYY-MM-DD")
             adjusted_at = f"{payload.adjustment_date}T{datetime.now().strftime('%H:%M:%S')}"
         assert_financial_year_unlocked(session, adjusted_at, context="Loan adjustment")
+        if adjusted_at[:10] < _loan_date(loan):
+            raise HTTPException(status_code=400, detail="Adjustment date cannot be before the loan date")
         party = session.get(Party, loan.party_id)
+        if not party or not party.is_active:
+            raise HTTPException(status_code=409, detail="Loan borrower account is inactive or missing")
+        if kind == "PRODUCT":
+            match = re.fullmatch(r"Bill\s*#(\d+)", str(payload.product_reference or "").strip(), flags=re.IGNORECASE)
+            if not match:
+                raise HTTPException(status_code=400, detail="Select a valid customer bill for the product adjustment")
+            bill = session.get(Bill, int(match.group(1)))
+            note = str(getattr(bill, "notes", "") or "").strip().lower() if bill else ""
+            note_matches = note == f"customer: {party.name.strip().lower()}" or note.startswith(f"customer: {party.name.strip().lower()} |") or note.startswith(f"customer: {party.name.strip().lower()}\n")
+            belongs = bool(bill and not bill.is_deleted and (int(bill.party_id or 0) == int(party.id) or (party.legacy_customer_id and int(bill.customer_id or 0) == int(party.legacy_customer_id)) or note_matches))
+            if not belongs:
+                raise HTTPException(status_code=400, detail="Selected bill does not belong to this loan borrower")
         settlement_book = str(payload.settlement_book or "CASH").upper() if kind == "MONEY" else None
         if settlement_book not in {None, "CASH", "BANK"}:
             raise HTTPException(status_code=400, detail="settlement_book must be CASH or BANK")
@@ -351,6 +374,8 @@ def update_adjustment(adjustment_id: int, payload: LoanAdjustmentUpdate):
             adjusted_at = f"{payload.adjustment_date}T{str(row.adjusted_at)[11:19]}"
         assert_financial_year_unlocked(session, row.adjusted_at, context="Loan adjustment edit")
         assert_financial_year_unlocked(session, adjusted_at, context="Loan adjustment edit")
+        if adjusted_at[:10] < _loan_date(loan):
+            raise HTTPException(status_code=400, detail="Return date cannot be before the selected loan date")
         row.loan_book = target_book
         row.loan_entry_id = int(loan.id)
         row.party_id = int(party.id)

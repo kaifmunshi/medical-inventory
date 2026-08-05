@@ -319,7 +319,7 @@ def create_entry(payload: CashbookCreate):
         if et == "LOAN":
             party = session.get(Party, payload.party_id) if payload.party_id else None
             if not party or party.party_group != "SUNDRY_DEBTOR" or not party.is_active:
-                raise HTTPException(status_code=400, detail="Select an active customer for the loan")
+                raise HTTPException(status_code=400, detail="Select an active client or loan borrower")
         assert_financial_year_unlocked(session, created_at, context="Cashbook entry")
         row = CashbookEntry(
             entry_type=et,
@@ -363,13 +363,18 @@ def update_entry(entry_id: int, payload: CashbookCreate):
         if managed_adjustment:
             raise HTTPException(status_code=409, detail="This receipt is managed by a loan adjustment; edit it from Loans & Advances")
         party = None
+        loan_adjustments = session.exec(select(LoanAdjustment).where(LoanAdjustment.loan_book == "CASH", LoanAdjustment.loan_entry_id == entry_id, LoanAdjustment.is_deleted == False).order_by(LoanAdjustment.adjusted_at)).all()  # noqa: E712
+        if str(row.entry_type or "").upper() == "LOAN" and loan_adjustments and et != "LOAN":
+            raise HTTPException(status_code=409, detail="Delete this loan's adjustments before changing its entry type")
         if et == "LOAN":
             party = session.get(Party, payload.party_id) if payload.party_id else None
             if not party or party.party_group != "SUNDRY_DEBTOR" or not party.is_active:
-                raise HTTPException(status_code=400, detail="Select an active customer for the loan")
-            adjusted = sum(float(x.amount or 0) for x in session.exec(select(LoanAdjustment).where(LoanAdjustment.loan_book == "CASH", LoanAdjustment.loan_entry_id == entry_id, LoanAdjustment.is_deleted == False)).all())  # noqa: E712
+                raise HTTPException(status_code=400, detail="Select an active client or loan borrower")
+            adjusted = sum(float(x.amount or 0) for x in loan_adjustments)
             if amt + 0.0001 < adjusted:
                 raise HTTPException(status_code=400, detail=f"Loan amount cannot be below adjusted amount of {adjusted:.2f}")
+            if loan_adjustments and int(row.party_id or 0) != int(party.id):
+                raise HTTPException(status_code=409, detail="A loan with adjustments cannot be moved to another borrower")
 
         assert_financial_year_unlocked(session, row.created_at, context="Cashbook entry edit")
         created_at = row.created_at
@@ -378,6 +383,8 @@ def update_entry(entry_id: int, payload: CashbookCreate):
             time_part = str(row.created_at or "")[11:19] if len(str(row.created_at or "")) >= 19 else datetime.now().strftime("%H:%M:%S")
             created_at = f"{day_dt.date().isoformat()}T{time_part}"
             assert_financial_year_unlocked(session, created_at, context="Cashbook entry edit")
+        if loan_adjustments and created_at[:10] > str(loan_adjustments[0].adjusted_at)[:10]:
+            raise HTTPException(status_code=400, detail="Loan date cannot be after its first adjustment")
 
         row.entry_type = et
         row.amount = amt

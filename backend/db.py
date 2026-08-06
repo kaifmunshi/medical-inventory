@@ -2820,6 +2820,9 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN refund_online REAL NOT NULL DEFAULT 0"))
         if "writeoff_reversal" not in purchase_return_col_names:
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN writeoff_reversal REAL NOT NULL DEFAULT 0"))
+        if "settlement_purchase_id" not in purchase_return_col_names:
+            session.exec(text("ALTER TABLE purchasereturn ADD COLUMN settlement_purchase_id INTEGER NOT NULL DEFAULT 0"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasereturn_settlement_purchase_id ON purchasereturn (settlement_purchase_id)"))
 
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchasereturnitem (

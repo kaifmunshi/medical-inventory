@@ -1,3 +1,4 @@
+from sqlalchemy import and_, or_
 from sqlmodel import select
 
 from backend.models import Purchase, PurchasePayment, PurchaseReturn
@@ -17,7 +18,10 @@ def recalculate_purchase_return_settlements(session, purchase: Purchase) -> list
     ).all()
     returns = session.exec(
         select(PurchaseReturn).where(
-            PurchaseReturn.purchase_id == purchase.id,
+            or_(
+                PurchaseReturn.settlement_purchase_id == purchase.id,
+                and_(PurchaseReturn.purchase_id == purchase.id, PurchaseReturn.settlement_purchase_id == 0),
+            ),
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).all()
@@ -78,7 +82,10 @@ def recalculate_purchase_return_settlements(session, purchase: Purchase) -> list
 
     for row in session.exec(
         select(PurchaseReturn).where(
-            PurchaseReturn.purchase_id == purchase.id,
+            or_(
+                PurchaseReturn.settlement_purchase_id == purchase.id,
+                and_(PurchaseReturn.purchase_id == purchase.id, PurchaseReturn.settlement_purchase_id == 0),
+            ),
             PurchaseReturn.is_deleted == True,  # noqa: E712
         )
     ).all():

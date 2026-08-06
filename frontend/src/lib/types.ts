@@ -316,6 +316,7 @@ export interface PurchaseReturnItem {
 export interface PurchaseReturn {
   id: ID
   purchase_id?: ID | null
+  settlement_purchase_id?: ID | null
   party_id: ID
   return_number: string
   return_date: string

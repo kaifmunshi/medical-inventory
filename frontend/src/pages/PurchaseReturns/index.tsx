@@ -254,7 +254,11 @@ export default function PurchaseReturnsPage() {
         items: incomingPayload(),
       })
       try {
-        return await createPurchaseReturn({ ...payload, notes: [payload.notes, `Replacement purchase #${replacement.id} (${replacement.invoice_number})`].filter(Boolean).join(' | ') })
+        return await createPurchaseReturn({
+          ...payload,
+          settlement_purchase_id: Number(replacement.id),
+          notes: [payload.notes, `Replacement purchase #${replacement.id} (${replacement.invoice_number})`].filter(Boolean).join(' | '),
+        })
       } catch (error) {
         try { await cancelPurchase(Number(replacement.id)) } catch { /* The original save error remains the useful message. */ }
         throw error

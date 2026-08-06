@@ -3,6 +3,7 @@ import type { AuditLog, PurchaseReturn } from '../lib/types'
 
 export interface PurchaseReturnCreatePayload {
   purchase_id?: number
+  settlement_purchase_id?: number
   party_id?: number
   return_date: string
   return_number?: string

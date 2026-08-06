@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlmodel import select
 
 from backend.accounting import mark_voucher_deleted, post_purchase_return_voucher
@@ -39,6 +39,13 @@ def round2(value: float) -> float:
     return float(f"{float(value or 0):.2f}")
 
 
+def _allocation_clause(purchase_id: int):
+    return or_(
+        PurchaseReturn.settlement_purchase_id == purchase_id,
+        and_(PurchaseReturn.purchase_id == purchase_id, PurchaseReturn.settlement_purchase_id == 0),
+    )
+
+
 def _linked_return_basis(purchase: Purchase, item: PurchaseItem) -> tuple[float, float]:
     subtotal = float(purchase.subtotal_amount or 0)
     discount_factor = max(0.0, subtotal - float(purchase.discount_amount or 0)) / subtotal if subtotal > 0 else 0.0
@@ -60,6 +67,7 @@ def _out(session, row: PurchaseReturn) -> PurchaseReturnOut:
     ).all()
     data = row.model_dump()
     data["purchase_id"] = int(row.purchase_id or 0) or None
+    data["settlement_purchase_id"] = int(row.settlement_purchase_id or 0) or None
     out_items = []
     for item in items:
         item_data = item.model_dump()
@@ -79,6 +87,7 @@ def _snapshot(session, row: PurchaseReturn, items: Optional[List[PurchaseReturnI
         "purchase_return": {
             "id": int(row.id),
             "purchase_id": int(row.purchase_id or 0) or None,
+            "settlement_purchase_id": int(row.settlement_purchase_id or 0) or None,
             "party_id": int(row.party_id),
             "return_number": row.return_number,
             "return_date": row.return_date,
@@ -128,7 +137,7 @@ def active_return_qty(session, purchase_item_id: int, exclude_return_id: Optiona
 def _refresh_purchase_payment_status(session, purchase: Purchase) -> None:
     active_return_total = float(session.exec(
         select(func.coalesce(func.sum(PurchaseReturn.total_amount), 0)).where(
-            PurchaseReturn.purchase_id == purchase.id,
+            _allocation_clause(int(purchase.id)),
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).one() or 0)
@@ -136,7 +145,7 @@ def _refresh_purchase_payment_status(session, purchase: Purchase) -> None:
         select(func.coalesce(func.sum(
             PurchaseReturn.refund_cash + PurchaseReturn.refund_online + PurchaseReturn.writeoff_reversal
         ), 0)).where(
-            PurchaseReturn.purchase_id == purchase.id,
+            _allocation_clause(int(purchase.id)),
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).one() or 0)
@@ -158,7 +167,7 @@ def _refresh_purchase_payment_status(session, purchase: Purchase) -> None:
 def _sync_purchase_return_settlements(session, purchase: Purchase, supplier: Party) -> None:
     recalculate_purchase_return_settlements(session, purchase)
     session.flush()
-    rows = session.exec(select(PurchaseReturn).where(PurchaseReturn.purchase_id == purchase.id)).all()
+    rows = session.exec(select(PurchaseReturn).where(_allocation_clause(int(purchase.id)))).all()
     for item in rows:
         if item.is_deleted or round2(item.total_amount) <= 0:
             mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(item.id))
@@ -234,6 +243,15 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
         if party_id <= 0:
             raise HTTPException(status_code=400, detail="Supplier is required for a no-invoice purchase return")
         supplier = _supplier(session, party_id)
+        settlement_purchase_id = int(payload.settlement_purchase_id or 0)
+        settlement_purchase = session.get(Purchase, settlement_purchase_id) if settlement_purchase_id > 0 else None
+        if settlement_purchase_id > 0:
+            if not settlement_purchase or settlement_purchase.is_deleted:
+                raise HTTPException(status_code=400, detail="The purchase receiving this return credit is not active")
+            if int(settlement_purchase.party_id) != party_id:
+                raise HTTPException(status_code=400, detail="Return credit can only be applied to a purchase from the same supplier")
+            if return_date < str(settlement_purchase.invoice_date or "")[:10]:
+                raise HTTPException(status_code=400, detail="Return credit cannot be applied before the replacement purchase date")
         requested_number = " ".join(str(payload.return_number or "").strip().split())
         if requested_number:
             duplicate = session.exec(
@@ -244,6 +262,7 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
 
         row = PurchaseReturn(
             purchase_id=int(purchase.id) if purchase else 0,
+            settlement_purchase_id=settlement_purchase_id,
             party_id=party_id,
             return_number=requested_number or "PENDING",
             return_date=return_date,
@@ -398,6 +417,8 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             _sync_purchase_return_settlements(session, purchase, supplier)
         elif total > 0:
             post_purchase_return_voucher(session, row, supplier)
+        if settlement_purchase and (not purchase or int(settlement_purchase.id) != int(purchase.id)):
+            _sync_purchase_return_settlements(session, settlement_purchase, supplier)
         session.flush()
         log_audit(
             session,
@@ -429,6 +450,7 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
         assert_financial_year_unlocked(session, return_date, context="Purchase return update")
 
         purchase = session.get(Purchase, row.purchase_id) if int(row.purchase_id or 0) > 0 else None
+        settlement_purchase = session.get(Purchase, row.settlement_purchase_id) if int(row.settlement_purchase_id or 0) > 0 else None
         if int(row.purchase_id or 0) > 0 and (not purchase or purchase.is_deleted):
             raise HTTPException(status_code=400, detail="The source purchase is not active")
         if purchase and return_date < str(purchase.invoice_date or "")[:10]:
@@ -616,6 +638,8 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
             post_purchase_return_voucher(session, row, supplier)
         else:
             mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(row.id))
+        if settlement_purchase and (not purchase or int(settlement_purchase.id) != int(purchase.id)):
+            _sync_purchase_return_settlements(session, settlement_purchase, supplier)
         session.flush()
         log_audit(
             session,
@@ -641,6 +665,7 @@ def cancel_purchase_return(return_id: int) -> PurchaseReturnOut:
             raise HTTPException(status_code=400, detail="Purchase return is already cancelled")
         assert_financial_year_unlocked(session, row.return_date, context="Purchase return cancel")
         purchase = session.get(Purchase, row.purchase_id) if int(row.purchase_id or 0) > 0 else None
+        settlement_purchase = session.get(Purchase, row.settlement_purchase_id) if int(row.settlement_purchase_id or 0) > 0 else None
         if int(row.purchase_id or 0) > 0 and (not purchase or purchase.is_deleted):
             raise HTTPException(status_code=400, detail="The source purchase is not active")
 
@@ -686,6 +711,9 @@ def cancel_purchase_return(return_id: int) -> PurchaseReturnOut:
         if purchase:
             supplier = _supplier(session, int(purchase.party_id))
             _sync_purchase_return_settlements(session, purchase, supplier)
+        if settlement_purchase and (not purchase or int(settlement_purchase.id) != int(purchase.id)):
+            supplier = _supplier(session, int(settlement_purchase.party_id))
+            _sync_purchase_return_settlements(session, settlement_purchase, supplier)
         session.flush()
         log_audit(
             session,

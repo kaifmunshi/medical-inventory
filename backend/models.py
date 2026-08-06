@@ -928,6 +928,7 @@ class PurchasePayment(SQLModel, table=True):
 class PurchaseReturn(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     purchase_id: int = Field(default=0, index=True)
+    settlement_purchase_id: int = Field(default=0, index=True)
     party_id: int = Field(index=True)
     return_number: str = Field(index=True)
     return_date: str = Field(sa_column=Column(String(10), index=True))
@@ -1315,6 +1316,7 @@ class PurchaseReturnItemIn(SQLModel):
 
 class PurchaseReturnCreate(SQLModel):
     purchase_id: Optional[int] = None
+    settlement_purchase_id: Optional[int] = None
     party_id: Optional[int] = None
     return_date: str
     return_number: Optional[str] = None
@@ -1351,6 +1353,7 @@ class PurchaseReturnItemOut(SQLModel):
 class PurchaseReturnOut(SQLModel):
     id: int
     purchase_id: Optional[int] = None
+    settlement_purchase_id: Optional[int] = None
     party_id: int
     return_number: str
     return_date: str

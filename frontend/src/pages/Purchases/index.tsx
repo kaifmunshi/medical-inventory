@@ -740,7 +740,7 @@ export default function PurchasesPage() {
       || (Number(selectedPurchase?.id || 0) === Number(paymentHistoryPurchaseId) ? selectedPurchase : null)
     : null
   const paymentTargetOutstanding = paymentTargetPurchase
-    ? round2(Math.max(0, Number(paymentTargetPurchase.total_amount || 0) - Number(paymentTargetPurchase.paid_amount || 0) - Number(paymentTargetPurchase.writeoff_amount || 0)))
+    ? round2(Math.max(0, Number(paymentTargetPurchase.net_amount ?? paymentTargetPurchase.total_amount ?? 0) - Number(paymentTargetPurchase.paid_amount || 0) - Number(paymentTargetPurchase.writeoff_amount || 0)))
     : 0
   const paymentAvailableAmount = round2(paymentContext === 'draft'
     ? draftPaymentAvailableAmount
@@ -944,7 +944,7 @@ export default function PurchasesPage() {
   function openPaymentDialog(purchase?: Purchase) {
     const target = purchase || selectedPurchase
     if (!target) return
-    const outstanding = money(Math.max(0, Number(target.total_amount || 0) - Number(target.paid_amount || 0) - Number(target.writeoff_amount || 0)))
+    const outstanding = money(Math.max(0, Number(target.net_amount ?? target.total_amount ?? 0) - Number(target.paid_amount || 0) - Number(target.writeoff_amount || 0)))
     setPaymentContext('saved')
     setPaymentPurchaseId(Number(target.id))
     setEditingPayment(null)
@@ -2109,7 +2109,7 @@ export default function PurchasesPage() {
             </Box>
             {paymentHistoryPurchase ? (
               <Stack direction="row" gap={1} alignItems="center">
-                <Chip label={`Outstanding ${money(Math.max(0, Number(paymentHistoryPurchase.total_amount || 0) - Number(paymentHistoryPurchase.paid_amount || 0) - Number(paymentHistoryPurchase.writeoff_amount || 0)))}`} color="warning" variant="outlined" />
+                <Chip label={`Outstanding ${money(Math.max(0, Number(paymentHistoryPurchase.net_amount ?? paymentHistoryPurchase.total_amount ?? 0) - Number(paymentHistoryPurchase.paid_amount || 0) - Number(paymentHistoryPurchase.writeoff_amount || 0)))}`} color="warning" variant="outlined" />
                 <Button
                   variant="contained"
                   size="small"

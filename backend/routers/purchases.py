@@ -3,7 +3,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlmodel import SQLModel, select
 
 from backend.accounting import mark_voucher_deleted, post_purchase_payment_voucher, post_purchase_return_voucher, sync_purchase_vouchers
@@ -38,6 +38,13 @@ from backend.models import (
 from backend.security import require_min_role
 
 router = APIRouter()
+
+
+def purchase_return_allocation_clause(purchase_id: int):
+    return or_(
+        PurchaseReturn.settlement_purchase_id == purchase_id,
+        and_(PurchaseReturn.purchase_id == purchase_id, PurchaseReturn.settlement_purchase_id == 0),
+    )
 
 
 def purchase_gst_amount(subtotal: float, discount: float, items: List[PurchaseItem]) -> float:
@@ -687,7 +694,7 @@ def make_purchase_out(session, row: Purchase) -> PurchaseOut:
     ).all()
     return_total = round2(session.exec(
         select(func.coalesce(func.sum(PurchaseReturn.total_amount), 0)).where(
-            PurchaseReturn.purchase_id == row.id,
+            purchase_return_allocation_clause(int(row.id)),
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).one() or 0)
@@ -695,7 +702,7 @@ def make_purchase_out(session, row: Purchase) -> PurchaseOut:
         select(func.coalesce(func.sum(
             PurchaseReturn.refund_cash + PurchaseReturn.refund_online + PurchaseReturn.writeoff_reversal
         ), 0)).where(
-            PurchaseReturn.purchase_id == row.id,
+            purchase_return_allocation_clause(int(row.id)),
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).one() or 0)
@@ -727,7 +734,7 @@ def make_purchase_out(session, row: Purchase) -> PurchaseOut:
 def assert_purchase_has_no_active_returns(session, purchase_id: int, *, context: str) -> None:
     active = session.exec(
         select(PurchaseReturn.id).where(
-            PurchaseReturn.purchase_id == purchase_id,
+            or_(PurchaseReturn.purchase_id == purchase_id, PurchaseReturn.settlement_purchase_id == purchase_id),
             PurchaseReturn.is_deleted == False,  # noqa: E712
         ).limit(1)
     ).first()
@@ -1086,7 +1093,7 @@ def recompute_purchase_payment_state(session, purchase: Purchase) -> None:
     supplier = session.get(Party, purchase.party_id)
     if supplier:
         for purchase_return in session.exec(select(PurchaseReturn).where(
-            PurchaseReturn.purchase_id == purchase.id,
+            purchase_return_allocation_clause(int(purchase.id)),
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )).all():
             post_purchase_return_voucher(session, purchase_return, supplier)
@@ -1123,7 +1130,7 @@ def purchase_payment_source_type(payment: PurchasePayment) -> str:
 def purchase_net_amount(session, purchase: Purchase) -> float:
     return_total = session.exec(
         select(func.coalesce(func.sum(PurchaseReturn.total_amount), 0)).where(
-            PurchaseReturn.purchase_id == purchase.id,
+            purchase_return_allocation_clause(int(purchase.id)),
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).one() or 0
@@ -1131,7 +1138,7 @@ def purchase_net_amount(session, purchase: Purchase) -> float:
         select(func.coalesce(func.sum(
             PurchaseReturn.refund_cash + PurchaseReturn.refund_online + PurchaseReturn.writeoff_reversal
         ), 0)).where(
-            PurchaseReturn.purchase_id == purchase.id,
+            purchase_return_allocation_clause(int(purchase.id)),
             PurchaseReturn.is_deleted == False,  # noqa: E712
         )
     ).one() or 0
@@ -1143,7 +1150,7 @@ def purchase_payable_at(session, purchase: Purchase, paid_at: str) -> float:
     payment_date = str(paid_at or "")[:10]
     prior_returns = session.exec(
         select(func.coalesce(func.sum(PurchaseReturn.total_amount), 0)).where(
-            PurchaseReturn.purchase_id == purchase.id,
+            purchase_return_allocation_clause(int(purchase.id)),
             PurchaseReturn.is_deleted == False,  # noqa: E712
             PurchaseReturn.return_date < payment_date,
         )
@@ -1715,7 +1722,7 @@ def supplier_ledger(party_id: int) -> List[PurchaseLedgerRow]:
         for row in rows:
             return_amount = round2(session.exec(
                 select(func.coalesce(func.sum(PurchaseReturn.total_amount), 0)).where(
-                    PurchaseReturn.purchase_id == row.id,
+                    purchase_return_allocation_clause(int(row.id)),
                     PurchaseReturn.is_deleted == False,  # noqa: E712
                 )
             ).one() or 0)
@@ -1723,7 +1730,7 @@ def supplier_ledger(party_id: int) -> List[PurchaseLedgerRow]:
                 select(func.coalesce(func.sum(
                     PurchaseReturn.refund_cash + PurchaseReturn.refund_online + PurchaseReturn.writeoff_reversal
                 ), 0)).where(
-                    PurchaseReturn.purchase_id == row.id,
+                    purchase_return_allocation_clause(int(row.id)),
                     PurchaseReturn.is_deleted == False,  # noqa: E712
                 )
             ).one() or 0)

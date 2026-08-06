@@ -17,8 +17,9 @@ import {
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchParties } from '../../services/parties'
-import { fetchPurchase, fetchPurchases } from '../../services/purchases'
+import { cancelPurchase, createPurchase, fetchPurchase, fetchPurchases } from '../../services/purchases'
 import { fetchLots } from '../../services/lots'
+import { fetchAllProducts, fetchCategories } from '../../services/products'
 import {
   cancelPurchaseReturn,
   createPurchaseReturn,
@@ -27,12 +28,24 @@ import {
   updatePurchaseReturn,
   type PurchaseReturnCreatePayload,
 } from '../../services/purchaseReturns'
-import type { AuditLog, InventoryLotBrowse, Party, Purchase, PurchaseReturn } from '../../lib/types'
+import type { AuditLog, Category, InventoryLotBrowse, Party, Product, Purchase, PurchaseItemPayload, PurchaseReturn } from '../../lib/types'
 import { useToast } from '../../components/ui/Toaster'
 import { useUserSession } from '../../components/session/UserSessionProvider'
 
 type LineDraft = { quantity: string; unitCost: string }
 type LegacyLine = { lot: InventoryLotBrowse; quantity: string; unitCost: string; gstPercent: string }
+type IncomingLine = {
+  key: string
+  product: Product
+  expiryDate: string
+  quantity: string
+  freeQuantity: string
+  costPrice: string
+  mrp: string
+  gstPercent: string
+  discountPercent: string
+  rackNumber: string
+}
 type ReturnSnapshot = {
   purchase_return: {
     return_number: string
@@ -99,6 +112,14 @@ export default function PurchaseReturnsPage() {
   const [cancelTarget, setCancelTarget] = useState<PurchaseReturn | null>(null)
   const [editingReturn, setEditingReturn] = useState<PurchaseReturn | null>(null)
   const [historyTarget, setHistoryTarget] = useState<PurchaseReturn | null>(null)
+  const [includeIncoming, setIncludeIncoming] = useState(false)
+  const [incomingProduct, setIncomingProduct] = useState<Product | null>(null)
+  const [incomingLines, setIncomingLines] = useState<IncomingLine[]>([])
+  const [incomingInvoiceNumber, setIncomingInvoiceNumber] = useState('')
+  const [incomingNotes, setIncomingNotes] = useState('')
+  const [incomingRounding, setIncomingRounding] = useState('0')
+  const [returnCategory, setReturnCategory] = useState<Category | null>(null)
+  const [incomingCategory, setIncomingCategory] = useState<Category | null>(null)
 
   const suppliersQ = useQuery({
     queryKey: ['purchase-return-suppliers'],
@@ -123,6 +144,21 @@ export default function PurchaseReturnsPage() {
     queryFn: () => fetchPurchaseReturnHistory(Number(historyTarget?.id)),
     enabled: Boolean(historyTarget?.id),
   })
+  const productsQ = useQuery({
+    queryKey: ['purchase-return-exchange-products'],
+    queryFn: () => fetchAllProducts({ active_only: true }),
+  })
+  const categoriesQ = useQuery({
+    queryKey: ['purchase-return-categories'],
+    queryFn: () => fetchCategories({ active_only: true }),
+  })
+
+  const filteredIncomingProducts = useMemo(() => (productsQ.data || []).filter((product) => (
+    !incomingCategory || Number(product.category_id || 0) === Number(incomingCategory.id)
+  )), [productsQ.data, incomingCategory])
+  const productCategoryById = useMemo(() => new Map(
+    (productsQ.data || []).map((product) => [Number(product.id), Number(product.category_id || 0)]),
+  ), [productsQ.data])
 
   const activeReturnedByItem = useMemo(() => {
     const totals = new Map<number, number>()
@@ -176,11 +212,54 @@ export default function PurchaseReturnsPage() {
     [activeLines],
   )
   const returnTotal = returnSubtotal + Number(roundingAdjustment || 0)
+  const incomingSubtotal = useMemo(() => incomingLines.reduce((sum, line) => {
+    const gross = Number(line.quantity || 0) * Number(line.costPrice || 0)
+    const discounted = gross * (1 - Number(line.discountPercent || 0) / 100)
+    return sum + discounted * (1 + Number(line.gstPercent || 0) / 100)
+  }, 0), [incomingLines])
+  const incomingTotal = incomingSubtotal + Number(incomingRounding || 0)
+  const exchangeDifference = incomingTotal - returnTotal
+
+  function incomingPayload(): PurchaseItemPayload[] {
+    return incomingLines.map((line) => ({
+      product_id: Number(line.product.id),
+      product_name: line.product.name,
+      alias: line.product.alias || undefined,
+      brand: line.product.brand || undefined,
+      category_id: line.product.category_id ? Number(line.product.category_id) : undefined,
+      expiry_date: line.expiryDate,
+      rack_number: Number(line.rackNumber || line.product.default_rack_number || 0),
+      sealed_qty: Number(line.quantity || 0),
+      free_qty: Number(line.freeQuantity || 0),
+      cost_price: Number(line.costPrice || 0),
+      mrp: Number(line.mrp || 0),
+      gst_percent: Number(line.gstPercent || 0),
+      discount_percent: Number(line.discountPercent || 0),
+      loose_sale_enabled: Boolean(line.product.loose_sale_enabled),
+      parent_unit_name: line.product.parent_unit_name || undefined,
+      child_unit_name: line.product.child_unit_name || undefined,
+      conversion_qty: line.product.default_conversion_qty || undefined,
+    }))
+  }
 
   const saveM = useMutation({
-    mutationFn: ({ payload, id }: { payload: PurchaseReturnCreatePayload; id?: number }) => (
-      id ? updatePurchaseReturn(id, payload) : createPurchaseReturn(payload)
-    ),
+    mutationFn: async ({ payload, id }: { payload: PurchaseReturnCreatePayload; id?: number }) => {
+      if (id || !includeIncoming) return id ? updatePurchaseReturn(id, payload) : createPurchaseReturn(payload)
+      const replacement = await createPurchase({
+        party_id: Number(supplier?.id),
+        invoice_number: incomingInvoiceNumber.trim() || `EXCH-${returnDate}-${Date.now().toString().slice(-6)}`,
+        invoice_date: returnDate,
+        notes: incomingNotes.trim() || `Replacement / additional stock against purchase return`,
+        rounding_adjustment: Number(incomingRounding || 0),
+        items: incomingPayload(),
+      })
+      try {
+        return await createPurchaseReturn({ ...payload, notes: [payload.notes, `Replacement purchase #${replacement.id} (${replacement.invoice_number})`].filter(Boolean).join(' | ') })
+      } catch (error) {
+        try { await cancelPurchase(Number(replacement.id)) } catch { /* The original save error remains the useful message. */ }
+        throw error
+      }
+    },
     onSuccess: async (saved) => {
       toast.push(`Purchase return ${saved.return_number} ${editingReturn ? 'updated' : 'created'}`)
       setPurchase(null)
@@ -190,6 +269,14 @@ export default function PurchaseReturnsPage() {
       setReturnNumber('')
       setNotes('')
       setRoundingAdjustment('0')
+      setIncludeIncoming(false)
+      setIncomingLines([])
+      setIncomingProduct(null)
+      setIncomingInvoiceNumber('')
+      setIncomingNotes('')
+      setIncomingRounding('0')
+      setReturnCategory(null)
+      setIncomingCategory(null)
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['purchase-returns'] }),
         queryClient.invalidateQueries({ queryKey: ['purchases-list'] }),
@@ -197,6 +284,11 @@ export default function PurchaseReturnsPage() {
         queryClient.invalidateQueries({ queryKey: ['supplier-ledger'] }),
         queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] }),
         queryClient.invalidateQueries({ queryKey: ['voucher-day-book'] }),
+        queryClient.invalidateQueries({ queryKey: ['lots'] }),
+        queryClient.invalidateQueries({ queryKey: ['inventory-items'] }),
+        queryClient.invalidateQueries({ queryKey: ['inventory-autocomplete'] }),
+        queryClient.invalidateQueries({ queryKey: ['stock-card-product-ledger'] }),
+        queryClient.invalidateQueries({ queryKey: ['stock-card-batch-ledger'] }),
       ])
     },
     onError: (error) => toast.push(errorMessage(error), 'error'),
@@ -231,6 +323,37 @@ export default function PurchaseReturnsPage() {
     if (returnTotal < 0) {
       toast.push('Credit total cannot be negative after round off', 'warning')
       return
+    }
+    if (includeIncoming) {
+      if (editingReturn) {
+        toast.push('Replacement purchases can only be added while creating a new return', 'warning')
+        return
+      }
+      if (!incomingLines.length) {
+        toast.push('Add at least one replacement or additional product', 'warning')
+        return
+      }
+      const invalid = incomingLines.find((line) => (
+        !line.expiryDate
+        || !Number.isInteger(Number(line.quantity || 0))
+        || !Number.isInteger(Number(line.freeQuantity || 0))
+        || Number(line.quantity || 0) <= 0
+        || Number(line.freeQuantity || 0) < 0
+        || Number(line.costPrice || 0) < 0
+        || Number(line.mrp || 0) < 0
+        || Number(line.gstPercent || 0) < 0
+        || Number(line.gstPercent || 0) > 100
+        || Number(line.discountPercent || 0) < 0
+        || Number(line.discountPercent || 0) > 100
+      ))
+      if (invalid) {
+        toast.push(`Complete expiry, quantity, rate and MRP for ${invalid.product.name}`, 'warning')
+        return
+      }
+      if (incomingTotal < 0) {
+        toast.push('Incoming purchase total cannot be negative', 'warning')
+        return
+      }
     }
     saveM.mutate({
       id: editingReturn ? Number(editingReturn.id) : undefined,
@@ -300,6 +423,8 @@ export default function PurchaseReturnsPage() {
     setReturnNumber('')
     setNotes('')
     setRoundingAdjustment('0')
+    setReturnCategory(null)
+    setIncomingCategory(null)
   }
 
   function addLegacyLot() {
@@ -319,6 +444,61 @@ export default function PurchaseReturnsPage() {
     }])
     setSelectedLot(null)
     setLotSearch('')
+  }
+
+  function addIncomingProduct() {
+    if (!incomingProduct) return
+    setIncomingLines((current) => [...current, {
+      key: `${incomingProduct.id}-${Date.now()}`,
+      product: incomingProduct,
+      expiryDate: '',
+      quantity: '1',
+      freeQuantity: '0',
+      costPrice: '0',
+      mrp: String(Number(incomingProduct.printed_price || 0).toFixed(2)),
+      gstPercent: '0',
+      discountPercent: '0',
+      rackNumber: String(incomingProduct.default_rack_number || 0),
+    }])
+    setIncomingProduct(null)
+  }
+
+  function addReturnedProductsAsIncoming() {
+    const productIds = new Set<number>()
+    if (sourceMode === 'invoice') {
+      for (const line of selectedLines) {
+        const item = purchase?.items.find((candidate) => Number(candidate.id) === Number(line.purchase_item_id))
+        if (item) productIds.add(Number(item.product_id))
+      }
+    } else {
+      for (const line of selectedLegacyLines) {
+        const source = legacyLines.find((candidate) => Number(candidate.lot.id) === Number(line.lot_id))
+        if (source) productIds.add(Number(source.lot.product_id))
+      }
+    }
+    const products = (productsQ.data || []).filter((product) => productIds.has(Number(product.id)))
+    if (!products.length) {
+      toast.push('Select return quantities first; matching products could not be found', 'warning')
+      return
+    }
+    setIncomingLines((current) => {
+      const existingIds = new Set(current.map((line) => Number(line.product.id)))
+      const additions = products.filter((product) => !existingIds.has(Number(product.id))).map((product) => ({
+        key: `${product.id}-${Date.now()}-${Math.random()}`,
+        product,
+        expiryDate: '',
+        quantity: String(sourceMode === 'invoice'
+          ? selectedLines.filter((line) => Number(purchase?.items.find((item) => Number(item.id) === Number(line.purchase_item_id))?.product_id) === Number(product.id)).reduce((sum, line) => sum + Number(line.quantity || 0), 0)
+          : selectedLegacyLines.filter((line) => Number(legacyLines.find((entry) => Number(entry.lot.id) === Number(line.lot_id))?.lot.product_id) === Number(product.id)).reduce((sum, line) => sum + Number(line.quantity || 0), 0)),
+        freeQuantity: '0',
+        costPrice: '0',
+        mrp: String(Number(product.printed_price || 0).toFixed(2)),
+        gstPercent: '0',
+        discountPercent: '0',
+        rackNumber: String(product.default_rack_number || 0),
+      }))
+      return [...current, ...additions]
+    })
   }
 
   return (
@@ -384,11 +564,25 @@ export default function PurchaseReturnsPage() {
                   <TextField label="Notes / reason" value={notes} onChange={(event) => setNotes(event.target.value)} sx={{ flex: 2 }} />
                 </Stack>
                 <Divider />
+                <Autocomplete
+                  sx={{ maxWidth: 360 }}
+                  options={categoriesQ.data || []}
+                  value={returnCategory}
+                  onChange={(_event, value) => { setReturnCategory(value); setSelectedLot(null) }}
+                  getOptionLabel={(option) => option.name}
+                  isOptionEqualToValue={(option, value) => option.id === value.id}
+                  renderInput={(params) => <TextField {...params} label="Return product category" helperText="Optional — filters products and batches below" />}
+                />
                 {sourceMode === 'legacy' && (
                   <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
                     <Autocomplete
                       sx={{ flex: 1 }}
-                      options={(lotsQ.data || []).filter((lot) => Boolean(lot.legacy_item_id) && !lot.opened_from_lot_id && Number(lot.sealed_qty || 0) > 0)}
+                      options={(lotsQ.data || []).filter((lot) => (
+                        Boolean(lot.legacy_item_id)
+                        && !lot.opened_from_lot_id
+                        && Number(lot.sealed_qty || 0) > 0
+                        && (!returnCategory || Number(lot.category_id || 0) === Number(returnCategory.id))
+                      ))}
                       value={selectedLot}
                       inputValue={lotSearch}
                       onInputChange={(_event, value) => setLotSearch(value)}
@@ -401,7 +595,9 @@ export default function PurchaseReturnsPage() {
                   </Stack>
                 )}
                 <Stack spacing={1.25}>
-                  {sourceMode === 'invoice' && purchase?.items.map((item) => {
+                  {sourceMode === 'invoice' && purchase?.items.filter((item) => (
+                    !returnCategory || productCategoryById.get(Number(item.product_id)) === Number(returnCategory.id)
+                  )).map((item) => {
                     const purchased = Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
                     const alreadyReturned = activeReturnedByItem.get(Number(item.id)) || 0
                     const remaining = Math.max(0, purchased - alreadyReturned)
@@ -480,6 +676,97 @@ export default function PurchaseReturnsPage() {
                     </Paper>
                   ))}
                 </Stack>
+                {!editingReturn && (
+                  <Paper variant="outlined" sx={{ p: 2, borderColor: includeIncoming ? 'primary.main' : 'divider' }}>
+                    <Stack spacing={2}>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} spacing={1}>
+                        <Box>
+                          <Typography fontWeight={800}>Supplier replacement / additional purchase</Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Receive the same products with new expiry dates and/or add other products in this exchange.
+                          </Typography>
+                        </Box>
+                        <Button
+                          variant={includeIncoming ? 'contained' : 'outlined'}
+                          onClick={() => { setIncludeIncoming((value) => !value); if (includeIncoming) setIncomingLines([]) }}
+                        >
+                          {includeIncoming ? 'Included' : 'Add incoming products'}
+                        </Button>
+                      </Stack>
+                      {includeIncoming && (
+                        <>
+                          <Alert severity="info">
+                            Return credit uses the credit rates above. Incoming stock uses the new supplier rates below. Their difference is the amount payable to, or receivable from, the supplier.
+                          </Alert>
+                          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5}>
+                            <TextField
+                              label="Replacement supplier invoice / challan no."
+                              value={incomingInvoiceNumber}
+                              onChange={(event) => setIncomingInvoiceNumber(event.target.value)}
+                              helperText="Optional; an exchange number is generated when blank"
+                              sx={{ flex: 1 }}
+                            />
+                            <TextField label="Incoming notes" value={incomingNotes} onChange={(event) => setIncomingNotes(event.target.value)} sx={{ flex: 1.5 }} />
+                          </Stack>
+                          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
+                            <Autocomplete
+                              sx={{ minWidth: 230 }}
+                              options={categoriesQ.data || []}
+                              value={incomingCategory}
+                              onChange={(_event, value) => { setIncomingCategory(value); setIncomingProduct(null) }}
+                              getOptionLabel={(option) => option.name}
+                              isOptionEqualToValue={(option, value) => option.id === value.id}
+                              renderInput={(params) => <TextField {...params} label="Incoming category" />}
+                            />
+                            <Autocomplete
+                              sx={{ flex: 1 }}
+                              options={filteredIncomingProducts}
+                              value={incomingProduct}
+                              onChange={(_event, value) => setIncomingProduct(value)}
+                              getOptionLabel={(option) => `${option.name}${option.brand ? ` | ${option.brand}` : ''}`}
+                              isOptionEqualToValue={(option, value) => option.id === value.id}
+                              renderInput={(params) => <TextField {...params} label="Replacement or additional product" />}
+                            />
+                            <Button variant="outlined" onClick={addReturnedProductsAsIncoming}>Add Returned Products</Button>
+                            <Button variant="outlined" disabled={!incomingProduct} onClick={addIncomingProduct}>Add Product</Button>
+                          </Stack>
+                          <Stack spacing={1.25}>
+                            {incomingLines.map((line) => (
+                              <Paper key={line.key} variant="outlined" sx={{ p: 1.5 }}>
+                                <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1.25} alignItems={{ lg: 'center' }}>
+                                  <Box sx={{ minWidth: 170, flex: 1 }}>
+                                    <Typography fontWeight={700}>{line.product.name}</Typography>
+                                    <Typography variant="caption" color="text.secondary">{line.product.brand || 'No brand'}</Typography>
+                                  </Box>
+                                  <TextField label="New expiry" type="date" value={line.expiryDate} InputLabelProps={{ shrink: true }} onChange={(event) => setIncomingLines((rows) => rows.map((entry) => entry.key === line.key ? { ...entry, expiryDate: event.target.value } : entry))} sx={{ width: 155 }} />
+                                  <TextField label="Qty" type="number" value={line.quantity} inputProps={{ min: 1, step: 1 }} onChange={(event) => setIncomingLines((rows) => rows.map((entry) => entry.key === line.key ? { ...entry, quantity: event.target.value } : entry))} sx={{ width: 90 }} />
+                                  <TextField label="Free" type="number" value={line.freeQuantity} inputProps={{ min: 0, step: 1 }} onChange={(event) => setIncomingLines((rows) => rows.map((entry) => entry.key === line.key ? { ...entry, freeQuantity: event.target.value } : entry))} sx={{ width: 90 }} />
+                                  <TextField label="New rate" type="number" value={line.costPrice} inputProps={{ min: 0, step: 0.01 }} onChange={(event) => setIncomingLines((rows) => rows.map((entry) => entry.key === line.key ? { ...entry, costPrice: event.target.value } : entry))} sx={{ width: 115 }} />
+                                  <TextField label="MRP" type="number" value={line.mrp} inputProps={{ min: 0, step: 0.01 }} onChange={(event) => setIncomingLines((rows) => rows.map((entry) => entry.key === line.key ? { ...entry, mrp: event.target.value } : entry))} sx={{ width: 110 }} />
+                                  <TextField label="GST %" type="number" value={line.gstPercent} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(event) => setIncomingLines((rows) => rows.map((entry) => entry.key === line.key ? { ...entry, gstPercent: event.target.value } : entry))} sx={{ width: 95 }} />
+                                  <TextField label="Disc %" type="number" value={line.discountPercent} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(event) => setIncomingLines((rows) => rows.map((entry) => entry.key === line.key ? { ...entry, discountPercent: event.target.value } : entry))} sx={{ width: 95 }} />
+                                  <TextField label="Rack" type="number" value={line.rackNumber} inputProps={{ min: 0, step: 1 }} onChange={(event) => setIncomingLines((rows) => rows.map((entry) => entry.key === line.key ? { ...entry, rackNumber: event.target.value } : entry))} sx={{ width: 85 }} />
+                                  <Button color="error" onClick={() => setIncomingLines((rows) => rows.filter((entry) => entry.key !== line.key))}>Remove</Button>
+                                </Stack>
+                              </Paper>
+                            ))}
+                          </Stack>
+                          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="flex-end" alignItems={{ sm: 'center' }} spacing={2}>
+                            <Typography>Incoming subtotal + GST: {money(incomingSubtotal)}</Typography>
+                            <TextField label="Incoming round off" type="number" value={incomingRounding} inputProps={{ step: 0.01 }} onChange={(event) => setIncomingRounding(event.target.value)} sx={{ width: 165 }} />
+                            <Typography fontWeight={800}>Incoming total: {money(incomingTotal)}</Typography>
+                          </Stack>
+                        </>
+                      )}
+                    </Stack>
+                  </Paper>
+                )}
+                {includeIncoming && !editingReturn && (
+                  <Alert severity={exchangeDifference > 0 ? 'warning' : 'success'}>
+                    Return credit: Rs {money(returnTotal)} | Incoming products: Rs {money(incomingTotal)} |{' '}
+                    <strong>{exchangeDifference > 0 ? `Net payable to supplier: Rs ${money(exchangeDifference)}` : exchangeDifference < 0 ? `Net supplier credit/refund: Rs ${money(Math.abs(exchangeDifference))}` : 'Fully even exchange'}</strong>
+                  </Alert>
+                )}
                 <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="flex-end" alignItems={{ sm: 'center' }} spacing={2}>
                   <Typography>Taxable + GST: {money(returnSubtotal)}</Typography>
                   <TextField
@@ -492,7 +779,7 @@ export default function PurchaseReturnsPage() {
                   />
                   <Typography variant="h6">Credit total: {money(returnTotal)}</Typography>
                   <Button variant="contained" disabled={!canManage || saveM.isPending || activeLines.length === 0} onClick={submit}>
-                    {editingReturn ? 'Save Return Changes' : 'Create Purchase Return'}
+                    {editingReturn ? 'Save Return Changes' : includeIncoming ? 'Save Return + Incoming Purchase' : 'Create Purchase Return'}
                   </Button>
                 </Stack>
               </>

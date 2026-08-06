@@ -2823,6 +2823,62 @@ def migrate_db():
         if "settlement_purchase_id" not in purchase_return_col_names:
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN settlement_purchase_id INTEGER NOT NULL DEFAULT 0"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasereturn_settlement_purchase_id ON purchasereturn (settlement_purchase_id)"))
+        # Early versions of the combined return/exchange screen stored the
+        # replacement purchase reference only in the generated return note.
+        # Recover those links conservatively so reopened purchases retain the
+        # same net payable shown before save.
+        exchange_marker = "Replacement purchase #"
+        session.exec(text(f"""
+            UPDATE purchasereturn
+            SET settlement_purchase_id = CAST(
+                    substr(notes, instr(notes, '{exchange_marker}') + length('{exchange_marker}'))
+                    AS INTEGER
+                ),
+                refund_cash = 0,
+                refund_online = 0,
+                writeoff_reversal = 0
+            WHERE COALESCE(settlement_purchase_id, 0) = 0
+              AND is_deleted = 0
+              AND instr(COALESCE(notes, ''), '{exchange_marker}') > 0
+              AND EXISTS (
+                  SELECT 1
+                  FROM purchase AS replacement
+                  WHERE replacement.id = CAST(
+                            substr(purchasereturn.notes, instr(purchasereturn.notes, '{exchange_marker}') + length('{exchange_marker}'))
+                            AS INTEGER
+                        )
+                    AND replacement.id != COALESCE(purchasereturn.purchase_id, 0)
+                    AND replacement.party_id = purchasereturn.party_id
+                    AND replacement.is_deleted = 0
+                    AND replacement.invoice_date = purchasereturn.return_date
+                    AND replacement.notes LIKE 'Replacement / additional stock against purchase return%'
+              )
+        """))
+        session.exec(text("""
+            UPDATE purchase
+            SET payment_status = CASE
+                WHEN MAX(0, total_amount - COALESCE((
+                    SELECT SUM(pr.total_amount - pr.refund_cash - pr.refund_online - pr.writeoff_reversal)
+                    FROM purchasereturn AS pr
+                    WHERE pr.is_deleted = 0
+                      AND (
+                          pr.settlement_purchase_id = purchase.id
+                          OR (pr.purchase_id = purchase.id AND COALESCE(pr.settlement_purchase_id, 0) = 0)
+                      )
+                ), 0)) <= 0.0001 THEN 'PAID'
+                WHEN COALESCE(paid_amount, 0) + COALESCE(writeoff_amount, 0) <= 0.0001 THEN 'UNPAID'
+                WHEN COALESCE(paid_amount, 0) + COALESCE(writeoff_amount, 0) + 0.0001 < MAX(0, total_amount - COALESCE((
+                    SELECT SUM(pr.total_amount - pr.refund_cash - pr.refund_online - pr.writeoff_reversal)
+                    FROM purchasereturn AS pr
+                    WHERE pr.is_deleted = 0
+                      AND (
+                          pr.settlement_purchase_id = purchase.id
+                          OR (pr.purchase_id = purchase.id AND COALESCE(pr.settlement_purchase_id, 0) = 0)
+                      )
+                ), 0)) THEN 'PARTIAL'
+                ELSE 'PAID'
+            END
+        """))
 
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchasereturnitem (

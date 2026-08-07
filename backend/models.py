@@ -339,6 +339,7 @@ class ReturnCreate(SQLModel):
     refund_mode: str                        # "cash" | "online" | "split" | "credit"
     refund_cash: float = 0.0
     refund_online: float = 0.0
+    rounding_adjustment: float = 0.0
     notes: Optional[str] = None
 
 

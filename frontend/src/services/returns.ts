@@ -12,6 +12,7 @@ export type CreateReturnBody = {
   refund_mode: 'cash' | 'online' | 'credit'      // required by backend; 'credit' adjusts the bill outstanding
   refund_cash: number                 // required by backend
   refund_online: number               // required by backend
+  rounding_adjustment?: number        // actual refund minus computed return value
   notes?: string
 }
 
@@ -56,6 +57,7 @@ export type ReturnRecord = {
   created_at?: string
   date_time?: string
   subtotal_return?: number
+  rounding_adjustment?: number
 }
 
 export type ReturnsDashboardSummary = {

@@ -267,17 +267,20 @@ def calculate_return_settlement(
     requested_cash: float = 0.0,
     requested_online: float = 0.0,
     existing_return: Optional[Return] = None,
+    rounding_adjustment: float = 0.0,
 ) -> tuple[float, float, float]:
     subtotal = round2(subtotal_return)
-    if subtotal <= MONEY_EPSILON:
+    rounding = round2(rounding_adjustment)
+    settlement_total = round2(subtotal + rounding)
+    if settlement_total <= MONEY_EPSILON:
         return 0.0, 0.0, 0.0
     mode = str(refund_mode or "").strip().lower()
     if not bill:
         credit = 0.0
         return (*allocate_refund_channels(
-            amount=subtotal,
-            cash_available=subtotal,
-            online_available=subtotal,
+            amount=settlement_total,
+            cash_available=settlement_total,
+            online_available=settlement_total,
             mode=mode,
             requested_cash=requested_cash,
             requested_online=requested_online,
@@ -291,13 +294,24 @@ def calculate_return_settlement(
     used_cash, used_online = bill_return_refund_totals(session, int(bill.id or 0), exclude_return_id=existing_id)
     cash_available = round2(paid_cash - used_cash)
     online_available = round2(paid_online - used_online)
+    # A small positive round-off is a real extra cash/bank outflow, not extra
+    # returned merchandise. Extend only the chosen refund channel's capacity.
+    if rounding > 0 and mode == "cash":
+        cash_available = round2(cash_available + rounding)
+    elif rounding > 0 and mode == "online":
+        online_available = round2(online_available + rounding)
+    elif rounding > 0 and mode == "split":
+        if round2(requested_cash) > cash_available:
+            cash_available = round2(cash_available + rounding)
+        else:
+            online_available = round2(online_available + rounding)
 
     requested_direct = round2(
         (requested_cash if mode in {"cash", "split"} else 0.0)
         + (requested_online if mode in {"online", "split"} else 0.0)
     )
     if mode in {"cash", "online", "split"} and requested_direct > MONEY_EPSILON:
-        direct_refund = round2(min(subtotal, requested_direct))
+        direct_refund = round2(min(settlement_total, requested_direct))
         refund_cash, refund_online = allocate_refund_channels(
             amount=direct_refund,
             cash_available=cash_available,
@@ -306,8 +320,8 @@ def calculate_return_settlement(
             requested_cash=requested_cash,
             requested_online=requested_online,
         )
-        credit = round2(min(subtotal - refund_cash - refund_online, credit_capacity))
-        refund_needed = round2(subtotal - refund_cash - refund_online - credit)
+        credit = round2(min(settlement_total - refund_cash - refund_online, credit_capacity))
+        refund_needed = round2(settlement_total - refund_cash - refund_online - credit)
         if refund_needed > MONEY_EPSILON:
             extra_cash, extra_online = allocate_refund_channels(
                 amount=refund_needed,
@@ -321,8 +335,8 @@ def calculate_return_settlement(
             refund_online = round2(refund_online + extra_online)
         return refund_cash, refund_online, credit
 
-    credit = round2(min(subtotal, credit_capacity))
-    refund_needed = round2(subtotal - credit)
+    credit = round2(min(settlement_total, credit_capacity))
+    refund_needed = round2(settlement_total - credit)
     refund_cash, refund_online = allocate_refund_channels(
         amount=refund_needed,
         cash_available=cash_available,
@@ -717,6 +731,7 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
             requested_cash=round2(payload.refund_cash),
             requested_online=round2(payload.refund_online),
             existing_return=r,
+            rounding_adjustment=round2(float(getattr(r, "rounding_adjustment", 0.0) or 0.0)),
         )
 
         if old_mode == infer_refund_mode(r) and old_cash == rc and old_online == ro and old_credit_amount == new_credit_amount:
@@ -950,6 +965,24 @@ def create_return(payload: ReturnCreate):
                 subtotal_return += base
 
         subtotal_return = round2(subtotal_return)
+        rounding_adjustment = round2(float(payload.rounding_adjustment or 0.0))
+        if abs(rounding_adjustment) > ROUND_TOLERANCE + MONEY_EPSILON:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Refund round-off cannot exceed Rs {ROUND_TOLERANCE:.2f}",
+            )
+        settlement_total = round2(subtotal_return + rounding_adjustment)
+        if settlement_total < 0:
+            raise HTTPException(status_code=400, detail="Final refund cannot be negative")
+        if payload.refund_mode == "credit" and abs(rounding_adjustment) > MONEY_EPSILON:
+            raise HTTPException(status_code=400, detail="Manual round-off is allowed only for cash, online, or split refunds")
+        requested_refund = round2(float(payload.refund_cash or 0.0) + float(payload.refund_online or 0.0))
+        if payload.refund_mode in {"cash", "online", "split"} and requested_refund > MONEY_EPSILON:
+            if abs(requested_refund - settlement_total) > MONEY_EPSILON:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cash and online refund must total Rs {settlement_total:.2f} after round-off",
+                )
 
         rc, ro, credit_amount = calculate_return_settlement(
             session,
@@ -958,6 +991,7 @@ def create_return(payload: ReturnCreate):
             refund_mode=payload.refund_mode,
             requested_cash=round2(payload.refund_cash),
             requested_online=round2(payload.refund_online),
+            rounding_adjustment=rounding_adjustment,
         )
 
         try:
@@ -969,6 +1003,7 @@ def create_return(payload: ReturnCreate):
                 refund_cash=rc,
                 refund_online=ro,
                 notes=payload.notes,
+                rounding_adjustment=rounding_adjustment,
             )
             session.add(r)
             session.flush()
@@ -1028,6 +1063,8 @@ def create_return(payload: ReturnCreate):
                 details={
                     "source_bill_id": r.source_bill_id,
                     "return_value": subtotal_return,
+                    "rounding_adjustment": rounding_adjustment,
+                    "actual_refund_total": settlement_total,
                     "refund_mode": infer_refund_mode(r),
                     "credit_amount": credit_amount,
                     "refund_cash": rc,

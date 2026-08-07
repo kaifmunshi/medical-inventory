@@ -468,6 +468,7 @@ export default function Returns() {
         refund_mode: mode,
         refund_cash,
         refund_online,
+        rounding_adjustment: clamp2(amt - computedRefund),
         notes: '',
       })
     },

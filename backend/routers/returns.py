@@ -29,7 +29,7 @@ def round2(x: float) -> float:
 
 
 # Allow manual round-off near the computed amount
-ROUND_TOLERANCE = 5.0  # e.g., 104.35 → any refund between ~99.35 and ~109.35 is OK
+ROUND_TOLERANCE = 20.0  # supports practical cash rounding such as Rs 239.69 -> Rs 250
 MONEY_EPSILON = 0.01   # allow 1 paisa drift between FE/BE rounding paths
 EXCHANGE_SETTLE_EPSILON = 0.05  # absorb small FE/BE rounding drift in exchange settlement
 

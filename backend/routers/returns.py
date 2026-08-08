@@ -38,6 +38,7 @@ class ReturnRefundUpdate(BaseModel):
     refund_mode: str
     refund_cash: float = 0.0
     refund_online: float = 0.0
+    return_date: Optional[str] = None
 
 
 class ReturnDashboardSummary(BaseModel):
@@ -50,6 +51,19 @@ class ReturnDashboardSummary(BaseModel):
 
 def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def normalize_return_datetime(value: Optional[str], *, fallback: Optional[str] = None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return str(fallback or now_ts())
+    date_part = raw[:10]
+    try:
+        datetime.strptime(date_part, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Return date must be a valid YYYY-MM-DD date")
+    time_part = str(fallback or now_ts())[11:19] or "00:00:00"
+    return f"{date_part}T{time_part}"
 
 
 def is_deleted_bill(b: Bill) -> bool:
@@ -65,6 +79,7 @@ def add_movement(
     ref_type: str,
     ref_id: int,
     note: Optional[str] = None,
+    ts: Optional[str] = None,
 ):
     """
     Append-only inventory ledger row.
@@ -73,7 +88,7 @@ def add_movement(
     session.add(
         StockMovement(
             item_id=int(item_id),
-            ts=now_ts(),
+            ts=ts or now_ts(),
             delta=int(delta),
             reason=str(reason),
             ref_type=str(ref_type),
@@ -717,6 +732,8 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
         if not r:
             raise HTTPException(status_code=404, detail="Return not found")
         assert_financial_year_unlocked(session, r.date_time, context="Return refund edit")
+        new_return_datetime = normalize_return_datetime(payload.return_date, fallback=r.date_time)
+        assert_financial_year_unlocked(session, new_return_datetime, context="Return date edit")
 
         ex = session.exec(select(ExchangeRecord).where(ExchangeRecord.return_id == return_id)).first()
         if ex:
@@ -728,6 +745,8 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
         old_online = round2(float(getattr(r, "refund_online", 0.0) or 0.0))
         old_credit_amount = return_credit_amount(r)
         bill = session.get(Bill, int(r.source_bill_id or 0)) if r.source_bill_id else None
+        if bill and new_return_datetime[:10] < str(bill.date_time or "")[:10]:
+            raise HTTPException(status_code=400, detail="Return date cannot be before the source bill date")
         rc, ro, new_credit_amount = calculate_return_settlement(
             session,
             bill,
@@ -739,13 +758,28 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
             rounding_adjustment=round2(float(getattr(r, "rounding_adjustment", 0.0) or 0.0)),
         )
 
-        if old_mode == infer_refund_mode(r) and old_cash == rc and old_online == ro and old_credit_amount == new_credit_amount:
+        old_return_datetime = str(r.date_time)
+        if (
+            old_mode == infer_refund_mode(r)
+            and old_cash == rc
+            and old_online == ro
+            and old_credit_amount == new_credit_amount
+            and old_return_datetime == new_return_datetime
+        ):
             return return_to_out(session, r)
 
+        r.date_time = new_return_datetime
         r.refund_cash = rc
         r.refund_online = ro
         r.credit_amount = new_credit_amount
         session.add(r)
+        if old_return_datetime != new_return_datetime:
+            for movement in session.exec(select(StockMovement).where(
+                StockMovement.ref_type == "RETURN",
+                StockMovement.ref_id == int(r.id or return_id),
+            )).all():
+                movement.ts = new_return_datetime
+                session.add(movement)
         session.flush()
         apply_return_credit_to_bill(session, r, old_credit_amount, new_credit_amount)
         log_audit(
@@ -761,6 +795,7 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
                     "refund_cash": old_cash,
                     "refund_online": old_online,
                     "total_paid": round2(old_credit_amount + old_cash + old_online),
+                    "return_date": old_return_datetime,
                 },
                 "after": {
                     "refund_mode": infer_refund_mode(r),
@@ -768,6 +803,7 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
                     "refund_cash": rc,
                     "refund_online": ro,
                     "total_paid": round2(new_credit_amount + rc + ro),
+                    "return_date": new_return_datetime,
                 },
                 "return_value": subtotal,
                 "source_bill_id": r.source_bill_id,
@@ -875,7 +911,8 @@ def create_return(payload: ReturnCreate):
         raise HTTPException(status_code=400, detail="Refund amounts cannot be negative")
 
     with get_session() as session:
-        assert_financial_year_unlocked(session, now_ts(), context="Return creation")
+        return_datetime = normalize_return_datetime(payload.return_date)
+        assert_financial_year_unlocked(session, return_datetime, context="Return creation")
         sold_lookup: Dict[int, int] = {}
         returned_lookup: Dict[int, int] = {}
         charged_unit_lookup: Dict[int, float] = {}
@@ -891,6 +928,8 @@ def create_return(payload: ReturnCreate):
                 raise HTTPException(status_code=404, detail="Source bill not found")
             if is_deleted_bill(bill):
                 raise HTTPException(status_code=400, detail="Returns are not allowed for deleted bills")
+            if return_datetime[:10] < str(bill.date_time or "")[:10]:
+                raise HTTPException(status_code=400, detail="Return date cannot be before the source bill date")
 
             sold_lookup = sold_map_for_bill(session, bill.id)
             returned_lookup = already_returned_map_for_bill(session, bill.id)
@@ -1002,6 +1041,7 @@ def create_return(payload: ReturnCreate):
         try:
             # ----- save Return header -----
             r = Return(
+                date_time=return_datetime,
                 source_bill_id=payload.source_bill_id,
                 subtotal_return=subtotal_return,
                 credit_amount=credit_amount,
@@ -1033,6 +1073,7 @@ def create_return(payload: ReturnCreate):
                     ref_type="RETURN",
                     ref_id=r.id,
                     note=f"Return #{r.id}",
+                    ts=return_datetime,
                 )
 
                 if itm.id in return_line_total_by_item:

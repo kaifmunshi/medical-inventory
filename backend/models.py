@@ -335,6 +335,7 @@ class ReturnItemIn(SQLModel):
 
 class ReturnCreate(SQLModel):
     source_bill_id: Optional[int] = None
+    return_date: Optional[str] = None
     items: List[ReturnItemIn]
     refund_mode: str                        # "cash" | "online" | "split" | "credit"
     refund_cash: float = 0.0

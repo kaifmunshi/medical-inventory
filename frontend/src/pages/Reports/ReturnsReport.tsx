@@ -233,6 +233,7 @@ export default function ReturnsReport(props: {
   const [editMode, setEditMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
   const [editCash, setEditCash] = useState('0')
   const [editOnline, setEditOnline] = useState('0')
+  const [editReturnDate, setEditReturnDate] = useState('')
   const [customerAccount, setCustomerAccount] = useState<CustomerBalanceAccount | null>(null)
 
   async function loadBalanceAccountForBill(b: any): Promise<CustomerBalanceAccount | null> {
@@ -398,6 +399,7 @@ export default function ReturnsReport(props: {
     setEditMode(mode)
     setEditCash(String(mode === 'cash' ? Number(detail.refund_cash || Math.min(returnValue, cashPaid || returnValue)) : Number(detail.refund_cash || 0)))
     setEditOnline(String(mode === 'online' ? Number(detail.refund_online || Math.min(returnValue, onlinePaid || returnValue)) : Number(detail.refund_online || 0)))
+    setEditReturnDate(String(detail.date_time || '').slice(0, 10))
     setPaymentEditOpen(true)
   }
 
@@ -408,6 +410,7 @@ export default function ReturnsReport(props: {
         refund_mode: editMode,
         refund_cash: editMode === 'cash' || editMode === 'split' ? Number(editCash || 0) : 0,
         refund_online: editMode === 'online' || editMode === 'split' ? Number(editOnline || 0) : 0,
+        return_date: editReturnDate,
       })
     },
     onSuccess: async (updated) => {
@@ -869,7 +872,7 @@ export default function ReturnsReport(props: {
         <DialogContent dividers>
           <Stack gap={2} sx={{ pt: 0.5 }}>
             <Typography variant="body2" color="text.secondary">
-              Sales return value: ₹{money(detail?.subtotal_return)}. Credit is recalculated against the source bill balance; cash and online are direct refunds. Amounts may differ by up to ₹5 for manual rounding.
+              Sales return value: ₹{money(detail?.subtotal_return)}. Credit is recalculated against the source bill balance; cash and online are direct refunds. Amounts may differ by up to ₹20 for manual rounding.
             </Typography>
             <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}>
               <Stack gap={1}>
@@ -915,6 +918,15 @@ export default function ReturnsReport(props: {
                 ) : null}
               </Stack>
             </Paper>
+            <TextField
+              label="Return Date"
+              type="date"
+              value={editReturnDate}
+              onChange={(event) => setEditReturnDate(event.target.value)}
+              InputLabelProps={{ shrink: true }}
+              inputProps={{ min: String(detail?.source_bill?.date_time || '').slice(0, 10) || undefined }}
+              required
+            />
             <TextField
               select
               label="Settlement Mode"

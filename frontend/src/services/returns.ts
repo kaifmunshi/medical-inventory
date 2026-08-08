@@ -8,6 +8,7 @@ export type ReturnLine = { item_id: number; quantity: number }
 
 export type CreateReturnBody = {
   source_bill_id: number
+  return_date?: string
   items: ReturnLine[]
   refund_mode: 'cash' | 'online' | 'credit'      // required by backend; 'credit' adjusts the bill outstanding
   refund_cash: number                 // required by backend
@@ -165,6 +166,7 @@ export async function updateReturnRefundMode(
     refund_mode: 'cash' | 'online' | 'credit' | 'split'
     refund_cash?: number
     refund_online?: number
+    return_date?: string
   },
 ) {
   const { data } = await api.patch(`/returns/${id}/refund`, body)

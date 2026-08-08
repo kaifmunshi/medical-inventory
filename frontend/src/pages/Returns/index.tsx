@@ -64,6 +64,10 @@ type CustomerBalanceAccount = Pick<Customer, 'name' | 'phone' | 'outstanding_amo
 function round2(n: number) {
   return Math.round(n * 100) / 100
 }
+function todayYmd() {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+}
 function round5Nearest(n: number) {
   return Math.round(n / 5) * 5
 }
@@ -133,6 +137,7 @@ export default function Returns() {
 
   const [finalRefund, setFinalRefund] = useState<number>(0)
   const [finalTouched, setFinalTouched] = useState<boolean>(false)
+  const [returnDate, setReturnDate] = useState(todayYmd())
 
   const { refetch, isFetching } = useQuery({
     queryKey: ['bill', query],
@@ -435,6 +440,10 @@ export default function Returns() {
 
       setFinalTouched(false)
       setFinalRefund(0)
+      setReturnDate((current) => {
+        const billDate = String(b.date_time || '').slice(0, 10)
+        return billDate && current < billDate ? billDate : current
+      })
 
       return {
         ok: true,
@@ -474,6 +483,7 @@ export default function Returns() {
 
       return createReturn({
         source_bill_id: Number(bill!.id),
+        return_date: returnDate,
         items: rows
           .filter(r => r.qty > 0)
           .map(r => ({ item_id: r.item_id, quantity: r.qty })),
@@ -490,6 +500,7 @@ export default function Returns() {
       setRows(prev => prev.map(r => ({ ...r, qty: 0 })))
       setFinalRefund(0)
       setFinalTouched(false)
+      setReturnDate(todayYmd())
 
       void loadBill()
     },
@@ -520,6 +531,14 @@ export default function Returns() {
     }
     if (finalRefund < 0) {
       toast.push('Final refund cannot be negative', 'warning')
+      return
+    }
+    if (!returnDate) {
+      toast.push('Select a return date', 'warning')
+      return
+    }
+    if (bill?.date_time && returnDate < String(bill.date_time).slice(0, 10)) {
+      toast.push('Return date cannot be before the bill date', 'warning')
       return
     }
     if (mode !== 'credit' && Math.abs(clamp2(finalRefund) - computedRefund) > RETURN_ROUND_TOLERANCE) {
@@ -666,6 +685,16 @@ export default function Returns() {
                 <option value="online">Online</option>
                 <option value="credit">Auto settle (credit first)</option>
               </TextField>
+
+              <TextField
+                label="Return Date"
+                type="date"
+                value={returnDate}
+                onChange={(event) => setReturnDate(event.target.value)}
+                InputLabelProps={{ shrink: true }}
+                inputProps={{ min: String(bill?.date_time || '').slice(0, 10) || undefined }}
+                sx={{ width: 180 }}
+              />
 
               <Typography sx={{ minWidth: 180 }}>Computed: ₹{refund.toFixed(2)}</Typography>
 

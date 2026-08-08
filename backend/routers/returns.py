@@ -294,12 +294,17 @@ def calculate_return_settlement(
     used_cash, used_online = bill_return_refund_totals(session, int(bill.id or 0), exclude_return_id=existing_id)
     cash_available = round2(paid_cash - used_cash)
     online_available = round2(paid_online - used_online)
-    # A small positive round-off is a real extra cash/bank outflow, not extra
-    # returned merchandise. Extend only the chosen refund channel's capacity.
-    if rounding > 0 and mode == "cash":
-        cash_available = round2(cash_available + rounding)
-    elif rounding > 0 and mode == "online":
-        online_available = round2(online_available + rounding)
+    # The original payment channels limit the total refundable amount, but the
+    # user's selected refund mode controls how money is actually returned.
+    # This permits an online-paid bill to be refunded in cash (and vice versa)
+    # without silently changing the selected mode.
+    refundable_paid = round2(max(0.0, cash_available) + max(0.0, online_available))
+    if mode == "cash":
+        cash_available = round2(refundable_paid + max(0.0, rounding))
+        online_available = 0.0
+    elif mode == "online":
+        online_available = round2(refundable_paid + max(0.0, rounding))
+        cash_available = 0.0
     elif rounding > 0 and mode == "split":
         if round2(requested_cash) > cash_available:
             cash_available = round2(cash_available + rounding)

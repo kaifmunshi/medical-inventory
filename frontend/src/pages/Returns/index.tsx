@@ -49,6 +49,7 @@ type Row = {
 }
 
 type RefundMode = 'cash' | 'online' | 'credit'
+const RETURN_ROUND_TOLERANCE = 20
 type PriorReturn = {
   refund_cash?: number
   refund_online?: number
@@ -254,8 +255,16 @@ export default function Returns() {
     const paidOnline = clamp2(Math.max(0, Number(bill?.payment_online || 0)))
     const usedCash = clamp2(priorReturns.reduce((sum, row) => sum + Number(row.refund_cash || 0), 0))
     const usedOnline = clamp2(priorReturns.reduce((sum, row) => sum + Number(row.refund_online || 0), 0))
-    const availableCash = clamp2(Math.max(0, paidCash - usedCash))
-    const availableOnline = clamp2(Math.max(0, paidOnline - usedOnline))
+    const originalCashAvailable = clamp2(Math.max(0, paidCash - usedCash))
+    const originalOnlineAvailable = clamp2(Math.max(0, paidOnline - usedOnline))
+    const refundablePaid = clamp2(originalCashAvailable + originalOnlineAvailable)
+    const positiveRounding = clamp2(Math.max(0, total - computedRefund))
+    const availableCash = mode === 'cash'
+      ? clamp2(Math.min(total, refundablePaid + positiveRounding))
+      : originalCashAvailable
+    const availableOnline = mode === 'online'
+      ? clamp2(Math.min(total, refundablePaid + positiveRounding))
+      : originalOnlineAvailable
     const outstanding = clamp2(Math.max(
       0,
       Number(bill?.total_amount || 0) - Number(bill?.paid_amount || 0) - Number(bill?.writeoff_amount || 0),
@@ -282,6 +291,7 @@ export default function Returns() {
 
     if (mode === 'online') {
       takeOnline()
+    } else if (mode === 'cash') {
       takeCash()
     } else {
       takeCash()
@@ -301,8 +311,10 @@ export default function Returns() {
       paidOnline,
       usedCash,
       usedOnline,
+      originalCashAvailable,
+      originalOnlineAvailable,
     }
-  }, [bill, finalRefund, mode, priorReturns])
+  }, [bill, computedRefund, finalRefund, mode, priorReturns])
 
   const billSummary = useMemo(() => {
     if (!bill) return { paid: 0, writeoff: 0, pending: 0, creditReturns: 0, originalTotal: 0 }
@@ -510,8 +522,8 @@ export default function Returns() {
       toast.push('Final refund cannot be negative', 'warning')
       return
     }
-    if (mode !== 'credit' && Math.abs(clamp2(finalRefund) - computedRefund) > 5) {
-      toast.push(`Final refund must be within ±₹5 of computed ₹${computedRefund.toFixed(2)}`, 'warning')
+    if (mode !== 'credit' && Math.abs(clamp2(finalRefund) - computedRefund) > RETURN_ROUND_TOLERANCE) {
+      toast.push(`Final refund must be within ±₹${RETURN_ROUND_TOLERANCE} of computed ₹${computedRefund.toFixed(2)}`, 'warning')
       return
     }
     if (!mCreate.isPending) mCreate.mutate()
@@ -721,14 +733,14 @@ export default function Returns() {
               <Stack gap={1}>
                 <Stack direction="row" gap={1} flexWrap="wrap" alignItems="center">
                   <Chip size="small" label={`Credit adjusted Rs ${money(settlementPreview.credit)}`} color={settlementPreview.credit > 0 ? 'warning' : 'default'} variant="outlined" />
-                  <Chip size="small" label={`Cash to return Rs ${money(settlementPreview.cash)}`} color={settlementPreview.cash > 0 ? 'success' : 'default'} variant="outlined" />
-                  <Chip size="small" label={`Online to return Rs ${money(settlementPreview.online)}`} color={settlementPreview.online > 0 ? 'info' : 'default'} variant="outlined" />
+                  {mode !== 'online' ? <Chip size="small" label={`Cash to return Rs ${money(settlementPreview.cash)}`} color={settlementPreview.cash > 0 ? 'success' : 'default'} variant="outlined" /> : null}
+                  {mode !== 'cash' ? <Chip size="small" label={`Online to return Rs ${money(settlementPreview.online)}`} color={settlementPreview.online > 0 ? 'info' : 'default'} variant="outlined" /> : null}
                 </Stack>
                 <Typography variant="body2">
                   {mode === 'cash'
-                    ? `Cash available from this bill is Rs ${money(settlementPreview.availableCash)}. Any unpaid balance is adjusted before cash is returned.`
+                    ? `Refundable paid amount is Rs ${money(settlementPreview.availableCash)} in Cash mode. Any unpaid balance is adjusted first.`
                     : mode === 'online'
-                      ? `Online available from this bill is Rs ${money(settlementPreview.availableOnline)}. Any unpaid balance is adjusted before online refund.`
+                      ? `Refundable paid amount is Rs ${money(settlementPreview.availableOnline)} in Online mode. Any unpaid balance is adjusted first.`
                       : `The system will adjust pending credit first, then return any balance from paid cash/online.`}
                 </Typography>
                 {settlementPreview.unresolved > 0 ? (

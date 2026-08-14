@@ -421,6 +421,7 @@ export default function BillEditDialog({
   const [editOpenLooseDraft, setEditOpenLooseDraft] = useState<any | null>(null)
   const [editOpenLooseQty, setEditOpenLooseQty] = useState('1')
   const [oldBillPasswordOpen, setOldBillPasswordOpen] = useState(false)
+  const [zeroFinalConfirmOpen, setZeroFinalConfirmOpen] = useState(false)
   const [oldBillPassword, setOldBillPassword] = useState('')
   const editItemSearchTerm = editItemQuery.trim()
   const debouncedEditItemSearchTerm = debouncedEditItemQuery.trim()
@@ -1120,6 +1121,15 @@ export default function BillEditDialog({
     },
   })
 
+  function proceedWithEditSave() {
+    if (isPastFinancialYear(bill?.date_time || bill?.created_at)) {
+      setOldBillPassword('')
+      setOldBillPasswordOpen(true)
+      return
+    }
+    mEdit.mutate(undefined)
+  }
+
   function saveEditBill() {
     if (mEdit.isPending) return
     if (!editPaymentsOk) {
@@ -1130,12 +1140,16 @@ export default function BillEditDialog({
       toast.push('Credit mode requires customer details or notes before saving.', 'warning')
       return
     }
-    if (isPastFinancialYear(bill?.date_time || bill?.created_at)) {
-      setOldBillPassword('')
-      setOldBillPasswordOpen(true)
+    if (editChosenFinal === 0) {
+      setZeroFinalConfirmOpen(true)
       return
     }
-    mEdit.mutate(undefined)
+    proceedWithEditSave()
+  }
+
+  function confirmZeroFinalEdit() {
+    setZeroFinalConfirmOpen(false)
+    proceedWithEditSave()
   }
 
   function confirmOldBillEdit() {
@@ -1496,6 +1510,11 @@ export default function BillEditDialog({
                       type="text"
                       value={String(editFinalAmount)}
                       onChange={(e) => {
+                        if (e.target.value.trim() === '') {
+                          setEditFinalAmount(editFinalByRows)
+                          setEditFinalManuallyEdited(false)
+                          return
+                        }
                         const v = parseNumText(e.target.value)
                         const next = Number(v || 0)
                         setEditFinalAmount(next)
@@ -1505,7 +1524,17 @@ export default function BillEditDialog({
                         }
                         setEditFinalManuallyEdited(true)
                       }}
-                      onBlur={(e) => applyEditFinalAmountToRows(Number(parseNumText(e.currentTarget.value) || 0))}
+                      onBlur={(e) => {
+                        const raw = e.currentTarget.value.trim()
+                        if (raw === '') {
+                          // Clearing the field means "recalculate from lines";
+                          // it must never be committed as a zero-value sale.
+                          setEditFinalManuallyEdited(false)
+                          setEditFinalAmount(editFinalByRows)
+                          return
+                        }
+                        applyEditFinalAmountToRows(Number(parseNumText(raw) || 0))
+                      }}
                       onWheel={blurOnWheel}
                       sx={{ width: 220, ...noSpinnerSx }}
                       inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }}
@@ -1596,6 +1625,21 @@ export default function BillEditDialog({
           <Button onClick={() => setOldBillPasswordOpen(false)} disabled={mEdit.isPending}>Cancel</Button>
           <Button variant="contained" color="warning" onClick={confirmOldBillEdit} disabled={mEdit.isPending}>
             Edit Old Bill
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={zeroFinalConfirmOpen} onClose={() => setZeroFinalConfirmOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Confirm Zero-Amount Bill</DialogTitle>
+        <DialogContent dividers>
+          <Typography color="warning.main">
+            The final amount is ₹0.00. Do you want to save this bill with a zero total?
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setZeroFinalConfirmOpen(false)}>Go Back</Button>
+          <Button variant="contained" color="warning" onClick={confirmZeroFinalEdit} disabled={mEdit.isPending}>
+            Save Zero Bill
           </Button>
         </DialogActions>
       </Dialog>

@@ -239,10 +239,12 @@ export default function Billing() {
   const [finalAmount, setFinalAmount] = useState<number>(0)
   const [finalManuallyEdited, setFinalManuallyEdited] = useState(false)
   const [paymentAutoFilledOnce, setPaymentAutoFilledOnce] = useState(false)
+  const [paymentManuallyEdited, setPaymentManuallyEdited] = useState(false)
   const [lastCreatedBill, setLastCreatedBill] = useState<Bill | null>(null)
 
   // ✅ Beautiful confirm dialog for CASH
   const [cashConfirmOpen, setCashConfirmOpen] = useState(false)
+  const [zeroFinalConfirmOpen, setZeroFinalConfirmOpen] = useState(false)
   const gridSearchTerm = gridSearch.trim()
   const debouncedGridSearchTerm = debouncedGridSearch.trim()
   const activeGridCategoryId = activeGridSearchRow === null
@@ -491,6 +493,13 @@ export default function Billing() {
     }
   }, [finalByRows, finalManuallyEdited])
 
+  // A product/quantity/line-price change starts a fresh computed total. The
+  // manual flag is only meant to protect a final-amount draft while it is being
+  // typed; it must not leave later cart changes pinned to an old amount.
+  useEffect(() => {
+    setFinalManuallyEdited(false)
+  }, [rows])
+
   function applyFinalAmountToRows(targetFinal: number) {
     const safeTarget = round2(Math.max(0, Number(targetFinal || 0)))
     setPriceDraftByRow({})
@@ -652,11 +661,13 @@ export default function Billing() {
       if (cash !== '') return
       handleCashAmountChange(String(chosenFinal))
       setPaymentAutoFilledOnce(true)
+      setPaymentManuallyEdited(false)
       return
     }
     if (online !== '') return
     handleOnlineAmountChange(String(chosenFinal))
     setPaymentAutoFilledOnce(true)
+    setPaymentManuallyEdited(false)
   }
 
   function syncPaymentFieldsFromFinal(target: number) {
@@ -691,12 +702,26 @@ export default function Billing() {
     // another product immediately after typing can blur this field before the last
     // state update is visible here; applying that stale value (often 0) would make
     // every existing line a 100% discount.
+    if (rawValue !== undefined && rawValue.trim() === '') {
+      const computed = round2(finalByRows)
+      setFinalAmount(computed)
+      setFinalManuallyEdited(false)
+      syncPaymentFieldsFromFinal(computed)
+      setPaymentManuallyEdited(false)
+      return
+    }
     const parsed = rawValue === undefined ? finalAmount : parseNumText(rawValue)
     const safe = round2(Math.max(0, Number(parsed || 0)))
     setFinalAmount(safe)
     syncPaymentFieldsFromFinal(safe)
+    setPaymentManuallyEdited(false)
     applyFinalAmountToRows(safe)
   }
+
+  useEffect(() => {
+    if (!paymentAutoFilledOnce || paymentManuallyEdited || finalManuallyEdited) return
+    syncPaymentFieldsFromFinal(finalByRows)
+  }, [finalByRows, finalManuallyEdited, paymentAutoFilledOnce, paymentManuallyEdited])
 
   useEffect(() => {
     if (mode !== 'split' || splitCombination !== 'cash-online') return
@@ -821,6 +846,7 @@ export default function Billing() {
       setFinalAmount(0)
       setFinalManuallyEdited(false)
       setPaymentAutoFilledOnce(false)
+      setPaymentManuallyEdited(false)
       toast.push('Bill created successfully. Inventory and payment entries were updated.', 'success')
     },
     onError: (err: any) => {
@@ -1195,6 +1221,11 @@ export default function Billing() {
       return
     }
 
+    if (chosenFinal === 0) {
+      setZeroFinalConfirmOpen(true)
+      return
+    }
+
     if (mode === 'cash' && chosenFinal > 0) {
       setCashConfirmOpen(true)
       return
@@ -1205,6 +1236,11 @@ export default function Billing() {
 
   const confirmCashAndSubmit = () => {
     setCashConfirmOpen(false)
+    mBill.mutate()
+  }
+
+  const confirmZeroFinalAndSubmit = () => {
+    setZeroFinalConfirmOpen(false)
     mBill.mutate()
   }
 
@@ -1598,6 +1634,7 @@ export default function Billing() {
                   const v = e.target.value as any
                   setMode(v)
                   setPaymentAutoFilledOnce(false)
+                  setPaymentManuallyEdited(false)
                   if (v === 'credit') {
                     setCash('')
                     setOnline('')
@@ -1620,6 +1657,7 @@ export default function Billing() {
                     const v = e.target.value as 'cash-online' | 'cash-credit' | 'online-credit'
                     setSplitCombination(v)
                     setPaymentAutoFilledOnce(false)
+                    setPaymentManuallyEdited(false)
                     if (v === 'cash-online') return
                     if (v === 'cash-credit') setOnline('')
                     if (v === 'online-credit') setCash('')
@@ -1640,7 +1678,10 @@ export default function Billing() {
                   label="Cash Amount"
                   type="text"
                   value={cash === '' ? '' : String(cash)}
-                  onChange={(e) => handleCashAmountChange(e.target.value)}
+                  onChange={(e) => {
+                    setPaymentManuallyEdited(true)
+                    handleCashAmountChange(e.target.value)
+                  }}
                   onFocus={() => handleAmountFocus('cash')}
                   onBlur={commitPaymentAmountBlur}
                   onWheel={blurOnWheel}
@@ -1655,7 +1696,10 @@ export default function Billing() {
                   label="Online Amount"
                   type="text"
                   value={online === '' ? '' : String(online)}
-                  onChange={(e) => handleOnlineAmountChange(e.target.value)}
+                  onChange={(e) => {
+                    setPaymentManuallyEdited(true)
+                    handleOnlineAmountChange(e.target.value)
+                  }}
                   onFocus={() => handleAmountFocus('online')}
                   onBlur={commitPaymentAmountBlur}
                   onWheel={blurOnWheel}
@@ -1728,6 +1772,14 @@ export default function Billing() {
                     type="text"
                     value={String(finalAmount)}
                     onChange={(e) => {
+                      if (e.target.value.trim() === '') {
+                        const computed = round2(finalByRows)
+                        setFinalAmount(computed)
+                        setFinalManuallyEdited(false)
+                        syncPaymentFieldsFromFinal(computed)
+                        setPaymentManuallyEdited(false)
+                        return
+                      }
                       const v = parseNumText(e.target.value)
                       const next = Number(v || 0)
                       setFinalAmount(next)
@@ -1892,6 +1944,22 @@ export default function Billing() {
             }}
           >
             Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={zeroFinalConfirmOpen} onClose={() => setZeroFinalConfirmOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Confirm Zero-Amount Bill</DialogTitle>
+        <DialogContent dividers>
+          <Alert severity="warning">
+            The final amount is ₹0.00. The bill will be saved with a zero total.
+          </Alert>
+          <Typography sx={{ mt: 2 }}>Do you want to continue?</Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setZeroFinalConfirmOpen(false)}>Go Back</Button>
+          <Button variant="contained" color="warning" onClick={confirmZeroFinalAndSubmit} disabled={mBill.isPending}>
+            Save Zero Bill
           </Button>
         </DialogActions>
       </Dialog>

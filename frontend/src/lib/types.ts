@@ -446,6 +446,7 @@ export interface CustomerAdvanceRefund {
   note?: string | null
   bank_mode?: string | null
   is_deleted: boolean
+  deleted_at?: string | null
 }
 
 export interface ReceiptBillAdjustment {

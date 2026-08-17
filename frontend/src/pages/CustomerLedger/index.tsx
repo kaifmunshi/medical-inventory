@@ -32,6 +32,7 @@ import {
   applyPartyReceipt,
   createPartyReceipt,
   deletePartyReceipt,
+  deleteAdvanceRefund,
   fetchCustomerReturns,
   fetchDebtorLedger,
   fetchOpenBills,
@@ -307,7 +308,8 @@ type ReceiptHistoryRow = {
   id: string
   receiptId: number
   billId?: number
-  sourceType: 'party_receipt' | 'bill_payment'
+  refundId?: number
+  sourceType: 'party_receipt' | 'bill_payment' | 'advance_refund'
   when: string
   source: string
   mode: string
@@ -551,11 +553,15 @@ export default function CustomerLedgerPage() {
         if (!selectedParty?.id) throw new Error('Customer missing')
         return deletePartyReceipt(Number(selectedParty.id), Number(row.receiptId))
       }
+      if (row.sourceType === 'advance_refund') {
+        if (!selectedParty?.id || !row.refundId) throw new Error('Advance return missing')
+        return deleteAdvanceRefund(Number(selectedParty.id), Number(row.refundId))
+      }
       if (!row.billId) throw new Error('Bill missing')
       return undoBillPayment(Number(row.billId), Number(row.receiptId))
     },
     onSuccess: async (_data, row) => {
-      toast.push(row.sourceType === 'party_receipt' ? 'Receipt deleted' : 'Bill payment deleted', 'success')
+      toast.push(row.sourceType === 'party_receipt' ? 'Receipt deleted' : row.sourceType === 'advance_refund' ? 'Advance return reversed' : 'Bill payment deleted', 'success')
       setDeleteTarget(null)
       refreshLedgerQueries()
       if (billDetail?.id) {
@@ -753,9 +759,29 @@ export default function CustomerLedgerPage() {
         }
       })
 
-    return [...partyReceiptRows, ...directPaymentRows].sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')))
+    const advanceRefundRows = receipts.flatMap((receipt) => (receipt.refunds || []).map((refund) => ({
+      id: `advance-refund-${refund.id}`,
+      receiptId: Number(receipt.id),
+      refundId: Number(refund.id),
+      sourceType: 'advance_refund' as const,
+      when: refund.refunded_at,
+      source: 'Advance return',
+      mode: String(refund.book || '').toLowerCase(),
+      cash: refund.book === 'CASH' ? -Number(refund.amount || 0) : 0,
+      online: refund.book === 'BANK' ? -Number(refund.amount || 0) : 0,
+      total: -Number(refund.amount || 0),
+      adjusted: 0,
+      onAccount: 0,
+      allocation: `Returned from receipt #${receipt.id} via ${refund.book === 'BANK' ? `Bankbook${refund.bank_mode ? ` (${refund.bank_mode})` : ''}` : 'Cashbook'}`,
+      note: refund.note || '',
+      isDeleted: Boolean(refund.is_deleted),
+      deletedAt: refund.deleted_at || null,
+    })))
+
+    return [...partyReceiptRows, ...directPaymentRows, ...advanceRefundRows].sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')))
   }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receipts])
-  const activeReceiptHistory = receiptHistory.filter((row) => !row.isDeleted)
+  const activeReceiptHistory = receiptHistory.filter((row) => !row.isDeleted && row.sourceType !== 'advance_refund')
+  const activeAdvanceReturns = receiptHistory.filter((row) => !row.isDeleted && row.sourceType === 'advance_refund')
   const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
   const receiptHistoryOnAccountTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
   const openingBalance = signedPartyOpening(selectedParty)
@@ -1730,6 +1756,7 @@ export default function CustomerLedgerPage() {
         summary={
           <>
             <Chip size="small" variant="outlined" label={`${activeReceiptHistory.length} receipts`} sx={{ fontWeight: 800 }} />
+            {activeAdvanceReturns.length ? <Chip size="small" color="warning" variant="outlined" label={`${activeAdvanceReturns.length} returns · Rs ${money(-activeAdvanceReturns.reduce((sum,row)=>sum+row.total,0))}`} sx={{ fontWeight: 800 }} /> : null}
             <Chip size="small" color="success" variant="outlined" label={`Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
             <Chip size="small" color="info" variant="outlined" label={`Advance Rs ${money(receiptHistoryOnAccountTotal)}`} sx={{ fontWeight: 800 }} />
           </>
@@ -1844,7 +1871,7 @@ export default function CustomerLedgerPage() {
             <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openEditReceipt(row)}}>Edit Receipt</MenuItem>
             <MenuItem disabled={!receiptActionsRow || receiptActionsRow.isDeleted || Number(receiptActionsRow.onAccount||0)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openApplyAdvance(row)}}>Adjust Advance</MenuItem>
             <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || Math.min(Number(receiptActionsRow.onAccount||0),actualRefundableAdvance)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row){setRefundTarget(row);setRefundAmount(String(Math.min(Number(row.onAccount),actualRefundableAdvance)));setRefundDate(today);setRefundBook('CASH');setRefundNote('')}}}>Return Advance</MenuItem>
-            {receiptActionsRow?.isDeleted ? <MenuItem onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setRecoverReceiptTarget(row)}}>Recover Receipt</MenuItem> : <MenuItem sx={{color:'error.main'}} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setDeleteTarget(row)}}>Delete</MenuItem>}
+            {receiptActionsRow?.isDeleted && receiptActionsRow.sourceType === 'party_receipt' ? <MenuItem onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setRecoverReceiptTarget(row)}}>Recover Receipt</MenuItem> : !receiptActionsRow?.isDeleted ? <MenuItem sx={{color:'error.main'}} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setDeleteTarget(row)}}>{receiptActionsRow?.sourceType === 'advance_refund' ? 'Reverse Advance Return' : 'Delete'}</MenuItem> : null}
           </Menu>
         </Box>
       </CollapsibleLedgerSection>
@@ -2337,7 +2364,9 @@ export default function CustomerLedgerPage() {
 
       <Dialog open={Boolean(deleteTarget)} onClose={() => !deleteReceiptM.isPending && setDeleteTarget(null)} fullWidth maxWidth="xs">
         <DialogTitle>
-          {deleteTarget?.sourceType === 'party_receipt' && Number(deleteTarget?.adjusted || 0) <= 0 && Number(deleteTarget?.onAccount || 0) > 0
+          {deleteTarget?.sourceType === 'advance_refund'
+            ? 'Reverse Advance Return'
+            : deleteTarget?.sourceType === 'party_receipt' && Number(deleteTarget?.adjusted || 0) <= 0 && Number(deleteTarget?.onAccount || 0) > 0
             ? 'Delete Advance Payment'
             : deleteTarget?.sourceType === 'party_receipt'
               ? 'Delete Receipt'
@@ -2346,10 +2375,12 @@ export default function CustomerLedgerPage() {
         <DialogContent dividers>
           <Stack gap={1}>
             <Typography>
-              {deleteTarget?.source || 'Receipt'} #{deleteTarget?.receiptId} for Rs {money(Number(deleteTarget?.total || 0))}
+              {deleteTarget?.source || 'Receipt'} #{deleteTarget?.refundId || deleteTarget?.receiptId} for Rs {money(Math.abs(Number(deleteTarget?.total || 0)))}
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              {deleteTarget?.sourceType === 'party_receipt' && Number(deleteTarget?.adjusted || 0) <= 0 && Number(deleteTarget?.onAccount || 0) > 0
+              {deleteTarget?.sourceType === 'advance_refund'
+                ? 'This reverses the advance return, restores the customer advance, removes the linked Cashbook/Bankbook withdrawal, and reverses its accounting voucher.'
+                : deleteTarget?.sourceType === 'party_receipt' && Number(deleteTarget?.adjusted || 0) <= 0 && Number(deleteTarget?.onAccount || 0) > 0
                 ? 'This removes the unused advance from the customer ledger and cash/bank receipt history.'
                 : deleteTarget?.sourceType === 'party_receipt'
                   ? 'This deletes the full receipt. Any bill allocations from this receipt will be reversed, and bill balances/statuses will be recalculated.'
@@ -2368,7 +2399,7 @@ export default function CustomerLedgerPage() {
             onClick={() => deleteTarget && deleteReceiptM.mutate(deleteTarget)}
             disabled={!deleteTarget || deleteReceiptM.isPending}
           >
-            Delete
+            {deleteTarget?.sourceType === 'advance_refund' ? 'Reverse Return' : 'Delete'}
           </Button>
         </DialogActions>
       </Dialog>

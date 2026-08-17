@@ -116,6 +116,11 @@ export async function refundPartyAdvance(partyId: number, receiptId: number, pay
   return res.data
 }
 
+export async function deleteAdvanceRefund(partyId: number, refundId: number) {
+  const res = await api.delete(`/parties/${partyId}/advance-refunds/${refundId}`)
+  return res.data
+}
+
 export async function updatePartyReceipt(
   partyId: number,
   receiptId: number,

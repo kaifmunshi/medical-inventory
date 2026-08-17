@@ -9,6 +9,7 @@ from backend.models import (
     BillPayment,
     BankbookEntry,
     CashbookEntry,
+    CustomerAdvanceRefund,
     Ledger,
     LedgerGroup,
     Party,
@@ -473,6 +474,28 @@ def post_party_receipt_voucher(session, receipt_id: int, party: Party, received_
     )
 
 
+def post_customer_advance_refund_voucher(session, refund, party: Party) -> Voucher:
+    ledgers = ensure_accounting_setup(session)
+    debtor_ledger = ensure_party_ledger(session, party)
+    amount = round2(refund.amount)
+    narration = refund.note or f"Advance returned to {party.name}"
+    money_ledger = ledgers["BANK_ACCOUNT" if str(refund.book).upper() == "BANK" else "CASH_IN_HAND"]
+    return upsert_voucher(
+        session,
+        voucher_type="PAYMENT",
+        source_type="CUSTOMER_ADVANCE_REFUND",
+        source_id=int(refund.id),
+        voucher_date=str(refund.refunded_at)[:10],
+        voucher_no=f"AR-{refund.id}",
+        narration=narration,
+        total_amount=amount,
+        lines=[
+            {"ledger_id": int(debtor_ledger.id), "entry_type": "DR", "amount": amount, "narration": narration},
+            {"ledger_id": int(money_ledger.id), "entry_type": "CR", "amount": amount, "narration": narration},
+        ],
+    )
+
+
 def post_loan_voucher(session, row, party: Party, *, book: str = "CASH") -> Voucher:
     ledgers = ensure_accounting_setup(session)
     amount = round2(row.amount)
@@ -715,6 +738,14 @@ def sync_existing_vouchers(session) -> None:
         )
         if bool(getattr(receipt, "is_deleted", False)):
             mark_voucher_deleted(session, source_type="PARTY_RECEIPT", source_id=int(receipt.id or 0))
+
+    for refund in session.exec(select(CustomerAdvanceRefund)).all():
+        party = party_map.get(int(refund.party_id or 0))
+        if not party:
+            continue
+        post_customer_advance_refund_voucher(session, refund, party)
+        if bool(getattr(refund, "is_deleted", False)):
+            mark_voucher_deleted(session, source_type="CUSTOMER_ADVANCE_REFUND", source_id=int(refund.id or 0))
 
     for payment in session.exec(select(BillPayment)).all():
         if int(payment.id or 0) in receipt_adjustment_payment_ids:

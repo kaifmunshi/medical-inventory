@@ -17,6 +17,7 @@ from backend.models import (
     BillOut,
     BillPayment,
     Customer,
+    CustomerAdvanceRefund,
     CustomerCreate,
     CustomerUpdate,
     CustomerOut,
@@ -243,6 +244,12 @@ def _active_receipt_adjusted_amount(session, receipt: PartyReceipt) -> float:
     return _round2(total)
 
 
+def _active_receipt_refunded_amount(session, receipt: PartyReceipt) -> float:
+    if not receipt or not receipt.id:
+        return 0.0
+    return _round2(sum(float(row.amount or 0) for row in session.exec(select(CustomerAdvanceRefund).where(CustomerAdvanceRefund.receipt_id == int(receipt.id), CustomerAdvanceRefund.is_deleted == False)).all()))  # noqa: E712
+
+
 def _customer_account_balance_out(session, customer: Customer) -> CustomerOut:
     party_id = _customer_party_id(session, customer)
     party = session.get(Party, int(party_id)) if party_id is not None else None
@@ -273,7 +280,7 @@ def _customer_account_balance_out(session, customer: Customer) -> CustomerOut:
             sum(
                 max(
                     0.0,
-                    float(receipt.total_amount or 0.0) - _active_receipt_adjusted_amount(session, receipt),
+                    float(receipt.total_amount or 0.0) - _active_receipt_adjusted_amount(session, receipt) - _active_receipt_refunded_amount(session, receipt),
                 )
                 for receipt in receipts
             )

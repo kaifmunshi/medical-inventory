@@ -3101,6 +3101,16 @@ def migrate_db():
             )
         """))
         session.exec(text("""
+            CREATE TABLE IF NOT EXISTS customeradvancerefund (
+                id INTEGER PRIMARY KEY, receipt_id INTEGER NOT NULL, party_id INTEGER NOT NULL,
+                book TEXT NOT NULL, amount REAL NOT NULL, refunded_at TEXT NOT NULL, note TEXT,
+                bank_mode TEXT, cashbook_entry_id INTEGER, bankbook_entry_id INTEGER,
+                is_deleted INTEGER NOT NULL DEFAULT 0, deleted_at TEXT
+            )
+        """))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_customeradvancerefund_receipt_id ON customeradvancerefund (receipt_id)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_customeradvancerefund_party_id ON customeradvancerefund (party_id)"))
+        session.exec(text("""
             CREATE TABLE IF NOT EXISTS packopenevent (
                 id INTEGER PRIMARY KEY,
                 source_lot_id INTEGER NOT NULL,

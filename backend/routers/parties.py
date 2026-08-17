@@ -2,16 +2,21 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlmodel import select
 
-from backend.accounting import mark_voucher_deleted, post_party_receipt_voucher
+from backend.accounting import mark_voucher_deleted, post_customer_advance_refund_voucher, post_party_receipt_voucher
 from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import (
     Bill,
     BillPayment,
+    BankbookEntry,
+    CashbookEntry,
     Customer,
+    CustomerAdvanceRefund,
+    CustomerAdvanceRefundCreate,
+    CustomerAdvanceRefundOut,
     CustomerReturnLedgerItem,
     CustomerReturnLedgerRow,
     DebtorLedgerRow,
@@ -195,7 +200,8 @@ def _active_receipt_adjustments(session, receipt_id: int) -> List[ReceiptBillAdj
 
 def _sync_party_receipt_unallocated(session, receipt: PartyReceipt) -> None:
     adjusted = _round2(sum(_as_float(row.adjusted_amount) for row in _active_receipt_adjustments(session, int(receipt.id or 0))))
-    receipt.unallocated_amount = _round2(max(0.0, _as_float(receipt.total_amount) - adjusted))
+    refunded = _round2(sum(_as_float(row.amount) for row in session.exec(select(CustomerAdvanceRefund).where(CustomerAdvanceRefund.receipt_id == int(receipt.id or 0), CustomerAdvanceRefund.is_deleted == False)).all()))  # noqa: E712
+    receipt.unallocated_amount = _round2(max(0.0, _as_float(receipt.total_amount) - adjusted - refunded))
     session.add(receipt)
 
 
@@ -307,6 +313,9 @@ def _party_receipt_outs(session, receipts: List[PartyReceipt]) -> List[PartyRece
     for receipt in receipts:
         data = receipt.model_dump()
         data["adjustments"] = adjustments_by_receipt.get(int(receipt.id or 0), [])
+        refunds = session.exec(select(CustomerAdvanceRefund).where(CustomerAdvanceRefund.receipt_id == int(receipt.id or 0)).order_by(CustomerAdvanceRefund.refunded_at.desc(), CustomerAdvanceRefund.id.desc())).all()
+        data["refunds"] = [CustomerAdvanceRefundOut(**row.model_dump()) for row in refunds]
+        data["refunded_amount"] = _round2(sum(_as_float(row.amount) for row in refunds if not row.is_deleted))
         out.append(PartyReceiptOut(**data))
     return out
 
@@ -922,6 +931,71 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
         return _party_receipt_out(session, receipt)
 
 
+@router.post("/{party_id}/receipts/{receipt_id}/refund", response_model=CustomerAdvanceRefundOut, status_code=201)
+def refund_customer_advance(party_id: int, receipt_id: int, payload: CustomerAdvanceRefundCreate) -> CustomerAdvanceRefundOut:
+    with get_session() as session:
+        _sync_customer_debtor_parties(session)
+        party = session.get(Party, party_id)
+        receipt = session.get(PartyReceipt, receipt_id)
+        if not party or party.party_group != "SUNDRY_DEBTOR":
+            raise HTTPException(status_code=404, detail="Debtor party not found")
+        if not receipt or int(receipt.party_id) != int(party_id) or receipt.is_deleted:
+            raise HTTPException(status_code=404, detail="Active receipt not found")
+        book = str(payload.book or "").strip().upper()
+        if book not in {"CASH", "BANK"}:
+            raise HTTPException(status_code=400, detail="book must be CASH or BANK")
+        amount = _round2(payload.amount)
+        if amount <= 0:
+            raise HTTPException(status_code=400, detail="Refund amount must be greater than 0")
+        _sync_party_receipt_unallocated(session, receipt)
+        if amount > _as_float(receipt.unallocated_amount) + 0.0001:
+            raise HTTPException(status_code=400, detail=f"Refund exceeds available advance of {_round2(receipt.unallocated_amount):.2f}")
+        refund_ts = _normalize_payment_ts(payload.refund_date)
+        assert_financial_year_unlocked(session, refund_ts, context="Customer advance refund")
+        bank_mode = str(payload.bank_mode or "UPI").strip().upper() if book == "BANK" else None
+        if book == "BANK" and bank_mode not in {"UPI", "NEFT", "RTGS", "IMPS"}:
+            raise HTTPException(status_code=400, detail="bank_mode must be UPI, NEFT, RTGS, or IMPS")
+        note = _normalize_text(payload.note) or f"Advance return to {party.name} (receipt #{receipt.id})"
+        refund = CustomerAdvanceRefund(receipt_id=int(receipt.id), party_id=int(party.id), book=book, amount=amount, refunded_at=refund_ts, note=note, bank_mode=bank_mode)
+        session.add(refund)
+        session.flush()
+        if book == "CASH":
+            entry = CashbookEntry(created_at=refund_ts, entry_type="WITHDRAWAL", amount=amount, note=note, party_id=int(party.id))
+            session.add(entry); session.flush(); refund.cashbook_entry_id = int(entry.id)
+        else:
+            entry = BankbookEntry(created_at=refund_ts, entry_type="WITHDRAWAL", mode=bank_mode or "UPI", amount=amount, txn_charges=0, note=note, party_id=int(party.id))
+            session.add(entry); session.flush(); refund.bankbook_entry_id = int(entry.id)
+        session.add(refund)
+        _sync_party_receipt_unallocated(session, receipt)
+        post_customer_advance_refund_voucher(session, refund, party)
+        log_audit(session, entity_type="CUSTOMER_ADVANCE_REFUND", entity_id=int(refund.id), action="CREATE", note=f"Returned customer advance #{refund.id}", details={"party_id": party.id, "receipt_id": receipt.id, "book": book, "amount": amount})
+        session.commit(); session.refresh(refund)
+        return CustomerAdvanceRefundOut(**refund.model_dump())
+
+
+@router.delete("/{party_id}/advance-refunds/{refund_id}", response_model=CustomerAdvanceRefundOut)
+def delete_customer_advance_refund(party_id: int, refund_id: int) -> CustomerAdvanceRefundOut:
+    require_min_role("MANAGER", context="Customer advance refund delete")
+    with get_session() as session:
+        refund = session.get(CustomerAdvanceRefund, refund_id)
+        if not refund or int(refund.party_id) != int(party_id):
+            raise HTTPException(status_code=404, detail="Advance refund not found")
+        if refund.is_deleted:
+            return CustomerAdvanceRefundOut(**refund.model_dump())
+        assert_financial_year_unlocked(session, refund.refunded_at, context="Customer advance refund delete")
+        if refund.cashbook_entry_id:
+            session.exec(text("DELETE FROM cashbookentry WHERE id = :id").bindparams(id=int(refund.cashbook_entry_id)))
+        if refund.bankbook_entry_id:
+            session.exec(text("DELETE FROM bankbookentry WHERE id = :id").bindparams(id=int(refund.bankbook_entry_id)))
+        refund.is_deleted = True; refund.deleted_at = datetime.now().isoformat(timespec="seconds"); session.add(refund)
+        receipt = session.get(PartyReceipt, int(refund.receipt_id))
+        if receipt: _sync_party_receipt_unallocated(session, receipt)
+        mark_voucher_deleted(session, source_type="CUSTOMER_ADVANCE_REFUND", source_id=int(refund.id))
+        log_audit(session, entity_type="CUSTOMER_ADVANCE_REFUND", entity_id=int(refund.id), action="DELETE", note=f"Deleted customer advance return #{refund.id}", details={"party_id": party_id, "receipt_id": refund.receipt_id, "amount": refund.amount})
+        session.commit(); session.refresh(refund)
+        return CustomerAdvanceRefundOut(**refund.model_dump())
+
+
 @router.post("/{party_id}/receipts/{receipt_id}/apply", response_model=PartyReceiptOut)
 def apply_party_receipt(party_id: int, receipt_id: int, payload: PartyReceiptApply) -> PartyReceiptOut:
     with get_session() as session:
@@ -1116,7 +1190,10 @@ def update_party_receipt(party_id: int, receipt_id: int, payload: PartyReceiptUp
         receipt.cash_amount = cash
         receipt.online_amount = online
         receipt.total_amount = total_amount
-        receipt.unallocated_amount = _round2(max(0.0, total_amount - adjusted_total))
+        refunded_total = _round2(sum(_as_float(row.amount) for row in session.exec(select(CustomerAdvanceRefund).where(CustomerAdvanceRefund.receipt_id == receipt.id, CustomerAdvanceRefund.is_deleted == False)).all()))  # noqa: E712
+        if adjusted_total + refunded_total > total_amount + 0.0001:
+            raise HTTPException(status_code=400, detail="Receipt total cannot be less than its bill allocations and returned advance")
+        receipt.unallocated_amount = _round2(max(0.0, total_amount - adjusted_total - refunded_total))
         receipt.note = _normalize_text(payload.note)
         session.add(receipt)
 
@@ -1280,6 +1357,8 @@ def delete_party_receipt(party_id: int, receipt_id: int) -> PartyReceiptOut:
             raise HTTPException(status_code=404, detail="Receipt not found")
         if bool(getattr(receipt, "is_deleted", False)):
             return _party_receipt_out(session, receipt)
+        if session.exec(select(CustomerAdvanceRefund).where(CustomerAdvanceRefund.receipt_id == receipt.id, CustomerAdvanceRefund.is_deleted == False)).first():  # noqa: E712
+            raise HTTPException(status_code=409, detail="Delete the advance return before deleting this receipt")
 
         assert_financial_year_unlocked(session, receipt.received_at, context="Customer receipt delete")
         deleted_at = datetime.now().isoformat(timespec="seconds")

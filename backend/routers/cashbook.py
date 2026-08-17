@@ -16,6 +16,7 @@ from backend.models import (
     CashbookCreate,
     CashbookEntry,
     CashbookOut,
+    CustomerAdvanceRefund,
     ExchangeRecord,
     PartyReceipt,
     Party,
@@ -359,6 +360,8 @@ def update_entry(entry_id: int, payload: CashbookCreate):
         row = session.exec(select(CashbookEntry).where(CashbookEntry.id == entry_id)).first()
         if not row:
             raise HTTPException(status_code=404, detail="cashbook entry not found")
+        if session.exec(select(CustomerAdvanceRefund).where(CustomerAdvanceRefund.cashbook_entry_id == entry_id, CustomerAdvanceRefund.is_deleted == False)).first():  # noqa: E712
+            raise HTTPException(status_code=409, detail="This withdrawal is a customer advance return; delete it from Customer Ledger")
         managed_adjustment = session.exec(select(LoanAdjustment).where(LoanAdjustment.cashbook_entry_id == entry_id, LoanAdjustment.is_deleted == False)).first()  # noqa: E712
         if managed_adjustment:
             raise HTTPException(status_code=409, detail="This receipt is managed by a loan adjustment; edit it from Loans & Advances")

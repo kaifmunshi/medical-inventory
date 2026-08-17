@@ -999,6 +999,21 @@ class ReceiptBillAdjustment(SQLModel, table=True):
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"), index=True)
 
 
+class CustomerAdvanceRefund(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    receipt_id: int = Field(index=True)
+    party_id: int = Field(index=True)
+    book: str = Field(index=True)  # CASH | BANK
+    amount: float
+    refunded_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"), index=True)
+    note: Optional[str] = None
+    bank_mode: Optional[str] = None
+    cashbook_entry_id: Optional[int] = Field(default=None, index=True)
+    bankbook_entry_id: Optional[int] = Field(default=None, index=True)
+    is_deleted: bool = Field(default=False, index=True)
+    deleted_at: Optional[str] = None
+
+
 class LedgerGroup(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True)
@@ -1467,6 +1482,29 @@ class PartyReceiptApply(SQLModel):
     adjustments: List[ReceiptAdjustmentIn] = Field(default_factory=list)
 
 
+class CustomerAdvanceRefundCreate(SQLModel):
+    book: str
+    amount: float
+    refund_date: Optional[str] = None
+    note: Optional[str] = None
+    bank_mode: Optional[str] = None
+
+
+class CustomerAdvanceRefundOut(SQLModel):
+    id: int
+    receipt_id: int
+    party_id: int
+    book: str
+    amount: float
+    refunded_at: str
+    note: Optional[str] = None
+    bank_mode: Optional[str] = None
+    cashbook_entry_id: Optional[int] = None
+    bankbook_entry_id: Optional[int] = None
+    is_deleted: bool = False
+    deleted_at: Optional[str] = None
+
+
 class PartyReceiptUpdate(SQLModel):
     mode: str
     cash_amount: float = 0.0
@@ -1496,6 +1534,8 @@ class PartyReceiptOut(SQLModel):
     online_amount: float
     total_amount: float
     unallocated_amount: float
+    refunded_amount: float = 0.0
+    refunds: List[CustomerAdvanceRefundOut] = Field(default_factory=list)
     note: Optional[str] = None
     is_deleted: bool
     deleted_at: Optional[str] = None

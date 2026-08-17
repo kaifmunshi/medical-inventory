@@ -39,6 +39,7 @@ import {
   fetchPartyReceipts,
   fetchReceiptAdjustments,
   recoverPartyReceipt,
+  refundPartyAdvance,
   updatePartyReceipt,
 } from '../../services/parties'
 import { getBill, listPayments, receivePayment, undoBillPayment, type BillPaymentRow } from '../../services/billing'
@@ -349,6 +350,12 @@ export default function CustomerLedgerPage() {
   const [editReceiptTarget, setEditReceiptTarget] = useState<ReceiptHistoryRow | null>(null)
   const [recoverReceiptTarget, setRecoverReceiptTarget] = useState<ReceiptHistoryRow | null>(null)
   const [applyTarget, setApplyTarget] = useState<ReceiptHistoryRow | null>(null)
+  const [refundTarget, setRefundTarget] = useState<ReceiptHistoryRow | null>(null)
+  const [refundBook, setRefundBook] = useState<'CASH' | 'BANK'>('CASH')
+  const [refundAmount, setRefundAmount] = useState('')
+  const [refundDate, setRefundDate] = useState(today)
+  const [refundBankMode, setRefundBankMode] = useState<'UPI' | 'NEFT' | 'RTGS' | 'IMPS'>('UPI')
+  const [refundNote, setRefundNote] = useState('')
   const [advancePickerOpen, setAdvancePickerOpen] = useState(false)
   const [advanceTargetBillId, setAdvanceTargetBillId] = useState<number | null>(null)
   const [writeoffBill, setWriteoffBill] = useState<OpenBill | null>(null)
@@ -622,6 +629,18 @@ export default function CustomerLedgerPage() {
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to recover receipt'), 'error'),
   })
 
+  const refundAdvanceM = useMutation({
+    mutationFn: () => {
+      if (!selectedParty?.id || !refundTarget) throw new Error('Customer advance missing')
+      return refundPartyAdvance(Number(selectedParty.id), Number(refundTarget.receiptId), {
+        book: refundBook, amount: Number(refundAmount), refund_date: refundDate,
+        bank_mode: refundBook === 'BANK' ? refundBankMode : undefined, note: refundNote || undefined,
+      })
+    },
+    onSuccess: () => { toast.push('Customer advance returned', 'success'); setRefundTarget(null); refreshLedgerQueries() },
+    onError: (err:any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to return advance'), 'error'),
+  })
+
   const ledgerRows = ledgerQ.data || []
   const openBills = openBillsQ.data || []
   const returnRows = returnsQ.data || []
@@ -686,6 +705,7 @@ export default function CustomerLedgerPage() {
           : Number(receipt.unallocated_amount || 0) > 0
             ? 'Advance / on account'
             : '-'
+      const refunded = Number(receipt.refunded_amount || 0)
       return {
         id: `party-${receipt.id}`,
         receiptId: receipt.id,
@@ -698,7 +718,7 @@ export default function CustomerLedgerPage() {
         total: Number(receipt.total_amount || 0),
         adjusted,
         onAccount: Number(receipt.unallocated_amount || 0),
-        allocation,
+        allocation: refunded > 0 ? `${allocation} · Returned Rs ${money(refunded)}` : allocation,
         note: receipt.note || '',
         isDeleted: Boolean(receipt.is_deleted),
         deletedAt: receipt.deleted_at || null,
@@ -1821,10 +1841,24 @@ export default function CustomerLedgerPage() {
           <Menu anchorEl={receiptActionsAnchor} open={Boolean(receiptActionsAnchor)} onClose={()=>{setReceiptActionsAnchor(null);setReceiptActionsRow(null)}}>
             <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openEditReceipt(row)}}>Edit Receipt</MenuItem>
             <MenuItem disabled={!receiptActionsRow || receiptActionsRow.isDeleted || Number(receiptActionsRow.onAccount||0)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openApplyAdvance(row)}}>Adjust Advance</MenuItem>
+            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || Number(receiptActionsRow.onAccount||0)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row){setRefundTarget(row);setRefundAmount(String(row.onAccount));setRefundDate(today);setRefundBook('CASH');setRefundNote('')}}}>Return Advance</MenuItem>
             {receiptActionsRow?.isDeleted ? <MenuItem onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setRecoverReceiptTarget(row)}}>Recover Receipt</MenuItem> : <MenuItem sx={{color:'error.main'}} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setDeleteTarget(row)}}>Delete</MenuItem>}
           </Menu>
         </Box>
       </CollapsibleLedgerSection>
+
+      <Dialog open={Boolean(refundTarget)} onClose={()=>!refundAdvanceM.isPending&&setRefundTarget(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Return Customer Advance</DialogTitle>
+        <DialogContent dividers><Stack gap={2} sx={{pt:1}}>
+          <Alert severity="info">Available advance from receipt #{refundTarget?.receiptId}: Rs {money(refundTarget?.onAccount)}</Alert>
+          <TextField select label="Pay from" value={refundBook} onChange={e=>setRefundBook(e.target.value as 'CASH'|'BANK')}><MenuItem value="CASH">Cashbook</MenuItem><MenuItem value="BANK">Bankbook</MenuItem></TextField>
+          {refundBook==='BANK'?<TextField select label="Bank mode" value={refundBankMode} onChange={e=>setRefundBankMode(e.target.value as any)}>{['UPI','NEFT','RTGS','IMPS'].map(v=><MenuItem key={v} value={v}>{v}</MenuItem>)}</TextField>:null}
+          <TextField label="Amount" type="number" value={refundAmount} onChange={e=>setRefundAmount(normalizeAmountInput(e.target.value))} inputProps={{min:0.01,max:Number(refundTarget?.onAccount||0),step:'0.01'}} />
+          <TextField label="Return date" type="date" value={refundDate} onChange={e=>setRefundDate(e.target.value)} InputLabelProps={{shrink:true}} />
+          <TextField label="Note" value={refundNote} onChange={e=>setRefundNote(e.target.value)} multiline minRows={2} />
+        </Stack></DialogContent>
+        <DialogActions><Button onClick={()=>setRefundTarget(null)} disabled={refundAdvanceM.isPending}>Cancel</Button><Button variant="contained" color="warning" disabled={refundAdvanceM.isPending||Number(refundAmount)<=0||Number(refundAmount)>Number(refundTarget?.onAccount||0)} onClick={()=>refundAdvanceM.mutate()}>{refundAdvanceM.isPending?'Returning…':'Return Advance'}</Button></DialogActions>
+      </Dialog>
 
       <Dialog
         open={receiptAdvanceConfirmOpen}

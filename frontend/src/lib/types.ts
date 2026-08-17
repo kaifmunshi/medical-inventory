@@ -432,6 +432,20 @@ export interface PartyReceipt {
   is_deleted: boolean
   deleted_at?: string | null
   adjustments?: ReceiptBillAdjustment[]
+  refunded_amount?: number
+  refunds?: CustomerAdvanceRefund[]
+}
+
+export interface CustomerAdvanceRefund {
+  id: ID
+  receipt_id: ID
+  party_id: ID
+  book: 'CASH' | 'BANK'
+  amount: number
+  refunded_at: string
+  note?: string | null
+  bank_mode?: string | null
+  is_deleted: boolean
 }
 
 export interface ReceiptBillAdjustment {

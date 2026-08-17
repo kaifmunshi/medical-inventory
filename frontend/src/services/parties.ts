@@ -105,6 +105,17 @@ export async function applyPartyReceipt(
   return res.data
 }
 
+export async function refundPartyAdvance(partyId: number, receiptId: number, payload: {
+  book: 'CASH' | 'BANK'
+  amount: number
+  refund_date?: string
+  note?: string
+  bank_mode?: 'UPI' | 'NEFT' | 'RTGS' | 'IMPS'
+}) {
+  const res = await api.post(`/parties/${partyId}/receipts/${receiptId}/refund`, payload)
+  return res.data
+}
+
 export async function updatePartyReceipt(
   partyId: number,
   receiptId: number,

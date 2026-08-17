@@ -205,6 +205,21 @@ def _sync_party_receipt_unallocated(session, receipt: PartyReceipt) -> None:
     session.add(receipt)
 
 
+def _party_net_advance(session, party: Party) -> float:
+    customer_name = _party_customer_name(session, party)
+    outstanding = 0.0
+    for bill in session.exec(select(Bill).where(Bill.is_deleted == False).where(_bill_matches_party_expr(party, customer_name))).all():  # noqa: E712
+        outstanding += max(0.0, _as_float(bill.total_amount) - _as_float(bill.paid_amount) - _as_float(getattr(bill, "writeoff_amount", 0)))
+    advances = 0.0
+    for row in session.exec(select(PartyReceipt).where(PartyReceipt.party_id == int(party.id), PartyReceipt.is_deleted == False)).all():  # noqa: E712
+        _sync_party_receipt_unallocated(session, row)
+        advances += _as_float(row.unallocated_amount)
+    opening = _as_float(party.opening_balance)
+    if str(party.opening_balance_type or "DR").upper() == "CR":
+        opening = -opening
+    return _round2(max(0.0, advances - opening - outstanding))
+
+
 def _receipt_remaining_channels(session, receipt: PartyReceipt) -> tuple[float, float]:
     used_cash = 0.0
     used_online = 0.0
@@ -948,8 +963,9 @@ def refund_customer_advance(party_id: int, receipt_id: int, payload: CustomerAdv
         if amount <= 0:
             raise HTTPException(status_code=400, detail="Refund amount must be greater than 0")
         _sync_party_receipt_unallocated(session, receipt)
-        if amount > _as_float(receipt.unallocated_amount) + 0.0001:
-            raise HTTPException(status_code=400, detail=f"Refund exceeds available advance of {_round2(receipt.unallocated_amount):.2f}")
+        refundable = _round2(min(_as_float(receipt.unallocated_amount), _party_net_advance(session, party)))
+        if amount > refundable + 0.0001:
+            raise HTTPException(status_code=400, detail=f"Refund exceeds customer's actual available advance of {refundable:.2f}")
         refund_ts = _normalize_payment_ts(payload.refund_date)
         assert_financial_year_unlocked(session, refund_ts, context="Customer advance refund")
         bank_mode = str(payload.bank_mode or "UPI").strip().upper() if book == "BANK" else None

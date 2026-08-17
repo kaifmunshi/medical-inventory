@@ -1362,7 +1362,7 @@ export default function CustomerLedgerPage() {
             >
               {[
                 { label: 'Outstanding', value: `Rs ${money(totalOutstanding)}`, color: totalOutstanding > 0 ? 'error.main' : 'success.main' },
-                { label: 'Advance', value: `Rs ${money(receiptHistoryOnAccountTotal)}`, color: receiptHistoryOnAccountTotal > 0 ? 'info.main' : 'text.primary' },
+                { label: 'Advance', value: `Rs ${money(actualRefundableAdvance)}`, color: actualRefundableAdvance > 0 ? 'info.main' : 'text.primary' },
                 { label: 'Receipts', value: `Rs ${money(receiptHistoryTotal)}`, color: 'success.main' },
                 { label: 'Returns', value: `Rs ${money(totalReturnCredit + totalReturnRefund)}`, color: 'warning.main' },
                 { label: 'Open Bills', value: String(openBills.length), color: 'primary.main' },
@@ -1758,7 +1758,7 @@ export default function CustomerLedgerPage() {
             <Chip size="small" variant="outlined" label={`${activeReceiptHistory.length} receipts`} sx={{ fontWeight: 800 }} />
             {activeAdvanceReturns.length ? <Chip size="small" color="warning" variant="outlined" label={`${activeAdvanceReturns.length} returns · Rs ${money(-activeAdvanceReturns.reduce((sum,row)=>sum+row.total,0))}`} sx={{ fontWeight: 800 }} /> : null}
             <Chip size="small" color="success" variant="outlined" label={`Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
-            <Chip size="small" color="info" variant="outlined" label={`Advance Rs ${money(receiptHistoryOnAccountTotal)}`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color="info" variant="outlined" label={`Advance Rs ${money(actualRefundableAdvance)}`} sx={{ fontWeight: 800 }} />
           </>
         }
       >

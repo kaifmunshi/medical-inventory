@@ -113,3 +113,19 @@ body {
 .table.credit-bills-table td.credit-bill-actions-cell .MuiButton-root {
   min-width: 76px;
 }
+
+/* Product rows have three labelled actions. Reserve their width so fixed table
+   columns cannot squeeze the buttons into one another on narrower screens. */
+.table.products-table {
+  width: 100% !important;
+  min-width: 1120px !important;
+  max-width: none;
+}
+
+.table.products-table th:last-child,
+.table.products-table td.product-actions-cell {
+  width: 230px;
+  min-width: 230px !important;
+  overflow: visible;
+  text-overflow: clip;
+}

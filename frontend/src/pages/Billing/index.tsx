@@ -238,6 +238,7 @@ export default function Billing() {
   const [billDateTime, setBillDateTime] = useState<string>(nowLocalDateInput())
   const [finalAmount, setFinalAmount] = useState<number>(0)
   const [finalManuallyEdited, setFinalManuallyEdited] = useState(false)
+  const manualFinalRowSyncRef = useRef(false)
   const [paymentAutoFilledOnce, setPaymentAutoFilledOnce] = useState(false)
   const [paymentManuallyEdited, setPaymentManuallyEdited] = useState(false)
   const [lastCreatedBill, setLastCreatedBill] = useState<Bill | null>(null)
@@ -497,6 +498,14 @@ export default function Billing() {
   // manual flag is only meant to protect a final-amount draft while it is being
   // typed; it must not leave later cart changes pinned to an old amount.
   useEffect(() => {
+    // Repricing rows is part of committing a manual final amount. Do not treat
+    // that internally-triggered row update as a new cart edit: some quantity
+    // combinations cannot represent every paise using two-decimal unit prices,
+    // while the submitted final amount and backend line allocation still can.
+    if (manualFinalRowSyncRef.current) {
+      manualFinalRowSyncRef.current = false
+      return
+    }
     setFinalManuallyEdited(false)
   }, [rows])
 
@@ -539,22 +548,37 @@ export default function Billing() {
         }
       })
 
-      const lastIdx = active[active.length - 1].idx
-      const lastRow = next[lastIdx]
-      const lastQty = Math.max(1, Math.floor(Number(lastRow.quantity || 0)))
       const residual = round2(safeTarget - running)
       if (Math.abs(residual) > 0.0001) {
-        const adjusted = round2(Math.max(0, Number(lastRow.custom_unit_price || 0) + residual / lastQty))
-        const mrp = Number(lastRow.mrp || 0)
-        const pct = mrp > 0 ? ((mrp - adjusted) / mrp) * 100 : 0
+        // A two-decimal unit price changes a line total in increments of its
+        // quantity (for example, a qty-2 row can only move by ₹0.02). Pick a
+        // row that can absorb the residual exactly so a requested whole-rupee
+        // final does not fall back by one paise after rows are recomputed.
+        const adjustmentRow = active
+          .map(({ idx }) => {
+            const row = next[idx]
+            const qty = Math.max(1, Math.floor(Number(row.quantity || 0)))
+            const unitDelta = round2(residual / qty)
+            const adjustedUnit = round2(Number(row.custom_unit_price || 0) + unitDelta)
+            const exact = Math.abs(round2(unitDelta * qty) - residual) < 0.0001
+            return { idx, row, qty, adjustedUnit, exact }
+          })
+          .filter(({ adjustedUnit }) => adjustedUnit >= 0)
+          .sort((a, b) => Number(b.exact) - Number(a.exact) || a.qty - b.qty)[0]
+
+        if (!adjustmentRow) return normalizeRows(next)
+        const { idx: adjustmentIdx, row: adjustmentBaseRow, adjustedUnit } = adjustmentRow
+        const mrp = Number(adjustmentBaseRow.mrp || 0)
+        const pct = mrp > 0 ? ((mrp - adjustedUnit) / mrp) * 100 : 0
         const safePct = Math.min(100, Math.max(0, pct))
-        next[lastIdx] = {
-          ...lastRow,
-          custom_unit_price: adjusted,
+        next[adjustmentIdx] = {
+          ...adjustmentBaseRow,
+          custom_unit_price: adjustedUnit,
           item_discount_percent: round2(safePct),
         }
       }
 
+      manualFinalRowSyncRef.current = true
       return normalizeRows(next)
     })
   }

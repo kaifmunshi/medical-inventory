@@ -32,6 +32,7 @@ import {
 } from '../../lib/productMasterEvents'
 import {
   findSimilarProductName,
+  productNameSimilarity,
   similarProductWarningMessage,
 } from '../../lib/productSimilarity'
 import {
@@ -42,7 +43,6 @@ import {
   fetchAllProducts,
   fetchBrands,
   fetchCategories,
-  fetchProducts,
   fetchProductsPage,
   mergeProduct,
   type ProductPage,
@@ -89,7 +89,7 @@ export default function ProductsPage() {
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false)
   const [mergeSource, setMergeSource] = useState<Product | null>(null)
   const [mergeTarget, setMergeTarget] = useState<Product | null>(null)
-  const [mergeSearch, setMergeSearch] = useState('')
+  const [mergeOptionsOpen, setMergeOptionsOpen] = useState(false)
   const [newBrandName, setNewBrandName] = useState('')
   const [newCategoryName, setNewCategoryName] = useState('')
   const [showScrollJumps, setShowScrollJumps] = useState(false)
@@ -171,13 +171,11 @@ export default function ProductsPage() {
   })
 
   const mergeOptionsQ = useQuery<Product[], Error>({
-    queryKey: ['product-merge-options', mergeSource?.id, mergeSearch],
-    queryFn: () =>
-      fetchProducts({
-        q: mergeSearch.trim() || mergeSource?.name || undefined,
-        active_only: false,
-        limit: 50,
-      }),
+    queryKey: ['product-merge-options'],
+    // Load every product before MUI applies its client-side text filter. Asking
+    // the API for the source's exact name hid legitimate near-duplicates such
+    // as "Supari Pak" and "Suparipak" from each other's merge picker.
+    queryFn: () => fetchAllProducts({ active_only: false }),
     enabled: Boolean(mergeSource),
   })
 
@@ -244,7 +242,6 @@ export default function ProductsPage() {
       )
       setMergeSource(null)
       setMergeTarget(null)
-      setMergeSearch('')
       queryClient.invalidateQueries({ queryKey: ['products-master'] })
       queryClient.invalidateQueries({ queryKey: ['product-merge-options'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-products-master'] })
@@ -296,8 +293,13 @@ export default function ProductsPage() {
   const pageEnd = rows.length > 0 ? page * rowsPerPage + rows.length : 0
   const mergeOptions = useMemo(() => {
     const sourceId = Number(mergeSource?.id || 0)
-    return (mergeOptionsQ.data || []).filter((product) => Number(product.id) !== sourceId)
-  }, [mergeOptionsQ.data, mergeSource?.id])
+    const sourceName = mergeSource?.name || ''
+    return (mergeOptionsQ.data || [])
+      .filter((product) => Number(product.id) !== sourceId)
+      .sort((left, right) => (
+        productNameSimilarity(sourceName, right.name) - productNameSimilarity(sourceName, left.name)
+      ))
+  }, [mergeOptionsQ.data, mergeSource?.id, mergeSource?.name])
 
   useEffect(() => {
     if (productsQ.isFetching) return
@@ -484,13 +486,13 @@ export default function ProductsPage() {
   function openMerge(row: Product) {
     setMergeSource(row)
     setMergeTarget(null)
-    setMergeSearch(row.name)
+    setMergeOptionsOpen(false)
   }
 
   function closeMerge() {
     setMergeSource(null)
     setMergeTarget(null)
-    setMergeSearch('')
+    setMergeOptionsOpen(false)
   }
 
   function submitMerge() {
@@ -603,7 +605,7 @@ export default function ProductsPage() {
         </Stack>
         {renderPager('top')}
         <Box sx={{ overflowX: 'auto' }}>
-          <table className="table">
+          <table className="table products-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -634,8 +636,8 @@ export default function ProductsPage() {
                   <td>{row.default_rack_number || 0}</td>
                   <td>{Number(row.printed_price || 0).toFixed(2)}</td>
                   <td>{row.is_active ? 'Active' : 'Deleted'}</td>
-                  <td>
-                    <Stack direction="row" gap={1}>
+                  <td className="product-actions-cell">
+                    <Stack direction="row" gap={0.5}>
                       <Button size="small" onClick={() => openEdit(row)}>Edit</Button>
                       <Button
                         size="small"
@@ -806,7 +808,13 @@ export default function ProductsPage() {
 
       <Dialog open={Boolean(mergeSource)} onClose={closeMerge} fullWidth maxWidth="sm">
         <DialogTitle>Merge Duplicate Product</DialogTitle>
-        <DialogContent dividers>
+        <DialogContent
+          dividers
+          sx={{
+            minHeight: mergeOptionsOpen ? { xs: 320, sm: 344 } : undefined,
+            transition: (theme) => theme.transitions.create('min-height', { duration: theme.transitions.duration.shorter }),
+          }}
+        >
           <Stack gap={2} sx={{ mt: 1 }}>
             <TextField
               label="Duplicate"
@@ -818,10 +826,16 @@ export default function ProductsPage() {
               options={mergeOptions}
               value={mergeTarget}
               loading={mergeOptionsQ.isFetching}
+              open={mergeOptionsOpen}
+              onOpen={() => setMergeOptionsOpen(true)}
+              onClose={() => setMergeOptionsOpen(false)}
               onChange={(_, value) => setMergeTarget(value)}
-              onInputChange={(_, value) => setMergeSearch(value)}
-              getOptionLabel={(option) => `#${option.id} • ${option.name}${option.brand ? ` • ${option.brand}` : ''}${option.is_active ? '' : ' • deleted'}`}
+              getOptionLabel={(option) => {
+                const category = categoryName(option.category_id)
+                return `#${option.id} • ${option.name}${option.brand ? ` • ${option.brand}` : ''} • ${category === '-' ? 'No category' : category}${option.is_active ? '' : ' • deleted'}`
+              }}
               isOptionEqualToValue={(option, value) => Number(option.id) === Number(value.id)}
+              ListboxProps={{ style: { maxHeight: 176 } }}
               renderInput={(params) => <TextField {...params} label="Merge Into" autoFocus />}
             />
           </Stack>

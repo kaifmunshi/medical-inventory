@@ -318,6 +318,7 @@ export interface PurchaseReturn {
   purchase_id?: ID | null
   settlement_purchase_id?: ID | null
   party_id: ID
+  transaction_type: 'PURCHASE_RETURN' | 'TRADE_IN'
   return_number: string
   return_date: string
   notes?: string | null

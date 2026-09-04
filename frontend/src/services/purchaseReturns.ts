@@ -5,6 +5,7 @@ export interface PurchaseReturnCreatePayload {
   purchase_id?: number
   settlement_purchase_id?: number
   party_id?: number
+  transaction_type?: 'PURCHASE_RETURN' | 'TRADE_IN'
   return_date: string
   return_number?: string
   notes?: string

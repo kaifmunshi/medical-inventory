@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import and_, func, or_
 from sqlmodel import select
 
-from backend.accounting import mark_voucher_deleted, post_purchase_return_voucher
+from backend.accounting import mark_voucher_deleted, post_purchase_return_voucher, post_trade_in_voucher
 from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.purchase_return_settlement import recalculate_purchase_return_settlements
@@ -37,6 +37,13 @@ def now_ts() -> str:
 
 def round2(value: float) -> float:
     return float(f"{float(value or 0):.2f}")
+
+
+def _post_outgoing_voucher(session, row: PurchaseReturn, supplier: Party) -> None:
+    if str(row.transaction_type or "PURCHASE_RETURN").upper() == "TRADE_IN":
+        post_trade_in_voucher(session, row, supplier)
+    else:
+        post_purchase_return_voucher(session, row, supplier)
 
 
 def _allocation_clause(purchase_id: int):
@@ -89,6 +96,7 @@ def _snapshot(session, row: PurchaseReturn, items: Optional[List[PurchaseReturnI
             "purchase_id": int(row.purchase_id or 0) or None,
             "settlement_purchase_id": int(row.settlement_purchase_id or 0) or None,
             "party_id": int(row.party_id),
+            "transaction_type": str(row.transaction_type or "PURCHASE_RETURN"),
             "return_number": row.return_number,
             "return_date": row.return_date,
             "notes": row.notes,
@@ -172,7 +180,7 @@ def _sync_purchase_return_settlements(session, purchase: Purchase, supplier: Par
         if item.is_deleted or round2(item.total_amount) <= 0:
             mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(item.id))
         else:
-            post_purchase_return_voucher(session, item, supplier)
+            _post_outgoing_voucher(session, item, supplier)
     _refresh_purchase_payment_status(session, purchase)
 
 
@@ -239,12 +247,20 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
         if not payload.items:
             raise HTTPException(status_code=400, detail="Select at least one item to return")
 
+        transaction_type = str(payload.transaction_type or "PURCHASE_RETURN").strip().upper()
+        if transaction_type not in {"PURCHASE_RETURN", "TRADE_IN"}:
+            raise HTTPException(status_code=400, detail="Transaction type must be PURCHASE_RETURN or TRADE_IN")
+        if transaction_type == "TRADE_IN" and purchase:
+            raise HTTPException(status_code=400, detail="Trade-ins must use No Invoice / Legacy Stock")
+
         party_id = int(purchase.party_id) if purchase else int(payload.party_id or 0)
         if party_id <= 0:
             raise HTTPException(status_code=400, detail="Supplier is required for a no-invoice purchase return")
         supplier = _supplier(session, party_id)
         settlement_purchase_id = int(payload.settlement_purchase_id or 0)
         settlement_purchase = session.get(Purchase, settlement_purchase_id) if settlement_purchase_id > 0 else None
+        if transaction_type == "TRADE_IN" and not settlement_purchase:
+            raise HTTPException(status_code=400, detail="A trade-in must be linked to the purchase received in exchange")
         if settlement_purchase_id > 0:
             if not settlement_purchase or settlement_purchase.is_deleted:
                 raise HTTPException(status_code=400, detail="The purchase receiving this return credit is not active")
@@ -264,6 +280,7 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             purchase_id=int(purchase.id) if purchase else 0,
             settlement_purchase_id=settlement_purchase_id,
             party_id=party_id,
+            transaction_type=transaction_type,
             return_number=requested_number or "PENDING",
             return_date=return_date,
             notes=(str(payload.notes).strip() or None) if payload.notes else None,
@@ -278,7 +295,7 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
         session.add(row)
         session.flush()
         if not requested_number:
-            row.return_number = f"PR-{int(row.id):06d}"
+            row.return_number = f"{'TI' if transaction_type == 'TRADE_IN' else 'PR'}-{int(row.id):06d}"
 
         seen = set()
         taxable_total = 0.0
@@ -377,13 +394,13 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
                     item_id=int(inventory_item.id),
                     ts=movement_ts,
                     delta=-quantity,
-                    reason="PURCHASE_RETURN",
+                    reason="TRADE_IN" if transaction_type == "TRADE_IN" else "PURCHASE_RETURN",
                     ref_type="PURCHASE_RETURN",
                     ref_id=int(row.id),
                     note=(
                         f"Purchase return {row.return_number} against {purchase.invoice_number}"
                         if purchase
-                        else f"No-invoice purchase return {row.return_number} to {supplier.name}"
+                        else (f"Trade-in {row.return_number} supplied to {supplier.name}" if transaction_type == "TRADE_IN" else f"No-invoice purchase return {row.return_number} to {supplier.name}")
                     ),
                     actor="SYSTEM",
                 )
@@ -416,7 +433,7 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
         if purchase:
             _sync_purchase_return_settlements(session, purchase, supplier)
         elif total > 0:
-            post_purchase_return_voucher(session, row, supplier)
+            _post_outgoing_voucher(session, row, supplier)
         if settlement_purchase and (not purchase or int(settlement_purchase.id) != int(purchase.id)):
             _sync_purchase_return_settlements(session, settlement_purchase, supplier)
         session.flush()
@@ -635,7 +652,7 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
         if purchase:
             _sync_purchase_return_settlements(session, purchase, supplier)
         elif total > 0:
-            post_purchase_return_voucher(session, row, supplier)
+            _post_outgoing_voucher(session, row, supplier)
         else:
             mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(row.id))
         if settlement_purchase and (not purchase or int(settlement_purchase.id) != int(purchase.id)):

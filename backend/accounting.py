@@ -43,6 +43,7 @@ SYSTEM_GROUPS = {
     "SUNDRY_DEBTORS": ("Sundry Debtors", "ASSET"),
     "SUNDRY_CREDITORS": ("Sundry Creditors", "LIABILITY"),
     "DUTIES_TAXES": ("Duties & Taxes", "ASSET"),
+    "GST_PAYABLE": ("GST Payable", "LIABILITY"),
     "SALES": ("Sales Accounts", "INCOME"),
     "PURCHASES": ("Purchase Accounts", "EXPENSE"),
     "INDIRECT_INCOME": ("Indirect Incomes", "INCOME"),
@@ -60,6 +61,7 @@ SYSTEM_LEDGERS = {
     "PURCHASE_ACCOUNT": ("Purchase Account", "PURCHASES"),
     "PURCHASE_RETURN_ACCOUNT": ("Purchase Returns", "PURCHASES"),
     "INPUT_GST": ("Input GST", "DUTIES_TAXES"),
+    "OUTPUT_GST": ("Output GST", "GST_PAYABLE"),
     "SALES_RECEIVABLE_CONTROL": ("Sales Receivable Control", "SUNDRY_DEBTORS"),
     "CUSTOMER_WRITE_OFF": ("Customer Write-off", "INDIRECT_EXPENSE"),
     "PURCHASE_WRITE_OFF": ("Purchase Write-off", "INDIRECT_INCOME"),
@@ -387,6 +389,32 @@ def post_purchase_return_voucher(session, purchase_return: PurchaseReturn, party
     )
 
 
+def post_trade_in_voucher(session, trade_in: PurchaseReturn, party: Party) -> Voucher:
+    """Post stock supplied to a vendor as non-cash purchase consideration."""
+    ledgers = ensure_accounting_setup(session)
+    creditor_ledger = ensure_party_ledger(session, party)
+    total = round2(trade_in.total_amount)
+    gst = round2(trade_in.gst_amount)
+    sale_value = round2(total - gst)
+    lines: List[PostingLine] = [
+        {"ledger_id": int(creditor_ledger.id), "entry_type": "DR", "amount": total, "narration": "Trade-in consideration against purchase"},
+        {"ledger_id": int(ledgers["SALES_ACCOUNT"].id), "entry_type": "CR", "amount": sale_value, "narration": "Legacy stock supplied in exchange"},
+    ]
+    if gst > 0:
+        lines.append({"ledger_id": int(ledgers["OUTPUT_GST"].id), "entry_type": "CR", "amount": gst, "narration": "Output GST on trade-in"})
+    return upsert_voucher(
+        session,
+        voucher_type="TRADE_IN",
+        source_type="PURCHASE_RETURN",
+        source_id=int(trade_in.id),
+        voucher_date=str(trade_in.return_date or "")[:10],
+        voucher_no=trade_in.return_number,
+        narration=trade_in.notes or f"Trade-in {trade_in.return_number}",
+        total_amount=total,
+        lines=lines,
+    )
+
+
 def post_purchase_payment_voucher(
     session,
     purchase: Optional[Purchase],
@@ -693,7 +721,10 @@ def sync_existing_vouchers(session) -> None:
         party = party_map.get(int(purchase_return.party_id or 0))
         if not party or round2(purchase_return.total_amount) <= 0:
             continue
-        post_purchase_return_voucher(session, purchase_return, party)
+        if str(getattr(purchase_return, "transaction_type", "PURCHASE_RETURN") or "PURCHASE_RETURN").upper() == "TRADE_IN":
+            post_trade_in_voucher(session, purchase_return, party)
+        else:
+            post_purchase_return_voucher(session, purchase_return, party)
         if bool(getattr(purchase_return, "is_deleted", False)):
             mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(purchase_return.id or 0))
 

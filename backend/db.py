@@ -2808,6 +2808,9 @@ def migrate_db():
         """))
         purchase_return_cols = session.exec(text("PRAGMA table_info(purchasereturn)")).all()
         purchase_return_col_names = {c[1] for c in purchase_return_cols}
+        if "transaction_type" not in purchase_return_col_names:
+            session.exec(text("ALTER TABLE purchasereturn ADD COLUMN transaction_type TEXT NOT NULL DEFAULT 'PURCHASE_RETURN'"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasereturn_transaction_type ON purchasereturn (transaction_type)"))
         if "taxable_amount" not in purchase_return_col_names:
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN taxable_amount REAL NOT NULL DEFAULT 0"))
         if "gst_amount" not in purchase_return_col_names:

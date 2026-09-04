@@ -364,6 +364,7 @@ export default function PurchaseReturnsPage() {
       payload: {
       purchase_id: sourceMode === 'invoice' ? Number(purchase?.id) : undefined,
       party_id: sourceMode === 'legacy' ? Number(supplier.id) : undefined,
+      transaction_type: sourceMode === 'legacy' && includeIncoming ? 'TRADE_IN' : 'PURCHASE_RETURN',
       return_date: returnDate,
       return_number: returnNumber.trim() || undefined,
       notes: notes.trim() || undefined,
@@ -534,7 +535,7 @@ export default function PurchaseReturnsPage() {
                 disabled={Boolean(editingReturn)}
                 onClick={() => { setSourceMode('legacy'); setPurchase(null); setLines({}) }}
               >
-                No Invoice / Legacy Stock
+                Legacy Stock / Trade-in
               </Button>
             </Stack>
             <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
@@ -564,7 +565,7 @@ export default function PurchaseReturnsPage() {
             {(purchase || sourceMode === 'legacy') && (
               <>
                 <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-                  <TextField label="Supplier credit note / return no." value={returnNumber} onChange={(event) => setReturnNumber(event.target.value)} helperText="Optional; generated automatically when blank" sx={{ flex: 1 }} />
+                  <TextField label={sourceMode === 'legacy' ? 'Trade-in / outward reference no.' : 'Supplier credit note / return no.'} value={returnNumber} onChange={(event) => setReturnNumber(event.target.value)} helperText="Optional; generated automatically when blank" sx={{ flex: 1 }} />
                   <TextField label="Notes / reason" value={notes} onChange={(event) => setNotes(event.target.value)} sx={{ flex: 2 }} />
                 </Stack>
                 <Divider />
@@ -649,7 +650,7 @@ export default function PurchaseReturnsPage() {
                           </Typography>
                         </Box>
                         <TextField
-                          label="Return qty"
+                          label="Trade-in qty"
                           type="number"
                           value={line.quantity}
                           inputProps={{ min: 0, max: line.lot.sealed_qty, step: 1 }}
@@ -657,7 +658,7 @@ export default function PurchaseReturnsPage() {
                           sx={{ width: 130 }}
                         />
                         <TextField
-                          label="Credit rate"
+                          label="Trade-in rate"
                           type="number"
                           value={line.unitCost}
                           inputProps={{ min: 0, step: 0.01 }}
@@ -687,7 +688,7 @@ export default function PurchaseReturnsPage() {
                         <Box>
                           <Typography fontWeight={800}>Supplier replacement / additional purchase</Typography>
                           <Typography variant="body2" color="text.secondary">
-                            Receive the same products with new expiry dates and/or add other products in this exchange.
+                            Receive products in exchange. Legacy stock supplied to this supplier is posted as a trade-in sale and contra settlement.
                           </Typography>
                         </Box>
                         <Button
@@ -767,7 +768,7 @@ export default function PurchaseReturnsPage() {
                 )}
                 {includeIncoming && !editingReturn && (
                   <Alert severity={exchangeDifference > 0 ? 'warning' : 'success'}>
-                    Return credit: Rs {money(returnTotal)} | Incoming products: Rs {money(incomingTotal)} |{' '}
+                    {sourceMode === 'legacy' ? 'Trade-in value' : 'Return credit'}: Rs {money(returnTotal)} | Incoming products: Rs {money(incomingTotal)} |{' '}
                     <strong>{exchangeDifference > 0 ? `Net payable to supplier: Rs ${money(exchangeDifference)}` : exchangeDifference < 0 ? `Net supplier credit/refund: Rs ${money(Math.abs(exchangeDifference))}` : 'Fully even exchange'}</strong>
                   </Alert>
                 )}
@@ -781,9 +782,9 @@ export default function PurchaseReturnsPage() {
                     onChange={(event) => setRoundingAdjustment(event.target.value)}
                     sx={{ width: 160 }}
                   />
-                  <Typography variant="h6">Credit total: {money(returnTotal)}</Typography>
+                  <Typography variant="h6">{sourceMode === 'legacy' ? 'Trade-in total' : 'Credit total'}: {money(returnTotal)}</Typography>
                   <Button variant="contained" disabled={!canManage || saveM.isPending || activeLines.length === 0} onClick={submit}>
-                    {editingReturn ? 'Save Return Changes' : includeIncoming ? 'Save Return + Incoming Purchase' : 'Create Purchase Return'}
+                    {editingReturn ? 'Save Changes' : includeIncoming && sourceMode === 'legacy' ? 'Save Trade-in + Incoming Purchase' : includeIncoming ? 'Save Return + Incoming Purchase' : 'Create Purchase Return'}
                   </Button>
                 </Stack>
               </>
@@ -802,6 +803,7 @@ export default function PurchaseReturnsPage() {
                     <Box sx={{ flex: 1 }}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <Typography fontWeight={800}>{row.return_number}</Typography>
+                        {row.transaction_type === 'TRADE_IN' && <Chip size="small" color="info" label="Trade-in" />}
                         <Chip size="small" color={row.is_deleted ? 'default' : 'secondary'} label={row.is_deleted ? 'Cancelled' : 'Posted'} />
                       </Stack>
                       <Typography variant="body2" color="text.secondary">

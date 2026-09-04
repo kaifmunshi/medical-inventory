@@ -459,6 +459,33 @@ def _apply_default_visibility(stmt):
     return stmt.where(or_(visible_row, ~same_group_visible_exists))
 
 
+def _dashboard_visible_rows_statement():
+    """Select the small dashboard projection without a per-row correlated lookup."""
+    name_key = func.lower(func.trim(func.coalesce(Item.name, "")))
+    brand_key = func.lower(func.trim(func.coalesce(Item.brand, "")))
+    active_groups = (
+        select(name_key.label("name_key"), brand_key.label("brand_key"))
+        .where(or_(Item.is_archived == False, Item.is_archived.is_(None)))  # noqa: E712
+        .group_by(name_key, brand_key)
+        .cte("active_inventory_groups")
+    )
+
+    item_is_active = or_(Item.is_archived == False, Item.is_archived.is_(None))  # noqa: E712
+    return (
+        select(Item.name, Item.brand, Item.stock, Item.expiry_date)
+        .outerjoin(
+            active_groups,
+            and_(
+                active_groups.c.name_key == name_key,
+                active_groups.c.brand_key == brand_key,
+            ),
+        )
+        # Keep active batches. For a fully archived product group, preserve all its
+        # archived batches so sold-out product types remain represented.
+        .where(or_(item_is_active, active_groups.c.name_key.is_(None)))
+    )
+
+
 def _attach_last_incoming(session, items: List[Item]) -> None:
     item_ids = [int(item.id) for item in items if getattr(item, "id", None) is not None]
     if not item_ids:
@@ -1146,7 +1173,7 @@ def dashboard_stats(
     expiry_window_days: int = Query(60, ge=0),
 ) -> InventoryDashboardStatsOut:
     with get_session() as session:
-        rows = session.exec(_apply_default_visibility(select(Item))).all()
+        rows = session.exec(_dashboard_visible_rows_statement()).all()
 
         groups: Dict[str, Dict[str, Any]] = {}
         total_qty = 0
@@ -1154,20 +1181,20 @@ def dashboard_stats(
         expiring_soon_count = 0
         expired_count = 0
 
-        for item in rows:
-            name = str(getattr(item, "name", "") or "").strip()
-            brand = str(getattr(item, "brand", "") or "").strip()
+        for name_raw, brand_raw, stock_raw, expiry_value in rows:
+            name = str(name_raw or "").strip()
+            brand = str(brand_raw or "").strip()
             if not name:
                 continue
 
-            stock = int(getattr(item, "stock", 0) or 0)
+            stock = int(stock_raw or 0)
             total_qty += stock
             key = f"{name.lower()}|{brand.lower()}"
             if key not in groups:
                 groups[key] = {"stock": 0}
             groups[key]["stock"] = int(groups[key]["stock"] or 0) + stock
 
-            expiry_raw = str(getattr(item, "expiry_date", "") or "").strip()[:10]
+            expiry_raw = str(expiry_value or "").strip()[:10]
             if expiry_raw:
                 try:
                     expiry = date.fromisoformat(expiry_raw)

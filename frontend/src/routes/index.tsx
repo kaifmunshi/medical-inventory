@@ -1,38 +1,40 @@
 // frontend/src/routes/index.tsx
-import type { ReactNode } from 'react'
+import { lazy, Suspense, type ReactNode } from 'react'
 import { Route, Routes, Navigate, useLocation } from 'react-router-dom'
 import AppLayout from '../components/layout/AppLayout'
 import { useUserSession } from '../components/session/UserSessionProvider'
 import { isLockAllowedPath } from '../lib/sessionLock'
-import Dashboard from '../pages/Dashboard'
-import Inventory from '../pages/Inventory'
-import StockCardPage from '../pages/Inventory/StockCard'
-import Billing from '../pages/Billing'
-import Returns from '../pages/Returns'
-import Exchange from '../pages/Returns/Exchange'
-import Reports from '../pages/Reports/index'
-import Settings from '../pages/Settings'
-import RequestedItems from '../pages/RequestedItems/index'
-import Customers from '../pages/Customers'
-import CreditBills from '../pages/CreditBills' 
-import CashbookPage from '../pages/Cashbook'
-import BankBookPage from '../pages/BankBook'
-import SalesBookPage from '../pages/SalesBook'
-import ProductsPage from '../pages/Products'
-import ProductCategoriesPage from '../pages/ProductCategories'
-import BrandMasterPage from '../pages/BrandMaster'
-import CustomerSummaryPage from '../pages/CustomerSummary'
-import SuppliersPage from '../pages/Suppliers'
-import PurchasesPage from '../pages/Purchases'
-import PurchaseReturnsPage from '../pages/PurchaseReturns'
-import StockAuditPage from '../pages/StockAudit'
-import DayBookPage from '../pages/DayBook'
-import JournalEntryPage from '../pages/JournalEntry'
-import LooseStockPage from '../pages/LooseStock'
-import SupplierLedgerPage from '../pages/SupplierLedger'
-import CustomerLedgerPage from '../pages/CustomerLedger'
-import SuspenseAccountPage from '../pages/SuspenseAccount'
-import LoansAdvancesPage from '../pages/LoansAdvances'
+import Loading from '../components/ui/Loading'
+
+const Dashboard = lazy(() => import('../pages/Dashboard'))
+const Inventory = lazy(() => import('../pages/Inventory'))
+const StockCardPage = lazy(() => import('../pages/Inventory/StockCard'))
+const Billing = lazy(() => import('../pages/Billing'))
+const Returns = lazy(() => import('../pages/Returns'))
+const Exchange = lazy(() => import('../pages/Returns/Exchange'))
+const Reports = lazy(() => import('../pages/Reports/index'))
+const Settings = lazy(() => import('../pages/Settings'))
+const RequestedItems = lazy(() => import('../pages/RequestedItems/index'))
+const Customers = lazy(() => import('../pages/Customers'))
+const CreditBills = lazy(() => import('../pages/CreditBills'))
+const CashbookPage = lazy(() => import('../pages/Cashbook'))
+const BankBookPage = lazy(() => import('../pages/BankBook'))
+const SalesBookPage = lazy(() => import('../pages/SalesBook'))
+const ProductsPage = lazy(() => import('../pages/Products'))
+const ProductCategoriesPage = lazy(() => import('../pages/ProductCategories'))
+const BrandMasterPage = lazy(() => import('../pages/BrandMaster'))
+const CustomerSummaryPage = lazy(() => import('../pages/CustomerSummary'))
+const SuppliersPage = lazy(() => import('../pages/Suppliers'))
+const PurchasesPage = lazy(() => import('../pages/Purchases'))
+const PurchaseReturnsPage = lazy(() => import('../pages/PurchaseReturns'))
+const StockAuditPage = lazy(() => import('../pages/StockAudit'))
+const DayBookPage = lazy(() => import('../pages/DayBook'))
+const JournalEntryPage = lazy(() => import('../pages/JournalEntry'))
+const LooseStockPage = lazy(() => import('../pages/LooseStock'))
+const SupplierLedgerPage = lazy(() => import('../pages/SupplierLedger'))
+const CustomerLedgerPage = lazy(() => import('../pages/CustomerLedger'))
+const SuspenseAccountPage = lazy(() => import('../pages/SuspenseAccount'))
+const LoansAdvancesPage = lazy(() => import('../pages/LoansAdvances'))
 
 function SessionAccessRoute({ children }: { children: ReactNode }) {
   const location = useLocation()
@@ -48,6 +50,7 @@ function SessionAccessRoute({ children }: { children: ReactNode }) {
 
 export default function AppRoutes() {
   return (
+    <Suspense fallback={<Loading label="Opening page…" hint="Loading only what this page needs" />}>
     <Routes>
       <Route
         path="/"
@@ -90,5 +93,6 @@ export default function AppRoutes() {
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </Suspense>
   )
 }

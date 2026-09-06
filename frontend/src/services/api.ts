@@ -3,7 +3,17 @@ import { loadStoredUserSession } from '../lib/userSession'
 
 function resolveApiBaseUrl() {
 const configured = String(import.meta.env.VITE_API_BASE_URL || '').trim()
-if (configured) return configured
+if (configured) {
+try {
+const url = new URL(configured)
+if (url.hostname === 'localhost' || url.hostname === '[::1]' || url.hostname === '::1') {
+url.hostname = '127.0.0.1'
+}
+return url.toString().replace(/\/$/, '')
+} catch {
+return configured
+}
+}
 
 if (typeof window !== 'undefined') {
 const hostname = String(window.location.hostname || '').trim()

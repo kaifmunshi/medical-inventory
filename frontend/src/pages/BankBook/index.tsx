@@ -49,7 +49,7 @@ import { getBill, listPayments } from '../../services/billing'
 import { listPurchasePayments } from '../../services/purchases'
 import { fetchPurchaseReturns } from '../../services/purchaseReturns'
 import { listExchangeRecords, listReturns } from '../../services/returns'
-import { createParty, fetchParties, fetchReceipts } from '../../services/parties'
+import { createParty, deletePartyReceipt, fetchParties, fetchReceipts, updatePartyReceipt } from '../../services/parties'
 import { toYMD } from '../../lib/date'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
@@ -191,6 +191,11 @@ function buildOnlineReceiptRows(payments: any[], receipts: any[] = []) {
       note: `Online customer receipt #${receiptId}`,
       source: 'PARTY_RECEIPT' as const,
       receipt_note: receipt?.note || '',
+      party_id: receipt?.party_id,
+      receipt_mode: receipt?.mode || fallbackPayment?.mode || 'online',
+      receipt_cash: Number(receipt?.cash_amount || 0),
+      receipt_online: Number(receipt?.online_amount || 0),
+      receipt_total: Number(receipt?.total_amount || 0),
       unallocated_amount: Number(receipt?.unallocated_amount || 0),
       subRows: [],
     }
@@ -226,6 +231,11 @@ function buildOnlineReceiptRows(payments: any[], receipts: any[] = []) {
     current.amount = onlineAmount
     current.created_at = receipt.received_at || current.created_at
     current.receipt_note = receipt.note || current.receipt_note || ''
+    current.party_id = receipt.party_id
+    current.receipt_mode = receipt.mode
+    current.receipt_cash = Number(receipt.cash_amount || 0)
+    current.receipt_online = Number(receipt.online_amount || 0)
+    current.receipt_total = Number(receipt.total_amount || 0)
     current.unallocated_amount = Number(receipt.unallocated_amount || current.unallocated_amount || 0)
     current.subRows = []
     current.adjusted_online_amount = 0
@@ -417,6 +427,11 @@ export default function BankBookPage() {
   const [editLoanReturnTarget,setEditLoanReturnTarget]=useState(''); const [editLoanAdjustmentId,setEditLoanAdjustmentId]=useState<number|null>(null)
   const [editLegacyReturnMode,setEditLegacyReturnMode]=useState(false); const [editLegacyOpeningAmount,setEditLegacyOpeningAmount]=useState(''); const [editLegacyOpeningDate,setEditLegacyOpeningDate]=useState(today)
   const [deleteRow, setDeleteRow] = useState<any | null>(null)
+  const [editDepositRow, setEditDepositRow] = useState<any | null>(null)
+  const [editDepositOnline, setEditDepositOnline] = useState('')
+  const [editDepositDate, setEditDepositDate] = useState(today)
+  const [editDepositNote, setEditDepositNote] = useState('')
+  const [deleteDepositRow, setDeleteDepositRow] = useState<any | null>(null)
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedAllAnchorDate(allAnchorDate), 250)
@@ -436,6 +451,50 @@ export default function BankBookPage() {
   const returnLoansQ=useQuery({queryKey:['bankbook-return-loans',loanPartyId],queryFn:()=>fetchLoans({party_id:Number(loanPartyId),open_only:true}),enabled:entryType==='LOAN_REPAYMENT'&&Boolean(loanPartyId)})
   const editReturnLoansQ=useQuery({queryKey:['bankbook-edit-return-loans',editLoanPartyId],queryFn:()=>fetchLoans({party_id:Number(editLoanPartyId),open_only:false}),enabled:editType==='LOAN_REPAYMENT'&&Boolean(editLoanPartyId)})
   const createClientM = useMutation({mutationFn:()=>createParty({name:newClientName.trim(),phone:newClientPhone.trim()||undefined,party_group:'SUNDRY_DEBTOR',notes:'Loan-only borrower account'}),onSuccess:p=>{if(newClientForEdit)setEditLoanPartyId(String(p.id));else setLoanPartyId(String(p.id));setNewClientOpen(false);setNewClientForEdit(false);setNewClientName('');setNewClientPhone('');qc.invalidateQueries({queryKey:['bankbook-loan-debtors']});toast.push('Loan borrower account created','success')},onError:(e:any)=>toast.push(String(e?.response?.data?.detail||e?.message||'Failed to add borrower'),'error')})
+
+  const refreshCustomerDepositQueries = () => {
+    qc.invalidateQueries({ queryKey: ['bankbook-receipts-day'] })
+    qc.invalidateQueries({ queryKey: ['bankbook-all-receipts'] })
+    qc.invalidateQueries({ queryKey: ['bankbook-day'] })
+    qc.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
+    qc.invalidateQueries({ queryKey: ['cashbook-receipts-day'] })
+    qc.invalidateQueries({ queryKey: ['cashbook-all-receipts'] })
+    qc.invalidateQueries({ queryKey: ['cashbook-day'] })
+    qc.invalidateQueries({ queryKey: ['cashbook-daily-summary'] })
+    qc.invalidateQueries({ queryKey: ['customer-receipts'] })
+    qc.invalidateQueries({ queryKey: ['customer-ledger'] })
+  }
+
+  const editDepositM = useMutation({
+    mutationFn: () => updatePartyReceipt(
+      Number(editDepositRow?.party_id),
+      Number(editDepositRow?.receipt_id),
+      {
+        mode: editDepositRow?.receipt_mode || 'online',
+        cash_amount: Number(editDepositRow?.receipt_cash || 0),
+        online_amount: Number(editDepositOnline),
+        payment_date: editDepositDate,
+        note: editDepositNote.trim() || undefined,
+      },
+    ),
+    onSuccess: (updated) => {
+      setEditDepositRow(null)
+      if (updated?.received_at) setSelectedDate(isoDate(updated.received_at))
+      refreshCustomerDepositQueries()
+      toast.push('Customer deposit updated', 'success')
+    },
+    onError: (e: any) => toast.push(errorMessage(e, 'Failed to update customer deposit'), 'error'),
+  })
+
+  const deleteDepositM = useMutation({
+    mutationFn: () => deletePartyReceipt(Number(deleteDepositRow?.party_id), Number(deleteDepositRow?.receipt_id)),
+    onSuccess: () => {
+      setDeleteDepositRow(null)
+      refreshCustomerDepositQueries()
+      toast.push('Customer deposit deleted', 'success')
+    },
+    onError: (e: any) => toast.push(errorMessage(e, 'Failed to delete customer deposit'), 'error'),
+  })
 
   useEffect(() => {
     if (entryMode !== 'BANK_DEPOSIT' && entryType !== 'CONTRA') return
@@ -1744,7 +1803,42 @@ export default function BankBookPage() {
                                       : 'Bankbook'}
                         </TableCell>
                         <TableCell align="right">
-                          {row.source === 'BANKBOOK' ? (
+                          {row.source === 'PARTY_RECEIPT' ? (
+                            <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                              <Tooltip title="Edit customer deposit">
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => {
+                                      editDepositM.reset()
+                                      setEditDepositRow(row)
+                                      setEditDepositOnline(String(row.receipt_online || 0))
+                                      setEditDepositDate(isoDate(row.created_at))
+                                      setEditDepositNote(String(row.receipt_note || ''))
+                                    }}
+                                    disabled={editDepositM.isPending || deleteDepositM.isPending}
+                                  >
+                                    <EditIcon fontSize="small" />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                              <Tooltip title="Delete customer deposit">
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    color="error"
+                                    onClick={() => {
+                                      deleteDepositM.reset()
+                                      setDeleteDepositRow(row)
+                                    }}
+                                    disabled={editDepositM.isPending || deleteDepositM.isPending}
+                                  >
+                                    <DeleteIcon fontSize="small" />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                            </Stack>
+                          ) : row.source === 'BANKBOOK' ? (
                             <Stack direction="row" spacing={0.5} justifyContent="flex-end">
                               <Tooltip title="Edit entry">
                                 <span>
@@ -1980,6 +2074,89 @@ export default function BankBookPage() {
           qc.invalidateQueries({ queryKey: ['bankbook-all-payments'] })
         }}
       />
+      <Dialog open={!!editDepositRow} onClose={() => !editDepositM.isPending && setEditDepositRow(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Edit Customer Deposit #{editDepositRow?.receipt_id}</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <Alert severity="info">
+              Applied/returned: Rs {money(Number(editDepositRow?.receipt_total || 0) - Number(editDepositRow?.unallocated_amount || 0))}
+              {' · '}Advance / on account: Rs {money(editDepositRow?.unallocated_amount)}
+            </Alert>
+            <TextField
+              label={editDepositRow?.receipt_mode === 'split' ? 'Online portion' : 'Deposit amount'}
+              type="number"
+              value={editDepositOnline}
+              onChange={(e) => setEditDepositOnline(e.target.value)}
+              inputProps={{ min: 0, step: 0.01 }}
+              fullWidth
+            />
+            <TextField
+              label="Date"
+              type="date"
+              value={editDepositDate}
+              onChange={(e) => setEditDepositDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              label="Note"
+              value={editDepositNote}
+              onChange={(e) => setEditDepositNote(e.target.value)}
+              multiline
+              minRows={2}
+              fullWidth
+            />
+            {Number(editDepositRow?.receipt_cash || 0) > 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                Cash portion preserved: Rs {money(editDepositRow?.receipt_cash)}
+              </Typography>
+            ) : null}
+            {editDepositM.isError ? (
+              <Alert severity="error">{errorMessage(editDepositM.error, 'Failed to update customer deposit.')}</Alert>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditDepositRow(null)} disabled={editDepositM.isPending}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => editDepositM.mutate()}
+            disabled={
+              editDepositM.isPending ||
+              Number(editDepositOnline) <= 0 ||
+              Number(editDepositOnline) + Number(editDepositRow?.receipt_cash || 0) <
+                Number(editDepositRow?.receipt_total || 0) - Number(editDepositRow?.unallocated_amount || 0)
+            }
+          >
+            {editDepositM.isPending ? 'Saving...' : 'Save Changes'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog open={!!deleteDepositRow} onClose={() => !deleteDepositM.isPending && setDeleteDepositRow(null)} fullWidth maxWidth="xs">
+        <DialogTitle>Delete Customer Deposit</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1}>
+            <Typography>Delete customer receipt #{deleteDepositRow?.receipt_id}?</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Bank deposit: Rs {money(deleteDepositRow?.receipt_online)}
+              {Number(deleteDepositRow?.receipt_cash || 0) > 0 ? ` · Cash portion: Rs ${money(deleteDepositRow?.receipt_cash)}` : ''}
+            </Typography>
+            <Alert severity="warning">
+              This removes the complete customer receipt and reverses its bill allocations
+              {Number(deleteDepositRow?.receipt_cash || 0) > 0 ? ', including its cash-book portion' : ''}.
+            </Alert>
+            {deleteDepositM.isError ? (
+              <Alert severity="error">{errorMessage(deleteDepositM.error, 'Failed to delete customer deposit.')}</Alert>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteDepositRow(null)} disabled={deleteDepositM.isPending}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={() => deleteDepositM.mutate()} disabled={deleteDepositM.isPending}>
+            {deleteDepositM.isPending ? 'Deleting...' : 'Delete Receipt'}
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Dialog open={!!editRow} onClose={() => setEditRow(null)} fullWidth maxWidth="sm">
         <DialogTitle>Edit Bank Book Entry</DialogTitle>
         <DialogContent dividers>

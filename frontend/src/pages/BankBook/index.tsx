@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Box,
@@ -23,6 +23,7 @@ import {
   TableContainer,
   TableFooter,
   TableHead,
+  TablePagination,
   TableRow,
   TextField,
   Tooltip,
@@ -389,7 +390,7 @@ export default function BankBookPage() {
   const today = useMemo(() => toYMD(new Date()), [])
   const [selectedDate, setSelectedDate] = useState(today)
   const [recordsFilter, setRecordsFilter] = useState<'DAY' | 'ALL'>('DAY')
-  const [allView, setAllView] = useState<'ALL' | 'WEEK' | 'MONTH' | 'CUSTOM'>('ALL')
+  const [allView, setAllView] = useState<'ALL' | 'ALL_TIME' | 'WEEK' | 'MONTH' | 'CUSTOM'>('ALL')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [allAnchorDate, setAllAnchorDate] = useState(today)
   const [debouncedAllAnchorDate, setDebouncedAllAnchorDate] = useState(today)
@@ -397,6 +398,9 @@ export default function BankBookPage() {
   const [rangeTo, setRangeTo] = useState(today)
   const [typeFilter, setTypeFilter] = useState('ALL')
   const [noteFilter, setNoteFilter] = useState('')
+  const deferredNoteFilter = useDeferredValue(noteFilter)
+  const [tablePage, setTablePage] = useState(0)
+  const [rowsPerPage, setRowsPerPage] = useState(100)
   const [addOpen, setAddOpen] = useState(false)
 
   const [entryType, setEntryType] = useState<BankbookType>('RECEIPT')
@@ -520,6 +524,7 @@ export default function BankBookPage() {
   }, [entryMode, entryType, note, today])
 
   const allRange = useMemo(() => {
+    if (allView === 'ALL_TIME') return { from: undefined, to: undefined }
     if (allView === 'WEEK') return weekRange(debouncedAllAnchorDate)
     if (allView === 'MONTH') return monthRange(debouncedAllAnchorDate)
     if (allView === 'CUSTOM') return { from: rangeFrom || undefined, to: rangeTo || undefined }
@@ -527,7 +532,9 @@ export default function BankBookPage() {
   }, [activeYear?.end_date, activeYear?.start_date, allView, debouncedAllAnchorDate, rangeFrom, rangeTo])
   const canLoadAllRange =
     recordsFilter === 'ALL' &&
-    (allView === 'CUSTOM'
+    (allView === 'ALL_TIME'
+      ? deferredNoteFilter.trim().length >= 2
+      : allView === 'CUSTOM'
       ? Boolean(allRange.from && allRange.to && allRange.from <= allRange.to)
       : allView !== 'ALL' || Boolean(activeYear))
 
@@ -650,7 +657,8 @@ export default function BankBookPage() {
 
   const qAllPurchaseReturns = useQuery({
     queryKey: ['bankbook-purchase-returns-all', allView, allRange.from, allRange.to],
-    queryFn: () => fetchPurchaseReturns({ from_date: allRange.from, to_date: allRange.to, limit: 1000 }),
+    queryFn: () =>
+      fetchPagedRows((limit, offset) => fetchPurchaseReturns({ from_date: allRange.from, to_date: allRange.to, limit, offset }), 1000),
     enabled: canLoadAllRange,
   })
 
@@ -1237,11 +1245,19 @@ export default function BankBookPage() {
   }, [allLedgerDates, ledgerRows, qDailySummary.data])
 
   const visibleRows = useMemo(
-    () => ledgerRows.filter((row: any) => matchesFilters(row, typeFilter, noteFilter)),
-    [ledgerRows, noteFilter, typeFilter],
+    () => ledgerRows.filter((row: any) => matchesFilters(row, typeFilter, deferredNoteFilter)),
+    [deferredNoteFilter, ledgerRows, typeFilter],
   )
 
   const hasActiveFilters = typeFilter !== 'ALL' || noteFilter.trim().length > 0
+  const displayedRows = useMemo(
+    () => visibleRows.slice(tablePage * rowsPerPage, tablePage * rowsPerPage + rowsPerPage),
+    [rowsPerPage, tablePage, visibleRows],
+  )
+
+  useEffect(() => {
+    setTablePage(0)
+  }, [recordsFilter, allView, selectedDate, allRange.from, allRange.to, typeFilter, noteFilter, rowsPerPage])
 
   const dayColorMap = useMemo(() => {
     if (recordsFilter !== 'ALL') return {} as Record<string, string>
@@ -1347,6 +1363,14 @@ export default function BankBookPage() {
                 <Button
                   variant="outlined"
                   size="small"
+                  onClick={() => setAllView('ALL_TIME')}
+                  sx={allView === 'ALL_TIME' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
+                >
+                  All Time
+                </Button>
+                <Button
+                  variant="outlined"
+                  size="small"
                   onClick={() => setAllView('WEEK')}
                   sx={allView === 'WEEK' ? { bgcolor: '#e9f2ff', borderColor: '#8bb5f8' } : undefined}
                 >
@@ -1419,6 +1443,10 @@ export default function BankBookPage() {
             <Typography variant="body2" color="text.secondary">
               {allView === 'ALL'
                 ? `Showing current financial year${activeYear ? `: ${financialYearDisplayName(activeYear)} (${activeYear.start_date} to ${activeYear.end_date})` : '.'}`
+                : allView === 'ALL_TIME'
+                  ? noteFilter.trim().length < 2
+                    ? 'Enter at least 2 characters in Note filter to search all records.'
+                    : 'Searching all records without a date restriction.'
                 : allView === 'CUSTOM' && !canLoadAllRange
                   ? 'Choose a valid custom date range.'
                 : allView === 'CUSTOM'
@@ -1676,13 +1704,13 @@ export default function BankBookPage() {
                   </TableCell>
                 </TableRow>
               ) : (
-                (visibleRows || []).map((row: any, idx: number) => {
+                (displayedRows || []).map((row: any, idx: number) => {
                   const t = String(row.entry_type || '').toUpperCase()
                   const chipType = row.source === 'RETURN' ? 'RETURN' : String(row.pill_type || t).toUpperCase()
                   const isIn = t === 'RECEIPT' || t === 'LOAN_REPAYMENT'
                   const chip = typeChipProps(chipType)
                   const date = isoDate(row.created_at)
-                  const prevDate = idx > 0 ? isoDate((visibleRows as any[])[idx - 1]?.created_at) : date
+                  const prevDate = idx > 0 ? isoDate((displayedRows as any[])[idx - 1]?.created_at) : date
                   const isNewDay = recordsFilter === 'ALL' && idx > 0 && date !== prevDate
                   const showDayHeader = recordsFilter === 'ALL' && (idx === 0 || isNewDay)
                   const daySummary = dailySummaryByDate[date]
@@ -1746,9 +1774,13 @@ export default function BankBookPage() {
                               </Typography>
                             ) : row.source === 'PARTY_RECEIPT' ? (
                               <Stack gap={0.25}>
-                                <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                                <Link
+                                  href={`/customer-ledger?party_id=${row.party_id}&receipt_id=${row.receipt_id}`}
+                                  underline="hover"
+                                  sx={{ fontSize: 14, fontWeight: 700, width: 'fit-content' }}
+                                >
                                   Customer receipt #{row.receipt_id}
-                                </Typography>
+                                </Link>
                                 <Typography variant="caption" color="text.secondary">
                                   {(row.subRows || []).filter((sub: any) => sub.kind !== 'plain').length} bill adjustment(s)
                                   {Number(row.plain_online_amount || 0) > 0 ? ` • Advance / on account Rs ${money(row.plain_online_amount)}` : ''}
@@ -1878,9 +1910,13 @@ export default function BankBookPage() {
                               {sub.kind === 'plain' ? (
                                 <>
                                   <Typography variant="caption" color="text.secondary">Advance / on account</Typography>
-                                  <Typography variant="caption" sx={{ fontWeight: 800 }}>
+                                  <Link
+                                    href={`/customer-ledger?party_id=${row.party_id}&receipt_id=${row.receipt_id}`}
+                                    underline="hover"
+                                    sx={{ fontSize: 13, fontWeight: 800 }}
+                                  >
                                     On account / unadjusted
-                                  </Typography>
+                                  </Link>
                                 </>
                               ) : (
                                 <>
@@ -1934,6 +1970,15 @@ export default function BankBookPage() {
             </TableFooter>
           </Table>
         </TableContainer>
+        <TablePagination
+          component="div"
+          count={visibleRows.length}
+          page={Math.min(tablePage, Math.max(0, Math.ceil(visibleRows.length / rowsPerPage) - 1))}
+          onPageChange={(_event, page) => setTablePage(page)}
+          rowsPerPage={rowsPerPage}
+          onRowsPerPageChange={(event) => setRowsPerPage(Number(event.target.value))}
+          rowsPerPageOptions={[50, 100, 250]}
+        />
       </Paper>
 
       <Dialog open={newClientOpen} onClose={()=>!createClientM.isPending&&setNewClientOpen(false)} fullWidth maxWidth="xs"><DialogTitle>Add Loan Borrower</DialogTitle><DialogContent><Stack spacing={2} sx={{mt:1}}><Alert severity="info">Creates a loan-only debtor account, not a sales customer.</Alert><TextField required label="Borrower name" value={newClientName} onChange={e=>setNewClientName(e.target.value)}/><TextField label="Phone" value={newClientPhone} onChange={e=>setNewClientPhone(e.target.value)}/></Stack></DialogContent><DialogActions><Button onClick={()=>setNewClientOpen(false)}>Cancel</Button><Button variant="contained" disabled={!newClientName.trim()||createClientM.isPending} onClick={()=>createClientM.mutate()}>Create Borrower</Button></DialogActions></Dialog>

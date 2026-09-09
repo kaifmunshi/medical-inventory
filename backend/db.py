@@ -8,7 +8,7 @@ import shutil
 import sqlite3
 import sys
 from sqlmodel import create_engine, Session, SQLModel
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 BASE_DIR = Path(__file__).resolve().parent.parent   # project root (medical-inventory/)
 
@@ -44,6 +44,18 @@ engine = create_engine(
     echo=False,
     connect_args={"check_same_thread": False},
 )
+
+
+@event.listens_for(engine, "connect")
+def _configure_sqlite_connection(dbapi_connection, _connection_record):
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA wal_autocheckpoint=1000")
+    finally:
+        cursor.close()
 
 
 def _now_ts() -> str:
@@ -3325,6 +3337,13 @@ def migrate_db():
         # indexes SQLite may scan years of unrelated cash/bank rows on every sync.
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_cashbookentry_type_created ON cashbookentry (entry_type, created_at)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_bankbookentry_type_created ON bankbookentry (entry_type, created_at)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_bill_date_time_deleted ON bill (date_time, is_deleted)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_bill_party_date_deleted ON bill (party_id, date_time, is_deleted)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_return_date_time ON return (date_time)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasereturn_return_date ON purchasereturn (return_date)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_partyreceipt_date_deleted ON partyreceipt (received_at, is_deleted)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_billpayment_date_deleted ON billpayment (received_at, is_deleted)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_purchasepayment_date_deleted ON purchasepayment (paid_at, is_deleted)"))
         session.commit()
 
         session.exec(text("""

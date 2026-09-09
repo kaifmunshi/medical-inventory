@@ -27,6 +27,7 @@ export async function fetchPurchaseReturns(params?: {
   to_date?: string
   include_deleted?: boolean
   limit?: number
+  offset?: number
 }): Promise<PurchaseReturn[]> {
   const response = await api.get<PurchaseReturn[]>('/purchase-returns', { params })
   return response.data

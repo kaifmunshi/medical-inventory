@@ -440,8 +440,16 @@ export default function Inventory() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['inventory-items'] })
       qc.invalidateQueries({ queryKey: ['inventory-autocomplete'] })
+      qc.invalidateQueries({ queryKey: ['inventory-products-master'] })
+      qc.invalidateQueries({ queryKey: ['products-master'] })
+      qc.invalidateQueries({ queryKey: ['billing-items'] })
+      qc.invalidateQueries({ queryKey: ['billing-grid-items'] })
+      qc.invalidateQueries({ queryKey: ['edit-bill-items'] })
+      qc.invalidateQueries({ queryKey: ['inventory-brands'] })
+      qc.invalidateQueries({ queryKey: ['inventory-categories'] })
       qc.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
       qc.invalidateQueries({ queryKey: ['dash-inventory'] })
+      notifyProductMasterChanged()
       toast.push('Item updated', 'success')
     },
     onError: (err: any) => {

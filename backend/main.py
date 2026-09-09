@@ -1,5 +1,7 @@
 # backend/main.py
 import os
+import logging
+from time import perf_counter
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +28,7 @@ from backend.routers import vouchers
 from backend.routers import users
 from backend.routers import loans
 app = FastAPI(title="Ayurvedic Medical Inventory System")
+logger = logging.getLogger("medical_inventory.performance")
 
 extra_origins = [
     origin.strip()
@@ -54,6 +57,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def bind_request_actor(request: Request, call_next):
+    started_at = perf_counter()
     set_request_actor(None, None, None)
     auth = str(request.headers.get("authorization") or "").strip()
     if auth.lower().startswith("bearer "):
@@ -64,7 +68,12 @@ async def bind_request_actor(request: Request, call_next):
                 str(payload.get("role") or ""),
                 int(payload.get("uid")) if payload.get("uid") is not None else None,
             )
-    return await call_next(request)
+    response = await call_next(request)
+    elapsed_ms = (perf_counter() - started_at) * 1000
+    response.headers["Server-Timing"] = f'app;dur={elapsed_ms:.1f}'
+    if elapsed_ms >= 500:
+        logger.warning("slow_request method=%s path=%s duration_ms=%.1f", request.method, request.url.path, elapsed_ms)
+    return response
 
 
 
@@ -90,6 +99,8 @@ def on_startup():
     # backend.db already creates tables and applies schema/data migrations on import.
     # Keep startup light: only run the historical accounting backfill once per database.
     _sync_existing_vouchers_once()
+    with Session(engine) as session:
+        session.exec(text("PRAGMA optimize"))
 
 
 # Routers

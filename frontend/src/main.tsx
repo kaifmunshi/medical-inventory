@@ -17,6 +17,9 @@ const client = new QueryClient({
       // ✅ feels smoother on slow networks
       refetchOnWindowFocus: false,
       staleTime: 30_000,
+      // Large ledger/report responses should not accumulate as users move
+      // through many date ranges during a long-running counter session.
+      gcTime: 60_000,
       retry: 1,
     },
   },

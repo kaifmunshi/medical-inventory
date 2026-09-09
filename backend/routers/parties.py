@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy import func, or_, text
 from sqlmodel import select
 
-from backend.accounting import mark_voucher_deleted, post_customer_advance_refund_voucher, post_party_receipt_voucher
+from backend.accounting import ensure_party_ledger, mark_voucher_deleted, post_customer_advance_refund_voucher, post_party_receipt_voucher
 from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import (
@@ -583,6 +583,7 @@ def update_party(party_id: int, payload: PartyUpdate) -> PartyOut:
             row.is_active = bool(data["is_active"])
         row.updated_at = datetime.now().isoformat(timespec="seconds")
         session.add(row)
+        ensure_party_ledger(session, row)
         log_audit(
             session,
             entity_type="PARTY",

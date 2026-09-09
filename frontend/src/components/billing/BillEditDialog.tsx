@@ -1112,6 +1112,19 @@ export default function BillEditDialog({
     },
     onSuccess: async (updated) => {
       toast.push(`Bill #${updated.id} updated`, 'success')
+      ;[
+        'bills', 'credit-bills', 'sales-book-bills', 'sales-book-payments', 'rpt-sales',
+        'customer-ledger', 'customer-open-bills', 'customer-ledger-bill-payments',
+        'customer-summary', 'bill-payments-panel', 'voucher-day-book',
+        'cashbook-day', 'cashbook-all-entries', 'cashbook-daily-summary',
+        'cashbook-payments-day', 'cashbook-all-payments',
+        'bankbook-day', 'bankbook-all-entries', 'bankbook-daily-summary',
+        'bankbook-payments-day', 'bankbook-all-payments',
+        'dash-credit-pending-total', 'dash-cashbook', 'dash-cashbook-history',
+        'dash-cashbook-history-summary', 'inventory-items', 'lots',
+        'stock-card-product-ledger', 'stock-card-batch-ledger',
+        'inventory-group-summary', 'inventory-group', 'inventory-dashboard-stats',
+      ].forEach((key) => queryClient.invalidateQueries({ queryKey: [key] }))
       await Promise.resolve(onSaved?.(updated))
       onClose()
     },

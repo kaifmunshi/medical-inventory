@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 from sqlalchemy import or_, exists, func, cast
 from sqlalchemy.types import Integer, Float
-from backend.accounting import mark_voucher_deleted, post_bill_payment_voucher, post_party_receipt_voucher, sync_bill_vouchers
+from backend.accounting import mark_voucher_deleted, post_bill_payment_voucher, post_party_receipt_voucher, sync_bill_related_vouchers, sync_bill_vouchers
 from backend.controls import assert_financial_year_unlocked, get_active_financial_year, log_audit, normalize_ymd
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
@@ -1209,7 +1209,7 @@ def map_unmapped_credit_bill_customer(bill_id: int, payload: BillCustomerMapIn):
         session.add(b)
         session.commit()
         session.refresh(b)
-        sync_bill_vouchers(session, b)
+        sync_bill_related_vouchers(session, b)
         session.commit()
         session.refresh(b)
         return bill_to_out(session, b)
@@ -1447,10 +1447,24 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         has_manual_receipts = len(manual_receipts) > 0
 
         if has_manual_receipts:
-            total_cash = round2(sum(as_f(getattr(p, "cash_amount", 0.0)) for p in pays))
-            total_online = round2(sum(as_f(getattr(p, "online_amount", 0.0)) for p in pays))
-            total_writeoff = round2(sum(as_f(getattr(p, "writeoff_amount", 0.0)) for p in pays if bool(getattr(p, "is_writeoff", False))))
-            cash, online = total_cash, total_online
+            manual_cash = round2(sum(as_f(getattr(p, "cash_amount", 0.0)) for p in manual_receipts))
+            manual_online = round2(sum(as_f(getattr(p, "online_amount", 0.0)) for p in manual_receipts))
+            total_writeoff = round2(sum(
+                as_f(getattr(p, "writeoff_amount", 0.0))
+                for p in manual_receipts
+                if bool(getattr(p, "is_writeoff", False))
+            ))
+            # The edit form submits the bill's desired cumulative cash/online
+            # settlement. Manual receipt rows are immutable here, while any
+            # difference is kept in the editor-managed automatic payment row.
+            # Previously we replaced the submitted values with the existing
+            # rows, so adding a payment while editing a partially-paid bill was
+            # silently discarded and the customer ledger stayed unchanged.
+            if cash + 0.0001 < manual_cash or online + 0.0001 < manual_online:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Bill payment cannot be below existing manual receipt amounts",
+                )
             credit = round2(max(0.0, total - (cash + online + total_writeoff)))
             if cash > 0 and online > 0:
                 effective_payment_mode = "split"
@@ -1594,20 +1608,32 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                     ),
                 ))
 
+            auto_payments = [
+                p for p in pays
+                if str(getattr(p, "note", "") or "") == "auto: payment at bill creation"
+            ]
+            for p in auto_payments:
+                session.delete(p)
+
+            auto_cash = round2(cash - sum(as_f(getattr(p, "cash_amount", 0.0)) for p in manual_receipts))
+            auto_online = round2(online - sum(as_f(getattr(p, "online_amount", 0.0)) for p in manual_receipts))
+            if auto_cash > 0 or auto_online > 0:
+                session.add(BillPayment(
+                    bill_id=b.id,
+                    received_at=bill_ts,
+                    mode=("split" if auto_cash > 0 and auto_online > 0 else "cash" if auto_cash > 0 else "online"),
+                    cash_amount=auto_cash,
+                    online_amount=auto_online,
+                    writeoff_amount=0.0,
+                    note="auto: payment at bill creation",
+                    is_writeoff=False,
+                ))
+
             if not has_manual_receipts:
                 for p in pays:
+                    if p in auto_payments:
+                        continue
                     session.delete(p)
-                if paid_now > 0:
-                    session.add(BillPayment(
-                        bill_id=b.id,
-                        received_at=bill_ts,
-                        mode=payload.payment_mode,
-                        cash_amount=cash,
-                        online_amount=online,
-                        writeoff_amount=0.0,
-                        note="auto: payment at bill creation",
-                        is_writeoff=False,
-                    ))
 
             b.date_time = bill_ts
             b.customer_id = linked_customer_id
@@ -1666,7 +1692,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
             )
             session.commit()
             session.refresh(b)
-            sync_bill_vouchers(session, b)
+            sync_bill_related_vouchers(session, b)
             session.commit()
         except HTTPException:
             session.rollback()

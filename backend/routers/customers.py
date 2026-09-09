@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from backend.db import get_session
+from backend.accounting import ensure_party_ledger, sync_bill_related_vouchers
 from backend.inventory_lot_sync import item_stock_meta
 from backend.controls import log_audit
 from backend.models import (
@@ -550,6 +551,8 @@ def update_customer(customer_id: int, payload: CustomerUpdate) -> CustomerOut:
 
         row.updated_at = datetime.now().isoformat(timespec="seconds")
         session.add(row)
+        party = _ensure_customer_party(session, row)
+        ensure_party_ledger(session, party)
         session.commit()
         session.refresh(row)
         return _customer_account_balance_out(session, row)
@@ -693,6 +696,10 @@ def move_customer_bills(payload: MoveCustomerBillsIn):
             bill.notes = _replace_customer_note(bill.notes, destination)
             session.add(bill)
 
+        session.flush()
+        for bill in bills:
+            sync_bill_related_vouchers(session, bill)
+
         session.commit()
         return {
             "moved_count": len(bills),
@@ -814,6 +821,7 @@ def merge_customers(payload: MergeCustomersIn) -> MergeCustomersOut:
             ledgers = session.exec(select(Ledger).where(Ledger.party_id == int(remove_party.id))).all()
             for ledger in ledgers:
                 ledger.party_id = int(keep_party.id or 0)
+                ledger.name = keep.name
                 ledger.updated_at = datetime.now().isoformat(timespec="seconds")
                 session.add(ledger)
                 moved_ledgers += 1

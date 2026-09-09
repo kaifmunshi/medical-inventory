@@ -4765,12 +4765,42 @@ def update_item(item_id: int, payload: ItemUpdateIn):
             else:
                 setattr(item, k, v)
 
-        if "category_id" in data and getattr(item, "product_id", None):
+        product = None
+        product_identity_changed = any(key in data for key in ("name", "brand", "category_id"))
+        if product_identity_changed and getattr(item, "product_id", None):
             product = session.get(Product, int(item.product_id))
             if product:
+                next_name = _norm_str(item.name) or ""
+                next_brand = _norm_str(item.brand)
+                duplicate = session.exec(
+                    select(Product).where(
+                        Product.id != int(product.id),
+                        Product.is_active == True,  # noqa: E712
+                        func.lower(func.trim(Product.name)) == next_name.lower(),
+                        func.lower(func.trim(func.coalesce(Product.brand, ""))) == (next_brand or "").lower(),
+                        Product.category_id == item.category_id,
+                    )
+                ).first()
+                if duplicate:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Product already exists for this name, brand, and category",
+                    )
+                product.name = next_name
+                product.brand = next_brand
                 product.category_id = item.category_id
                 product.updated_at = now_ts()
                 session.add(product)
+
+                # Product identity is shared by every batch. Keeping sibling
+                # items aligned prevents Product Master and Billing from showing
+                # a mixture of old and new names after an Inventory edit.
+                for sibling in session.exec(select(Item).where(Item.product_id == int(product.id))).all():
+                    sibling.name = product.name
+                    sibling.brand = product.brand
+                    sibling.category_id = product.category_id
+                    sibling.updated_at = product.updated_at
+                    session.add(sibling)
 
         item.updated_at = now_ts()
         session.add(item)

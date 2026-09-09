@@ -460,13 +460,27 @@ export default function CustomerLedgerPage() {
 
   useEffect(() => {
     const id = params.get('customer_id')
+    const partyId = params.get('party_id')
     if (id && customersQ.data) {
       const match = customersQ.data.find((customer) => String(customer.id) === id)
       if (match && customerId !== String(match.id)) {
         setCustomerId(String(match.id))
       }
+      return
     }
-  }, [params, customersQ.data, customerId])
+    if (partyId && customersQ.data && partiesQ.data) {
+      const party = partiesQ.data.find((row) => String(row.id) === partyId)
+      const customer = party
+        ? customersQ.data.find((row) =>
+            Number(party.legacy_customer_id || 0) === Number(row.id) ||
+            String(party.name || '').trim().toLowerCase() === String(row.name || '').trim().toLowerCase(),
+          )
+        : undefined
+      if (customer && customerId !== String(customer.id)) {
+        setCustomerId(String(customer.id))
+      }
+    }
+  }, [params, customersQ.data, partiesQ.data, customerId])
 
   const ledgerQ = useQuery<DebtorLedgerRow[], Error>({
     queryKey: ['customer-ledger', selectedParty?.id],
@@ -780,6 +794,21 @@ export default function CustomerLedgerPage() {
 
     return [...partyReceiptRows, ...directPaymentRows, ...advanceRefundRows].sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')))
   }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receipts])
+
+  useEffect(() => {
+    const receiptId = Number(params.get('receipt_id') || 0)
+    if (receiptId <= 0) return
+    const target = receiptHistory.find(
+      (row) => row.sourceType === 'party_receipt' && Number(row.receiptId) === receiptId,
+    )
+    if (!target) return
+    setSectionOpen((prev) => (prev.receipts ? prev : { ...prev, receipts: true }))
+    setExpandedReceipts((prev) => (prev[target.id] ? prev : { [target.id]: true }))
+    window.requestAnimationFrame(() => {
+      document.getElementById(`customer-receipt-${receiptId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }, [params, receiptHistory])
+
   const activeReceiptHistory = receiptHistory.filter((row) => !row.isDeleted && row.sourceType !== 'advance_refund')
   const activeAdvanceReturns = receiptHistory.filter((row) => !row.isDeleted && row.sourceType === 'advance_refund')
   const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
@@ -1790,7 +1819,11 @@ export default function CustomerLedgerPage() {
                     : 'receipt-applied'
                 return (
                   <Fragment key={receipt.id}>
-                    <tr className={rowClass} style={receipt.isDeleted ? { opacity: 0.68 } : undefined}>
+                    <tr
+                      id={receipt.sourceType === 'party_receipt' ? `customer-receipt-${receipt.receiptId}` : undefined}
+                      className={rowClass}
+                      style={receipt.isDeleted ? { opacity: 0.68 } : undefined}
+                    >
                       <td className="expand-col">
                         <IconButton
                           size="small"

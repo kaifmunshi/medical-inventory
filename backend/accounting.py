@@ -148,7 +148,7 @@ def ensure_party_ledger(session, party: Party) -> Ledger:
         group = session.exec(select(LedgerGroup).where(LedgerGroup.system_key == "SUNDRY_CREDITORS")).first()
     else:
         group = session.exec(select(LedgerGroup).where(LedgerGroup.system_key == "SUNDRY_DEBTORS")).first()
-    return _ensure_ledger(
+    ledger = _ensure_ledger(
         session,
         system_key=None,
         name=str(party.name or "").strip() or f"Party {party.id}",
@@ -156,6 +156,14 @@ def ensure_party_ledger(session, party: Party) -> Ledger:
         party_id=int(party.id),
         is_system=False,
     )
+    expected_name = str(party.name or "").strip() or f"Party {party.id}"
+    if ledger.name != expected_name or int(ledger.group_id) != int(group.id):
+        ledger.name = expected_name
+        ledger.group_id = int(group.id)
+        ledger.updated_at = now_ts()
+        session.add(ledger)
+        session.flush()
+    return ledger
 
 
 def resolve_bill_party_ledger(session, bill: Bill) -> Optional[Ledger]:
@@ -632,6 +640,39 @@ def sync_bill_vouchers(session, bill: Bill) -> Voucher:
     if bool(getattr(bill, "is_deleted", False)):
         mark_voucher_deleted(session, source_type="BILL", source_id=int(bill.id))
     return post_sales_voucher(session, bill)
+
+
+def sync_bill_related_vouchers(session, bill: Bill) -> Voucher:
+    """Resync a bill and direct receipts after its customer/account changes."""
+    voucher = sync_bill_vouchers(session, bill)
+    receipt_managed_ids = {
+        int(payment_id)
+        for payment_id in session.exec(
+            select(ReceiptBillAdjustment.bill_payment_id).where(
+                ReceiptBillAdjustment.bill_payment_id.is_not(None)
+            )
+        ).all()
+        if payment_id is not None
+    }
+    for payment in session.exec(select(BillPayment).where(BillPayment.bill_id == bill.id)).all():
+        payment_id = int(payment.id or 0)
+        note = str(payment.note or "").strip().lower()
+        if payment_id in receipt_managed_ids or note == "auto: payment at bill creation":
+            continue
+        post_bill_payment_voucher(
+            session,
+            bill,
+            payment_id,
+            payment.received_at,
+            float(payment.cash_amount or 0),
+            float(payment.online_amount or 0),
+            float(getattr(payment, "writeoff_amount", 0) or 0),
+            bool(getattr(payment, "is_writeoff", False)),
+            payment.note,
+        )
+        if bool(getattr(payment, "is_deleted", False)) or bool(getattr(bill, "is_deleted", False)):
+            mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=payment_id)
+    return voucher
 
 
 def sync_purchase_vouchers(session, purchase: Purchase, party: Party) -> Voucher:

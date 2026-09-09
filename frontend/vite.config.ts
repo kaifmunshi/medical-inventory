@@ -14,4 +14,17 @@ export default defineConfig({
     port: 4173,
     strictPort: true,
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined
+          if (id.includes('@mui') || id.includes('@emotion')) return 'ui-vendor'
+          if (id.includes('@tanstack') || id.includes('axios')) return 'data-vendor'
+          if (id.includes('react')) return 'react-vendor'
+          return 'vendor'
+        },
+      },
+    },
+  },
 })

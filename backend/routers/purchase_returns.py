@@ -192,6 +192,7 @@ def list_purchase_returns(
     to_date: Optional[str] = Query(None),
     include_deleted: bool = Query(False),
     limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
 ) -> List[PurchaseReturnOut]:
     with get_session() as session:
         stmt = select(PurchaseReturn)
@@ -205,7 +206,9 @@ def list_purchase_returns(
             stmt = stmt.where(PurchaseReturn.return_date <= str(to_date)[:10])
         if not include_deleted:
             stmt = stmt.where(PurchaseReturn.is_deleted == False)  # noqa: E712
-        rows = session.exec(stmt.order_by(PurchaseReturn.return_date.desc(), PurchaseReturn.id.desc()).limit(limit)).all()
+        rows = session.exec(
+            stmt.order_by(PurchaseReturn.return_date.desc(), PurchaseReturn.id.desc()).offset(offset).limit(limit)
+        ).all()
         return [_out(session, row) for row in rows]
 
 

@@ -421,11 +421,11 @@ export default function PurchasesPage() {
 
   const inventoryBatchesQ = useQuery<IncomingStockEntry[], Error>({
     queryKey: ['purchase-existing-inventory', inventorySearchTerm, inventorySearchCategoryId, EXISTING_INVENTORY_FROM_DATE],
-    queryFn: () => listIncomingStockEntries(inventorySearchTerm, {
+    queryFn: ({ signal }) => listIncomingStockEntries(inventorySearchTerm, {
       include_archived: true,
       incoming_from: EXISTING_INVENTORY_FROM_DATE,
       category_id: inventorySearchCategoryId ?? undefined,
-    }),
+    }, { signal }),
     enabled: canSearchInventoryBatches,
   })
 
@@ -1774,7 +1774,7 @@ export default function PurchasesPage() {
                     <Autocomplete
                       size="small"
                       options={products}
-                      loading={canSearchProducts && productsQ.isFetching}
+                      loading={canSearchProducts && productsQ.isLoading}
                       getOptionLabel={(option) => {
                         return `${option.name}${option.brand ? ` | ${option.brand}` : ''}`
                       }}
@@ -1816,7 +1816,7 @@ export default function PurchasesPage() {
                       <Autocomplete
                         size="small"
                         options={inventoryBatches}
-                        loading={canSearchInventoryBatches && inventoryBatchesQ.isFetching}
+                        loading={canSearchInventoryBatches && inventoryBatchesQ.isLoading}
                         filterOptions={(options) => options}
                         value={
                           inventoryBatches.find((entry) => Number(entry.movement_id) === Number(item.existing_stock_movement_id)) ||

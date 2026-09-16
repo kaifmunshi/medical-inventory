@@ -18,7 +18,7 @@ import {
 import CloseIcon from '@mui/icons-material/Close'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useToast } from '../ui/Toaster'
-import { listItemsPage } from '../../services/inventory'
+import { listBillingItemsPage } from '../../services/inventory'
 import { createCustomer, fetchCustomers } from '../../services/customers'
 import { mapBillCustomer, updateBill } from '../../services/billing'
 import { openPack } from '../../services/lots'
@@ -549,11 +549,10 @@ export default function BillEditDialog({
         return { items: [], total: 0, next_offset: null }
       }
       try {
-        return await listItemsPage(
+        return await listBillingItemsPage(
           hasReadyEditSearchTerm ? debouncedEditItemSearchTerm : '',
           EDIT_SUGGESTIONS_PAGE_SIZE,
           editSuggestionPage * EDIT_SUGGESTIONS_PAGE_SIZE,
-          undefined,
           editCategoryId != null ? { category_id: Number(editCategoryId) } : undefined,
           { signal },
         )
@@ -635,7 +634,7 @@ export default function BillEditDialog({
         packs_opened: packs,
         note: 'Opened from bill edit for loose sale',
       })
-      const freshPage = await listItemsPage(String(item.name || ''), EDIT_SUGGESTIONS_PAGE_SIZE, 0)
+      const freshPage = await listBillingItemsPage(String(item.name || ''), EDIT_SUGGESTIONS_PAGE_SIZE, 0)
       return {
         packs,
         loose: findOpenedLooseItem(freshPage.items as any[], item, event.loose_item_id),
@@ -1351,7 +1350,7 @@ export default function BillEditDialog({
                 {editSuggestionItems.length === 0 ? (
                   <Box p={2}>
                     <Typography variant="body2" color="text.secondary" textAlign="center">
-                      {canSearchEditItems ? (qEditItems.isFetching ? 'Loading products...' : 'No items found.') : PRODUCT_SEARCH_PROMPT}
+                      {canSearchEditItems ? (qEditItems.isFetching && editSuggestionItems.length === 0 ? 'Loading products...' : 'No items found.') : PRODUCT_SEARCH_PROMPT}
                     </Typography>
                   </Box>
                 ) : null}

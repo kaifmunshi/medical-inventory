@@ -107,6 +107,70 @@ class ItemPageOut(BaseModel):
     next_offset: Optional[int] = None
 
 
+@router.get("/billing-search", response_model=ItemPageOut)
+def search_items_for_billing(
+    q: Optional[str] = Query(None, description="Search sellable items by name, brand, alias, or id"),
+    category_id: Optional[int] = Query(None, ge=0, description="Filter by product category"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Fast inventory lookup for the checkout screen.
+
+    The general inventory endpoint deliberately searches stock-movement history as
+    well. That is useful in reports, but its cost grows with every sale and made
+    the billing autocomplete progressively slower. Checkout only needs currently
+    sellable item/product fields, so keep this query independent of the ledger.
+    """
+    with get_session() as session:
+        stmt = select(Item).where(
+            or_(Item.is_archived == False, Item.is_archived.is_(None)),  # noqa: E712
+            Item.stock > 0,
+        )
+
+        if q:
+            search_text = q.strip()
+            like = f"%{search_text}%"
+            id_text = search_text[1:] if search_text.startswith("#") else search_text
+            terms = [Item.name.ilike(like), Item.brand.ilike(like)]
+            if id_text.isdigit():
+                terms.append(Item.id == int(id_text))
+            terms.extend([
+                exists(
+                    select(Product.id).where(
+                        Product.id == Item.product_id,
+                        or_(Product.name.ilike(like), Product.alias.ilike(like), Product.brand.ilike(like)),
+                    )
+                ),
+                exists(
+                    select(InventoryLot.id)
+                    .join(Product, Product.id == InventoryLot.product_id)
+                    .where(
+                        InventoryLot.legacy_item_id == Item.id,
+                        or_(Product.name.ilike(like), Product.alias.ilike(like), Product.brand.ilike(like)),
+                    )
+                ),
+            ])
+            stmt = stmt.where(or_(*terms))
+
+        if category_id is not None:
+            stmt = stmt.where(or_(
+                Item.category_id == category_id,
+                exists(select(Product.id).where(Product.id == Item.product_id, Product.category_id == category_id)),
+                exists(
+                    select(InventoryLot.id)
+                    .join(Product, Product.id == InventoryLot.product_id)
+                    .where(InventoryLot.legacy_item_id == Item.id, Product.category_id == category_id)
+                ),
+            ))
+
+        total = session.exec(select(func.count()).select_from(stmt.subquery())).one()
+        items = session.exec(stmt.order_by(Item.name, Item.id).limit(limit).offset(offset)).all()
+        _attach_lot_metadata(session, items)
+        _attach_category_names(session, items)
+        next_offset = offset + limit if offset + limit < total else None
+        return {"items": items, "total": total, "next_offset": next_offset}
+
+
 class IncomingStockEntryOut(BaseModel):
     movement_id: int
     item_id: int
@@ -446,17 +510,23 @@ def _group_key(name: Optional[str], brand: Optional[str]) -> str:
 
 def _apply_default_visibility(stmt):
     peer = aliased(Item)
-    visible_row = or_(Item.is_archived == False, Item.is_archived.is_(None))  # noqa: E712
-    same_group_visible_exists = exists(
-        select(peer.id).where(
-            func.lower(func.trim(func.coalesce(peer.name, "")))
-            == func.lower(func.trim(func.coalesce(Item.name, ""))),
-            func.lower(func.trim(func.coalesce(peer.brand, "")))
-            == func.lower(func.trim(func.coalesce(Item.brand, ""))),
-            or_(peer.is_archived == False, peer.is_archived.is_(None)),  # noqa: E712
-        )
+    peer_name_key = func.lower(func.trim(func.coalesce(peer.name, "")))
+    peer_brand_key = func.lower(func.trim(func.coalesce(peer.brand, "")))
+    active_groups = (
+        select(peer_name_key.label("name_key"), peer_brand_key.label("brand_key"))
+        .where(or_(peer.is_archived == False, peer.is_archived.is_(None)))  # noqa: E712
+        .group_by(peer_name_key, peer_brand_key)
+        .cte("visible_inventory_groups")
     )
-    return stmt.where(or_(visible_row, ~same_group_visible_exists))
+    item_name_key = func.lower(func.trim(func.coalesce(Item.name, "")))
+    item_brand_key = func.lower(func.trim(func.coalesce(Item.brand, "")))
+    visible_row = or_(Item.is_archived == False, Item.is_archived.is_(None))  # noqa: E712
+    return stmt.outerjoin(
+        active_groups,
+        and_(active_groups.c.name_key == item_name_key, active_groups.c.brand_key == item_brand_key),
+    ).where(
+        or_(visible_row, active_groups.c.name_key.is_(None))
+    )
 
 
 def _dashboard_visible_rows_statement():
@@ -1249,6 +1319,10 @@ def list_items(
     limit: Optional[int] = Query(None, ge=1, le=500),
     offset: Optional[int] = Query(None, ge=0),
 
+    # Fast path for interactive lists/autocompletes. These screens search item
+    # identity fields; they must not scan the ever-growing stock ledger.
+    lookup_only: bool = Query(False, description="Skip stock-movement text search and movement metadata"),
+
     # ✅ NEW
     include_archived: bool = Query(False, description="If true, include archived batches"),
 ):
@@ -1268,20 +1342,6 @@ def list_items(
             if id_text.isdigit():
                 numeric_search_id = int(id_text)
 
-            movement_search_terms = [
-                StockMovement.reason.ilike(like),
-                func.coalesce(StockMovement.ref_type, "").ilike(like),
-                func.coalesce(StockMovement.note, "").ilike(like),
-            ]
-            if numeric_search_id is not None:
-                movement_search_terms.append(StockMovement.ref_id == numeric_search_id)
-
-            matching_movement_exists = exists(
-                select(StockMovement.id).where(
-                    StockMovement.item_id == Item.id,
-                    or_(*movement_search_terms),
-                )
-            )
             matching_product_exists = exists(
                 select(Product.id).where(
                     Product.id == Item.product_id,
@@ -1307,10 +1367,25 @@ def list_items(
             item_search_terms = [
                 Item.name.ilike(like),
                 Item.brand.ilike(like),
-                matching_movement_exists,
                 matching_product_exists,
                 matching_lot_product_exists,
             ]
+            if not lookup_only:
+                movement_search_terms = [
+                    StockMovement.reason.ilike(like),
+                    func.coalesce(StockMovement.ref_type, "").ilike(like),
+                    func.coalesce(StockMovement.note, "").ilike(like),
+                ]
+                if numeric_search_id is not None:
+                    movement_search_terms.append(StockMovement.ref_id == numeric_search_id)
+                item_search_terms.append(
+                    exists(
+                        select(StockMovement.id).where(
+                            StockMovement.item_id == Item.id,
+                            or_(*movement_search_terms),
+                        )
+                    )
+                )
             if numeric_search_id is not None:
                 item_search_terms.append(Item.id == numeric_search_id)
 
@@ -1388,7 +1463,8 @@ def list_items(
         if q and limit is None and offset is None:
             stmt = base_stmt.order_by(Item.name, Item.id)
             items = session.exec(stmt).all()
-            _attach_last_incoming(session, items)
+            if not lookup_only:
+                _attach_last_incoming(session, items)
             _attach_lot_metadata(session, items)
             _attach_category_names(session, items)
             total = len(items)
@@ -1405,7 +1481,8 @@ def list_items(
             base_stmt.order_by(Item.name, Item.id).limit(page_limit).offset(page_offset)
         )
         items = session.exec(page_stmt).all()
-        _attach_last_incoming(session, items)
+        if not lookup_only:
+            _attach_last_incoming(session, items)
         _attach_lot_metadata(session, items)
         _attach_category_names(session, items)
 
@@ -1426,6 +1503,7 @@ def list_incoming_stock_entries(
     include_archived: bool = Query(False, description="If true, include archived batches"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    lookup_only: bool = Query(False, description="Fast picker lookup without ledger-text search or exact count"),
 ):
     with get_session() as session:
         movement_ts = _stock_movement_effective_ts_expr()
@@ -1470,29 +1548,33 @@ def list_incoming_stock_entries(
             if id_text.isdigit():
                 numeric_search_id = int(id_text)
 
-            terms = [
-                Item.name.ilike(like),
-                Item.brand.ilike(like),
-                StockMovement.reason.ilike(like),
-                func.coalesce(StockMovement.ref_type, "").ilike(like),
-                func.coalesce(StockMovement.note, "").ilike(like),
-            ]
-            if numeric_search_id is not None:
+            terms = [Item.name.ilike(like), Item.brand.ilike(like)]
+            if not lookup_only:
                 terms.extend([
-                    Item.id == numeric_search_id,
-                    StockMovement.id == numeric_search_id,
-                    StockMovement.ref_id == numeric_search_id,
+                    StockMovement.reason.ilike(like),
+                    func.coalesce(StockMovement.ref_type, "").ilike(like),
+                    func.coalesce(StockMovement.note, "").ilike(like),
                 ])
+            if numeric_search_id is not None:
+                terms.append(Item.id == numeric_search_id)
+                if not lookup_only:
+                    terms.extend([StockMovement.id == numeric_search_id, StockMovement.ref_id == numeric_search_id])
             stmt = stmt.where(or_(*terms))
 
-        count_stmt = select(func.count()).select_from(stmt.subquery())
-        total = session.exec(count_stmt).one()
-
+        fetch_limit = limit + 1 if lookup_only else limit
         rows = session.exec(
             stmt.order_by(movement_ts.desc(), StockMovement.id.desc())
-            .limit(limit)
+            .limit(fetch_limit)
             .offset(offset)
         ).all()
+        has_more = lookup_only and len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+        if lookup_only:
+            total = offset + len(rows) + (1 if has_more else 0)
+        else:
+            count_stmt = select(func.count()).select_from(stmt.subquery())
+            total = session.exec(count_stmt).one()
 
         row_items = [row[1] for row in rows]
         item_ids = [int(item.id) for item in row_items if getattr(item, "id", None) is not None]
@@ -1551,7 +1633,7 @@ def list_incoming_stock_entries(
                 )
             )
 
-        next_offset = (offset + limit) if (offset + limit) < total else None
+        next_offset = (offset + limit) if (has_more or (not lookup_only and offset + limit < total)) else None
         return {"items": items, "total": total, "next_offset": next_offset}
 
 

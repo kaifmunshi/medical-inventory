@@ -16,7 +16,7 @@ import {
   MenuItem,
 } from '@mui/material'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { listItemsPage } from '../../services/inventory'
+import { listBillingItemsPage } from '../../services/inventory'
 import { openPack } from '../../services/lots'
 import { fetchCategories } from '../../services/products'
 import { PRODUCT_SEARCH_DEBOUNCE_MS, PRODUCT_SEARCH_MIN_CHARS, PRODUCT_SEARCH_PROMPT } from '../../lib/constants'
@@ -179,11 +179,10 @@ export default function ItemPicker({
         return { items: [], total: 0, next_offset: null }
       }
       try {
-        return await listItemsPage(
+        return await listBillingItemsPage(
           hasReadySearchTerm ? debouncedSearchTerm : '',
           ITEM_PAGE_SIZE,
           pageOffset,
-          undefined,
           categoryId ? { category_id: Number(categoryId) } : undefined,
           { signal },
         )
@@ -280,7 +279,7 @@ export default function ItemPicker({
         packs_opened: packs,
         note: 'Opened from billing for loose sale',
       })
-      const freshPage = await listItemsPage(String(item.name || ''), ITEM_PAGE_SIZE, 0)
+      const freshPage = await listBillingItemsPage(String(item.name || ''), ITEM_PAGE_SIZE, 0)
       return {
         packs,
         parent: item,
@@ -437,7 +436,7 @@ export default function ItemPicker({
 
             {items.length === 0 && (
               <Box p={2} color="text.secondary">
-                {canSearchItems ? (isFetching ? 'Loading products...' : 'No items found.') : PRODUCT_SEARCH_PROMPT}
+                {canSearchItems ? (isFetching && items.length === 0 ? 'Loading products...' : 'No items found.') : PRODUCT_SEARCH_PROMPT}
               </Box>
             )}
           </List>

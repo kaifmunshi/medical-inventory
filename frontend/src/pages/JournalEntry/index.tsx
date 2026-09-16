@@ -398,7 +398,7 @@ export default function JournalEntryPage() {
                           sx={{ flex: 1, minWidth: 0 }}
                           options={optionsForLine(line)}
                           value={line.ledger}
-                          loading={activeLedgerLine === line.key && ledgersQ.isFetching}
+                          loading={activeLedgerLine === line.key && ledgersQ.isLoading}
                           filterOptions={(options) => options}
                           isOptionEqualToValue={(a, b) => Number(a?.id) === Number(b?.id)}
                           getOptionLabel={(option) => option?.name || ''}

@@ -825,7 +825,7 @@ export default function ProductsPage() {
             <Autocomplete
               options={mergeOptions}
               value={mergeTarget}
-              loading={mergeOptionsQ.isFetching}
+              loading={mergeOptionsQ.isLoading}
               open={mergeOptionsOpen}
               onOpen={() => setMergeOptionsOpen(true)}
               onClose={() => setMergeOptionsOpen(false)}

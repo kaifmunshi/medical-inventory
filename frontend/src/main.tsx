@@ -7,7 +7,6 @@ import { ThemeProvider, CssBaseline } from '@mui/material'
 import App from './App'
 import theme from './theme/theme'
 import './styles.css'
-import GlobalFetchingUI from './components/ui/GlobalFetchingUI'
 import DisableNumberInputScroll from './components/ui/DisableNumberInputScroll'
 import EnterKeyDefaultAction from './components/ui/EnterKeyDefaultAction'
 
@@ -25,12 +24,25 @@ const client = new QueryClient({
   },
 })
 
+// Older client installations may have registered a service worker or retained
+// an application cache. This app is local-first and ships hashed assets, so
+// keeping those legacy caches can only serve an obsolete frontend after update.
+if ('serviceWorker' in navigator) {
+  void navigator.serviceWorker.getRegistrations().then((registrations) => {
+    registrations.forEach((registration) => void registration.unregister())
+  })
+}
+if ('caches' in window) {
+  void caches.keys().then((keys) => {
+    keys.forEach((key) => void caches.delete(key))
+  })
+}
+
 function Root() {
   return (
     <>
       <DisableNumberInputScroll />
       <EnterKeyDefaultAction />
-      <GlobalFetchingUI />
       <App />
     </>
   )

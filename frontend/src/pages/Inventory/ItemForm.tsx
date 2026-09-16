@@ -317,7 +317,7 @@ export default function ItemForm({
 
               <Autocomplete
                 options={options}
-                loading={canSearchExistingItems && (isLoading || isFetchingNextPage)}
+                loading={canSearchExistingItems && isLoading && options.length === 0}
                 value={pickedExisting}
                 onChange={(_, value) => {
                   applyFromExisting(value)

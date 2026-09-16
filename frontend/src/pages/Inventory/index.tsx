@@ -723,7 +723,6 @@ export default function Inventory() {
       >
         <Typography variant="body2" color="text.secondary">
           Showing {pageStart}-{pageEnd} of {totalRows}
-          {isFetching && !isLoading ? ' • Refreshing...' : ''}
         </Typography>
         <Stack direction="row" gap={1} justifyContent={{ xs: 'space-between', sm: 'flex-end' }}>
           <Button

@@ -597,7 +597,7 @@ export default function SuspenseAccountPage() {
                 <Autocomplete
                   options={products}
                   value={selectedProduct}
-                  loading={saleProductsQ.isLoading}
+                  loading={saleProductsQ.isLoading && !(saleProductsQ.data || []).length}
                   onChange={(_event, value) => setSaleLines((current) => current.map((row, rowIndex) => rowIndex === index ? {
                     ...row,
                     categoryId: value?.categoryId || row.categoryId,

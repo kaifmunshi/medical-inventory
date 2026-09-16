@@ -213,7 +213,7 @@ export async function listItems(
   q: string = '',
   options?: { include_archived?: boolean; created_from?: string; incoming_from?: string },
 ): Promise<Item[]> {
-  const params: Record<string, string | boolean> = {}
+  const params: Record<string, string | boolean> = { lookup_only: true }
   if (q) params.q = q
   if (typeof options?.include_archived === 'boolean') params.include_archived = options.include_archived
   if (options?.created_from) params.created_from = options.created_from
@@ -233,7 +233,7 @@ export async function listItemsPage(
   filters?: { brand?: string; category_id?: number; include_archived?: boolean; created_from?: string; incoming_from?: string; missing_expiry?: boolean },
   requestOptions?: InventoryRequestOptions,
 ): Promise<ItemsPage> {
-  const params: Record<string, string | number | boolean> = { q, limit, offset }
+  const params: Record<string, string | number | boolean> = { q, limit, offset, lookup_only: true }
   if (typeof rackNumber === 'number' && Number.isFinite(rackNumber)) {
     params.rack_number = rackNumber
   }
@@ -244,6 +244,22 @@ export async function listItemsPage(
   if (filters?.incoming_from) params.incoming_from = filters.incoming_from
   if (typeof filters?.missing_expiry === 'boolean') params.missing_expiry = filters.missing_expiry
   const { data } = await api.get('/inventory', { params, signal: requestOptions?.signal })
+  return data as ItemsPage
+}
+
+export async function listBillingItemsPage(
+  q: string = '',
+  limit: number = 50,
+  offset: number = 0,
+  filters?: { category_id?: number },
+  requestOptions?: InventoryRequestOptions,
+): Promise<ItemsPage> {
+  const params: Record<string, string | number> = { q, limit, offset }
+  if (typeof filters?.category_id === 'number') params.category_id = filters.category_id
+  const { data } = await api.get('/inventory/billing-search', {
+    params,
+    signal: requestOptions?.signal,
+  })
   return data as ItemsPage
 }
 
@@ -271,26 +287,20 @@ export async function listAllItems(
 
 export async function listIncomingStockEntries(
   q: string = '',
-  options?: { include_archived?: boolean; incoming_from?: string; category_id?: number },
+  options?: { include_archived?: boolean; incoming_from?: string; category_id?: number; limit?: number },
+  requestOptions?: InventoryRequestOptions,
 ): Promise<IncomingStockEntry[]> {
-  const limit = 500
-  let offset = 0
-  const rows: IncomingStockEntry[] = []
-
-  while (true) {
-    const params: Record<string, string | number | boolean> = { limit, offset }
-    if (q) params.q = q
-    if (typeof options?.include_archived === 'boolean') params.include_archived = options.include_archived
-    if (options?.incoming_from) params.incoming_from = options.incoming_from
-    if (typeof options?.category_id === 'number') params.category_id = options.category_id
-    const { data } = await api.get('/inventory/incoming', { params })
-    const page = data as IncomingStockEntryPage
-    rows.push(...(page.items || []))
-    if (page.next_offset == null) break
-    offset = page.next_offset
+  const params: Record<string, string | number | boolean> = {
+    limit: options?.limit ?? 100,
+    offset: 0,
+    lookup_only: true,
   }
-
-  return rows
+  if (q) params.q = q
+  if (typeof options?.include_archived === 'boolean') params.include_archived = options.include_archived
+  if (options?.incoming_from) params.incoming_from = options.incoming_from
+  if (typeof options?.category_id === 'number') params.category_id = options.category_id
+  const { data } = await api.get('/inventory/incoming', { params, signal: requestOptions?.signal })
+  return ((data as IncomingStockEntryPage).items || [])
 }
 
 export async function getInventoryDashboardStats(): Promise<InventoryDashboardStats> {

@@ -324,6 +324,12 @@ type ReceiptHistoryRow = {
   deletedAt?: string | null
 }
 
+export function customerClosingBalance(openingBalance: number, outstandingBills: number, unallocatedAdvance: number) {
+  // Applied receipts are already included in each bill's outstanding amount.
+  // Subtracting total receipts here would count applied payments twice.
+  return round2(openingBalance + outstandingBills - unallocatedAdvance)
+}
+
 export default function CustomerLedgerPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -814,7 +820,7 @@ export default function CustomerLedgerPage() {
   const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
   const receiptHistoryOnAccountTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
   const openingBalance = signedPartyOpening(selectedParty)
-  const closingBalance = round2(openingBalance + totalOutstanding - receiptHistoryOnAccountTotal)
+  const closingBalance = customerClosingBalance(openingBalance, totalOutstanding, receiptHistoryOnAccountTotal)
   const actualRefundableAdvance = round2(Math.max(0, -closingBalance))
   const refundAvailable = round2(Math.min(Number(refundTarget?.onAccount || 0), actualRefundableAdvance))
   const availableAdvanceReceipts = activeReceiptHistory.filter(

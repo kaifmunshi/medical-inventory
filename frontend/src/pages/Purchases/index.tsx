@@ -320,6 +320,7 @@ export default function PurchasesPage() {
   const [roundingAdjustment, setRoundingAdjustment] = useState('0')
   const [items, setItems] = useState<DraftItem[]>([makeEmptyItem()])
   const [draftPayments, setDraftPayments] = useState<DraftPayment[]>([])
+  const [draftSupplierCredit, setDraftSupplierCredit] = useState('0')
   const [editingDraftPaymentKey, setEditingDraftPaymentKey] = useState<string | null>(null)
   const [paymentContext, setPaymentContext] = useState<'saved' | 'draft'>('saved')
   const [expandedDraftLines, setExpandedDraftLines] = useState<Record<string, boolean>>({})
@@ -703,12 +704,14 @@ export default function PurchasesPage() {
   )
   const gstTotal = useMemo(() => invoiceGst(items, Number(discountAmount || 0)), [discountAmount, items])
   const draftPaymentTotal = round2(draftPayments.reduce((sum, payment) => round2(sum + Number(payment.amount || 0)), 0))
+  const draftSupplierCreditAmount = round2(Number(draftSupplierCredit || 0))
+  const draftSettlementTotal = round2(draftPaymentTotal + draftSupplierCreditAmount)
   const draftPaidTotal = round2(draftPayments.reduce((sum, payment) => round2(sum + (payment.is_writeoff ? 0 : Number(payment.amount || 0))), 0))
   const draftWriteoffTotal = round2(draftPayments.reduce((sum, payment) => round2(sum + (payment.is_writeoff ? Number(payment.amount || 0) : 0)), 0))
   const editingDraftPayment = editingDraftPaymentKey
     ? draftPayments.find((payment) => payment.key === editingDraftPaymentKey) || null
     : null
-  const draftPaymentAvailableAmount = round2(Math.max(0, total - draftPaymentTotal) + (editingDraftPayment ? Number(editingDraftPayment.amount || 0) : 0))
+  const draftPaymentAvailableAmount = round2(Math.max(0, total - draftSettlementTotal) + (editingDraftPayment ? Number(editingDraftPayment.amount || 0) : 0))
 
   const suppliers = suppliersQ.data || []
   const categories = categoriesQ.data || []
@@ -765,25 +768,10 @@ export default function PurchasesPage() {
         ? 'Invalid bank charges'
       : purchasePaymentAmount <= 0
       ? 'Amount must be greater than 0'
-      : purchasePaymentAmount > paymentAvailableAmount + 0.01
+      : (paymentType === 'writeoff' || paymentContext === 'draft') && purchasePaymentAmount > paymentAvailableAmount + 0.01
         ? `Max ${money(paymentAvailableAmount)}`
         : ''
   const supplierNameFor = (id: number) => suppliers.find((supplier) => Number(supplier.id) === Number(id))?.name || `Supplier #${id}`
-
-  useEffect(() => {
-    if (!paymentOpen || paymentType !== 'payment' || paymentMode !== 'split') return
-    const cash = Number(paymentCash || 0)
-    if (Number.isNaN(cash) || cash < 0) {
-      setPaymentOnline((prev) => (prev === '0' ? prev : '0'))
-    } else if (cash > paymentAvailableAmount) {
-      const outstanding = money(paymentAvailableAmount)
-      setPaymentCash((prev) => (prev === outstanding ? prev : outstanding))
-      setPaymentOnline((prev) => (prev === '0' ? prev : '0'))
-    } else {
-      const online = money(paymentAvailableAmount - cash)
-      setPaymentOnline((prev) => (prev === online ? prev : online))
-    }
-  }, [paymentAvailableAmount, paymentCash, paymentMode, paymentOpen, paymentType])
 
   useEffect(() => {
     if (!paymentOpen || paymentType !== 'payment' || purchasePaymentOnline > 0) return
@@ -806,6 +794,7 @@ export default function PurchasesPage() {
     const firstItem = makeEmptyItem()
     setItems([firstItem])
     setDraftPayments([])
+    setDraftSupplierCredit('0')
     setEditingDraftPaymentKey(null)
     setExpandedDraftLines({ [firstItem.key]: true })
     setSupplierContextOpen(false)
@@ -1038,25 +1027,11 @@ export default function PurchasesPage() {
   }
 
   function setPaymentSplitCashAmount(value: string) {
-    const cash = Number(value || 0)
-    if (Number.isNaN(cash) || cash < 0) {
-      setPaymentCash(value)
-      setPaymentOnline('0')
-      return
-    }
     setPaymentCash(value)
-    setPaymentOnline(money(Math.max(0, paymentAvailableAmount - cash)))
   }
 
   function setPaymentSplitOnlineAmount(value: string) {
-    const online = Number(value || 0)
-    if (Number.isNaN(online) || online < 0) {
-      setPaymentOnline(value)
-      setPaymentCash('0')
-      return
-    }
     setPaymentOnline(value)
-    setPaymentCash(money(Math.max(0, paymentAvailableAmount - online)))
   }
 
   function openEditHeader() {
@@ -1189,6 +1164,15 @@ export default function PurchasesPage() {
       toast.push('Add at least one purchase item', 'error')
       return
     }
+    const availableSupplierCredit = Number(ledgerQ.data?.supplier_credit || 0)
+    if (draftSupplierCreditAmount < 0 || draftSupplierCreditAmount > availableSupplierCredit + 0.01) {
+      toast.push(`Supplier credit cannot exceed Rs ${money(availableSupplierCredit)}`, 'error')
+      return
+    }
+    if (draftSettlementTotal > total + 0.01) {
+      toast.push('Payments, write-offs, and supplier credit cannot exceed the purchase total', 'error')
+      return
+    }
     const cleanedItems = cleanItems(activeItems)
     if (cleanedItems.some((item) => !item.product_name)) {
       toast.push('Every purchase item needs a product name', 'error')
@@ -1225,7 +1209,8 @@ export default function PurchasesPage() {
       gst_amount: round2(gstTotal),
       rounding_adjustment: round2(Number(roundingAdjustment || 0)),
       items: purchasePayloadItems(activeItems),
-      payments: draftPayments.map((payment) => ({
+      payments: [
+        ...draftPayments.map((payment) => ({
         amount: round2(Number(payment.amount || 0)),
         mode: payment.mode,
         bank_mode: Number(payment.online_amount || 0) > 0 ? payment.bank_mode : undefined,
@@ -1236,7 +1221,20 @@ export default function PurchasesPage() {
         note: payment.note?.trim() || undefined,
         paid_at: payment.paid_at || invoiceDate,
         is_writeoff: Boolean(payment.is_writeoff),
+        is_supplier_credit: false,
       })),
+        ...(draftSupplierCreditAmount > 0 ? [{
+          amount: draftSupplierCreditAmount,
+          mode: 'supplier_credit' as const,
+          cash_amount: 0,
+          online_amount: 0,
+          txn_charges: 0,
+          note: 'Supplier credit applied while creating purchase',
+          paid_at: invoiceDate,
+          is_writeoff: false,
+          is_supplier_credit: true,
+        }] : []),
+      ],
     })
   }
 
@@ -1330,6 +1328,13 @@ export default function PurchasesPage() {
       resetPaymentForm()
       return
     }
+    const supplierCreditCreated = paymentType === 'payment'
+      ? round2(Math.max(0, purchasePaymentAmount - paymentAvailableAmount))
+      : 0
+    if (supplierCreditCreated > 0.01 && !window.confirm(
+      `Bill outstanding is Rs ${money(paymentAvailableAmount)} and payment is Rs ${money(purchasePaymentAmount)}. ` +
+      `Rs ${money(supplierCreditCreated)} will be saved as supplier credit from this bill. Continue?`,
+    )) return
     const targetPaymentPurchaseId = Number(paymentPurchaseId)
     if (editingPayment) {
       updatePaymentM.mutate({ id: targetPaymentPurchaseId, paymentId: Number(editingPayment.id), payload })
@@ -2118,7 +2123,7 @@ export default function PurchasesPage() {
 	                  startIcon={<PaymentsIcon />}
 	                  onClick={() => openPaymentDialog(paymentHistoryPurchase)}
 	                >
-                  Add Payment / Write-off
+	                  Add Payment / Overpayment / Write-off
                 </Button>
               </Stack>
             ) : null}
@@ -2305,7 +2310,7 @@ export default function PurchasesPage() {
               <Grid container spacing={1}>
                 <Grid item xs={12} md={4}>
                   <Stack direction="row" gap={1}>
-                    <TextField size="small" select label="Supplier" value={partyId ?? ''} onChange={(e) => setPartyId(e.target.value ? Number(e.target.value) : null)} fullWidth>
+                    <TextField size="small" select label="Supplier" value={partyId ?? ''} onChange={(e) => { setPartyId(e.target.value ? Number(e.target.value) : null); setDraftSupplierCredit('0') }} fullWidth>
                       {suppliers.map((supplier) => (
                         <MenuItem key={supplier.id} value={supplier.id}>{supplier.name}</MenuItem>
                       ))}
@@ -2350,6 +2355,28 @@ export default function PurchasesPage() {
                   <Typography variant="caption" color="text.secondary">Total</Typography>
                   <Typography variant="h6" color="primary.main" fontWeight={900}>{money(total)}</Typography>
                 </Grid>
+                {partyId && Number(ledgerQ.data?.supplier_credit || 0) > 0 ? (
+                  <Grid item xs={12} md={4}>
+                    <Paper variant="outlined" sx={{ p: 1, bgcolor: 'rgba(2, 136, 209, 0.06)' }}>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
+                        <Box sx={{ flex: 1 }}>
+                          <Typography variant="body2" fontWeight={800}>Supplier credit available: Rs {money(ledgerQ.data?.supplier_credit || 0)}</Typography>
+                          <Typography variant="caption" color="text.secondary">Apply it to this new purchase without a cash/bank payment.</Typography>
+                        </Box>
+                        <TextField
+                          size="small"
+                          label="Credit to Adjust"
+                          type="number"
+                          value={draftSupplierCredit}
+                          onChange={(e) => setDraftSupplierCredit(e.target.value)}
+                          inputProps={{ min: 0, max: Math.min(Number(ledgerQ.data?.supplier_credit || 0), Math.max(0, total - draftPaymentTotal)), step: '0.01' }}
+                          error={draftSupplierCreditAmount < 0 || draftSupplierCreditAmount > Number(ledgerQ.data?.supplier_credit || 0) + 0.01 || draftSettlementTotal > total + 0.01}
+                          sx={{ minWidth: 170 }}
+                        />
+                      </Stack>
+                    </Paper>
+                  </Grid>
+                ) : null}
                 <Grid item xs={6} md={2}>
                   <Button
                     size="small"
@@ -2361,13 +2388,14 @@ export default function PurchasesPage() {
                     Payment
                   </Button>
                 </Grid>
-                {draftPayments.length > 0 ? (
+                {draftPayments.length > 0 || draftSupplierCreditAmount > 0 ? (
                 <Grid item xs={12}>
                   <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1} sx={{ mb: 0.5 }}>
                     <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} flexWrap="wrap" useFlexGap>
                       <Chip label={`Payments ${money(draftPaidTotal)}`} color="success" variant="outlined" />
                       <Chip label={`Write-off ${money(draftWriteoffTotal)}`} variant="outlined" />
-                      <Chip label={`Outstanding ${money(round2(Math.max(0, total - draftPaymentTotal)))}`} color="warning" variant="outlined" />
+                      {draftSupplierCreditAmount > 0 ? <Chip label={`Supplier Credit ${money(draftSupplierCreditAmount)}`} color="info" variant="outlined" /> : null}
+                      <Chip label={`Outstanding ${money(round2(Math.max(0, total - draftSettlementTotal)))}`} color="warning" variant="outlined" />
                     </Stack>
                   </Stack>
                   <Box sx={{ overflowX: 'auto' }}>
@@ -2388,6 +2416,17 @@ export default function PurchasesPage() {
                         </tr>
                       </thead>
                       <tbody>
+                        {draftSupplierCreditAmount > 0 ? (
+                          <tr>
+                            <td>{invoiceDate}</td>
+                            <td>Supplier Credit</td>
+                            <td>Credit Adjustment</td>
+                            <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+                            <td>{money(draftSupplierCreditAmount)}</td>
+                            <td>Applied from supplier credit balance</td>
+                            <td><Button size="small" color="error" onClick={() => setDraftSupplierCredit('0')}>Remove</Button></td>
+                          </tr>
+                        ) : null}
                         {draftPayments.map((payment) => (
                           <tr key={payment.key}>
                             <td>{payment.paid_at || '-'}</td>
@@ -2544,10 +2583,9 @@ export default function PurchasesPage() {
 	                  <Button
                     variant="contained"
                     startIcon={<PaymentsIcon />}
-                    disabled={(selectedPurchase.net_amount ?? selectedPurchase.total_amount) - selectedPurchase.paid_amount - selectedPurchase.writeoff_amount <= 0.0001}
                     onClick={() => openPaymentDialog()}
                   >
-                    Add Payment / Write-off
+                    Add Payment / Overpayment / Write-off
                   </Button>
                   <Button color="error" variant="outlined" disabled={selectedPurchase.return_total > 0} onClick={() => setCancelConfirmOpen(true)}>Cancel Purchase</Button>
                   <Button component="a" href={`/purchase-returns`} variant="outlined" color="secondary">Purchase Returns</Button>
@@ -2903,9 +2941,14 @@ export default function PurchasesPage() {
               </Stack>
             ) : null}
 	            <Typography variant="body2" color={purchasePaymentError ? 'error' : 'text.secondary'}>
-	              Amount {money(purchasePaymentAmount)} / Available {money(paymentAvailableAmount)}
+	              Amount {money(purchasePaymentAmount)} / Bill outstanding {money(paymentAvailableAmount)}
                 {purchasePaymentOnline > 0 ? ` / Bank ${bankModeLabel(paymentBankMode)}${paymentBankMode === 'UPI' && paymentTransactionId.trim() ? ` / Txn ${paymentTransactionId.trim()}` : ''} / Charges ${money(purchasePaymentTxnCharges)}` : ''}
 	            </Typography>
+                {paymentContext === 'saved' && paymentType === 'payment' && purchasePaymentAmount > paymentAvailableAmount + 0.01 ? (
+                  <Typography variant="body2" color="info.main" fontWeight={700}>
+                    Excess Rs {money(purchasePaymentAmount - paymentAvailableAmount)} will become supplier credit from this bill.
+                  </Typography>
+                ) : null}
 	            <TextField label="Date" type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
             <TextField label="Note" value={paymentNote} onChange={(e) => setPaymentNote(e.target.value)} multiline minRows={2} fullWidth />
           </Stack>

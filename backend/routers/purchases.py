@@ -1346,20 +1346,22 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     raise HTTPException(status_code=400, detail="paid_at is required")
                 payment_ts = f"{payment_date}T00:00:00"
             assert_financial_year_unlocked(session, payment_ts, context="Purchase payment")
-            mode, amount, cash_amount, online_amount = normalize_payment_mode(
-                payment.mode,
-                payment.amount,
-                payment.cash_amount,
-                payment.online_amount,
-                bool(payment.is_writeoff),
-            )
-            bank_mode, transaction_id, txn_charges = normalize_purchase_bank_details(
-                is_writeoff=bool(payment.is_writeoff),
-                online_amount=online_amount,
-                bank_mode=payment.bank_mode,
-                transaction_id=payment.transaction_id,
-                txn_charges=payment.txn_charges,
-            )
+            if bool(payment.is_supplier_credit):
+                amount = round2(payment.amount)
+                if amount <= 0:
+                    raise HTTPException(status_code=400, detail="Supplier credit amount must be greater than 0")
+                if bool(payment.is_writeoff):
+                    raise HTTPException(status_code=400, detail="Supplier credit cannot be a write-off")
+                mode, cash_amount, online_amount = "supplier_credit", 0.0, 0.0
+                bank_mode, transaction_id, txn_charges = None, None, 0.0
+            else:
+                mode, amount, cash_amount, online_amount = normalize_payment_mode(
+                    payment.mode, payment.amount, payment.cash_amount, payment.online_amount, bool(payment.is_writeoff),
+                )
+                bank_mode, transaction_id, txn_charges = normalize_purchase_bank_details(
+                    is_writeoff=bool(payment.is_writeoff), online_amount=online_amount,
+                    bank_mode=payment.bank_mode, transaction_id=payment.transaction_id, txn_charges=payment.txn_charges,
+                )
             prepared_payments.append(
                 {
                     "mode": mode,
@@ -1372,6 +1374,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     "note": clean_text(payment.note),
                     "paid_at": payment_ts,
                     "is_writeoff": bool(payment.is_writeoff),
+                    "is_supplier_credit": bool(payment.is_supplier_credit),
                 }
             )
             if bool(payment.is_writeoff):
@@ -1381,6 +1384,11 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
 
         if paid_amount + writeoff_amount > total_amount + 0.0001:
             raise HTTPException(status_code=400, detail="Payments and write-offs exceed purchase total")
+        credit_to_apply = round2(sum(
+            float(payment["amount"] or 0) for payment in prepared_payments if payment["is_supplier_credit"]
+        ))
+        if credit_to_apply > supplier_credit_available(session, int(supplier.id)) + 0.0001:
+            raise HTTPException(status_code=400, detail="Applied amount exceeds available supplier credit")
 
         if total_amount <= 0:
             payment_status = "PAID"
@@ -1540,6 +1548,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 txn_charges=payment["txn_charges"],
                 note=payment["note"],
                 is_writeoff=bool(payment["is_writeoff"]),
+                is_supplier_credit=bool(payment["is_supplier_credit"]),
                 is_deleted=False,
                 deleted_at=None,
             )
@@ -2045,7 +2054,12 @@ def add_supplier_payment(party_id: int, payload: SupplierPaymentCreate) -> List[
                 - float(row.paid_amount or 0)
                 - float(row.writeoff_amount or 0)
             )
-            if amount > outstanding + 0.0001:
+            allow_bill_overpayment = (
+                not bool(payload.is_writeoff)
+                and not bool(payload.use_supplier_credit)
+                and len(allocation_map) == 1
+            )
+            if amount > outstanding + 0.0001 and not allow_bill_overpayment:
                 raise HTTPException(status_code=400, detail=f"Allocation for purchase {purchase_id} exceeds outstanding amount")
 
         cash_remaining = cash_amount
@@ -2197,7 +2211,7 @@ def update_supplier_payment(party_id: int, payment_id: int, payload: PurchasePay
                 )
             ).all()
             settled_elsewhere = round2(sum(float(p.amount or 0) for p in active_payments))
-            if settled_elsewhere + amount > purchase_payable_at(session, purchase, next_paid_at) + 0.0001:
+            if next_is_writeoff and settled_elsewhere + amount > purchase_payable_at(session, purchase, next_paid_at) + 0.0001:
                 raise HTTPException(status_code=400, detail="Payment exceeds outstanding amount")
 
         payment.party_id = supplier.id
@@ -2371,7 +2385,7 @@ def add_purchase_payment(purchase_id: int, payload: PurchasePaymentCreate) -> Pu
             + float(row.writeoff_amount or 0)
             + amount
         )
-        if projected > purchase_payable_at(session, row, paid_at) + 0.0001:
+        if bool(payload.is_writeoff) and projected > purchase_payable_at(session, row, paid_at) + 0.0001:
             raise HTTPException(status_code=400, detail="Payment exceeds outstanding amount")
 
         payment = PurchasePayment(
@@ -2480,7 +2494,7 @@ def update_purchase_payment(purchase_id: int, payment_id: int, payload: Purchase
             )
         ).all()
         settled_elsewhere = round2(sum(float(p.amount or 0) for p in active_payments))
-        if settled_elsewhere + amount > purchase_payable_at(session, row, next_paid_at) + 0.0001:
+        if next_is_writeoff and settled_elsewhere + amount > purchase_payable_at(session, row, next_paid_at) + 0.0001:
             raise HTTPException(status_code=400, detail="Payment exceeds outstanding amount")
 
         payment.paid_at = next_paid_at

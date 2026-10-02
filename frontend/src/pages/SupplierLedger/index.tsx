@@ -365,6 +365,9 @@ export default function SupplierLedgerPage() {
   const purchaseReturns = purchaseReturnsQ.data || []
   const openingBalance = openingForSupplier(selectedSupplier)
   const openPurchases = purchases.filter((purchase) => outstandingOf(purchase) > 0.0001)
+  const paymentAllocationPurchases = purchases.filter(
+    (purchase) => outstandingOf(purchase) > 0.0001 || Object.prototype.hasOwnProperty.call(allocationDrafts, Number(purchase.id)),
+  )
   const openPurchaseOutstanding = openPurchases.reduce((sum, purchase) => sum + outstandingOf(purchase), 0)
   const selectedPurchase = purchases.find((purchase) => Number(purchase.id) === Number(selectedPurchaseId)) || null
   const editItemsSubtotal = useMemo(
@@ -832,9 +835,12 @@ export default function SupplierLedgerPage() {
     setPaymentTxnCharges('0')
     setPaymentDate(today)
     setPaymentNote('')
+    const allocationRows = target && !openPurchases.some((row) => Number(row.id) === Number(target.id))
+      ? [target, ...openPurchases]
+      : openPurchases
     setAllocationDrafts(
       Object.fromEntries(
-        openPurchases.map((row) => [
+        allocationRows.map((row) => [
           Number(row.id),
           target && Number(target.id) === Number(row.id) ? money(outstandingOf(row)) : '0',
         ]),
@@ -887,6 +893,32 @@ export default function SupplierLedgerPage() {
     if (!canSavePayment) {
       toast.push('Check supplier, amount, allocations, split payment, and bank charges before saving', 'error')
       return
+    }
+    if (paymentType === 'payment') {
+      let supplierCreditCreated = 0
+      let billOutstanding = 0
+      if (editingPayment && Number(editingPayment.purchase_id || 0) > 0) {
+        const purchase = purchases.find((row) => Number(row.id) === Number(editingPayment.purchase_id))
+        if (purchase) {
+          billOutstanding = round2(outstandingOf(purchase) + Number(editingPayment.amount || 0))
+          supplierCreditCreated = round2(Math.max(0, supplierPaymentBaseTotal - billOutstanding))
+        }
+      } else if (!paymentWithoutBill) {
+        for (const [purchaseId, value] of Object.entries(allocationDrafts)) {
+          const purchase = purchases.find((row) => Number(row.id) === Number(purchaseId))
+          if (!purchase) continue
+          const applied = Number(value || 0)
+          if (applied > outstandingOf(purchase) + 0.01) {
+            billOutstanding = outstandingOf(purchase)
+            supplierCreditCreated = round2(applied - billOutstanding)
+            break
+          }
+        }
+      }
+      if (supplierCreditCreated > 0.01 && !window.confirm(
+        `Bill outstanding is Rs ${money(billOutstanding)} and payment is Rs ${money(billOutstanding + supplierCreditCreated)}. ` +
+        `Rs ${money(supplierCreditCreated)} will be saved as supplier credit from this bill. Continue?`,
+      )) return
     }
     if (editingPayment) {
       if (!partyId) return
@@ -1901,7 +1933,7 @@ export default function SupplierLedgerPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {openPurchases.map((purchase) => (
+                      {paymentAllocationPurchases.map((purchase) => (
                         <tr key={purchase.id}>
                           <td>
                             <Link
@@ -1926,7 +1958,11 @@ export default function SupplierLedgerPage() {
                               onChange={(e) => setDraft(Number(purchase.id), e.target.value)}
 	                              inputProps={{ min: 0, step: '0.01' }}
 	                              error={Boolean(allocationIssueByPurchaseId[Number(purchase.id)])}
-	                              helperText={allocationIssueByPurchaseId[Number(purchase.id)] || 'Backend verifies current outstanding on save'}
+                              helperText={allocationIssueByPurchaseId[Number(purchase.id)] || (
+                                paymentType === 'payment' && Number(allocationDrafts[Number(purchase.id)] || 0) > outstandingOf(purchase) + 0.01
+                                  ? `Excess Rs ${money(Number(allocationDrafts[Number(purchase.id)] || 0) - outstandingOf(purchase))} becomes supplier credit from this bill`
+                                  : 'Backend verifies current outstanding on save'
+                              )}
                               sx={{ width: 140 }}
                             />
                           </td>
@@ -1937,7 +1973,7 @@ export default function SupplierLedgerPage() {
                           </td>
                         </tr>
                       ))}
-                      {openPurchases.length === 0 && (
+                      {paymentAllocationPurchases.length === 0 && (
                         <tr>
                           <td colSpan={6}>
                             <Box p={2} color="text.secondary">No open purchases to settle.</Box>

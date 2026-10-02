@@ -197,7 +197,7 @@ export interface PurchaseItemPayload {
 
 export interface PurchasePaymentPayload {
   amount: number
-  mode?: 'cash' | 'online' | 'split' | 'writeoff'
+  mode?: 'cash' | 'online' | 'split' | 'writeoff' | 'supplier_credit'
   bank_mode?: 'UPI' | 'NEFT' | 'RTGS' | 'IMPS'
   transaction_id?: string
   cash_amount?: number
@@ -206,6 +206,7 @@ export interface PurchasePaymentPayload {
   note?: string
   paid_at?: string
   is_writeoff?: boolean
+  is_supplier_credit?: boolean
 }
 
 export interface PurchaseItem {

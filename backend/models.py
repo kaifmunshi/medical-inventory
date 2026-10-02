@@ -1209,6 +1209,7 @@ class PurchasePaymentIn(SQLModel):
     note: Optional[str] = None
     paid_at: Optional[str] = None
     is_writeoff: bool = False
+    is_supplier_credit: bool = False
 
 
 class PurchaseCreate(SQLModel):

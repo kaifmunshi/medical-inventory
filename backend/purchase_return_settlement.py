@@ -43,6 +43,8 @@ def recalculate_purchase_return_settlements(session, purchase: Purchase) -> list
         if event_type == "PAYMENT":
             amount = round2(row.amount)
             liability = round2(liability - amount)
+            if bool(getattr(row, "is_supplier_credit", False)):
+                continue
             if bool(row.is_writeoff):
                 writeoff_available = round2(writeoff_available + amount)
                 continue

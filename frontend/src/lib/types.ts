@@ -237,7 +237,7 @@ export interface PurchasePayment {
   purchase_id: ID
   party_id?: ID | null
   paid_at: string
-  mode: 'cash' | 'online' | 'split' | 'writeoff'
+  mode: 'cash' | 'online' | 'split' | 'writeoff' | 'supplier_credit'
   bank_mode?: 'UPI' | 'NEFT' | 'RTGS' | 'IMPS' | null
   transaction_id?: string | null
   amount: number
@@ -246,6 +246,7 @@ export interface PurchasePayment {
   txn_charges: number
   note?: string | null
   is_writeoff: boolean
+  is_supplier_credit: boolean
   is_deleted: boolean
   deleted_at?: string | null
 }
@@ -262,6 +263,8 @@ export interface Purchase {
   rounding_adjustment: number
   total_amount: number
   paid_amount: number
+  cash_paid_amount: number
+  supplier_credit_applied: number
   writeoff_amount: number
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID'
   is_deleted: boolean
@@ -295,6 +298,7 @@ export interface SupplierLedgerSummary {
   total_writeoff: number
   total_returns: number
   outstanding_amount: number
+  supplier_credit: number
 }
 
 export interface PurchaseReturnItem {

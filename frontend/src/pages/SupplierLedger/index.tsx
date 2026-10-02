@@ -35,6 +35,7 @@ import {
   addSupplierPayment,
   deleteSupplierPayment,
   fetchPurchases,
+  fetchSupplierLedgerSummary,
   listPurchasePayments,
   replacePurchaseItems,
   restoreSupplierPayment,
@@ -155,6 +156,7 @@ function paymentModeLabel(mode?: string | null) {
   if (raw === 'online') return 'Online'
   if (raw === 'split') return 'Split'
   if (raw === 'writeoff') return 'Write-off'
+  if (raw === 'supplier_credit') return 'Supplier Credit'
   return 'Cash'
 }
 
@@ -233,7 +235,7 @@ export default function SupplierLedgerPage() {
   )
   const [paymentOpen, setPaymentOpen] = useState(false)
   const [paymentWithoutBill, setPaymentWithoutBill] = useState(false)
-  const [paymentType, setPaymentType] = useState<'payment' | 'writeoff'>('payment')
+  const [paymentType, setPaymentType] = useState<'payment' | 'writeoff' | 'credit'>('payment')
   const [paymentMode, setPaymentMode] = useState<'cash' | 'online' | 'split'>('cash')
   const [paymentAmount, setPaymentAmount] = useState('0')
   const [paymentCash, setPaymentCash] = useState('0')
@@ -307,6 +309,12 @@ export default function SupplierLedgerPage() {
       include_deleted: true,
       limit: 2000,
     }),
+    enabled: Boolean(partyId),
+  })
+
+  const ledgerQ = useQuery({
+    queryKey: ['supplier-ledger-summary', partyId],
+    queryFn: () => fetchSupplierLedgerSummary(Number(partyId)),
     enabled: Boolean(partyId),
   })
 
@@ -396,6 +404,7 @@ export default function SupplierLedgerPage() {
     const paymentEvents = supplierPayments.map((payment) => {
       const purchase = purchases.find((row) => Number(row.id) === Number(payment.purchase_id)) || null
       const isWriteoff = Boolean(payment.is_writeoff)
+      const isSupplierCredit = Boolean(payment.is_supplier_credit)
       const isDeleted = Boolean(payment.is_deleted)
       const purchaseLabel = purchase?.invoice_number || payment.invoice_number || (payment.purchase_id ? `#${payment.purchase_id}` : '')
       const bankDetail = !isWriteoff && Number(payment.online_amount || 0) > 0
@@ -411,12 +420,12 @@ export default function SupplierLedgerPage() {
         isDeleted,
         date: dateOnly(payment.paid_at),
         particulars: purchaseLabel
-          ? `${isWriteoff ? 'Write-off' : 'Payment'} for ${purchaseLabel}`
+          ? `${isWriteoff ? 'Write-off' : isSupplierCredit ? 'Supplier credit applied' : 'Payment'} for ${purchaseLabel}`
           : `${isWriteoff ? 'Supplier write-off' : 'Supplier payment'} without bill`,
         purchaseAmount: 0,
         returnAmount: 0,
         refundAmount: 0,
-        paidAmount: isWriteoff ? 0 : Number(payment.amount || 0),
+        paidAmount: isWriteoff || isSupplierCredit ? 0 : Number(payment.amount || 0),
         writeoffAmount: isWriteoff ? Number(payment.amount || 0) : 0,
         writeoffReversalAmount: 0,
         mode: `${paymentModeLabel(payment.mode)}${bankDetail}`,
@@ -529,7 +538,7 @@ export default function SupplierLedgerPage() {
     const totalPurchases = purchases.reduce((sum, purchase) => sum + Number(purchase.total_amount || 0), 0)
     const totalReturns = purchaseReturns.filter((row) => !row.is_deleted).reduce((sum, row) => sum + Number(row.total_amount || 0), 0)
     const activePayments = supplierPayments.filter((payment) => !payment.is_deleted)
-    const totalPaid = activePayments.reduce((sum, payment) => sum + (payment.is_writeoff ? 0 : Number(payment.amount || 0)), 0)
+    const totalPaid = activePayments.reduce((sum, payment) => sum + (payment.is_writeoff || payment.is_supplier_credit ? 0 : Number(payment.amount || 0)), 0)
     const totalWriteoff = activePayments.reduce((sum, payment) => sum + (payment.is_writeoff ? Number(payment.amount || 0) : 0), 0)
     const totalRefunded = purchaseReturns.filter((row) => !row.is_deleted).reduce(
       (sum, row) => sum + Number(row.refund_cash || 0) + Number(row.refund_online || 0), 0,
@@ -562,13 +571,13 @@ export default function SupplierLedgerPage() {
   }, [allocationDrafts, purchases])
   const hasAllocationIssues = Object.keys(allocationIssueByPurchaseId).length > 0
   const supplierPaymentCash =
-    paymentType === 'writeoff' || paymentMode === 'online'
+    paymentType !== 'payment' || paymentMode === 'online'
       ? 0
     : paymentMode === 'cash'
         ? supplierPaymentBaseTotal
         : Number(paymentCash || 0)
   const supplierPaymentOnline =
-    paymentType === 'writeoff' || paymentMode === 'cash'
+    paymentType !== 'payment' || paymentMode === 'cash'
       ? 0
     : paymentMode === 'online'
         ? supplierPaymentBaseTotal
@@ -586,7 +595,7 @@ export default function SupplierLedgerPage() {
     paymentType === 'payment' &&
     (Number.isNaN(supplierPaymentTxnCharges) || supplierPaymentTxnCharges < 0)
   const supplierPaymentTotal =
-    paymentType === 'writeoff' || paymentMode !== 'split'
+    paymentType !== 'payment' || paymentMode !== 'split'
       ? supplierPaymentBaseTotal
       : round2(supplierPaymentCash + supplierPaymentOnline)
   const allocationDifference = round2(supplierPaymentTotal - supplierPaymentBaseTotal)
@@ -596,7 +605,8 @@ export default function SupplierLedgerPage() {
     (paymentUsesAmountField || !hasAllocationIssues) &&
     !splitPaymentInvalid &&
     !bankChargeInvalid &&
-    (paymentType === 'writeoff' || Math.abs(allocationDifference) <= 0.01)
+    (paymentType !== 'payment' || Math.abs(allocationDifference) <= 0.01) &&
+    (paymentType !== 'credit' || supplierPaymentBaseTotal <= Number(ledgerQ.data?.supplier_credit || 0) + 0.0001)
 
   useEffect(() => {
     if (!paymentOpen || paymentType !== 'payment') return
@@ -645,6 +655,7 @@ export default function SupplierLedgerPage() {
         payment_date: paymentDate,
         note: paymentNote.trim() || undefined,
         is_writeoff: paymentType === 'writeoff',
+        use_supplier_credit: paymentType === 'credit',
         allocations: paymentWithoutBill
           ? []
           : Object.entries(allocationDrafts)
@@ -652,7 +663,7 @@ export default function SupplierLedgerPage() {
             .filter((allocation) => allocation.amount > 0),
       }),
     onSuccess: () => {
-      toast.push(paymentType === 'writeoff' ? 'Write-off added' : 'Supplier payment added', 'success')
+      toast.push(paymentType === 'writeoff' ? 'Write-off added' : paymentType === 'credit' ? 'Supplier credit applied' : 'Supplier payment added', 'success')
       setPaymentOpen(false)
       setPaymentWithoutBill(false)
       setPaymentType('payment')
@@ -1581,6 +1592,7 @@ export default function SupplierLedgerPage() {
             <Chip label={`Write-off: Rs ${money(totals.totalWriteoff)}`} variant="outlined" />
             <Chip label={`Open Bills: ${openPurchases.length}`} color={openPurchases.length > 0 ? 'warning' : 'success'} variant="outlined" />
             <Chip label={`Open Amount: Rs ${money(openPurchaseOutstanding)}`} color={openPurchaseOutstanding > 0 ? 'warning' : 'success'} variant="outlined" />
+            <Chip label={`Supplier Credit: Rs ${money(ledgerQ.data?.supplier_credit || 0)}`} color={Number(ledgerQ.data?.supplier_credit || 0) > 0 ? 'info' : 'default'} variant="outlined" />
             <Chip label={`Closing: Rs ${money(totals.closingBalance)}`} color="primary" />
           </Stack>
         </Paper>
@@ -1773,7 +1785,7 @@ export default function SupplierLedgerPage() {
           <Menu anchorEl={actionsAnchor} open={Boolean(actionsAnchor)} onClose={closeActions}>
             {actionsPurchase && !actionsPayment ? <MenuItem onClick={()=>{const purchase=actionsPurchase;closeActions();if(purchase)openPaymentDialog(purchase)}}>Add Payment / Write-off</MenuItem> : null}
             {actionsPayment && Number(actionsPayment.purchase_id||0)>0 ? <MenuItem onClick={()=>{const payment=actionsPayment;closeActions();if(payment)openPaymentInBill(Number(payment.purchase_id),Number(payment.id))}}>View Purchase & Payment</MenuItem> : null}
-            {actionsPayment && !actionsPayment.is_deleted ? <MenuItem onClick={()=>{const payment=actionsPayment;closeActions();if(payment)openEditPayment(payment)}}>Edit</MenuItem> : null}
+            {actionsPayment && !actionsPayment.is_deleted && !actionsPayment.is_supplier_credit ? <MenuItem onClick={()=>{const payment=actionsPayment;closeActions();if(payment)openEditPayment(payment)}}>Edit</MenuItem> : null}
             {actionsPayment?.is_deleted ? <MenuItem disabled={!partyId||restorePaymentM.isPending} onClick={()=>{const payment=actionsPayment;const supplierId=Number(partyId);closeActions();if(payment&&supplierId)restorePaymentM.mutate({supplierId,paymentId:Number(payment.id)})}}>Restore</MenuItem> : null}
             {actionsPayment && !actionsPayment.is_deleted ? <MenuItem sx={{color:'error.main'}} onClick={()=>{const payment=actionsPayment;closeActions();if(payment)setDeletePaymentTarget(payment)}}>Delete</MenuItem> : null}
           </Menu>
@@ -1790,13 +1802,14 @@ export default function SupplierLedgerPage() {
                 label="Entry Type"
                 value={paymentType}
                 onChange={(e) => {
-                  const next = e.target.value as 'payment' | 'writeoff'
+                  const next = e.target.value as 'payment' | 'writeoff' | 'credit'
 	                  setPaymentType(next)
-	                  if (next === 'writeoff') {
+	                  if (next !== 'payment') {
 	                    setPaymentCash('0')
 	                    setPaymentOnline('0')
 	                    setPaymentTransactionId('')
 	                    setPaymentTxnCharges('0')
+	                    setPaymentWithoutBill(false)
 	                  } else {
 	                    setPaymentMode('cash')
 	                  }
@@ -1805,6 +1818,7 @@ export default function SupplierLedgerPage() {
 	              >
 	                <MenuItem value="payment">Payment</MenuItem>
                 <MenuItem value="writeoff">Write-off</MenuItem>
+                <MenuItem value="credit" disabled={Number(ledgerQ.data?.supplier_credit || 0) <= 0}>Use Supplier Credit</MenuItem>
               </TextField>
               {paymentType === 'payment' && (
                 <TextField
@@ -1838,7 +1852,14 @@ export default function SupplierLedgerPage() {
               minRows={2}
             />
 
-            {!editingPayment ? (
+            {paymentType === 'credit' ? (
+              <Paper variant="outlined" sx={{ p: 1.5, bgcolor: 'rgba(2, 136, 209, 0.06)' }}>
+                <Typography fontWeight={800}>Available supplier credit: Rs {money(ledgerQ.data?.supplier_credit || 0)}</Typography>
+                <Typography variant="body2" color="text.secondary">Allocate this balance to open purchase bills. No new cash or bank payment will be recorded.</Typography>
+              </Paper>
+            ) : null}
+
+            {!editingPayment && paymentType !== 'credit' ? (
               <FormControlLabel
                 control={
                   <Checkbox
@@ -2096,7 +2117,8 @@ export default function SupplierLedgerPage() {
                   <Typography>Total: {money(selectedPurchase.total_amount)}</Typography>
                   <Typography color="secondary.main">Returns: {money(selectedPurchase.return_total || 0)}</Typography>
                   <Typography>Net: {money(selectedPurchase.net_amount ?? selectedPurchase.total_amount)}</Typography>
-                  <Typography>Paid: {money(selectedPurchase.paid_amount)}</Typography>
+                  <Typography>Cash Paid: {money(selectedPurchase.cash_paid_amount || 0)}</Typography>
+                  <Typography color="info.main">Supplier Credit: {money(selectedPurchase.supplier_credit_applied || 0)}</Typography>
                   <Typography>Write-off: {money(selectedPurchase.writeoff_amount)}</Typography>
                   <Typography fontWeight={700}>Outstanding: {money(outstandingOf(selectedPurchase))}</Typography>
                   <Typography>Status: {selectedPurchase.payment_status}</Typography>
@@ -2169,7 +2191,7 @@ export default function SupplierLedgerPage() {
                         }}
                       >
                         <td>{dateOnly(payment.paid_at)}</td>
-                        <td>{payment.is_writeoff ? `Write-off #${payment.id}` : `Payment #${payment.id}`}</td>
+                        <td>{payment.is_writeoff ? `Write-off #${payment.id}` : payment.is_supplier_credit ? `Supplier Credit #${payment.id}` : `Payment #${payment.id}`}</td>
                         <td>{paymentModeLabel(payment.mode)}</td>
                         <td>{payment.is_writeoff ? '-' : money(payment.cash_amount)}</td>
                         <td>{payment.is_writeoff ? '-' : money(payment.online_amount)}</td>

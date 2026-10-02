@@ -1080,6 +1080,8 @@ def daybook(
         elif deleted_filter == "deleted":
             purchase_payment_stmt = purchase_payment_stmt.where(PurchasePayment.is_deleted == True)  # noqa: E712
         for payment in session.exec(purchase_payment_stmt).all():
+            if bool(getattr(payment, "is_supplier_credit", False)):
+                continue
             purchase = session.get(Purchase, payment.purchase_id) if int(payment.purchase_id or 0) > 0 else None
             payment_party_id = int(purchase.party_id or 0) if purchase else int(getattr(payment, "party_id", 0) or 0)
             if not payment_party_id:

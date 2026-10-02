@@ -2950,6 +2950,7 @@ def migrate_db():
                 txn_charges REAL NOT NULL DEFAULT 0,
                 note TEXT,
                 is_writeoff INTEGER NOT NULL DEFAULT 0,
+                is_supplier_credit INTEGER NOT NULL DEFAULT 0,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT
             )
@@ -2970,6 +2971,8 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchasepayment ADD COLUMN online_amount REAL NOT NULL DEFAULT 0"))
         if "txn_charges" not in purchase_payment_col_names:
             session.exec(text("ALTER TABLE purchasepayment ADD COLUMN txn_charges REAL NOT NULL DEFAULT 0"))
+        if "is_supplier_credit" not in purchase_payment_col_names:
+            session.exec(text("ALTER TABLE purchasepayment ADD COLUMN is_supplier_credit INTEGER NOT NULL DEFAULT 0"))
         session.exec(text("""
             UPDATE purchasepayment
             SET mode = CASE WHEN is_writeoff = 1 THEN 'writeoff' ELSE 'cash' END

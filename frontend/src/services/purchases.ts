@@ -53,7 +53,7 @@ export interface PurchasePaymentBookRow {
   purchase_id: number
   party_id: number
   paid_at: string
-  mode: 'cash' | 'online' | 'split' | 'writeoff'
+  mode: 'cash' | 'online' | 'split' | 'writeoff' | 'supplier_credit'
   bank_mode?: PurchaseBankMode | null
   transaction_id?: string | null
   amount: number
@@ -64,6 +64,7 @@ export interface PurchasePaymentBookRow {
   invoice_number?: string | null
   supplier_name?: string | null
   is_writeoff?: boolean
+  is_supplier_credit?: boolean
   is_deleted?: boolean
   deleted_at?: string | null
 }
@@ -79,6 +80,7 @@ export interface SupplierPaymentCreatePayload {
   note?: string
   payment_date?: string
   is_writeoff?: boolean
+  use_supplier_credit?: boolean
   allocations: Array<{ purchase_id: number; amount: number }>
 }
 

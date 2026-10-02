@@ -141,6 +141,7 @@ function paymentModeLabel(mode?: string | null) {
   if (raw === 'online') return 'Online'
   if (raw === 'split') return 'Split'
   if (raw === 'writeoff') return 'Write-off'
+  if (raw === 'supplier_credit') return 'Supplier Credit'
   return 'Cash'
 }
 
@@ -2035,8 +2036,9 @@ export default function PurchasesPage() {
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
           <Chip label={`Purchase Value ${money(purchases.reduce((sum, row) => sum + Number(row.total_amount || 0), 0))}`} />
           <Chip label={`Returns ${money(purchases.reduce((sum, row) => sum + Number(row.return_total || 0), 0))}`} color="secondary" />
-          <Chip label={`Paid ${money(purchases.reduce((sum, row) => sum + Number(row.paid_amount || 0), 0))}`} color="success" />
-          <Chip label={`Outstanding ${money(purchases.reduce((sum, row) => sum + (Number(row.net_amount ?? row.total_amount ?? 0) - Number(row.paid_amount || 0) - Number(row.writeoff_amount || 0)), 0))}`} color="warning" />
+          <Chip label={`Cash Paid ${money(purchases.reduce((sum, row) => sum + Number(row.cash_paid_amount || 0), 0))}`} color="success" />
+          <Chip label={`Credit Applied ${money(purchases.reduce((sum, row) => sum + Number(row.supplier_credit_applied || 0), 0))}`} color="info" variant="outlined" />
+          <Chip label={`Outstanding ${money(purchases.reduce((sum, row) => sum + Math.max(0, Number(row.net_amount ?? row.total_amount ?? 0) - Number(row.paid_amount || 0) - Number(row.writeoff_amount || 0)), 0))}`} color="warning" />
         </Stack>
         <Box sx={{ overflowX: 'auto' }}>
           <table className="table">
@@ -2049,7 +2051,7 @@ export default function PurchasesPage() {
                 <th>Total</th>
                 <th>Returns</th>
                 <th>Net</th>
-                <th>Paid</th>
+                <th>Settled</th>
                 <th>Write-off</th>
                 <th>Status</th>
                 <th>Payments</th>
@@ -2153,9 +2155,9 @@ export default function PurchasesPage() {
                           onClick={() => openPaymentInPurchasePopup(Number(paymentHistoryPurchase.id), Number(payment.id))}
                           sx={{ fontWeight: 700 }}
                         >
-                          {payment.is_writeoff ? `Write-off #${payment.id}` : `Payment #${payment.id}`}
+                          {payment.is_writeoff ? `Write-off #${payment.id}` : payment.is_supplier_credit ? `Supplier Credit #${payment.id}` : `Payment #${payment.id}`}
                         </Link>
-                      ) : payment.is_writeoff ? `Write-off #${payment.id}` : `Payment #${payment.id}`}
+                      ) : payment.is_writeoff ? `Write-off #${payment.id}` : payment.is_supplier_credit ? `Supplier Credit #${payment.id}` : `Payment #${payment.id}`}
                     </td>
                     <td>{payment.is_writeoff ? '-' : paymentModeLabel(payment.mode)}</td>
                     <td>{payment.is_writeoff ? '-' : money(payment.cash_amount || 0)}</td>
@@ -2179,7 +2181,7 @@ export default function PurchasesPage() {
                           </Button>
                         ) : (
                           <>
-                            <Button size="small" variant="outlined" disabled={!paymentHistoryPurchase} onClick={() => paymentHistoryPurchase && openEditPaymentDialog(paymentHistoryPurchase, payment)}>
+                            <Button size="small" variant="outlined" disabled={!paymentHistoryPurchase || payment.is_supplier_credit} onClick={() => paymentHistoryPurchase && openEditPaymentDialog(paymentHistoryPurchase, payment)}>
                               Edit
                             </Button>
                             <Button
@@ -2241,7 +2243,8 @@ export default function PurchasesPage() {
                     </Box>
                     {ledgerQ.data ? (
                       <Stack direction="row" gap={0.75} flexWrap="wrap" useFlexGap alignItems="center">
-                        <Chip size="small" label={`Outstanding ${money(ledgerQ.data.outstanding_amount)}`} color="warning" />
+                        <Chip size="small" label={`Outstanding ${money(Math.max(0, ledgerQ.data.outstanding_amount))}`} color="warning" />
+                        {Number(ledgerQ.data.supplier_credit || 0) > 0 ? <Chip size="small" label={`Credit available ${money(ledgerQ.data.supplier_credit)}`} color="info" /> : null}
                         <Chip size="small" label={`Paid ${money(ledgerQ.data.total_paid)}`} color="success" variant="outlined" />
                         <Button size="small" onClick={() => setSupplierContextOpen((open) => !open)}>
                           {supplierContextOpen ? 'Hide history' : 'History'}
@@ -2557,9 +2560,10 @@ export default function PurchasesPage() {
                   <Typography>GST: {money(selectedPurchase.gst_amount)}</Typography>
                   <Typography color="secondary.main">Returns: {money(selectedPurchase.return_total || 0)}</Typography>
                   <Typography>Net: {money(selectedPurchase.net_amount ?? selectedPurchase.total_amount)}</Typography>
-                  <Typography>Paid: {money(selectedPurchase.paid_amount)}</Typography>
+                  <Typography>Cash Paid: {money(selectedPurchase.cash_paid_amount || 0)}</Typography>
+                  <Typography color="info.main">Supplier Credit: {money(selectedPurchase.supplier_credit_applied || 0)}</Typography>
                   <Typography>Write-off: {money(selectedPurchase.writeoff_amount)}</Typography>
-                  <Typography fontWeight={700}>Outstanding: {money((selectedPurchase.net_amount ?? selectedPurchase.total_amount) - selectedPurchase.paid_amount - selectedPurchase.writeoff_amount)}</Typography>
+                  <Typography fontWeight={700}>Outstanding: {money(Math.max(0, (selectedPurchase.net_amount ?? selectedPurchase.total_amount) - selectedPurchase.paid_amount - selectedPurchase.writeoff_amount))}</Typography>
                   <Typography>Status: {selectedPurchase.payment_status}</Typography>
                 </Stack>
                 {selectedPurchase.notes ? <Typography mt={2} color="text.secondary">Notes: {selectedPurchase.notes}</Typography> : null}
@@ -2644,7 +2648,7 @@ export default function PurchasesPage() {
                           }}
                         >
 	                        <td>{fmtDateTime(payment.paid_at)}</td>
-	                        <td>{payment.is_writeoff ? `Write-off #${payment.id}` : `Payment #${payment.id}`}</td>
+	                        <td>{payment.is_writeoff ? `Write-off #${payment.id}` : payment.is_supplier_credit ? `Supplier Credit #${payment.id}` : `Payment #${payment.id}`}</td>
 	                        <td>{payment.is_writeoff ? '-' : paymentModeLabel(payment.mode)}</td>
 	                        <td>{payment.is_writeoff ? '-' : money(payment.cash_amount || 0)}</td>
 	                        <td>{payment.is_writeoff ? '-' : money(payment.online_amount || 0)}</td>
@@ -2667,7 +2671,7 @@ export default function PurchasesPage() {
 	                              </Button>
 	                            ) : (
 	                              <>
-	                                <Button size="small" variant="outlined" onClick={() => openEditPaymentDialog(selectedPurchase, payment)}>
+	                                <Button size="small" variant="outlined" disabled={payment.is_supplier_credit} onClick={() => openEditPaymentDialog(selectedPurchase, payment)}>
 	                                  Edit
 	                                </Button>
 	                                <Button size="small" color="error" variant="outlined" onClick={() => setDeletePaymentTarget({ purchase: selectedPurchase, payment })}>

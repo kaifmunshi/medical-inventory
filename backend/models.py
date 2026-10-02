@@ -923,6 +923,8 @@ class PurchasePayment(SQLModel, table=True):
     txn_charges: float = 0.0
     note: Optional[str] = None
     is_writeoff: bool = Field(default=False, index=True)
+    # Non-cash settlement made from money already held by the supplier.
+    is_supplier_credit: bool = Field(default=False, index=True)
     is_deleted: bool = Field(default=False, index=True)
     deleted_at: Optional[str] = None
 
@@ -1295,6 +1297,7 @@ class PurchasePaymentOut(SQLModel):
     txn_charges: float = 0.0
     note: Optional[str] = None
     is_writeoff: bool
+    is_supplier_credit: bool = False
     is_deleted: bool
     deleted_at: Optional[str] = None
 
@@ -1311,6 +1314,8 @@ class PurchaseOut(SQLModel):
     rounding_adjustment: float
     total_amount: float
     paid_amount: float
+    cash_paid_amount: float = 0.0
+    supplier_credit_applied: float = 0.0
     writeoff_amount: float
     payment_status: str
     is_deleted: bool
@@ -1413,6 +1418,7 @@ class SupplierLedgerSummary(SQLModel):
     total_writeoff: float
     total_returns: float = 0.0
     outstanding_amount: float
+    supplier_credit: float = 0.0
 
 
 class DebtorLedgerRow(SQLModel):

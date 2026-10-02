@@ -770,6 +770,10 @@ def sync_existing_vouchers(session) -> None:
             mark_voucher_deleted(session, source_type="PURCHASE_RETURN", source_id=int(purchase_return.id or 0))
 
     for payment in session.exec(select(PurchasePayment)).all():
+        if bool(getattr(payment, "is_supplier_credit", False)):
+            # Applying an existing supplier credit is only a sub-ledger allocation;
+            # the original payment/discount already changed the control account.
+            continue
         purchase = session.get(Purchase, payment.purchase_id) if int(payment.purchase_id or 0) > 0 else None
         party_id = int(purchase.party_id or 0) if purchase else int(getattr(payment, "party_id", 0) or 0)
         party = party_map.get(party_id)

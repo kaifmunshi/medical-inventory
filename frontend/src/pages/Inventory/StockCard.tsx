@@ -35,7 +35,7 @@ import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
 import OpenInNewIcon from '@mui/icons-material/OpenInNew'
 import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 import { getBill, type Bill } from '../../services/billing'
@@ -465,6 +465,7 @@ function canRemoveManualAdjustRow(row: any) {
 }
 
 export default function StockCardPage() {
+  const location = useLocation()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const toast = useToast()
@@ -1312,7 +1313,12 @@ export default function StockCardPage() {
                                   onClick={(event) => {
                                     event.stopPropagation()
                                     if (sourceLink.kind === 'bill') openBillDetail(sourceLink.id)
-                                    else navigate(`/purchases?purchase_id=${sourceLink.id}`)
+                                    else {
+                                      const purchaseParams = new URLSearchParams()
+                                      purchaseParams.set('purchase_id', String(sourceLink.id))
+                                      purchaseParams.set('returnTo', `${location.pathname}${location.search}`)
+                                      navigate(`/purchases?${purchaseParams.toString()}`)
+                                    }
                                   }}
                                   sx={{
                                     border: 0,

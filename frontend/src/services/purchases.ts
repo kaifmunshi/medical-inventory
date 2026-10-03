@@ -120,6 +120,7 @@ export async function listPurchasePayments(params?: {
   to_date?: string
   party_id?: number
   include_writeoffs?: boolean
+  include_supplier_credit?: boolean
   include_deleted?: boolean
   limit?: number
   offset?: number

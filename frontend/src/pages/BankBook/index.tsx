@@ -282,7 +282,7 @@ function purchasePaymentNote(payment: any) {
 
 function buildPurchaseOnlineRows(payments: any[]) {
   return (payments || [])
-    .filter((p) => Number(p?.online_amount || 0) > 0)
+    .filter((p) => !p?.is_supplier_credit && Number(p?.online_amount || 0) > 0)
     .map((p) => ({
       id: `purchase-payment-online-${p.id}`,
       created_at: p.paid_at,
@@ -300,7 +300,7 @@ function buildPurchaseOnlineRows(payments: any[]) {
 
 function buildPurchaseChargeRows(payments: any[]) {
   return (payments || [])
-    .filter((p) => Number(p?.online_amount || 0) > 0 && Number(p?.txn_charges || 0) > 0)
+    .filter((p) => !p?.is_supplier_credit && Number(p?.online_amount || 0) > 0 && Number(p?.txn_charges || 0) > 0)
     .map((p) => ({
       id: `purchase-payment-charge-${p.id}`,
       created_at: p.paid_at,

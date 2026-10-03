@@ -290,7 +290,7 @@ function purchasePaymentNote(payment: any, label: 'Cash' | 'Online') {
 
 function buildPurchaseCashRows(payments: any[]) {
   return (payments || [])
-    .filter((p) => Number(p?.cash_amount || 0) > 0)
+    .filter((p) => !p?.is_supplier_credit && Number(p?.cash_amount || 0) > 0)
     .map((p) => ({
       id: `purchase-payment-cash-${p.id}`,
       created_at: p.paid_at,

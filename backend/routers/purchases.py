@@ -1170,13 +1170,13 @@ def purchase_payable_at(session, purchase: Purchase, paid_at: str) -> float:
 
 
 def supplier_credit_balance(session, party_id: int, *, exclude_payment_id: Optional[int] = None) -> float:
-    """Money held by a supplier that has not yet been assigned to another bill."""
-    party = session.get(Party, party_id)
-    credit = (
-        float(getattr(party, "opening_balance", 0) or 0)
-        if party and str(getattr(party, "opening_balance_type", "CR") or "CR").upper() == "DR"
-        else 0.0
-    )
+    """Explicit bill-wise excess payments, less credit already applied.
+
+    Opening balances and legacy payments recorded without a purchase are not
+    automatically classified as supplier credit. They remain ordinary control-
+    account entries until they are reconciled to a specific bill.
+    """
+    credit = 0.0
     purchases = session.exec(select(Purchase).where(
         Purchase.party_id == party_id,
         Purchase.is_deleted == False,  # noqa: E712
@@ -1189,15 +1189,6 @@ def supplier_credit_balance(session, party_id: int, *, exclude_payment_id: Optio
         cash_paid = sum(float(p.amount or 0) for p in payments if not p.is_writeoff and not p.is_supplier_credit)
         writeoff = sum(float(p.amount or 0) for p in payments if p.is_writeoff)
         credit += max(0.0, cash_paid - max(0.0, purchase_net_amount(session, purchase) - writeoff))
-
-    unallocated = session.exec(select(PurchasePayment).where(
-        PurchasePayment.party_id == party_id,
-        PurchasePayment.purchase_id == 0,
-        PurchasePayment.is_deleted == False,  # noqa: E712
-        PurchasePayment.is_writeoff == False,  # noqa: E712
-        PurchasePayment.is_supplier_credit == False,  # noqa: E712
-    )).all()
-    credit += sum(float(p.amount or 0) for p in unallocated)
 
     used = session.exec(select(PurchasePayment).where(
         PurchasePayment.party_id == party_id,
@@ -1686,6 +1677,7 @@ def list_purchase_payments(
     to_date: Optional[str] = Query(None),
     party_id: Optional[int] = Query(None),
     include_writeoffs: bool = Query(False),
+    include_supplier_credit: bool = Query(False),
     include_deleted: bool = Query(False),
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
@@ -1699,6 +1691,10 @@ def list_purchase_payments(
             stmt = stmt.where(PurchasePayment.is_deleted == False)  # noqa: E712
         if not include_writeoffs:
             stmt = stmt.where(PurchasePayment.is_writeoff == False)  # noqa: E712
+        if not include_supplier_credit:
+            # Credit allocations settle a bill but do not move money. Keep them
+            # out of cash/bank/payment books unless a sub-ledger explicitly asks.
+            stmt = stmt.where(PurchasePayment.is_supplier_credit == False)  # noqa: E712
         if party_id is not None:
             stmt = stmt.where(PurchasePayment.party_id == int(party_id))
         if start_iso:

@@ -367,6 +367,7 @@ export default function SalesBookPage() {
     }
 
     for (const pmt of (qPurchasePayments.data || []) as any[]) {
+      if (pmt?.is_supplier_credit) continue
       const d = String(pmt?.paid_at || '').slice(0, 10)
       const charges = Number(pmt?.txn_charges || 0)
       if (!d || charges <= 0 || Number(pmt?.online_amount || 0) <= 0) continue

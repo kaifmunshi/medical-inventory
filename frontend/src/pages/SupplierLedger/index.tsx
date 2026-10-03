@@ -306,6 +306,7 @@ export default function SupplierLedgerPage() {
     queryFn: () => listPurchasePayments({
       party_id: Number(partyId),
       include_writeoffs: true,
+      include_supplier_credit: true,
       include_deleted: true,
       limit: 2000,
     }),

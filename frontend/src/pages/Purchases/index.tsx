@@ -24,7 +24,7 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
 import PaymentsIcon from '@mui/icons-material/Payments'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { createParty, fetchParties } from '../../services/parties'
 import { listIncomingStockEntries, type IncomingStockEntry } from '../../services/inventory'
 import { createBrand, createCategory, fetchAllProducts, fetchBrands, fetchCategories, fetchProducts } from '../../services/products'
@@ -301,6 +301,7 @@ function fmtDateTime(v?: string | null) {
 }
 
 export default function PurchasesPage() {
+  const navigate = useNavigate()
   const toast = useToast()
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -899,6 +900,11 @@ export default function PurchasesPage() {
   function closeDetail() {
     setSelectedPurchaseId(null)
     setHighlightedPaymentId(null)
+    const returnTo = searchParams.get('returnTo')
+    if (returnTo && (returnTo === '/inventory' || returnTo.startsWith('/inventory?') || returnTo.startsWith('/inventory/stock-card?'))) {
+      navigate(returnTo, { replace: true })
+      return
+    }
     if (searchParams.has('purchase_id')) {
       const next = new URLSearchParams(searchParams)
       next.delete('purchase_id')

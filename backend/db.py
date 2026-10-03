@@ -2982,9 +2982,23 @@ def migrate_db():
             UPDATE purchasepayment
             SET cash_amount = amount
             WHERE is_writeoff = 0
+              AND COALESCE(is_supplier_credit, 0) = 0
               AND amount > 0
               AND COALESCE(cash_amount, 0) = 0
               AND COALESCE(online_amount, 0) = 0
+        """))
+        # Supplier-credit allocations are internal bill settlements, never a
+        # second cash/bank payment. Repair databases touched by older startup
+        # migrations that inferred cash_amount from amount.
+        session.exec(text("""
+            UPDATE purchasepayment
+            SET mode = 'supplier_credit',
+                cash_amount = 0,
+                online_amount = 0,
+                txn_charges = 0,
+                bank_mode = NULL,
+                transaction_id = NULL
+            WHERE COALESCE(is_supplier_credit, 0) = 1
         """))
         session.exec(text("""
             UPDATE purchasepayment
@@ -3034,7 +3048,7 @@ def migrate_db():
             liability = round(float(purchase_row[1] or 0), 2)
             events = []
             for payment in session.exec(text("""
-                SELECT id, paid_at, amount, cash_amount, online_amount, is_writeoff
+                SELECT id, paid_at, amount, cash_amount, online_amount, is_writeoff, is_supplier_credit
                 FROM purchasepayment
                 WHERE purchase_id = :purchase_id AND COALESCE(is_deleted, 0) = 0
             """).bindparams(purchase_id=purchase_id)).all():
@@ -3051,6 +3065,8 @@ def migrate_db():
                 if event_type == "PAYMENT":
                     amount = round(float(event_row[2] or 0), 2)
                     liability = round(liability - amount, 2)
+                    if bool(event_row[6]):
+                        continue
                     if bool(event_row[5]):
                         writeoff_available = round(writeoff_available + amount, 2)
                     else:

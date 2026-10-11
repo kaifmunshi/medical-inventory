@@ -186,6 +186,12 @@ def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def purchase_event_ts(invoice_date: str, recorded_at: Optional[str] = None) -> str:
+    """Place a purchase on its invoice date while preserving its entry time."""
+    time_part = str(recorded_at or now_ts()).replace(" ", "T").partition("T")[2]
+    return f"{invoice_date}T{(time_part or '00:00:00')[:8]}"
+
+
 def clean_text(v: Optional[str]) -> Optional[str]:
     if v is None:
         return None
@@ -689,6 +695,30 @@ def convert_opening_placeholder_to_purchase(
     return inventory_lot
 
 
+def sync_open_loose_prices_from_parent_lot(session, parent_lot: InventoryLot, *, ts: str) -> None:
+    """Keep already-open loose stock priced from its edited parent batch."""
+    children = session.exec(
+        select(InventoryLot).where(InventoryLot.opened_from_lot_id == int(parent_lot.id or 0))
+    ).all()
+    for child in children:
+        conversion = int(child.conversion_qty or parent_lot.conversion_qty or 0)
+        if conversion <= 0:
+            continue
+        child.conversion_qty = conversion
+        child.mrp = round2(float(parent_lot.mrp or 0) / conversion)
+        child.cost_price = round2(float(parent_lot.cost_price or 0) / conversion)
+        child.updated_at = ts
+        session.add(child)
+
+        if child.legacy_item_id:
+            loose_item = session.get(Item, int(child.legacy_item_id))
+            if loose_item:
+                loose_item.mrp = child.mrp
+                loose_item.cost_price = child.cost_price
+                loose_item.updated_at = ts
+                session.add(loose_item)
+
+
 def make_purchase_out(session, row: Purchase) -> PurchaseOut:
     items = session.exec(select(PurchaseItem).where(PurchaseItem.purchase_id == row.id).order_by(PurchaseItem.id.asc())).all()
     payments = session.exec(
@@ -888,7 +918,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
     existing_items = get_purchase_items(session, int(purchase.id))
     existing_by_id = {int(item.id or 0): item for item in existing_items}
     subtotal_amount = 0.0
-    purchase_stock_ts = f"{purchase.invoice_date}T00:00:00"
+    purchase_stock_ts = purchase_event_ts(purchase.invoice_date, purchase.created_at)
     ts = now_ts()
     changed_lines: List[Dict[str, Any]] = []
 
@@ -985,6 +1015,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         lot.mrp = round2(raw.mrp)
         lot.updated_at = ts
         session.add(lot)
+        sync_open_loose_prices_from_parent_lot(session, lot, ts=ts)
 
         if stock_delta:
             inventory_item.stock = next_stock
@@ -1033,14 +1064,30 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         if old_expiry != new_expiry:
             changed_lines.append({"purchase_item_id": int(item.id), "old_expiry": old_expiry, "new_expiry": new_expiry})
 
-    purchase.subtotal_amount = subtotal_amount
-    purchase.gst_amount = purchase_gst_amount(subtotal_amount, purchase.discount_amount, list(existing_by_id.values()))
-    purchase.total_amount = purchase_total_amount(
+    next_gst_amount = purchase_gst_amount(
         subtotal_amount,
         purchase.discount_amount,
-        purchase.gst_amount,
+        list(existing_by_id.values()),
+    )
+    next_total_amount = purchase_total_amount(
+        subtotal_amount,
+        purchase.discount_amount,
+        next_gst_amount,
         purchase.rounding_adjustment,
     )
+    settled_amount = round2(float(purchase.paid_amount or 0) + float(purchase.writeoff_amount or 0))
+    if next_total_amount + 0.0001 < settled_amount:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Purchase edit cannot reduce total below settled amount. "
+                f"Settled={settled_amount:.2f}, new total={next_total_amount:.2f}"
+            ),
+        )
+
+    purchase.subtotal_amount = subtotal_amount
+    purchase.gst_amount = next_gst_amount
+    purchase.total_amount = next_total_amount
     purchase.updated_at = ts
     session.add(purchase)
     session.flush()
@@ -1391,7 +1438,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             payment_status = "PAID"
 
         ts = now_ts()
-        purchase_stock_ts = f"{invoice_date}T00:00:00"
+        purchase_stock_ts = purchase_event_ts(invoice_date, ts)
         purchase = Purchase(
             party_id=supplier.id,
             invoice_number=invoice_number,
@@ -2781,7 +2828,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                 }
             )
 
-        purchase_stock_ts = f"{purchase.invoice_date}T00:00:00"
+        purchase_stock_ts = purchase_event_ts(purchase.invoice_date, purchase.created_at)
         for purchase_item, inventory_item in touched:
             purchase_item_qty = purchase_item_total_qty(purchase_item)
             if purchase_item_stock_source(purchase_item) == STOCK_SOURCE_ATTACHED:
@@ -2979,7 +3026,7 @@ def cancel_purchase(purchase_id: int) -> PurchaseOut:
         assert_financial_year_unlocked(session, purchase.invoice_date, context="Purchase cancel")
         before_snapshot = purchase_snapshot(session, purchase)
 
-        purchase_stock_ts = f"{purchase.invoice_date}T00:00:00"
+        purchase_stock_ts = purchase_event_ts(purchase.invoice_date, purchase.created_at)
         items = get_purchase_items(session, purchase_id)
         for item in items:
             qty = purchase_item_total_qty(item)

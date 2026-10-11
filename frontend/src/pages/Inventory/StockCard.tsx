@@ -90,14 +90,16 @@ function formatExpiry(exp?: string | null) {
   return `${d}-${m}-${y}`
 }
 
-function formatDateOnly(value?: string | null) {
+function formatLedgerDateTime(value?: string | null) {
   const raw = String(value || '')
   if (!raw) return '-'
   try {
-    return new Date(raw).toLocaleDateString('en-IN', {
+    return new Date(raw).toLocaleString('en-IN', {
       day: '2-digit',
       month: 'short',
       year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
     })
   } catch {
     return formatExpiry(raw)
@@ -1278,7 +1280,7 @@ export default function StockCardPage() {
                     >
                       <td>
                         <Typography sx={{ fontWeight: 800 }}>
-                          {row.is_synthetic_opening ? 'Opening' : formatDateOnly(row.ts)}
+                          {row.is_synthetic_opening ? 'Opening' : formatLedgerDateTime(row.ts)}
                         </Typography>
                       </td>
                       <td>

@@ -1104,13 +1104,18 @@ def _purchase_stock_movement_join_condition():
 
 
 def _stock_movement_effective_ts_expr():
+    purchase_recorded_time = func.substr(
+        func.coalesce(Purchase.created_at, StockMovement.ts),
+        12,
+        8,
+    )
     return case(
         (
             and_(
                 func.upper(func.coalesce(StockMovement.ref_type, "")) == "PURCHASE",
                 Purchase.invoice_date.isnot(None),
             ),
-            Purchase.invoice_date + literal("T00:00:00"),
+            Purchase.invoice_date + literal("T") + purchase_recorded_time,
         ),
         else_=StockMovement.ts,
     )

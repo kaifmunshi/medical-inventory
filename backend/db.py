@@ -426,6 +426,149 @@ def create_data_repair_backup(label: str) -> str:
     return str(backup_path)
 
 
+def repair_sutashekhar_bill_1649_unit_misclassification(session) -> tuple[bool, str | None]:
+    """Repair the one known box-vs-strip sale after purchase #132 is corrected.
+
+    This deliberately requires the complete client-specific signature.  It is
+    safe to call on every startup and does nothing on other databases or after
+    the bill has already been repaired.
+    """
+    row = session.exec(text("""
+        SELECT
+            pi.id AS purchase_item_id,
+            pi.inventory_item_id AS source_item_id,
+            pi.lot_id AS source_lot_id,
+            bi.id AS bill_item_id,
+            ll.id AS loose_lot_id,
+            ll.legacy_item_id AS loose_item_id,
+            COALESCE(si.stock, 0) AS source_stock,
+            COALESCE(li.stock, 0) AS loose_stock,
+            COALESCE(sl.sealed_qty, 0) AS sealed_qty,
+            COALESCE(ll.loose_qty, 0) AS loose_qty,
+            COALESCE(sl.conversion_qty, ll.conversion_qty, p.default_conversion_qty, 0) AS conversion_qty,
+            COALESCE(li.mrp, ll.mrp, 0) AS loose_mrp,
+            COALESCE(bi.line_total, 0) AS line_total,
+            b.date_time AS bill_ts
+        FROM purchaseitem pi
+        JOIN purchase pu ON pu.id = pi.purchase_id
+        JOIN item si ON si.id = pi.inventory_item_id
+        JOIN inventorylot sl ON sl.id = pi.lot_id AND sl.legacy_item_id = si.id
+        JOIN product p ON p.id = sl.product_id
+        JOIN billitem bi ON bi.bill_id = 1649 AND bi.item_id = si.id AND bi.quantity = 1
+        JOIN bill b ON b.id = bi.bill_id AND COALESCE(b.is_deleted, 0) = 0
+        JOIN inventorylot ll ON ll.opened_from_lot_id = sl.id
+        JOIN item li ON li.id = ll.legacy_item_id
+        WHERE pi.purchase_id = 132
+          AND pu.invoice_number = 'AE/T06313'
+          AND COALESCE(pu.is_deleted, 0) = 0
+          AND lower(trim(pi.product_name)) = 'sutashekhar ras 30tabs'
+          AND lower(trim(COALESCE(pi.brand, ''))) = 'shree dhootapapeshwar ltd.'
+          AND (COALESCE(pi.sealed_qty, 0) + COALESCE(pi.free_qty, 0)) = 1
+          AND ABS(COALESCE(pi.mrp, 0) - 2070) < 0.001
+          AND ABS(COALESCE(si.mrp, 0) - 2070) < 0.001
+          AND ABS(COALESCE(sl.mrp, 0) - 2070) < 0.001
+          AND COALESCE(si.stock, 0) = COALESCE(sl.sealed_qty, 0)
+          AND COALESCE(li.stock, 0) = COALESCE(ll.loose_qty, 0)
+          AND COALESCE(si.stock, 0) = 0
+          AND COALESCE(li.stock, 0) = 0
+          AND COALESCE(sl.conversion_qty, ll.conversion_qty, p.default_conversion_qty, 0) = 10
+          AND ABS(COALESCE(li.mrp, ll.mrp, 0) - 207) < 0.001
+          AND EXISTS (
+              SELECT 1 FROM packopenevent e
+              WHERE e.source_lot_id = sl.id AND e.loose_lot_id = ll.id
+                AND e.packs_opened = 1 AND e.loose_units_created = 10
+          )
+          AND EXISTS (
+              SELECT 1 FROM packopenevent e
+              WHERE e.source_lot_id = sl.id AND e.loose_lot_id = ll.id
+                AND e.packs_opened = -1 AND e.loose_units_created = -10
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM stockmovement sm
+              WHERE sm.ref_type = 'BILL' AND sm.ref_id = 1649 AND sm.reason = 'BILL_EDIT'
+          )
+          AND (SELECT COALESCE(SUM(delta), 0) FROM stockmovement WHERE item_id = si.id) = COALESCE(si.stock, 0)
+          AND (SELECT COALESCE(SUM(delta), 0) FROM stockmovement WHERE item_id = li.id) = COALESCE(li.stock, 0)
+        LIMIT 1
+    """)).first()
+    if not row:
+        return False, None
+
+    backup_path = create_data_repair_backup("before_sutashekhar_bill1649_strip_repair")
+    ts = _now_ts()
+    source_item_id, source_lot_id = int(row[1]), int(row[2])
+    bill_item_id, loose_lot_id, loose_item_id = int(row[3]), int(row[4]), int(row[5])
+    source_stock, loose_stock = int(row[6]), int(row[7])
+    conversion, loose_mrp = int(row[10]), float(row[11])
+
+    session.exec(text("""
+        INSERT INTO packopenevent
+            (source_lot_id, loose_lot_id, source_item_id, loose_item_id,
+             packs_opened, loose_units_created, note, created_at)
+        VALUES
+            (:source_lot_id, :loose_lot_id, :source_item_id, :loose_item_id,
+             1, :conversion, :note, :ts)
+    """).bindparams(
+        source_lot_id=source_lot_id, loose_lot_id=loose_lot_id,
+        source_item_id=source_item_id, loose_item_id=loose_item_id,
+        conversion=conversion, note="Repair: reopen box for bill #1649 strip sale", ts=ts,
+    ))
+    event_id_row = session.exec(text("SELECT last_insert_rowid()")).one()
+    event_id = int(event_id_row[0])
+
+    movements = [
+        (source_item_id, 1, "BILL_EDIT", "BILL", 1649),
+        (source_item_id, -1, "PACK_OPEN_OUT", "PACK_OPEN", event_id),
+        (loose_item_id, conversion, "PACK_OPEN_IN", "PACK_OPEN", event_id),
+        (loose_item_id, -1, "BILL_EDIT", "BILL", 1649),
+    ]
+    for item_id, delta, reason, ref_type, ref_id in movements:
+        session.exec(text("""
+            INSERT INTO stockmovement (item_id, ts, delta, reason, ref_type, ref_id, note, actor)
+            VALUES (:item_id, :ts, :delta, :reason, :ref_type, :ref_id, :note, 'migration')
+        """).bindparams(
+            item_id=item_id, ts=ts, delta=delta, reason=reason,
+            ref_type=ref_type, ref_id=ref_id,
+            note="Repair bill #1649: sold 1 strip, not 1 box",
+        ))
+
+    final_source_stock = source_stock
+    final_loose_stock = loose_stock + conversion - 1
+    session.exec(text("UPDATE item SET stock=:qty, is_archived=0, updated_at=:ts WHERE id=:id").bindparams(
+        qty=final_source_stock, ts=ts, id=source_item_id,
+    ))
+    session.exec(text("UPDATE inventorylot SET sealed_qty=:qty, is_active=1, updated_at=:ts WHERE id=:id").bindparams(
+        qty=final_source_stock, ts=ts, id=source_lot_id,
+    ))
+    session.exec(text("UPDATE item SET stock=:qty, is_archived=0, updated_at=:ts WHERE id=:id").bindparams(
+        qty=final_loose_stock, ts=ts, id=loose_item_id,
+    ))
+    session.exec(text("UPDATE inventorylot SET loose_qty=:qty, is_active=1, updated_at=:ts WHERE id=:id").bindparams(
+        qty=final_loose_stock, ts=ts, id=loose_lot_id,
+    ))
+    session.exec(text("""
+        UPDATE billitem
+        SET item_id=:loose_item_id, mrp=:loose_mrp
+        WHERE id=:bill_item_id
+    """).bindparams(loose_item_id=loose_item_id, loose_mrp=loose_mrp, bill_item_id=bill_item_id))
+    session.exec(text("""
+        INSERT INTO auditlog (event_ts, entity_type, entity_id, action, note, details_json, actor)
+        VALUES (:ts, 'BILL', 1649, 'DATA_REPAIR', :note, :details, 'migration')
+    """).bindparams(
+        ts=ts,
+        note="Corrected Sutashekhar bill #1649 from 1 box to 1 strip",
+        details=json.dumps({
+            "purchase_id": 132,
+            "source_item_id": source_item_id,
+            "loose_item_id": loose_item_id,
+            "final_box_stock": final_source_stock,
+            "final_strip_stock": final_loose_stock,
+            "backup": backup_path,
+        }),
+    ))
+    return True, backup_path
+
+
 def repair_saved_monetary_values_v1(session) -> tuple[int, int, str | None]:
     """Repair only high-confidence monetary damage caused by old edit clients.
 
@@ -3858,6 +4001,25 @@ def migrate_db():
                 ),
             )
             session.commit()
+
+        # ---------- one-time repair: Sutashekhar bill #1649 box/strip correction ----------
+        sutashekhar_repair_key = "repair_sutashekhar_bill_1649_strip_v1"
+        sutashekhar_repair_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=sutashekhar_repair_key),
+        ).first()
+        if not sutashekhar_repair_done:
+            applied, backup_path = repair_sutashekhar_bill_1649_unit_misclassification(session)
+            if applied:
+                session.exec(text("""
+                    INSERT INTO appmeta (key, value, updated_at)
+                    VALUES (:k, :value, :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """).bindparams(
+                    k=sutashekhar_repair_key,
+                    value=f"done;bill:1649;purchase:132;backup:{backup_path or ''}",
+                    ts=_now_ts(),
+                ))
+                session.commit()
 
         # ---------- one-time repair: monetary fields reset by legacy editors ----------
         saved_money_repair_key = "repair_saved_monetary_values_v1"

@@ -20,6 +20,7 @@ import {
   MenuItem,
   TableContainer,
   TablePagination,
+  TableSortLabel,
 } from '@mui/material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getCreditPendingTotal, getPaymentsSummary, getSalesAggregate } from '../services/billing'
@@ -33,6 +34,7 @@ import {
   type CashbookEntry,
 } from '../services/cashbook'
 import { useToast } from '../components/ui/Toaster'
+import type { Item } from '../lib/types'
 
 function formatExpiry(exp?: string | null) {
   if (!exp) return '-'
@@ -45,6 +47,19 @@ function formatExpiry(exp?: string | null) {
 
 const LOW_STOCK_THRESH = 2 // ≤ 2 is low-stock
 const EXPIRY_WINDOW_DAYS = 60 // within next 60 days
+
+type ExpiringSoonSortKey = 'name' | 'brand' | 'category_name' | 'expiry_date' | 'stock' | '_daysLeft'
+type SortDirection = 'asc' | 'desc'
+type ExpiringSoonItem = Item & { _daysLeft: number }
+
+const EXPIRING_SOON_COLUMNS: Array<{ key: ExpiringSoonSortKey; label: string; align?: 'right' }> = [
+  { key: 'name', label: 'Name' },
+  { key: 'brand', label: 'Brand' },
+  { key: 'category_name', label: 'Category' },
+  { key: 'expiry_date', label: 'Expiry' },
+  { key: 'stock', label: 'Qty' },
+  { key: '_daysLeft', label: 'Days Left', align: 'right' },
+]
 
 const to2 = (n: any) => Math.round(Number(n || 0) * 100) / 100
 
@@ -71,6 +86,11 @@ export default function Dashboard() {
 
   const [openLow, setOpenLow] = useState(false)
   const [openExp, setOpenExp] = useState(false)
+  const [expiringSearch, setExpiringSearch] = useState('')
+  const [expiringSort, setExpiringSort] = useState<{
+    key: ExpiringSoonSortKey
+    direction: SortDirection
+  }>({ key: '_daysLeft', direction: 'asc' })
   const [openExpired, setOpenExpired] = useState(false) // ✅ NEW
 
   // ✅ NEW: zero stock dialog state
@@ -351,7 +371,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
 
   // ---- Expiring Soon ----
   const { expiringSoonItems, expiringSoonCount } = useMemo(() => {
-    const items = (qInv.data || []) as any[]
+    const items = (qInv.data || []) as Item[]
     const today = new Date()
     today.setHours(0, 0, 0, 0)
 
@@ -364,12 +384,52 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
     }
 
     const soon = items
-      .map((it: any) => ({ ...it, _daysLeft: daysUntil(it.expiry_date) }))
-      .filter((it: any) => it._daysLeft >= 0 && it._daysLeft <= EXPIRY_WINDOW_DAYS)
-      .sort((a: any, b: any) => a._daysLeft - b._daysLeft)
+      .map((it): ExpiringSoonItem => ({ ...it, _daysLeft: daysUntil(it.expiry_date) }))
+      .filter(
+        (it) =>
+          Number(it.stock || 0) > 0 &&
+          it._daysLeft >= 0 &&
+          it._daysLeft <= EXPIRY_WINDOW_DAYS,
+      )
+      .sort((a, b) => a._daysLeft - b._daysLeft)
 
     return { expiringSoonItems: soon, expiringSoonCount: soon.length }
   }, [qInv.data])
+
+  const visibleExpiringSoonItems = useMemo(() => {
+    const query = expiringSearch.trim().toLocaleLowerCase()
+    const filtered = query
+      ? expiringSoonItems.filter((item) =>
+          [item.name, item.brand, item.category_name, formatExpiry(item.expiry_date), item.stock, item._daysLeft]
+            .map((value) => String(value ?? '').toLocaleLowerCase())
+            .some((value) => value.includes(query)),
+        )
+      : expiringSoonItems
+
+    const valueFor = (item: ExpiringSoonItem): string | number => {
+      if (expiringSort.key === 'stock' || expiringSort.key === '_daysLeft') {
+        return Number(item[expiringSort.key] || 0)
+      }
+      return String(item[expiringSort.key] ?? '').toLocaleLowerCase()
+    }
+
+    return [...filtered].sort((a, b) => {
+      const aValue = valueFor(a)
+      const bValue = valueFor(b)
+      const comparison =
+        typeof aValue === 'number' && typeof bValue === 'number'
+          ? aValue - bValue
+          : String(aValue).localeCompare(String(bValue), undefined, { numeric: true })
+      return expiringSort.direction === 'asc' ? comparison : -comparison
+    })
+  }, [expiringSearch, expiringSoonItems, expiringSort])
+
+  const sortExpiringSoonBy = (key: ExpiringSoonSortKey) => {
+    setExpiringSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+    }))
+  }
 
   // ✅ NEW: ---- Expired Items ----
   const { expiredItems, expiredCount } = useMemo(() => {
@@ -995,6 +1055,15 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       <Dialog open={openExp} onClose={() => setOpenExp(false)} fullWidth maxWidth="md">
         <DialogTitle>Expiring Soon (≤ {EXPIRY_WINDOW_DAYS} days)</DialogTitle>
         <DialogContent>
+          <TextField
+            fullWidth
+            size="small"
+            label="Search expiring products"
+            placeholder="Search by name, brand, category, expiry, or quantity"
+            value={expiringSearch}
+            onChange={(event) => setExpiringSearch(event.target.value)}
+            sx={{ my: 1 }}
+          />
           {!Array.isArray(qInv.data) ? (
             <Typography color="text.secondary" p={1}>
               Fetching expiry list...
@@ -1003,31 +1072,44 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
             <Typography color="text.secondary" p={1}>
               No items expiring soon.
             </Typography>
+          ) : visibleExpiringSoonItems.length === 0 ? (
+            <Typography color="text.secondary" p={1}>
+              No expiring products match your search.
+            </Typography>
           ) : (
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Name</TableCell>
-                  <TableCell>Brand</TableCell>
-                  <TableCell>Expiry</TableCell>
-                  <TableCell>Qty</TableCell>
-                  <TableCell align="right">Days Left</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {expiringSoonItems.map((it: any) => (
-                  <TableRow key={it._key}>
-                    <TableCell>{it.name}</TableCell>
-                    <TableCell>{it.brand || '-'}</TableCell>
-                    <TableCell>{formatExpiry(it.expiry_date)}</TableCell>
-                    <TableCell>{it.stock || '-'}</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>
-                      {it._daysLeft}
-                    </TableCell>
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    {EXPIRING_SOON_COLUMNS.map(({ key, label, align }) => (
+                      <TableCell key={key} align={align || 'left'}>
+                        <TableSortLabel
+                          active={expiringSort.key === key}
+                          direction={expiringSort.key === key ? expiringSort.direction : 'asc'}
+                          onClick={() => sortExpiringSoonBy(key)}
+                        >
+                          {label}
+                        </TableSortLabel>
+                      </TableCell>
+                    ))}
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHead>
+                <TableBody>
+                  {visibleExpiringSoonItems.map((it) => (
+                    <TableRow key={it.id}>
+                      <TableCell>{it.name}</TableCell>
+                      <TableCell>{it.brand || '-'}</TableCell>
+                      <TableCell>{it.category_name || '-'}</TableCell>
+                      <TableCell>{formatExpiry(it.expiry_date)}</TableCell>
+                      <TableCell>{it.stock}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 700 }}>
+                        {it._daysLeft}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
           )}
           <Stack alignItems="flex-end" p={1}>
             <Button onClick={() => setOpenExp(false)}>Close</Button>

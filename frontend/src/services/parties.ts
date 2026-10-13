@@ -85,6 +85,7 @@ export async function createPartyReceipt(
     online_amount?: number
     note?: string
     payment_date?: string
+    allow_cross_customer?: boolean
     adjustments: Array<{ bill_id: number; amount: number }>
   },
 ): Promise<PartyReceipt> {

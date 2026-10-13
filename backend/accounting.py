@@ -490,13 +490,40 @@ def post_purchase_payment_voucher(
 
 def post_party_receipt_voucher(session, receipt_id: int, party: Party, received_at: str, total_amount: float, cash_amount: float, online_amount: float, note: Optional[str]) -> Voucher:
     ledgers = ensure_accounting_setup(session)
-    debtor_ledger = ensure_party_ledger(session, party)
     lines: List[PostingLine] = []
     if round2(cash_amount) > 0:
         lines.append({"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "DR", "amount": round2(cash_amount), "narration": note or "Customer receipt"})
     if round2(online_amount) > 0:
         lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "DR", "amount": round2(online_amount), "narration": note or "Customer receipt"})
-    lines.append({"ledger_id": int(debtor_ledger.id), "entry_type": "CR", "amount": round2(total_amount), "narration": note or "Customer receipt"})
+    credits_by_ledger: Dict[int, float] = {}
+    allocated_total = 0.0
+    adjustments = session.exec(
+        select(ReceiptBillAdjustment).where(ReceiptBillAdjustment.receipt_id == int(receipt_id))
+    ).all()
+    for adjustment in adjustments:
+        if adjustment.bill_payment_id is not None:
+            payment = session.get(BillPayment, int(adjustment.bill_payment_id))
+            if not payment or bool(getattr(payment, "is_deleted", False)):
+                continue
+        bill = session.get(Bill, int(adjustment.bill_id))
+        debtor_ledger = resolve_bill_party_ledger(session, bill) if bill else None
+        if not debtor_ledger:
+            debtor_ledger = ensure_party_ledger(session, party)
+        amount = round2(adjustment.adjusted_amount)
+        if amount <= 0:
+            continue
+        ledger_id = int(debtor_ledger.id)
+        credits_by_ledger[ledger_id] = round2(credits_by_ledger.get(ledger_id, 0.0) + amount)
+        allocated_total = round2(allocated_total + amount)
+
+    unallocated = round2(max(0.0, round2(total_amount) - allocated_total))
+    if unallocated > 0:
+        payer_ledger = ensure_party_ledger(session, party)
+        payer_ledger_id = int(payer_ledger.id)
+        credits_by_ledger[payer_ledger_id] = round2(credits_by_ledger.get(payer_ledger_id, 0.0) + unallocated)
+
+    for ledger_id, amount in credits_by_ledger.items():
+        lines.append({"ledger_id": ledger_id, "entry_type": "CR", "amount": amount, "narration": note or "Customer receipt"})
     return upsert_voucher(
         session,
         voucher_type="RECEIPT",

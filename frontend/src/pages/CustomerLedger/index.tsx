@@ -319,6 +319,7 @@ type ReceiptHistoryRow = {
   adjusted: number
   onAccount: number
   allocation: string
+  hasCrossCustomerAllocation?: boolean
   note: string
   isDeleted?: boolean
   deletedAt?: string | null
@@ -350,6 +351,7 @@ export default function CustomerLedgerPage() {
   const [paymentDate, setPaymentDate] = useState(today)
   const [note, setNote] = useState('')
   const [adjustmentDrafts, setAdjustmentDrafts] = useState<Record<number, string>>({})
+  const [otherReceiptPartyId, setOtherReceiptPartyId] = useState('')
   const [billOpen, setBillOpen] = useState(false)
   const [billLoading, setBillLoading] = useState(false)
   const [billDetail, setBillDetail] = useState<any | null>(null)
@@ -499,6 +501,17 @@ export default function CustomerLedgerPage() {
     queryFn: () => fetchOpenBills(Number(selectedParty?.id)),
     enabled: Boolean(selectedParty?.id),
   })
+
+  const otherReceiptParty = useMemo(
+    () => (partiesQ.data || []).find((party) => String(party.id) === otherReceiptPartyId),
+    [otherReceiptPartyId, partiesQ.data],
+  )
+
+  const otherReceiptOpenBillsQ = useQuery<OpenBill[], Error>({
+    queryKey: ['customer-open-bills', otherReceiptParty?.id],
+    queryFn: () => fetchOpenBills(Number(otherReceiptParty?.id)),
+    enabled: receiptOpen && Boolean(otherReceiptParty?.id),
+  })
   const loansQ = useQuery({ queryKey: ['customer-ledger-loans', selectedParty?.id], queryFn: () => fetchLoans({ party_id: Number(selectedParty?.id) }), enabled: Boolean(selectedParty?.id) })
   const writeoffM = useMutation({ mutationFn: () => receivePayment(Number(writeoffBill?.bill_id), { mode: 'cash', is_writeoff: true, writeoff_amount: Number(writeoffAmount), cash_amount: 0, online_amount: 0, payment_date: today, note: 'Customer bill write-off' }), onSuccess: () => { setWriteoffBill(null); setWriteoffAmount(''); queryClient.invalidateQueries({ queryKey: ['customer-ledger'] }); queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] }); queryClient.invalidateQueries({ queryKey: ['customer-ledger-payments'] }); toast.push('Bill write-off recorded', 'success') }, onError: (err:any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Write-off failed'), 'error') })
 
@@ -549,6 +562,7 @@ export default function CustomerLedgerPage() {
         online_amount?: number
         note?: string
         payment_date?: string
+        allow_cross_customer?: boolean
         adjustments: Array<{ bill_id: number; amount: number }>
       }
     }) => createPartyReceipt(partyId, payload),
@@ -563,8 +577,9 @@ export default function CustomerLedgerPage() {
       setPaymentDate(today)
       setNote('')
       setAdjustmentDrafts({})
+      setOtherReceiptPartyId('')
     },
-    onError: (err: any) => toast.push(String(err?.message || 'Failed to record receipt'), 'error'),
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to record receipt'), 'error'),
   })
 
   const deleteReceiptM = useMutation({
@@ -669,6 +684,17 @@ export default function CustomerLedgerPage() {
 
   const ledgerRows = ledgerQ.data || []
   const openBills = openBillsQ.data || []
+  const receiptEntryBills = useMemo(
+    () => [
+      ...openBills.map((bill) => ({ ...bill, party_id: selectedParty?.id, customer_name: selectedParty?.name })),
+      ...(otherReceiptOpenBillsQ.data || []).map((bill) => ({
+        ...bill,
+        party_id: otherReceiptParty?.id,
+        customer_name: otherReceiptParty?.name,
+      })),
+    ],
+    [openBills, otherReceiptOpenBillsQ.data, otherReceiptParty?.id, otherReceiptParty?.name, selectedParty?.id, selectedParty?.name],
+  )
   const returnRows = returnsQ.data || []
   const receipts = receiptsQ.data || []
   const adjustments = receiptAdjustmentsQ.data || []
@@ -716,6 +742,10 @@ export default function CustomerLedgerPage() {
     }
     return map
   }, [adjustments])
+  const receiptManagedPaymentIds = useMemo(
+    () => new Set(adjustments.map((row) => Number(row.bill_payment_id || 0)).filter((id) => id > 0)),
+    [adjustments],
+  )
   const editReceiptAllocations = editReceiptTarget?.sourceType === 'party_receipt'
     ? adjustmentDetails.get(Number(editReceiptTarget.receiptId)) || []
     : []
@@ -727,7 +757,7 @@ export default function CustomerLedgerPage() {
       const adjusted = adjustmentMap.get(Number(receipt.id)) || 0
       const allocation =
         lines.length > 0
-          ? lines.map((line) => `Bill #${line.bill_id}: ${money(line.adjusted_amount)}`).join(', ')
+          ? lines.map((line) => `${line.customer_name && line.customer_name !== selectedParty?.name ? `${line.customer_name} · ` : ''}Bill #${line.bill_id}: ${money(line.adjusted_amount)}`).join(', ')
           : Number(receipt.unallocated_amount || 0) > 0
             ? 'Advance / on account'
             : '-'
@@ -745,6 +775,9 @@ export default function CustomerLedgerPage() {
         adjusted,
         onAccount: Number(receipt.unallocated_amount || 0),
         allocation: refunded > 0 ? `${allocation} · Returned Rs ${money(refunded)}` : allocation,
+        hasCrossCustomerAllocation: lines.some(
+          (line) => Number(line.party_id || 0) > 0 && Number(line.party_id) !== Number(selectedParty?.id || 0),
+        ),
         note: receipt.note || '',
         isDeleted: Boolean(receipt.is_deleted),
         deletedAt: receipt.deleted_at || null,
@@ -754,7 +787,7 @@ export default function CustomerLedgerPage() {
     const directPaymentRows = ((allPaymentsQ.data || []) as any[])
       .filter((payment) => billIds.has(Number(payment.bill_id)))
       .filter((payment) => !payment.is_writeoff && Number(payment.writeoff_amount || 0) <= 0)
-      .filter((payment) => !/^party receipt #/i.test(String(payment.note || '').trim()))
+      .filter((payment) => !receiptManagedPaymentIds.has(Number(payment.id)))
       .map((payment) => {
         const cash = Number(payment.cash_amount || 0)
         const online = Number(payment.online_amount || 0)
@@ -799,7 +832,7 @@ export default function CustomerLedgerPage() {
     })))
 
     return [...partyReceiptRows, ...directPaymentRows, ...advanceRefundRows].sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')))
-  }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receipts])
+  }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receiptManagedPaymentIds, receipts, selectedParty?.id, selectedParty?.name])
 
   useEffect(() => {
     const receiptId = Number(params.get('receipt_id') || 0)
@@ -908,6 +941,7 @@ export default function CustomerLedgerPage() {
     setOnlineAmount('0')
     setPaymentDate(today)
     setNote('')
+    setOtherReceiptPartyId('')
     setReceiptOpen(true)
   }
 
@@ -1037,7 +1071,7 @@ export default function CustomerLedgerPage() {
   function fillAdjustmentsFromReceipt() {
     let remaining = receiptTotal
     const next: Record<number, string> = {}
-    for (const bill of openBillsForReceipt) {
+    for (const bill of receiptEntryBills) {
       const amount = Math.min(Number(bill.outstanding_amount || 0), Math.max(0, remaining))
       next[Number(bill.bill_id)] = amount > 0 ? money(amount) : '0'
       remaining = Math.max(0, remaining - amount)
@@ -1047,7 +1081,7 @@ export default function CustomerLedgerPage() {
 
   function clearReceiptAdjustments() {
     setAdjustmentDrafts(
-      Object.fromEntries(openBillsForReceipt.map((bill) => [Number(bill.bill_id), '0'])),
+      Object.fromEntries(receiptEntryBills.map((bill) => [Number(bill.bill_id), '0'])),
     )
   }
 
@@ -1212,7 +1246,8 @@ export default function CustomerLedgerPage() {
         online_amount: receiptOnlineAmount,
         payment_date: paymentDate,
         note: note.trim() || undefined,
-        adjustments: openBills
+        allow_cross_customer: Boolean(otherReceiptParty?.id),
+        adjustments: receiptEntryBills
           .map((bill) => ({
             bill_id: Number(bill.bill_id),
             amount: Number(adjustmentDrafts[Number(bill.bill_id)] || 0),
@@ -1907,7 +1942,7 @@ export default function CustomerLedgerPage() {
             </tbody>
           </table>
           <Menu anchorEl={receiptActionsAnchor} open={Boolean(receiptActionsAnchor)} onClose={()=>{setReceiptActionsAnchor(null);setReceiptActionsRow(null)}}>
-            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openEditReceipt(row)}}>Edit Receipt</MenuItem>
+            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || receiptActionsRow.hasCrossCustomerAllocation} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openEditReceipt(row)}}>Edit Receipt</MenuItem>
             <MenuItem disabled={!receiptActionsRow || receiptActionsRow.isDeleted || Number(receiptActionsRow.onAccount||0)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openApplyAdvance(row)}}>Adjust Advance</MenuItem>
             <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || Math.min(Number(receiptActionsRow.onAccount||0),actualRefundableAdvance)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row){setRefundTarget(row);setRefundAmount(String(Math.min(Number(row.onAccount),actualRefundableAdvance)));setRefundDate(today);setRefundBook('CASH');setRefundNote('')}}}>Return Advance</MenuItem>
             {receiptActionsRow?.isDeleted && receiptActionsRow.sourceType === 'party_receipt' ? <MenuItem onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setRecoverReceiptTarget(row)}}>Recover Receipt</MenuItem> : !receiptActionsRow?.isDeleted ? <MenuItem sx={{color:'error.main'}} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setDeleteTarget(row)}}>{receiptActionsRow?.sourceType === 'advance_refund' ? 'Reverse Advance Return' : 'Delete'}</MenuItem> : null}
@@ -2006,13 +2041,32 @@ export default function CustomerLedgerPage() {
             </Stack>
             <TextField label="Note" value={note} onChange={(e) => setNote(e.target.value)} multiline minRows={2} fullWidth />
 
+            <TextField
+              select
+              label="Also adjust bills for"
+              value={otherReceiptPartyId}
+              onChange={(e) => {
+                setOtherReceiptPartyId(String(e.target.value || ''))
+                setAdjustmentDrafts(
+                  Object.fromEntries(openBills.map((bill) => [Number(bill.bill_id), adjustmentDrafts[Number(bill.bill_id)] || '0'])),
+                )
+              }}
+              helperText="Optional: choose another customer when this payer is settling their bill too."
+              fullWidth
+            >
+              <MenuItem value="">No other customer</MenuItem>
+              {(partiesQ.data || [])
+                .filter((party) => Number(party.id) !== Number(selectedParty?.id))
+                .map((party) => <MenuItem key={party.id} value={String(party.id)}>{party.name}</MenuItem>)}
+            </TextField>
+
             <Stack direction={{ xs: 'column', md: 'row' }} gap={1} justifyContent="space-between" alignItems={{ md: 'center' }}>
               <Typography variant="h6">Bill Adjustments</Typography>
               <Stack direction="row" gap={1}>
-                <Button variant="outlined" onClick={fillAdjustmentsFromReceipt} disabled={receiptTotal <= 0 || openBillsForReceipt.length === 0}>
+                <Button variant="outlined" onClick={fillAdjustmentsFromReceipt} disabled={receiptTotal <= 0 || receiptEntryBills.length === 0}>
                   Auto Fill
                 </Button>
-                <Button variant="outlined" color="inherit" onClick={clearReceiptAdjustments} disabled={openBillsForReceipt.length === 0}>
+                <Button variant="outlined" color="inherit" onClick={clearReceiptAdjustments} disabled={receiptEntryBills.length === 0}>
                   Clear
                 </Button>
               </Stack>
@@ -2022,13 +2076,14 @@ export default function CustomerLedgerPage() {
                 <thead>
                   <tr>
                     <th>Bill</th>
+                    <th>Customer</th>
                     <th>Outstanding</th>
                     <th>Remaining Receipt</th>
                     <th>Adjust Now</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {openBillsForReceipt.map((bill) => {
+                  {receiptEntryBills.map((bill) => {
                     const billId = Number(bill.bill_id)
                     const billDate = formatLedgerDateTime(bill.bill_date)
                     const usedElsewhere = Object.entries(adjustmentDrafts).reduce((sum, [id, value]) => {
@@ -2052,6 +2107,7 @@ export default function CustomerLedgerPage() {
                           </Typography>
                         </Stack>
                       </td>
+                      <td style={{ textAlign: 'left', minWidth: 160 }}>{bill.customer_name || '-'}</td>
                       <td><Typography fontWeight={800}>Rs {money(bill.outstanding_amount)}</Typography></td>
                       <td>Rs {money(remainingForThis)}</td>
                       <td>
@@ -2068,9 +2124,9 @@ export default function CustomerLedgerPage() {
                     </tr>
                     )
                   })}
-                  {openBills.length === 0 && (
+                  {receiptEntryBills.length === 0 && (
                     <tr>
-                      <td colSpan={4}>
+                      <td colSpan={5}>
                         <Box p={2} color="text.secondary">No open bills to adjust.</Box>
                       </td>
                     </tr>

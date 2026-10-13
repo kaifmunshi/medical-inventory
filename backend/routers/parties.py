@@ -101,6 +101,26 @@ def _bill_matches_party_expr(party: Party, customer_name: str):
     return or_(*matches)
 
 
+def _debtor_party_for_bill(session, bill: Bill) -> Optional[Party]:
+    if bill.party_id is not None:
+        party = session.get(Party, int(bill.party_id))
+        if party and party.party_group == "SUNDRY_DEBTOR":
+            return party
+    if bill.customer_id is not None:
+        party = session.exec(
+            select(Party).where(
+                Party.party_group == "SUNDRY_DEBTOR",
+                Party.legacy_customer_id == int(bill.customer_id),
+            )
+        ).first()
+        if party:
+            return party
+    for party in session.exec(select(Party).where(Party.party_group == "SUNDRY_DEBTOR")).all():
+        if session.exec(select(Bill.id).where(Bill.id == int(bill.id), _bill_matches_party_expr(party, party.name))).first():
+            return party
+    return None
+
+
 def _round2(x: float) -> float:
     return float(f"{float(x or 0):.2f}")
 
@@ -302,11 +322,15 @@ def _receipt_adjustment_outs_by_receipt(
             online_amount = 0.0
 
         receipt_id = int(adjustment.receipt_id)
+        bill = session.get(Bill, int(adjustment.bill_id))
+        bill_party = _debtor_party_for_bill(session, bill) if bill else None
         out.setdefault(receipt_id, []).append(
             ReceiptBillAdjustmentOut(
                 **adjustment.model_dump(),
                 cash_amount=cash_amount,
                 online_amount=online_amount,
+                party_id=int(bill_party.id) if bill_party and bill_party.id is not None else None,
+                customer_name=bill_party.name if bill_party else None,
             )
         )
     return out
@@ -859,8 +883,13 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
         adjustment_total = 0.0
         normalized_adjustments = []
         for adj in payload.adjustments:
-            bill = open_bills.get(int(adj.bill_id))
+            bill = session.get(Bill, int(adj.bill_id)) if payload.allow_cross_customer else open_bills.get(int(adj.bill_id))
+            bill_party = _debtor_party_for_bill(session, bill) if bill else None
             if not bill:
+                raise HTTPException(status_code=400, detail=f"Bill {adj.bill_id} does not belong to this customer")
+            if bool(getattr(bill, "is_deleted", False)) or not bill_party:
+                raise HTTPException(status_code=400, detail=f"Bill {adj.bill_id} is not an active customer bill")
+            if not payload.allow_cross_customer and int(bill_party.id or 0) != int(party.id or 0):
                 raise HTTPException(status_code=400, detail=f"Bill {adj.bill_id} does not belong to this customer")
             outstanding = max(
                 0.0,
@@ -892,16 +921,6 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
         )
         session.add(receipt)
         session.flush()
-        post_party_receipt_voucher(
-            session,
-            int(receipt.id),
-            party,
-            receipt.received_at,
-            float(receipt.total_amount or 0),
-            float(receipt.cash_amount or 0),
-            float(receipt.online_amount or 0),
-            receipt.note,
-        )
         log_audit(
             session,
             entity_type="PARTY_RECEIPT",
@@ -921,7 +940,7 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
                 cash_amount=cash_share,
                 online_amount=online_share,
                 writeoff_amount=0.0,
-                note=f"party receipt #{receipt.id}",
+                note=f"party receipt #{receipt.id} from {party.name}",
                 is_writeoff=False,
                 is_deleted=False,
                 deleted_at=None,
@@ -941,6 +960,17 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
 
             _recalculate_bill_payment_state(session, bill)
             session.add(bill)
+
+        post_party_receipt_voucher(
+            session,
+            int(receipt.id),
+            party,
+            receipt.received_at,
+            float(receipt.total_amount or 0),
+            float(receipt.cash_amount or 0),
+            float(receipt.online_amount or 0),
+            receipt.note,
+        )
 
         session.commit()
         session.refresh(receipt)

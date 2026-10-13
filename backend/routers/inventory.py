@@ -1279,7 +1279,7 @@ def dashboard_stats(
                     days_left = (expiry - today).days
                     if days_left < 0:
                         expired_count += 1
-                    elif days_left <= expiry_window_days:
+                    elif stock > 0 and days_left <= expiry_window_days:
                         expiring_soon_count += 1
 
         zero_stock_types = 0

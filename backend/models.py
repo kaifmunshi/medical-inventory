@@ -1483,6 +1483,7 @@ class PartyReceiptCreate(SQLModel):
     online_amount: float = 0.0
     note: Optional[str] = None
     payment_date: Optional[str] = None
+    allow_cross_customer: bool = False
     adjustments: List[ReceiptAdjustmentIn] = Field(default_factory=list)
 
 
@@ -1533,6 +1534,8 @@ class ReceiptBillAdjustmentOut(SQLModel):
     created_at: str
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    party_id: Optional[int] = None
+    customer_name: Optional[str] = None
 
 
 class PartyReceiptOut(SQLModel):

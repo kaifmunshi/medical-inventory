@@ -423,6 +423,8 @@ export interface OpenBill {
   outstanding_amount: number
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID'
   notes?: string | null
+  party_id?: ID | null
+  customer_name?: string | null
 }
 
 export interface PartyReceipt {
@@ -464,6 +466,8 @@ export interface ReceiptBillAdjustment {
   created_at: string
   cash_amount?: number
   online_amount?: number
+  party_id?: ID | null
+  customer_name?: string | null
 }
 
 export interface VoucherDayBookRow {

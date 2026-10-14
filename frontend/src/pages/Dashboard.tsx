@@ -26,6 +26,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getCreditPendingTotal, getPaymentsSummary, getSalesAggregate } from '../services/billing'
 import { getReturnsDashboardSummary } from '../services/returns'
 import { getInventoryDashboardStats, listItemsPage } from '../services/inventory'
+import { fetchCategories } from '../services/products'
 import { todayRange } from '../lib/date'
 import {
   createCashbookEntry,
@@ -87,6 +88,7 @@ export default function Dashboard() {
   const [openLow, setOpenLow] = useState(false)
   const [openExp, setOpenExp] = useState(false)
   const [expiringSearch, setExpiringSearch] = useState('')
+  const [expiringCategoryFilter, setExpiringCategoryFilter] = useState('')
   const [expiringSort, setExpiringSort] = useState<{
     key: ExpiringSoonSortKey
     direction: SortDirection
@@ -183,6 +185,14 @@ export default function Dashboard() {
   staleTime: 60_000,
   refetchOnWindowFocus: false,
 })
+
+  const qExpiringCategories = useQuery({
+    queryKey: ['inventory-categories'],
+    queryFn: () => fetchCategories({ active_only: false }),
+    enabled: openExp,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+  })
 
   // ✅ Inventory totals (Total Qty + Total Types) + ✅ Zero stock types list
   const {
@@ -398,13 +408,18 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
 
   const visibleExpiringSoonItems = useMemo(() => {
     const query = expiringSearch.trim().toLocaleLowerCase()
+    const categoryFiltered = expiringCategoryFilter
+      ? expiringSoonItems.filter(
+          (item) => Number(item.category_id || 0) === Number(expiringCategoryFilter),
+        )
+      : expiringSoonItems
     const filtered = query
-      ? expiringSoonItems.filter((item) =>
+      ? categoryFiltered.filter((item) =>
           [item.name, item.brand, item.category_name, formatExpiry(item.expiry_date), item.stock, item._daysLeft]
             .map((value) => String(value ?? '').toLocaleLowerCase())
             .some((value) => value.includes(query)),
         )
-      : expiringSoonItems
+      : categoryFiltered
 
     const valueFor = (item: ExpiringSoonItem): string | number => {
       if (expiringSort.key === 'stock' || expiringSort.key === '_daysLeft') {
@@ -422,7 +437,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
           : String(aValue).localeCompare(String(bValue), undefined, { numeric: true })
       return expiringSort.direction === 'asc' ? comparison : -comparison
     })
-  }, [expiringSearch, expiringSoonItems, expiringSort])
+  }, [expiringCategoryFilter, expiringSearch, expiringSoonItems, expiringSort])
 
   const sortExpiringSoonBy = (key: ExpiringSoonSortKey) => {
     setExpiringSort((current) => ({
@@ -1055,15 +1070,31 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       <Dialog open={openExp} onClose={() => setOpenExp(false)} fullWidth maxWidth="md">
         <DialogTitle>Expiring Soon (≤ {EXPIRY_WINDOW_DAYS} days)</DialogTitle>
         <DialogContent>
-          <TextField
-            fullWidth
-            size="small"
-            label="Search expiring products"
-            placeholder="Search by name, brand, category, expiry, or quantity"
-            value={expiringSearch}
-            onChange={(event) => setExpiringSearch(event.target.value)}
-            sx={{ my: 1 }}
-          />
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ my: 1 }}>
+            <TextField
+              fullWidth
+              size="small"
+              label="Search expiring products"
+              placeholder="Search by name, brand, category, expiry, or quantity"
+              value={expiringSearch}
+              onChange={(event) => setExpiringSearch(event.target.value)}
+            />
+            <TextField
+              select
+              size="small"
+              label="Category"
+              value={expiringCategoryFilter}
+              onChange={(event) => setExpiringCategoryFilter(event.target.value)}
+              sx={{ minWidth: { sm: 210 } }}
+            >
+              <MenuItem value="">All Categories</MenuItem>
+              {(qExpiringCategories.data || []).map((category) => (
+                <MenuItem key={category.id} value={String(category.id)}>
+                  {category.name}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Stack>
           {!Array.isArray(qInv.data) ? (
             <Typography color="text.secondary" p={1}>
               Fetching expiry list...

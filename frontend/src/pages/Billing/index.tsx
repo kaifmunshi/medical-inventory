@@ -207,6 +207,15 @@ export default function Billing() {
   const queryClient = useQueryClient()
 
   const [rows, setRows] = useState<CartRow[]>(normalizeRows(createEmptyRows(5)))
+  const reservedStockByItemId = useMemo(() => {
+    const reserved: Record<number, number> = {}
+    for (const row of rows) {
+      const itemId = Number(row.item_id || 0)
+      if (itemId <= 0) continue
+      reserved[itemId] = Number(reserved[itemId] || 0) + Math.max(0, Number(row.quantity || 0))
+    }
+    return reserved
+  }, [rows])
   const [priceDraftByRow, setPriceDraftByRow] = useState<Record<number, string>>({})
   const [discountDraftByRow, setDiscountDraftByRow] = useState<Record<number, string>>({})
   const [stockErrorByRow, setStockErrorByRow] = useState<Record<number, string>>({})
@@ -995,6 +1004,15 @@ export default function Billing() {
     }
   }
 
+  function availableStockForOption(option: any, targetRowIndex: number) {
+    const totalStock = Number(option?.stock ?? 0)
+    const reservedInOtherRows = rows.reduce((total, row, rowIndex) => {
+      if (rowIndex === targetRowIndex || Number(row.item_id) !== Number(option?.id)) return total
+      return total + Math.max(0, Number(row.quantity || 0))
+    }, 0)
+    return Math.max(0, totalStock - reservedInOtherRows)
+  }
+
   function setQty(i: number, q: number) {
     setRows((prev) =>
       normalizeRows(
@@ -1052,7 +1070,7 @@ export default function Billing() {
           idx === i ? { ...emptyRow(), category_filter_id: r.category_filter_id ?? null } : r
         )))
       }
-      const st = Number(it.stock ?? 0)
+      const st = Number(it._availableStock ?? it.stock ?? 0)
       if (st <= 0) {
         toast.push('This item is currently out of stock, so it cannot be selected here.', 'error')
         setStockError(i, `Selected item has no stock available.`)
@@ -1394,8 +1412,21 @@ export default function Billing() {
             </thead>
             <tbody>
               {rows.map((r, i) => {
-                const selectedOption = rowSelectedOption(r)
-                const activeOptions = activeGridSearchRow === i ? inventoryItemsSorted : []
+                const selectedOptionRaw = rowSelectedOption(r)
+                const selectedOption = selectedOptionRaw
+                  ? {
+                      ...selectedOptionRaw,
+                      _availableStock: availableStockForOption(selectedOptionRaw, i),
+                    }
+                  : null
+                const activeOptions = activeGridSearchRow === i
+                  ? inventoryItemsSorted
+                      .map((item: any) => ({
+                        ...item,
+                        _availableStock: availableStockForOption(item, i),
+                      }))
+                      .filter((item: any) => Number(item._availableStock) > 0)
+                  : []
                 const rowOptions = selectedOption
                   ? [
                       selectedOption,
@@ -1447,6 +1478,9 @@ export default function Billing() {
                       }
                       getOptionLabel={(it: any) => `${it?.name || ''}`}
                       isOptionEqualToValue={(a: any, b: any) => Number(a?.id) === Number(b?.id)}
+                      getOptionDisabled={(option: any) =>
+                        Number(option?._availableStock ?? option?.stock ?? 0) <= 0
+                      }
                       filterOptions={(options) => options}
                       onOpen={() => setActiveGridSearchRow(i)}
                       onInputChange={(_e, val, reason) => {
@@ -1480,7 +1514,9 @@ export default function Billing() {
                           style={{
                             ...(props as any).style,
                             backgroundColor:
-                              Number(option?.stock || 0) <= 0 ? 'rgba(244, 67, 54, 0.12)' : undefined,
+                              Number(option?._availableStock ?? option?.stock ?? 0) <= 0
+                                ? 'rgba(244, 67, 54, 0.12)'
+                                : undefined,
                           }}
                         >
                           <Box sx={{ py: 0.5, width: '100%', display: 'flex', alignItems: 'center', gap: 1.5 }}>
@@ -1491,7 +1527,10 @@ export default function Billing() {
                                 {itemKindLabel(option) ? ` - ${itemKindLabel(option)}` : ''}
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                #{option.id} | {option.brand ? `${option.brand} | ` : ''}MRP ₹{Number(option.mrp || 0).toFixed(2)} | Stock {itemStockText(option)} | Exp {formatExpiry(option.expiry_date)}
+                                #{option.id} | {option.brand ? `${option.brand} | ` : ''}MRP ₹{Number(option.mrp || 0).toFixed(2)} | Stock {itemStockText({
+                                  ...option,
+                                  stock: option?._availableStock ?? option?.stock,
+                                })} | Exp {formatExpiry(option.expiry_date)}
                               </Typography>
                             </Stack>
                             {canOpenForLoose(option) ? (
@@ -1890,7 +1929,12 @@ export default function Billing() {
         </Box>
       </Paper>
 
-      <ItemPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onPick={addRow} />
+      <ItemPicker
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        onPick={addRow}
+        reservedByItemId={reservedStockByItemId}
+      />
 
       <Dialog open={Boolean(openLooseDraft)} onClose={() => setOpenLooseDraft(null)} maxWidth="xs" fullWidth>
         <DialogTitle>Open {openLooseDraft ? itemUnitLabel(openLooseDraft.item) || 'Parent Unit' : 'Parent Unit'}</DialogTitle>

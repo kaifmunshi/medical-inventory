@@ -115,10 +115,12 @@ export default function ItemPicker({
   open,
   onClose,
   onPick,
+  reservedByItemId = {},
 }: {
   open: boolean
   onClose: () => void
   onPick: (it: PickerItem) => void
+  reservedByItemId?: Record<number, number>
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -200,6 +202,8 @@ export default function ItemPicker({
     retry: false,
   })
   const rawItems = canSearchItems ? ((data?.items || []) as PickerItem[]) : []
+  const availableStock = (item: PickerItem) =>
+    Math.max(0, Number(item.stock || 0) - Number(reservedByItemId[Number(item.id)] || 0))
   const totalItems = Number(data?.total || 0)
   const pageStart = rawItems.length > 0 ? pageOffset + 1 : 0
   const pageEnd = rawItems.length > 0 ? pageOffset + rawItems.length : 0
@@ -227,9 +231,8 @@ export default function ItemPicker({
         if (!db) return -1
         return da.localeCompare(db)
       })
-      const inStock = sorted.filter((x) => Number(x?.stock ?? 0) > 0)
-      const visible = inStock.length > 0 ? inStock : sorted.slice(0, 1)
-      out.push(...visible)
+      const inStock = sorted.filter((x) => availableStock(x) > 0)
+      out.push(...inStock)
     }
 
     out.sort((a, b) => {
@@ -261,7 +264,7 @@ export default function ItemPicker({
 
   function handlePick(it: PickerItem) {
     // ✅ keep safety check (in case stale list / race condition)
-    if (Number(it.stock ?? 0) <= 0) {
+    if (availableStock(it) <= 0) {
       toast.push('Out of stock', 'warning')
       return
     }
@@ -394,17 +397,17 @@ export default function ItemPicker({
               <ListItemButton
                 key={it.id}
                 onClick={() => handlePick(it)}
-                disabled={Number(it.stock ?? 0) <= 0 || mOpenParentPacks.isPending}
+                disabled={availableStock(it) <= 0 || mOpenParentPacks.isPending}
                 sx={{
-                  bgcolor: Number(it.stock ?? 0) <= 0 ? 'rgba(244, 67, 54, 0.12)' : undefined,
+                  bgcolor: availableStock(it) <= 0 ? 'rgba(244, 67, 54, 0.12)' : undefined,
                 }}
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, width: '100%' }}>
                   <ListItemText
                     primary={`${it.name}${itemKindLabel(it) ? ` — ${itemKindLabel(it)}` : ''} — ₹${it.mrp}`}
-                    secondary={`#${it.id} • Stock: ${itemStockText(it)}${it.brand ? ` • ${it.brand}` : ''} • Exp: ${formatExpiry(
+                    secondary={`#${it.id} • Stock: ${itemStockText({ ...it, stock: availableStock(it) })}${it.brand ? ` • ${it.brand}` : ''} • Exp: ${formatExpiry(
                       it.expiry_date
-                    )}${Number(it.stock ?? 0) <= 0 ? ' • Out of stock' : ''}`}
+                    )}${availableStock(it) <= 0 ? ' • Out of stock' : ''}`}
                   />
                   {canOpenForLoose(it) ? (
                     <Button

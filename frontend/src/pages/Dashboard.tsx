@@ -50,8 +50,10 @@ const LOW_STOCK_THRESH = 2 // ≤ 2 is low-stock
 const EXPIRY_WINDOW_DAYS = 60 // within next 60 days
 
 type ExpiringSoonSortKey = 'name' | 'brand' | 'category_name' | 'expiry_date' | 'stock' | '_daysLeft'
+type ExpiredSortKey = 'name' | 'brand' | 'category_name' | 'expiry_date' | 'stock' | '_daysExpired'
 type SortDirection = 'asc' | 'desc'
 type ExpiringSoonItem = Item & { _daysLeft: number }
+type ExpiredItem = Item & { _daysLeft: number; _daysExpired: number }
 
 const EXPIRING_SOON_COLUMNS: Array<{ key: ExpiringSoonSortKey; label: string; align?: 'right' }> = [
   { key: 'name', label: 'Name' },
@@ -60,6 +62,15 @@ const EXPIRING_SOON_COLUMNS: Array<{ key: ExpiringSoonSortKey; label: string; al
   { key: 'expiry_date', label: 'Expiry' },
   { key: 'stock', label: 'Qty' },
   { key: '_daysLeft', label: 'Days Left', align: 'right' },
+]
+
+const EXPIRED_COLUMNS: Array<{ key: ExpiredSortKey; label: string; align?: 'right' }> = [
+  { key: 'name', label: 'Name' },
+  { key: 'brand', label: 'Brand' },
+  { key: 'category_name', label: 'Category' },
+  { key: 'expiry_date', label: 'Expiry' },
+  { key: 'stock', label: 'Qty' },
+  { key: '_daysExpired', label: 'Days Expired', align: 'right' },
 ]
 
 const to2 = (n: any) => Math.round(Number(n || 0) * 100) / 100
@@ -94,6 +105,12 @@ export default function Dashboard() {
     direction: SortDirection
   }>({ key: '_daysLeft', direction: 'asc' })
   const [openExpired, setOpenExpired] = useState(false) // ✅ NEW
+  const [expiredSearch, setExpiredSearch] = useState('')
+  const [expiredCategoryFilter, setExpiredCategoryFilter] = useState('')
+  const [expiredSort, setExpiredSort] = useState<{
+    key: ExpiredSortKey
+    direction: SortDirection
+  }>({ key: '_daysExpired', direction: 'desc' })
 
   // ✅ NEW: zero stock dialog state
   const [openZeroStock, setOpenZeroStock] = useState(false)
@@ -189,7 +206,7 @@ export default function Dashboard() {
   const qExpiringCategories = useQuery({
     queryKey: ['inventory-categories'],
     queryFn: () => fetchCategories({ active_only: false }),
-    enabled: openExp,
+    enabled: openExp || openExpired,
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
   })
@@ -202,7 +219,7 @@ export default function Dashboard() {
     zeroStockTypesCount,
     zeroStockTypesList,
   } = useMemo(() => {
-    const items = (qInv.data || []) as any[]
+    const items = (qInv.data || []) as Item[]
 
     type TypeAgg = { _key: string; name: string; brand: string; stock: number }
     const map = new Map<string, TypeAgg>()
@@ -448,7 +465,7 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
 
   // ✅ NEW: ---- Expired Items ----
   const { expiredItems, expiredCount } = useMemo(() => {
-    const items = (qInv.data || []) as any[]
+    const items = (qInv.data || []) as Item[]
     const today = new Date()
     today.setHours(0, 0, 0, 0)
 
@@ -461,15 +478,62 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
     }
 
     const expired = items
-      .map((it: any) => {
+      .map((it): ExpiredItem => {
         const left = daysUntil(it.expiry_date)
         return { ...it, _daysLeft: left, _daysExpired: left === Infinity ? Infinity : Math.max(0, -left) }
       })
-      .filter((it: any) => it._daysLeft < 0) // strictly before today
-      .sort((a: any, b: any) => a._daysLeft - b._daysLeft) // more negative first
+      .filter((it) => it._daysLeft < 0) // strictly before today
+      .sort((a, b) => b._daysExpired - a._daysExpired)
 
     return { expiredItems: expired, expiredCount: expired.length }
   }, [qInv.data])
+
+  const visibleExpiredItems = useMemo(() => {
+    const query = expiredSearch.trim().toLocaleLowerCase()
+    const categoryFiltered = expiredCategoryFilter
+      ? expiredItems.filter(
+          (item) => Number(item.category_id || 0) === Number(expiredCategoryFilter),
+        )
+      : expiredItems
+    const filtered = query
+      ? categoryFiltered.filter((item) =>
+          [
+            item.name,
+            item.brand,
+            item.category_name,
+            formatExpiry(item.expiry_date),
+            item.stock,
+            item._daysExpired,
+          ]
+            .map((value) => String(value ?? '').toLocaleLowerCase())
+            .some((value) => value.includes(query)),
+        )
+      : categoryFiltered
+
+    const valueFor = (item: ExpiredItem): string | number => {
+      if (expiredSort.key === 'stock' || expiredSort.key === '_daysExpired') {
+        return Number(item[expiredSort.key] || 0)
+      }
+      return String(item[expiredSort.key] ?? '').toLocaleLowerCase()
+    }
+
+    return [...filtered].sort((a, b) => {
+      const aValue = valueFor(a)
+      const bValue = valueFor(b)
+      const comparison =
+        typeof aValue === 'number' && typeof bValue === 'number'
+          ? aValue - bValue
+          : String(aValue).localeCompare(String(bValue), undefined, { numeric: true })
+      return expiredSort.direction === 'asc' ? comparison : -comparison
+    })
+  }, [expiredCategoryFilter, expiredItems, expiredSearch, expiredSort])
+
+  const sortExpiredBy = (key: ExpiredSortKey) => {
+    setExpiredSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+    }))
+  }
 
   const displayInventoryTotalQty = qInventoryStats.data?.inventory_total_qty ?? inventoryTotalQty
   const displayInventoryTotalTypesAll = qInventoryStats.data?.inventory_total_types_all ?? inventoryTotalTypesAll
@@ -1152,6 +1216,31 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
       <Dialog open={openExpired} onClose={() => setOpenExpired(false)} fullWidth maxWidth="md">
         <DialogTitle>Expired Items</DialogTitle>
         <DialogContent>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ my: 1 }}>
+            <TextField
+              fullWidth
+              size="small"
+              label="Search expired products"
+              placeholder="Search by name, brand, category, expiry, or quantity"
+              value={expiredSearch}
+              onChange={(event) => setExpiredSearch(event.target.value)}
+            />
+            <TextField
+              select
+              size="small"
+              label="Category"
+              value={expiredCategoryFilter}
+              onChange={(event) => setExpiredCategoryFilter(event.target.value)}
+              sx={{ minWidth: { sm: 210 } }}
+            >
+              <MenuItem value="">All Categories</MenuItem>
+              {(qExpiringCategories.data || []).map((category) => (
+                <MenuItem key={category.id} value={String(category.id)}>
+                  {category.name}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Stack>
           {!Array.isArray(qInv.data) ? (
             <Typography color="text.secondary" p={1}>
               Fetching expired items...
@@ -1160,31 +1249,44 @@ const { returnsTodayCash, returnsTodayOnline, returnsTodayTotal, returnsTodayCre
             <Typography color="text.secondary" p={1}>
               No expired items.
             </Typography>
+          ) : visibleExpiredItems.length === 0 ? (
+            <Typography color="text.secondary" p={1}>
+              No expired products match your search.
+            </Typography>
           ) : (
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Name</TableCell>
-                  <TableCell>Brand</TableCell>
-                  <TableCell>Expiry</TableCell>
-                  <TableCell>Qty</TableCell>
-                  <TableCell align="right">Days Expired</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {expiredItems.map((it: any) => (
-                  <TableRow key={it._key}>
-                    <TableCell>{it.name}</TableCell>
-                    <TableCell>{it.brand || '-'}</TableCell>
-                    <TableCell>{formatExpiry(it.expiry_date)}</TableCell>
-                    <TableCell>{it.stock || '-'}</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>
-                      {Math.max(0, -Number(it._daysLeft || 0))}
-                    </TableCell>
+            <TableContainer>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    {EXPIRED_COLUMNS.map(({ key, label, align }) => (
+                      <TableCell key={key} align={align || 'left'}>
+                        <TableSortLabel
+                          active={expiredSort.key === key}
+                          direction={expiredSort.key === key ? expiredSort.direction : 'asc'}
+                          onClick={() => sortExpiredBy(key)}
+                        >
+                          {label}
+                        </TableSortLabel>
+                      </TableCell>
+                    ))}
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHead>
+                <TableBody>
+                  {visibleExpiredItems.map((it) => (
+                    <TableRow key={it.id}>
+                      <TableCell>{it.name}</TableCell>
+                      <TableCell>{it.brand || '-'}</TableCell>
+                      <TableCell>{it.category_name || '-'}</TableCell>
+                      <TableCell>{formatExpiry(it.expiry_date)}</TableCell>
+                      <TableCell>{it.stock}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>
+                        {it._daysExpired}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
           )}
           <Stack alignItems="flex-end" p={1}>
             <Button onClick={() => setOpenExpired(false)}>Close</Button>

@@ -9,6 +9,7 @@ import {
   DialogTitle,
   FormControlLabel,
   IconButton,
+  Menu,
   MenuItem,
   Pagination,
   Paper,
@@ -20,10 +21,8 @@ import {
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import CallMergeIcon from '@mui/icons-material/CallMerge'
-import DeleteIcon from '@mui/icons-material/Delete'
 import KeyboardDoubleArrowDownIcon from '@mui/icons-material/KeyboardDoubleArrowDown'
 import KeyboardDoubleArrowUpIcon from '@mui/icons-material/KeyboardDoubleArrowUp'
-import RestoreFromTrashIcon from '@mui/icons-material/RestoreFromTrash'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
@@ -89,6 +88,8 @@ export default function ProductsPage() {
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false)
   const [mergeSource, setMergeSource] = useState<Product | null>(null)
   const [mergeTarget, setMergeTarget] = useState<Product | null>(null)
+  const [actionsAnchor, setActionsAnchor] = useState<HTMLElement | null>(null)
+  const [actionsProduct, setActionsProduct] = useState<Product | null>(null)
   const [mergeOptionsOpen, setMergeOptionsOpen] = useState(false)
   const [newBrandName, setNewBrandName] = useState('')
   const [newCategoryName, setNewCategoryName] = useState('')
@@ -612,7 +613,7 @@ export default function ProductsPage() {
                 <th>Brand</th>
                 <th>Alias</th>
                 <th>Category</th>
-                <th>Default Rack</th>
+                <th>Rack</th>
                 <th>Printed Price</th>
                 <th>Status</th>
                 <th></th>
@@ -637,46 +638,17 @@ export default function ProductsPage() {
                   <td>{Number(row.printed_price || 0).toFixed(2)}</td>
                   <td>{row.is_active ? 'Active' : 'Deleted'}</td>
                   <td className="product-actions-cell">
-                    <Stack direction="row" gap={0.5}>
-                      <Button size="small" onClick={() => openEdit(row)}>Edit</Button>
-                      <Button
-                        size="small"
-                        startIcon={<CallMergeIcon fontSize="small" />}
-                        disabled={mergeM.isPending}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          openMerge(row)
-                        }}
-                      >
-                        Merge
-                      </Button>
-                      {row.is_active ? (
-                        <Button
-                          size="small"
-                          color="error"
-                          startIcon={<DeleteIcon fontSize="small" />}
-                          disabled={deleteM.isPending}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            deleteRow(row)
-                          }}
-                        >
-                          Delete
-                        </Button>
-                      ) : (
-                        <Button
-                          size="small"
-                          startIcon={<RestoreFromTrashIcon fontSize="small" />}
-                          disabled={restoreM.isPending}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            restoreM.mutate(Number(row.id))
-                          }}
-                        >
-                          Restore
-                        </Button>
-                      )}
-                    </Stack>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setActionsAnchor(event.currentTarget)
+                        setActionsProduct(row)
+                      }}
+                    >
+                      Actions
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -690,6 +662,62 @@ export default function ProductsPage() {
             </tbody>
           </table>
         </Box>
+        <Menu
+          anchorEl={actionsAnchor}
+          open={Boolean(actionsAnchor)}
+          onClose={() => {
+            setActionsAnchor(null)
+            setActionsProduct(null)
+          }}
+        >
+          <MenuItem
+            onClick={() => {
+              const product = actionsProduct
+              setActionsAnchor(null)
+              setActionsProduct(null)
+              if (product) openEdit(product)
+            }}
+          >
+            Edit
+          </MenuItem>
+          <MenuItem
+            disabled={mergeM.isPending}
+            onClick={() => {
+              const product = actionsProduct
+              setActionsAnchor(null)
+              setActionsProduct(null)
+              if (product) openMerge(product)
+            }}
+          >
+            Merge
+          </MenuItem>
+          {actionsProduct?.is_active ? (
+            <MenuItem
+              disabled={deleteM.isPending}
+              sx={{ color: 'error.main' }}
+              onClick={() => {
+                const product = actionsProduct
+                setActionsAnchor(null)
+                setActionsProduct(null)
+                if (product) deleteRow(product)
+              }}
+            >
+              Delete
+            </MenuItem>
+          ) : (
+            <MenuItem
+              disabled={restoreM.isPending}
+              onClick={() => {
+                const product = actionsProduct
+                setActionsAnchor(null)
+                setActionsProduct(null)
+                if (product) restoreM.mutate(Number(product.id))
+              }}
+            >
+              Restore
+            </MenuItem>
+          )}
+        </Menu>
         {renderPager('bottom')}
       </Paper>
 

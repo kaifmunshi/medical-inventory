@@ -1,4 +1,16 @@
-import { Button, Tooltip } from '@mui/material'
+import { useState } from 'react'
+import {
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
+  Stack,
+  Switch,
+  Tooltip,
+  Typography,
+} from '@mui/material'
 import PrintIcon from '@mui/icons-material/Print'
 import type { Bill } from '../../services/billing'
 
@@ -46,6 +58,15 @@ function formatDateTime(raw: any) {
     minute: '2-digit',
   })
   return `${dateText}, ${timeText}`
+}
+
+function formatExpiry(raw: any) {
+  const text = String(raw || '').trim()
+  if (!text) return '-'
+  const iso = text.length > 10 ? text.slice(0, 10) : text
+  const [year, month, day] = iso.split('-')
+  if (!year || !month || !day) return iso
+  return `${day}-${month}-${year}`
 }
 
 function parseBillNotes(raw: any) {
@@ -97,7 +118,7 @@ function paymentLabel(bill: any) {
   return uniqueParts([mode || '-', status || '-']).join(' / ')
 }
 
-function buildPrintHtml(bill: Bill | any, logoUrl: string) {
+function buildPrintHtml(bill: Bill | any, logoUrl: string, printExpiryByItem: boolean[]) {
   const items = Array.isArray(bill?.items) ? bill.items : []
   const notes = parseBillNotes(bill?.notes)
   const billFileName = `Bill-${String(bill?.id || 'new').replace(/[^\w-]/g, '')}`
@@ -123,11 +144,14 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
     const name = item?.item_name || item?.name || item?.item?.name || `Item #${item?.item_id || ''}`
     const categoryName = String(item?.category_name || '').trim()
     const printedName = categoryName ? `${categoryName} - ${name}` : name
+    const expiryLabel = printExpiryByItem[index] && item?.expiry_date
+      ? `<span class="expiry-label">Exp: ${escapeHtml(formatExpiry(item.expiry_date))}</span>`
+      : ''
     return `
       <tr>
         <td class="center">${index + 1}</td>
         <td>
-          <div class="item-name">${escapeHtml(printedName)}</div>
+          <div class="item-name">${escapeHtml(printedName)}${expiryLabel}</div>
           <div class="muted small">${escapeHtml(packLine(item))}</div>
         </td>
         <td class="num">${escapeHtml(money(item?.mrp))}</td>
@@ -288,6 +312,16 @@ function buildPrintHtml(bill: Bill | any, logoUrl: string) {
       .item-name {
         font-weight: 700;
       }
+      .expiry-label {
+        display: inline-block;
+        margin-left: 8px;
+        padding-left: 8px;
+        border-left: 1px solid #888;
+        color: #333;
+        font-size: 10.5px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
       .small {
         font-size: 10.5px;
       }
@@ -445,13 +479,25 @@ export default function BillSupplyPrintButton({
   disabled,
   fullWidth,
 }: Props) {
+  const [optionsOpen, setOptionsOpen] = useState(false)
+  const [printExpiryByItem, setPrintExpiryByItem] = useState<boolean[]>([])
+
+  const items = Array.isArray(bill?.items) ? bill.items : []
+
+  function openPrintOptions() {
+    if (!bill?.id) return
+    setPrintExpiryByItem(items.map((item: any) => Boolean(item?.expiry_date)))
+    setOptionsOpen(true)
+  }
+
   function printBill() {
     if (!bill?.id) return
     const win = window.open('', '_blank', 'width=900,height=1200')
     if (!win) return
+    setOptionsOpen(false)
     const logoUrl = new URL('/logo.png', window.location.origin).href
     win.document.open()
-    win.document.write(buildPrintHtml(bill, logoUrl))
+    win.document.write(buildPrintHtml(bill, logoUrl, printExpiryByItem))
     win.document.close()
   }
 
@@ -461,7 +507,7 @@ export default function BillSupplyPrintButton({
       size={size}
       variant={variant}
       startIcon={<PrintIcon />}
-      onClick={printBill}
+      onClick={openPrintOptions}
       disabled={disabled || !bill?.id}
       fullWidth={fullWidth}
       aria-label={bill?.id ? `Print bill ${bill.bill_number || bill.id}` : 'Print bill'}
@@ -501,8 +547,67 @@ export default function BillSupplyPrintButton({
   )
 
   return (
-    <Tooltip title={bill?.id ? `Print Bill #${bill.bill_number || bill.id}` : 'Print bill'} arrow>
-      <span>{button}</span>
-    </Tooltip>
+    <>
+      <Tooltip title={bill?.id ? `Print Bill #${bill.bill_number || bill.id}` : 'Print bill'} arrow>
+        <span>{button}</span>
+      </Tooltip>
+      <Dialog open={optionsOpen} onClose={() => setOptionsOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Choose Expiry Dates to Print</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            Switch expiry printing on or off for each product in this bill.
+          </Typography>
+          <Stack spacing={0.5}>
+            {items.map((item: any, index: number) => {
+              const name = item?.item_name || item?.name || item?.item?.name || `Item #${item?.item_id || index + 1}`
+              const hasExpiry = Boolean(item?.expiry_date)
+              return (
+                <Stack
+                  key={`${item?.item_id || 'item'}-${index}`}
+                  direction={{ xs: 'column', sm: 'row' }}
+                  alignItems={{ xs: 'flex-start', sm: 'center' }}
+                  justifyContent="space-between"
+                  gap={0.5}
+                  sx={{ py: 1, borderBottom: '1px solid', borderColor: 'divider' }}
+                >
+                  <Stack spacing={0.1} sx={{ minWidth: 0 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                      {name}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      Expiry: {hasExpiry ? formatExpiry(item.expiry_date) : 'Not available'}
+                    </Typography>
+                  </Stack>
+                  <FormControlLabel
+                    label={printExpiryByItem[index] ? 'Print' : 'Hide'}
+                    labelPlacement="start"
+                    control={
+                      <Switch
+                        checked={Boolean(printExpiryByItem[index])}
+                        onChange={(event) => {
+                          const checked = event.target.checked
+                          setPrintExpiryByItem((current) =>
+                            current.map((value, itemIndex) => itemIndex === index ? checked : value),
+                          )
+                        }}
+                        disabled={!hasExpiry}
+                        inputProps={{ 'aria-label': `Print expiry for ${name}` }}
+                      />
+                    }
+                    sx={{ m: 0, flexShrink: 0 }}
+                  />
+                </Stack>
+              )
+            })}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOptionsOpen(false)}>Cancel</Button>
+          <Button variant="contained" startIcon={<PrintIcon />} onClick={printBill}>
+            Print Bill
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
   )
 }

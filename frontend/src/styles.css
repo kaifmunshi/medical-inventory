@@ -118,14 +118,39 @@ body {
    columns cannot squeeze the buttons into one another on narrower screens. */
 .table.products-table {
   width: 100% !important;
-  min-width: 1120px !important;
-  max-width: none;
+  min-width: 0 !important;
+  max-width: 100%;
+}
+
+/* Product names are often much longer than the other product fields. Give the
+   name column dedicated space and allow an unusually long name to wrap instead
+   of being truncated with an ellipsis. */
+.table.products-table th:first-child,
+.table.products-table td:first-child {
+  width: 30%;
+  min-width: 0 !important;
+  white-space: normal !important;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+}
+
+.table.products-table th:nth-child(2),
+.table.products-table td:nth-child(2) {
+  width: 18%;
+}
+
+.table.products-table th:nth-child(5),
+.table.products-table td:nth-child(5) {
+  width: 76px;
+  text-align: center;
 }
 
 .table.products-table th:last-child,
 .table.products-table td.product-actions-cell {
-  width: 230px;
-  min-width: 230px !important;
+  width: 92px;
+  min-width: 92px !important;
   overflow: visible;
   text-overflow: clip;
 }

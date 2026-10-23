@@ -2874,6 +2874,7 @@ def migrate_db():
                 party_id INTEGER NOT NULL,
                 invoice_number TEXT NOT NULL,
                 invoice_date TEXT NOT NULL,
+                received_date TEXT,
                 notes TEXT,
                 subtotal_amount REAL NOT NULL DEFAULT 0,
                 discount_amount REAL NOT NULL DEFAULT 0,
@@ -2888,6 +2889,14 @@ def migrate_db():
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
+        """))
+        purchase_columns = {row[1] for row in session.exec(text("PRAGMA table_info(purchase)")).all()}
+        if "received_date" not in purchase_columns:
+            session.exec(text("ALTER TABLE purchase ADD COLUMN received_date TEXT"))
+        session.exec(text("""
+            UPDATE purchase
+            SET received_date = invoice_date
+            WHERE received_date IS NULL OR trim(received_date) = ''
         """))
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchaseitem (

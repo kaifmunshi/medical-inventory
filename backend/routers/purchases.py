@@ -93,6 +93,7 @@ def purchase_snapshot(session, purchase: Purchase) -> dict:
             "party_id": int(purchase.party_id),
             "invoice_number": purchase.invoice_number,
             "invoice_date": purchase.invoice_date,
+            "received_date": purchase.received_date or purchase.invoice_date,
             "notes": purchase.notes,
             "subtotal_amount": round2(purchase.subtotal_amount),
             "discount_amount": round2(purchase.discount_amount),
@@ -752,6 +753,7 @@ def make_purchase_out(session, row: Purchase) -> PurchaseOut:
         party_id=row.party_id,
         invoice_number=row.invoice_number,
         invoice_date=row.invoice_date,
+        received_date=row.received_date or row.invoice_date,
         notes=row.notes,
         subtotal_amount=row.subtotal_amount,
         discount_amount=row.discount_amount,
@@ -1269,6 +1271,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
     invoice_date = clean_date(payload.invoice_date)
     if not invoice_date:
         raise HTTPException(status_code=400, detail="invoice_date is required")
+    received_date = clean_date(payload.received_date) or invoice_date
     if not payload.items:
         raise HTTPException(status_code=400, detail="At least one item is required")
 
@@ -1443,6 +1446,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             party_id=supplier.id,
             invoice_number=invoice_number,
             invoice_date=invoice_date,
+            received_date=received_date,
             notes=clean_text(payload.notes),
             subtotal_amount=subtotal_amount,
             discount_amount=discount_amount,
@@ -1688,6 +1692,7 @@ def create_free_stock(payload: FreeStockCreate) -> PurchaseOut:
             party_id=party_id,
             invoice_number=invoice_number,
             invoice_date=invoice_date,
+            received_date=invoice_date,
             notes=clean_text(payload.notes),
             discount_amount=0.0,
             gst_amount=0.0,
@@ -1861,6 +1866,7 @@ def supplier_ledger(party_id: int) -> List[PurchaseLedgerRow]:
                     purchase_id=row.id,
                     invoice_number=row.invoice_number,
                     invoice_date=row.invoice_date,
+                    received_date=row.received_date or row.invoice_date,
                     total_amount=row.total_amount,
                     paid_amount=row.paid_amount,
                     writeoff_amount=row.writeoff_amount,
@@ -1918,6 +1924,11 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
                 raise HTTPException(status_code=400, detail="invoice_date is required")
             assert_financial_year_unlocked(session, invoice_date, context="Purchase update")
             row.invoice_date = invoice_date
+        if "received_date" in data:
+            received_date = clean_date(data["received_date"])
+            if not received_date:
+                raise HTTPException(status_code=400, detail="received_date is required")
+            row.received_date = received_date
         if "notes" in data:
             row.notes = clean_text(data["notes"])
         discount_changed = (

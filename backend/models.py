@@ -870,6 +870,7 @@ class Purchase(SQLModel, table=True):
     party_id: int = Field(index=True)
     invoice_number: str = Field(index=True)
     invoice_date: str = Field(sa_column=Column(String(10)))
+    received_date: Optional[str] = Field(default=None, sa_column=Column(String(10)))
     notes: Optional[str] = None
     subtotal_amount: float = 0.0
     discount_amount: float = 0.0
@@ -1216,6 +1217,7 @@ class PurchaseCreate(SQLModel):
     party_id: int
     invoice_number: str
     invoice_date: str
+    received_date: Optional[str] = None
     notes: Optional[str] = None
     discount_amount: float = 0.0
     gst_amount: float = 0.0
@@ -1228,6 +1230,7 @@ class PurchaseUpdate(SQLModel):
     party_id: Optional[int] = None
     invoice_number: Optional[str] = None
     invoice_date: Optional[str] = None
+    received_date: Optional[str] = None
     notes: Optional[str] = None
     discount_amount: Optional[float] = None
     gst_amount: Optional[float] = None
@@ -1308,6 +1311,7 @@ class PurchaseOut(SQLModel):
     party_id: int
     invoice_number: str
     invoice_date: str
+    received_date: str
     notes: Optional[str] = None
     subtotal_amount: float
     discount_amount: float
@@ -1402,6 +1406,7 @@ class PurchaseLedgerRow(SQLModel):
     purchase_id: int
     invoice_number: str
     invoice_date: str
+    received_date: str
     total_amount: float
     paid_amount: float
     writeoff_amount: float

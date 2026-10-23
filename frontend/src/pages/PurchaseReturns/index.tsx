@@ -554,7 +554,7 @@ export default function PurchaseReturnsPage() {
                 options={(purchasesQ.data || []).filter((row) => !row.is_deleted)}
                 value={purchase}
                 disabled={!supplier || Boolean(editingReturn)}
-                getOptionLabel={(option) => `${option.invoice_number} | ${option.invoice_date} | ${money(option.net_amount ?? option.total_amount)}`}
+                getOptionLabel={(option) => `${option.invoice_number} | Invoice ${option.invoice_date} | Received ${option.received_date || option.invoice_date} | ${money(option.net_amount ?? option.total_amount)}`}
                 isOptionEqualToValue={(option, value) => option.id === value.id}
                 onChange={(_event, value) => setPurchase(value)}
                 renderInput={(params) => <TextField {...params} label="Source purchase invoice" />}

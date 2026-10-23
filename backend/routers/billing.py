@@ -910,6 +910,11 @@ def create_bill(payload: BillCreate):
         subtotal = 0.0
 
         for line in payload.items:
+            if line.item_id in db_items:
+                raise HTTPException(
+                    status_code=400,
+                    detail="The same inventory batch cannot appear twice in one bill. Combine its quantity into one line.",
+                )
             itm = session.get(Item, line.item_id)
             if not itm:
                 raise HTTPException(status_code=404, detail=f"Item {line.item_id} not found")

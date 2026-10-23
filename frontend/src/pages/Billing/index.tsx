@@ -104,6 +104,24 @@ function itemStockText(it: any) {
   return `${Number(it?.stock || 0)}${unit ? ` ${unit}` : ''}`
 }
 
+// Stock is held per inventory batch. Prefer its lot id so two expiries of the
+// same product never reserve each other's stock in the billing UI.
+function stockReservationKey(it: any) {
+  const lotId = Number(it?.inventory_lot_id || 0)
+  if (lotId > 0) return `lot:${lotId}`
+  return `item:${Number(it?.item_id ?? it?.id ?? 0)}`
+}
+
+function availableStockForRows(rows: CartRow[], option: any, excludedRowIndex?: number) {
+  const totalStock = Math.max(0, Number(option?.stock ?? 0))
+  const optionKey = stockReservationKey(option)
+  const reserved = rows.reduce((total, row, rowIndex) => {
+    if (rowIndex === excludedRowIndex || stockReservationKey(row) !== optionKey) return total
+    return total + Math.max(0, Number(row.quantity || 0))
+  }, 0)
+  return Math.max(0, totalStock - reserved)
+}
+
 function canOpenForLoose(it: any) {
   return Boolean(
     it &&
@@ -207,12 +225,13 @@ export default function Billing() {
   const queryClient = useQueryClient()
 
   const [rows, setRows] = useState<CartRow[]>(normalizeRows(createEmptyRows(5)))
-  const reservedStockByItemId = useMemo(() => {
-    const reserved: Record<number, number> = {}
+  const reservedStockByBatch = useMemo(() => {
+    const reserved: Record<string, number> = {}
     for (const row of rows) {
       const itemId = Number(row.item_id || 0)
       if (itemId <= 0) continue
-      reserved[itemId] = Number(reserved[itemId] || 0) + Math.max(0, Number(row.quantity || 0))
+      const key = stockReservationKey(row)
+      reserved[key] = Number(reserved[key] || 0) + Math.max(0, Number(row.quantity || 0))
     }
     return reserved
   }, [rows])
@@ -457,6 +476,19 @@ export default function Billing() {
       const next = { ...prev }
       if (msg) next[i] = msg
       else delete next[i]
+      return next
+    })
+  }
+
+  function clearRowDrafts(i: number) {
+    setPriceDraftByRow((prev) => {
+      const next = { ...prev }
+      delete next[i]
+      return next
+    })
+    setDiscountDraftByRow((prev) => {
+      const next = { ...prev }
+      delete next[i]
       return next
     })
   }
@@ -888,29 +920,28 @@ export default function Billing() {
   })
 
   function addRow(it: any) {
-    const st = Number(it.stock ?? 0)
-    if (st <= 0) {
-      toast.push('This item is currently out of stock, so it cannot be added to the billing grid.', 'error')
-      return
-    }
-
     setRows((prev) => {
-      const idx = prev.findIndex((p) => p.item_id === it.id)
+      const available = availableStockForRows(prev, it)
+      if (available < 1) {
+        toast.push('This item has no remaining stock available for this bill.', 'error')
+        return prev
+      }
+      const idx = prev.findIndex((p) => Number(p.item_id) === Number(it.id))
       if (idx >= 0) {
         const next = prev.map((r, i) => {
           if (i !== idx) return r
           const nextQty = Number(r.quantity || 0) + 1
-          const stock = Number(r.stock ?? Number.POSITIVE_INFINITY)
+          const stock = Number(r.stock ?? 0)
           if (nextQty > stock) {
             setStockError(
               idx,
-              `Only ${stock} unit(s) available for ${r.name}. Quantity was reset to 0.`
+              `Only ${stock} unit(s) are available for ${r.name}.`
             )
             toast.push(
-              `Only ${stock} unit(s) are available for ${r.name}. Quantity was reset to 0. Enter a value from 0 to ${stock}.`,
+              `Only ${stock} unit(s) are available for ${r.name}. Existing quantity was kept.`,
               'warning'
             )
-            return { ...r, quantity: 0 }
+            return r
           }
           setStockError(idx)
           return { ...r, quantity: nextQty }
@@ -1005,39 +1036,33 @@ export default function Billing() {
   }
 
   function availableStockForOption(option: any, targetRowIndex: number) {
-    const totalStock = Number(option?.stock ?? 0)
-    const reservedInOtherRows = rows.reduce((total, row, rowIndex) => {
-      if (rowIndex === targetRowIndex || Number(row.item_id) !== Number(option?.id)) return total
-      return total + Math.max(0, Number(row.quantity || 0))
-    }, 0)
-    return Math.max(0, totalStock - reservedInOtherRows)
+    return availableStockForRows(rows, option, targetRowIndex)
   }
 
   function setQty(i: number, q: number) {
-    setRows((prev) =>
-      normalizeRows(
-        prev.map((r, idx) => {
+    setRows((prev) => {
+      const next = prev.map((r, idx) => {
           if (idx !== i) return r
           if (Number(r.item_id) <= 0) return r
           const raw = Number.isFinite(Number(q)) ? Number(q) : 0
           const normalized = Math.max(0, Math.floor(raw))
-          const stock = Number(r.stock ?? Number.POSITIVE_INFINITY)
-          if (normalized > stock) {
+          const available = availableStockForRows(prev, r, i)
+          if (normalized > available) {
             setStockError(
               i,
-              `Only ${stock} unit(s) available for ${r.name}. Quantity was reset to 0.`
+              `Only ${available} unit(s) are available for ${r.name}.`
             )
             toast.push(
-              `Only ${stock} unit(s) are available for ${r.name}. Quantity was reset to 0. Please enter between 0 and ${stock}.`,
+              `Only ${available} unit(s) are available for ${r.name}. Existing quantity was kept.`,
               'warning'
             )
-            return { ...r, quantity: 0 }
+            return r
           }
           setStockError(i)
           return { ...r, quantity: normalized }
         })
-      )
-    )
+      return normalizeRows(next)
+    })
   }
 
   function normalizeQtyOnBlur(i: number) {
@@ -1059,6 +1084,7 @@ export default function Billing() {
       idx === i ? { ...emptyRow(), category_filter_id: r.category_filter_id ?? null } : r
     ))))
     setStockError(i)
+    clearRowDrafts(i)
     toast.push('Row cleared successfully. You can now select another item in that row.', 'info')
   }
 
@@ -1066,12 +1092,13 @@ export default function Billing() {
     setRows((prev) => {
       if (!it) {
         setStockError(i)
+        clearRowDrafts(i)
         return normalizeRows(prev.map((r, idx) => (
           idx === i ? { ...emptyRow(), category_filter_id: r.category_filter_id ?? null } : r
         )))
       }
-      const st = Number(it._availableStock ?? it.stock ?? 0)
-      if (st <= 0) {
+      const available = availableStockForRows(prev, it, i)
+      if (available <= 0) {
         toast.push('This item is currently out of stock, so it cannot be selected here.', 'error')
         setStockError(i, `Selected item has no stock available.`)
         return prev
@@ -1082,17 +1109,17 @@ export default function Billing() {
         const next = prev.map((r, idx) => {
           if (idx === dup) {
             const nextQty = Number(r.quantity || 0) + 1
-            const stock = Number(r.stock ?? Number.POSITIVE_INFINITY)
+            const stock = Number(r.stock ?? 0)
             if (nextQty > stock) {
               setStockError(
                 dup,
-                `Only ${stock} unit(s) available for ${r.name}. Quantity was reset to 0.`
+                `Only ${stock} unit(s) are available for ${r.name}.`
               )
               toast.push(
-                `Only ${stock} unit(s) are available for ${r.name}. Quantity was reset to 0. Please enter between 0 and ${stock}.`,
+                `Only ${stock} unit(s) are available for ${r.name}. Existing quantity was kept.`,
                 'warning'
               )
-              return { ...r, quantity: 0 }
+              return r
             }
             setStockError(dup)
             return {
@@ -1104,6 +1131,7 @@ export default function Billing() {
           return r
         })
         setStockError(i)
+        clearRowDrafts(i)
         setPendingQtyFocusRow(dup)
         toast.push('This item already exists in another row, so that row quantity was increased by 1.', 'info')
         return normalizeRows(next)
@@ -1135,6 +1163,7 @@ export default function Billing() {
           : r
       )
       setStockError(i)
+      clearRowDrafts(i)
       return normalizeRows(next)
     })
   }
@@ -1444,6 +1473,11 @@ export default function Billing() {
                         value={r.category_filter_id ?? r.category_id ?? ''}
                         onChange={(e) => {
                           const nextCategoryId = e.target.value ? Number(e.target.value) : null
+                          const clearsSelectedItem = (
+                            nextCategoryId != null &&
+                            r.category_id != null &&
+                            Number(r.category_id) !== Number(nextCategoryId)
+                          )
                           setRows((prev) => normalizeRows(prev.map((row, idx) => {
                             if (idx !== i) return row
                             if (
@@ -1455,6 +1489,10 @@ export default function Billing() {
                             }
                             return { ...row, category_filter_id: nextCategoryId }
                           })))
+                          if (clearsSelectedItem) {
+                            setStockError(i)
+                            clearRowDrafts(i)
+                          }
                           setActiveGridSearchRow(i)
                           setGridSearch('')
                           setDebouncedGridSearch('')
@@ -1572,7 +1610,10 @@ export default function Billing() {
                             Number(r.item_id) > 0
                               ? [
                                   String(r.brand || '').trim(),
-                                  `${itemKindLabel(r) ? `${itemKindLabel(r)} ` : ''}stock: ${itemStockText(r)}`,
+                                  `${itemKindLabel(r) ? `${itemKindLabel(r)} ` : ''}available: ${itemStockText({
+                                    ...r,
+                                    stock: Math.max(0, Number(r.stock || 0) - Number(reservedStockByBatch[stockReservationKey(r)] || 0)),
+                                  })}`,
                                 ].filter(Boolean).join(' | ')
                               : ''
                           }
@@ -1933,7 +1974,7 @@ export default function Billing() {
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}
         onPick={addRow}
-        reservedByItemId={reservedStockByItemId}
+        reservedByItemId={reservedStockByBatch}
       />
 
       <Dialog open={Boolean(openLooseDraft)} onClose={() => setOpenLooseDraft(null)} maxWidth="xs" fullWidth>

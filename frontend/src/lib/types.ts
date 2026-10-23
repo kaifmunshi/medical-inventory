@@ -257,6 +257,7 @@ export interface Purchase {
   party_id: ID
   invoice_number: string
   invoice_date: string
+  received_date: string
   notes?: string | null
   subtotal_amount: number
   discount_amount: number
@@ -282,6 +283,7 @@ export interface PurchaseLedgerRow {
   purchase_id: ID
   invoice_number: string
   invoice_date: string
+  received_date: string
   total_amount: number
   paid_amount: number
   writeoff_amount: number

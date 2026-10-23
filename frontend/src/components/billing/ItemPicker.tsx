@@ -86,6 +86,12 @@ function itemStockText(it: any) {
   return `${Number(it?.stock || 0)}${unit ? ` ${unit}` : ''}`
 }
 
+function stockReservationKey(it: any) {
+  const lotId = Number(it?.inventory_lot_id || 0)
+  if (lotId > 0) return `lot:${lotId}`
+  return `item:${Number(it?.item_id ?? it?.id ?? 0)}`
+}
+
 function canOpenForLoose(it: any) {
   return Boolean(
     it &&
@@ -120,7 +126,7 @@ export default function ItemPicker({
   open: boolean
   onClose: () => void
   onPick: (it: PickerItem) => void
-  reservedByItemId?: Record<number, number>
+  reservedByItemId?: Record<string, number>
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -203,7 +209,7 @@ export default function ItemPicker({
   })
   const rawItems = canSearchItems ? ((data?.items || []) as PickerItem[]) : []
   const availableStock = (item: PickerItem) =>
-    Math.max(0, Number(item.stock || 0) - Number(reservedByItemId[Number(item.id)] || 0))
+    Math.max(0, Number(item.stock || 0) - Number(reservedByItemId[stockReservationKey(item)] || 0))
   const totalItems = Number(data?.total || 0)
   const pageStart = rawItems.length > 0 ? pageOffset + 1 : 0
   const pageEnd = rawItems.length > 0 ? pageOffset + rawItems.length : 0

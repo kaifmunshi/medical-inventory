@@ -255,6 +255,7 @@ export default function SupplierLedgerPage() {
   const [editPartyId, setEditPartyId] = useState<number | null>(null)
   const [editInvoiceNumber, setEditInvoiceNumber] = useState('')
   const [editInvoiceDate, setEditInvoiceDate] = useState(today)
+  const [editReceivedDate, setEditReceivedDate] = useState(today)
   const [editNotes, setEditNotes] = useState('')
   const [editDiscountAmount, setEditDiscountAmount] = useState('0')
   const [editRoundingAdjustment, setEditRoundingAdjustment] = useState('0')
@@ -1009,6 +1010,7 @@ export default function SupplierLedgerPage() {
     setEditPartyId(Number(selectedPurchase.party_id))
     setEditInvoiceNumber(selectedPurchase.invoice_number || '')
     setEditInvoiceDate(selectedPurchase.invoice_date || today)
+    setEditReceivedDate(selectedPurchase.received_date || selectedPurchase.invoice_date || today)
     setEditNotes(selectedPurchase.notes || '')
     setEditDiscountAmount(String(selectedPurchase.discount_amount || 0))
     setEditRoundingAdjustment(String(selectedPurchase.rounding_adjustment || 0))
@@ -1143,12 +1145,17 @@ export default function SupplierLedgerPage() {
 
   function saveHeaderEdit() {
     if (!selectedPurchaseId || !editPartyId) return
+    if (!editReceivedDate) {
+      toast.push('Received date is required', 'error')
+      return
+    }
     updateM.mutate({
       id: selectedPurchaseId,
       payload: {
         party_id: editPartyId,
         invoice_number: editInvoiceNumber.trim(),
         invoice_date: editInvoiceDate,
+        received_date: editReceivedDate,
         notes: editNotes.trim() || undefined,
         discount_amount: Number(editDiscountAmount || 0),
         gst_amount: 0,
@@ -1926,7 +1933,8 @@ export default function SupplierLedgerPage() {
                     <thead>
                       <tr>
                         <th>Purchase</th>
-                        <th>Date</th>
+                        <th>Invoice Date</th>
+                        <th>Received Date</th>
                         <th>Total</th>
                         <th>Outstanding</th>
                         <th>Apply Now</th>
@@ -1950,6 +1958,7 @@ export default function SupplierLedgerPage() {
                             </Link>
                           </td>
                           <td>{purchase.invoice_date}</td>
+                          <td>{purchase.received_date || purchase.invoice_date}</td>
                           <td>{money(purchase.total_amount)}</td>
                           <td>{money(outstandingOf(purchase))}</td>
                           <td>
@@ -2132,7 +2141,7 @@ export default function SupplierLedgerPage() {
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                 <Box>
                   <Typography variant="h6">{selectedPurchase.invoice_number || `Purchase #${selectedPurchase.id}`}</Typography>
-                  <Typography color="text.secondary">{selectedSupplier?.name || `Supplier #${selectedPurchase.party_id}`} | {selectedPurchase.invoice_date}</Typography>
+                  <Typography color="text.secondary">{selectedSupplier?.name || `Supplier #${selectedPurchase.party_id}`} | Invoice {selectedPurchase.invoice_date} | Received {selectedPurchase.received_date || selectedPurchase.invoice_date}</Typography>
                 </Box>
                 <Stack direction="row" gap={1} flexWrap="wrap">
                   <Button variant="outlined" disabled={selectedPurchase.return_total > 0} startIcon={<EditIcon />} onClick={openEditHeader}>
@@ -2276,7 +2285,7 @@ export default function SupplierLedgerPage() {
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Supplier & Invoice</Typography>
               <Grid container spacing={2}>
-                <Grid item xs={12} md={4}>
+                <Grid item xs={12} md={3}>
                   <TextField
                     select
                     label="Supplier"
@@ -2289,11 +2298,14 @@ export default function SupplierLedgerPage() {
                     ))}
                   </TextField>
                 </Grid>
-                <Grid item xs={12} md={4}>
+                <Grid item xs={12} md={3}>
                   <TextField label="Invoice Number" value={editInvoiceNumber} onChange={(e) => setEditInvoiceNumber(e.target.value)} fullWidth />
                 </Grid>
-                <Grid item xs={12} md={4}>
+                <Grid item xs={12} md={3}>
                   <TextField label="Invoice Date" type="date" value={editInvoiceDate} onChange={(e) => setEditInvoiceDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={3}>
+                  <TextField label="Received Date" type="date" value={editReceivedDate} onChange={(e) => setEditReceivedDate(e.target.value)} InputLabelProps={{ shrink: true }} required fullWidth />
                 </Grid>
                 <Grid item xs={12}>
                   <TextField label="Notes" value={editNotes} onChange={(e) => setEditNotes(e.target.value)} multiline minRows={2} fullWidth />

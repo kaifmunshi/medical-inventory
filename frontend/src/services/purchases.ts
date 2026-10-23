@@ -7,6 +7,7 @@ export interface PurchaseCreatePayload {
   party_id: number
   invoice_number: string
   invoice_date: string
+  received_date?: string
   notes?: string
   discount_amount?: number
   gst_amount?: number
@@ -27,6 +28,7 @@ export interface PurchaseUpdatePayload {
   party_id?: number
   invoice_number?: string
   invoice_date?: string
+  received_date?: string
   notes?: string
   discount_amount?: number
   gst_amount?: number

@@ -187,6 +187,7 @@ type PurchaseSnapshot = {
   purchase: {
     invoice_number: string
     invoice_date: string
+    received_date: string
     subtotal_amount: number
     discount_amount: number
     gst_amount: number
@@ -316,6 +317,7 @@ export default function PurchasesPage() {
   const [partyId, setPartyId] = useState<number | null>(null)
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [invoiceDate, setInvoiceDate] = useState(today)
+  const [receivedDate, setReceivedDate] = useState(today)
   const [notes, setNotes] = useState('')
   const [discountAmount, setDiscountAmount] = useState('0')
   const [roundingAdjustment, setRoundingAdjustment] = useState('0')
@@ -387,6 +389,7 @@ export default function PurchasesPage() {
   const [editPartyId, setEditPartyId] = useState<number | null>(null)
   const [editInvoiceNumber, setEditInvoiceNumber] = useState('')
   const [editInvoiceDate, setEditInvoiceDate] = useState(today)
+  const [editReceivedDate, setEditReceivedDate] = useState(today)
   const [editNotes, setEditNotes] = useState('')
   const [editDiscountAmount, setEditDiscountAmount] = useState('0')
   const [editRoundingAdjustment, setEditRoundingAdjustment] = useState('0')
@@ -789,6 +792,7 @@ export default function PurchasesPage() {
     setPartyId(null)
     setInvoiceNumber('')
     setInvoiceDate(today)
+    setReceivedDate(today)
     setNotes('')
     setDiscountAmount('0')
     setRoundingAdjustment('0')
@@ -1046,6 +1050,7 @@ export default function PurchasesPage() {
     setEditPartyId(purchase.party_id)
     setEditInvoiceNumber(purchase.invoice_number)
     setEditInvoiceDate(purchase.invoice_date)
+    setEditReceivedDate(purchase.received_date || purchase.invoice_date)
     setEditNotes(purchase.notes || '')
     setEditDiscountAmount(String(purchase.discount_amount || 0))
     setEditRoundingAdjustment(String(purchase.rounding_adjustment || 0))
@@ -1165,6 +1170,10 @@ export default function PurchasesPage() {
       toast.push('Invoice number is required', 'error')
       return
     }
+    if (!receivedDate) {
+      toast.push('Received date is required', 'error')
+      return
+    }
     const activeItems = filledDraftItems(items)
     if (activeItems.length === 0) {
       toast.push('Add at least one purchase item', 'error')
@@ -1210,6 +1219,7 @@ export default function PurchasesPage() {
       party_id: partyId,
       invoice_number: invoiceNumber.trim(),
       invoice_date: invoiceDate,
+      received_date: receivedDate,
       notes: notes.trim() || undefined,
       discount_amount: round2(Number(discountAmount || 0)),
       gst_amount: round2(gstTotal),
@@ -1288,12 +1298,17 @@ export default function PurchasesPage() {
 
   function saveHeaderEdit() {
     if (!selectedPurchaseId || !editPartyId) return
+    if (!editReceivedDate) {
+      toast.push('Received date is required', 'error')
+      return
+    }
     updateM.mutate({
       id: selectedPurchaseId,
       payload: {
         party_id: editPartyId,
         invoice_number: editInvoiceNumber.trim(),
         invoice_date: editInvoiceDate,
+        received_date: editReceivedDate,
         notes: editNotes.trim() || undefined,
         discount_amount: Number(editDiscountAmount || 0),
         gst_amount: Number(selectedPurchase?.gst_amount || 0),
@@ -2058,7 +2073,8 @@ export default function PurchasesPage() {
                 <th>ID</th>
                 <th>Supplier</th>
                 <th>Invoice</th>
-                <th>Date</th>
+                <th>Invoice Date</th>
+                <th>Received Date</th>
                 <th>Total</th>
                 <th>Returns</th>
                 <th>Net</th>
@@ -2078,6 +2094,7 @@ export default function PurchasesPage() {
                     <td>{supplierNameFor(Number(purchase.party_id))}</td>
                     <td>{purchase.invoice_number}</td>
                     <td>{purchase.invoice_date}</td>
+                    <td>{purchase.received_date || purchase.invoice_date}</td>
                     <td>{money(purchase.total_amount)}</td>
                     <td>{money(purchase.return_total || 0)}</td>
                     <td>{money(purchase.net_amount ?? purchase.total_amount)}</td>
@@ -2272,7 +2289,8 @@ export default function PurchasesPage() {
                         <thead>
                           <tr>
                             <th>Recent Invoice</th>
-                            <th>Date</th>
+                            <th>Invoice Date</th>
+                            <th>Received Date</th>
                             <th>Total</th>
                             <th>Returns</th>
                             <th>Net</th>
@@ -2286,6 +2304,7 @@ export default function PurchasesPage() {
                             <tr key={row.purchase_id}>
                               <td>{row.invoice_number}</td>
                               <td>{row.invoice_date}</td>
+                              <td>{row.received_date || row.invoice_date}</td>
                               <td>{money(row.total_amount)}</td>
                               <td>{money(row.return_amount || 0)}</td>
                               <td>{money(row.net_amount ?? row.total_amount)}</td>
@@ -2314,7 +2333,7 @@ export default function PurchasesPage() {
                 </Button>
               </Stack>
               <Grid container spacing={1}>
-                <Grid item xs={12} md={4}>
+                <Grid item xs={12} md={3}>
                   <Stack direction="row" gap={1}>
                     <TextField size="small" select label="Supplier" value={partyId ?? ''} onChange={(e) => { setPartyId(e.target.value ? Number(e.target.value) : null); setDraftSupplierCredit('0') }} fullWidth>
                       {suppliers.map((supplier) => (
@@ -2324,11 +2343,14 @@ export default function PurchasesPage() {
                     <Button size="small" variant="outlined" onClick={() => setSupplierDialogOpen(true)} sx={{ whiteSpace: 'nowrap' }}>New</Button>
                   </Stack>
                 </Grid>
-                <Grid item xs={12} md={4}>
+                <Grid item xs={12} md={3}>
                   <TextField size="small" label="Invoice Number" value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} fullWidth />
                 </Grid>
-                <Grid item xs={12} md={4}>
+                <Grid item xs={12} md={3}>
                   <TextField size="small" label="Invoice Date" type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={3}>
+                  <TextField size="small" label="Received Date" type="date" value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)} InputLabelProps={{ shrink: true }} required fullWidth />
                 </Grid>
                 {purchaseExtrasOpen ? (
                   <Grid item xs={12}>
@@ -2580,7 +2602,7 @@ export default function PurchasesPage() {
               <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
                 <Box>
                   <Typography variant="h6">{selectedPurchase.invoice_number}</Typography>
-                  <Typography color="text.secondary">{selectedSupplierName} | {selectedPurchase.invoice_date}</Typography>
+                  <Typography color="text.secondary">{selectedSupplierName} | Invoice {selectedPurchase.invoice_date} | Received {selectedPurchase.received_date || selectedPurchase.invoice_date}</Typography>
                 </Box>
                 <Stack direction="row" gap={1}>
                   <Button variant="outlined" disabled={selectedPurchase.return_total > 0} onClick={openEditHeader}>Edit Header</Button>
@@ -2759,18 +2781,21 @@ export default function PurchasesPage() {
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>Supplier & Invoice</Typography>
               <Grid container spacing={2}>
-                <Grid item xs={12} md={4}>
+                <Grid item xs={12} md={3}>
                   <TextField select label="Supplier" value={editPartyId ?? ''} onChange={(e) => setEditPartyId(e.target.value ? Number(e.target.value) : null)} fullWidth>
                     {suppliers.map((supplier) => (
                       <MenuItem key={supplier.id} value={supplier.id}>{supplier.name}</MenuItem>
                     ))}
                   </TextField>
                 </Grid>
-                <Grid item xs={12} md={4}>
+                <Grid item xs={12} md={3}>
                   <TextField label="Invoice Number" value={editInvoiceNumber} onChange={(e) => setEditInvoiceNumber(e.target.value)} fullWidth />
                 </Grid>
-                <Grid item xs={12} md={4}>
+                <Grid item xs={12} md={3}>
                   <TextField label="Invoice Date" type="date" value={editInvoiceDate} onChange={(e) => setEditInvoiceDate(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+                </Grid>
+                <Grid item xs={12} md={3}>
+                  <TextField label="Received Date" type="date" value={editReceivedDate} onChange={(e) => setEditReceivedDate(e.target.value)} InputLabelProps={{ shrink: true }} required fullWidth />
                 </Grid>
                 <Grid item xs={12}>
                   <TextField label="Notes" value={editNotes} onChange={(e) => setEditNotes(e.target.value)} multiline minRows={2} fullWidth />
@@ -3043,14 +3068,14 @@ export default function PurchasesPage() {
                   {details.before && (
                     <Box mb={1}>
                       <Typography variant="caption" color="text.secondary">BEFORE</Typography>
-                      <Typography variant="body2">{details.before.purchase.invoice_date} | GST {money(details.before.purchase.gst_amount)} | Total {money(details.before.purchase.total_amount)} | {details.before.purchase.is_deleted ? 'Cancelled' : 'Posted'}</Typography>
+                      <Typography variant="body2">Invoice {details.before.purchase.invoice_date} | Received {details.before.purchase.received_date || details.before.purchase.invoice_date} | GST {money(details.before.purchase.gst_amount)} | Total {money(details.before.purchase.total_amount)} | {details.before.purchase.is_deleted ? 'Cancelled' : 'Posted'}</Typography>
                       <Typography variant="body2">{purchaseSnapshotItems(details.before)}</Typography>
                     </Box>
                   )}
                   {details.after && (
                     <Box>
                       <Typography variant="caption" color="text.secondary">AFTER</Typography>
-                      <Typography variant="body2">{details.after.purchase.invoice_date} | GST {money(details.after.purchase.gst_amount)} | Total {money(details.after.purchase.total_amount)} | {details.after.purchase.is_deleted ? 'Cancelled' : 'Posted'}</Typography>
+                      <Typography variant="body2">Invoice {details.after.purchase.invoice_date} | Received {details.after.purchase.received_date || details.after.purchase.invoice_date} | GST {money(details.after.purchase.gst_amount)} | Total {money(details.after.purchase.total_amount)} | {details.after.purchase.is_deleted ? 'Cancelled' : 'Posted'}</Typography>
                       <Typography variant="body2">{purchaseSnapshotItems(details.after)}</Typography>
                     </Box>
                   )}

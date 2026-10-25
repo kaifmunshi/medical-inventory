@@ -268,6 +268,7 @@ export default function Inventory() {
           brand: brandFilter || undefined,
           category_id: categoryFilter ? Number(categoryFilter) : undefined,
           missing_expiry: expiryFilter === 'missing' ? true : undefined,
+          grouped: true,
         }, { signal })
       } catch (err: any) {
         if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') throw err
@@ -286,8 +287,6 @@ export default function Inventory() {
   const totalRows = canLoadInventory ? Number(data?.total || 0) : 0
   const hasPrevPage = pageOffset > 0
   const hasNextPage = canLoadInventory && data?.next_offset != null
-  const pageStart = rows.length > 0 ? pageOffset + 1 : 0
-  const pageEnd = rows.length > 0 ? pageOffset + rows.length : 0
   const hasFilters = q.trim() !== '' || rackQ.trim() !== '' || brandFilter !== '' || categoryFilter !== '' || expiryFilter !== ''
   const shouldLoadBrandOptions = brandFilterOptionsOpen || productOpen || productBrandOpen || brandFilter !== ''
   const shouldLoadCategoryOptions = canLoadInventory || categoryFilterOptionsOpen || productOpen || productCategoryOpen || openForm || categoryFilter !== ''
@@ -403,6 +402,9 @@ export default function Inventory() {
 
     return list
   }, [rows, categoryNameById])
+
+  const pageStart = groups.length > 0 ? pageOffset + 1 : 0
+  const pageEnd = groups.length > 0 ? pageOffset + groups.length : 0
 
   const mCreate = useMutation({
     mutationFn: (payload: ItemFormValues) => createItem(payload),

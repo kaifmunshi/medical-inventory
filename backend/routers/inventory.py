@@ -1327,6 +1327,7 @@ def list_items(
     # Fast path for interactive lists/autocompletes. These screens search item
     # identity fields; they must not scan the ever-growing stock ledger.
     lookup_only: bool = Query(False, description="Skip stock-movement text search and movement metadata"),
+    grouped: bool = Query(False, description="Paginate inventory by name and brand group, returning all matching batches for each group"),
 
     # ✅ NEW
     include_archived: bool = Query(False, description="If true, include archived batches"),
@@ -1475,9 +1476,49 @@ def list_items(
             total = len(items)
             return {"items": items, "total": total, "next_offset": None}
 
-        # Otherwise paginate (defaults if not provided)
+        # The inventory table groups batches by name + brand in the UI. When
+        # requested, page those groups first and then fetch every matching batch
+        # in the selected groups. Paging Item rows first can split a group across
+        # pages and produce partial stock/expiry/MRP summaries.
         page_limit = limit if limit is not None else 500
         page_offset = offset if offset is not None else 0
+
+        if grouped:
+            # Use the same canonical key as _group_key / the UI (including
+            # unit-spacing normalization). SQL-only trim/lower grouping would
+            # split names such as "125 g" and "125g" that the UI combines.
+            # Use SQLAlchemy's execute() here: SQLModel's exec() scalarizes
+            # multi-column selects to the first column, which loses name/brand.
+            candidate_rows = session.execute(
+                base_stmt.with_only_columns(
+                    Item.id,
+                    Item.name,
+                    Item.brand,
+                    maintain_column_froms=True,
+                )
+            ).all()
+            ids_by_group: Dict[str, List[int]] = defaultdict(list)
+            for item_id, item_name, item_brand in candidate_rows:
+                if item_id is not None:
+                    ids_by_group[_group_key(item_name, item_brand)].append(int(item_id))
+
+            ordered_group_keys = sorted(ids_by_group)
+            total = len(ordered_group_keys)
+            selected_keys = ordered_group_keys[page_offset : page_offset + page_limit]
+            selected_ids = [item_id for key in selected_keys for item_id in ids_by_group[key]]
+            if selected_ids:
+                page_stmt = base_stmt.where(Item.id.in_(selected_ids)).order_by(Item.name, Item.id)
+                items = session.exec(page_stmt).all()
+            else:
+                items = []
+
+            if not lookup_only:
+                _attach_last_incoming(session, items)
+            _attach_lot_metadata(session, items)
+            _attach_category_names(session, items)
+
+            next_offset = (page_offset + page_limit) if (page_offset + page_limit) < total else None
+            return {"items": items, "total": total, "next_offset": next_offset}
 
         count_stmt = select(func.count()).select_from(base_stmt.subquery())
         total = session.exec(count_stmt).one()

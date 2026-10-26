@@ -1224,6 +1224,7 @@ class PurchaseCreate(SQLModel):
     rounding_adjustment: float = 0.0
     items: List[PurchaseItemIn]
     payments: List[PurchasePaymentIn] = []
+    club_duplicate: bool = False
 
 
 class PurchaseUpdate(SQLModel):
@@ -1235,6 +1236,7 @@ class PurchaseUpdate(SQLModel):
     discount_amount: Optional[float] = None
     gst_amount: Optional[float] = None
     rounding_adjustment: Optional[float] = None
+    club_duplicate: bool = False
 
 
 class PurchasePaymentCreate(SQLModel):

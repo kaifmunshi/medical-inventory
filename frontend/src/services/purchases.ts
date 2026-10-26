@@ -14,6 +14,7 @@ export interface PurchaseCreatePayload {
   rounding_adjustment?: number
   items: PurchaseItemPayload[]
   payments?: PurchasePaymentPayload[]
+  club_duplicate?: boolean
 }
 
 export interface FreeStockCreatePayload {
@@ -33,6 +34,7 @@ export interface PurchaseUpdatePayload {
   discount_amount?: number
   gst_amount?: number
   rounding_adjustment?: number
+  club_duplicate?: boolean
 }
 
 export interface PurchasePaymentCreatePayload {

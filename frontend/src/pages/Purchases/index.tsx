@@ -491,9 +491,15 @@ export default function PurchasesPage() {
 
   const createM = useMutation({
     mutationFn: createPurchase,
-    onSuccess: () => {
-      toast.push('Purchase saved', 'success')
+    onSuccess: (purchase, variables) => {
+      toast.push(variables.club_duplicate ? 'Purchases clubbed successfully' : 'Purchase saved', 'success')
+      if (variables.club_duplicate) {
+        // Clubbing affects stock ledgers, supplier/payments, accounting books,
+        // reports, and purchase-return selectors. Refresh every active view.
+        queryClient.invalidateQueries()
+      }
       queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
+      queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
       queryClient.invalidateQueries({ queryKey: ['lots'] })
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
       queryClient.invalidateQueries({ queryKey: ['dash-inventory-stats'] })
@@ -502,7 +508,23 @@ export default function PurchasesPage() {
       resetForm()
       setAddOpen(false)
     },
-    onError: (err: any) => toast.push(String(err?.message || 'Failed to save purchase'), 'error'),
+    onError: (err: any, variables) => {
+      const detail = err?.response?.data?.detail
+      if (
+        !variables.club_duplicate
+        && err?.response?.status === 409
+        && detail?.code === 'DUPLICATE_PURCHASE_INVOICE'
+      ) {
+        const confirmed = window.confirm(
+          `Invoice ${detail.invoice_number} already exists for this supplier (dated ${detail.invoice_date}).\n\n`
+          + 'Club this purchase into the existing bill? The items entered now will be added once; existing stock and sales will not be reversed. '
+          + 'Both sets of item quantities will be retained, so do not include units that were already entered in the earlier purchase.',
+        )
+        if (confirmed) createM.mutate({ ...variables, club_duplicate: true })
+        return
+      }
+      toast.push(String(detail?.message || err?.message || 'Failed to save purchase'), 'error')
+    },
   })
 
   const createFreeStockM = useMutation({
@@ -525,8 +547,12 @@ export default function PurchasesPage() {
 
   const updateM = useMutation({
     mutationFn: ({ id, payload }: { id: number; payload: any }) => updatePurchase(id, payload),
-    onSuccess: (purchase) => {
-      toast.push('Purchase updated', 'success')
+    onSuccess: (purchase, variables) => {
+      toast.push(variables.payload?.club_duplicate ? 'Purchases clubbed successfully' : 'Purchase updated', 'success')
+      setSelectedPurchaseId(purchase.id)
+      if (variables.payload?.club_duplicate) {
+        queryClient.invalidateQueries()
+      }
       queryClient.invalidateQueries({ queryKey: ['purchases-list'] })
       queryClient.invalidateQueries({ queryKey: ['purchase-detail', purchase.id] })
       queryClient.invalidateQueries({ queryKey: ['supplier-ledger-summary'] })
@@ -534,7 +560,28 @@ export default function PurchasesPage() {
       queryClient.invalidateQueries({ queryKey: ['stock-card-batch-ledger'] })
       setEditHeaderOpen(false)
     },
-    onError: (err: any) => toast.push(String(err?.message || 'Failed to update purchase'), 'error'),
+    onError: (err: any, variables) => {
+      const detail = err?.response?.data?.detail
+      if (
+        !variables.payload?.club_duplicate
+        && err?.response?.status === 409
+        && detail?.code === 'DUPLICATE_PURCHASE_INVOICE'
+      ) {
+        const confirmed = window.confirm(
+          `Invoice ${detail.invoice_number} already exists for this supplier (dated ${detail.invoice_date}).\n\n`
+          + 'Club these two purchases? Stock and completed sales will remain unchanged, and both sets of items and payments will move into the existing bill. '
+          + 'Both item quantities are retained; if the same physical units were entered in both purchases, correct those duplicate lines before clubbing.',
+        )
+        if (confirmed) {
+          updateM.mutate({
+            ...variables,
+            payload: { ...variables.payload, club_duplicate: true },
+          })
+        }
+        return
+      }
+      toast.push(String(detail?.message || err?.message || 'Failed to update purchase'), 'error')
+    },
   })
 
   const addPaymentM = useMutation({

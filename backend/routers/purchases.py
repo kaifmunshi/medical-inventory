@@ -1263,6 +1263,116 @@ def assert_supplier_credit_supported(session, party_id: int) -> None:
         )
 
 
+def club_purchase_into_existing(session, *, source: Purchase, target: Purchase) -> Purchase:
+    """Move a newly-created duplicate purchase into an existing invoice without touching stock."""
+    if int(source.id or 0) == int(target.id or 0):
+        raise HTTPException(status_code=400, detail="A purchase cannot be clubbed into itself")
+    if int(source.party_id) != int(target.party_id):
+        raise HTTPException(status_code=400, detail="Only purchases from the same supplier can be clubbed")
+    if bool(source.is_deleted) or bool(target.is_deleted):
+        raise HTTPException(status_code=400, detail="Cancelled purchases cannot be clubbed")
+
+    assert_purchase_has_no_active_returns(session, int(source.id), context="Purchase clubbing")
+    assert_purchase_has_no_active_returns(session, int(target.id), context="Purchase clubbing")
+    assert_financial_year_unlocked(session, target.invoice_date, context="Purchase clubbing")
+
+    target_before = purchase_snapshot(session, target)
+    source_before = purchase_snapshot(session, source)
+    ts = now_ts()
+
+    for item in get_purchase_items(session, int(source.id)):
+        item.purchase_id = int(target.id)
+        session.add(item)
+
+    payments = session.exec(select(PurchasePayment).where(PurchasePayment.purchase_id == source.id)).all()
+    for payment in payments:
+        payment.purchase_id = int(target.id)
+        payment.party_id = int(target.party_id)
+        session.add(payment)
+
+    # The source can have a provisional number when clubbing is triggered from
+    # a header edit. Refresh ledger labels before those movements adopt the
+    # retained purchase id.
+    sync_purchase_stock_movement_invoice_number(
+        session,
+        purchase_id=int(source.id),
+        old_invoice_number=source.invoice_number,
+        new_invoice_number=target.invoice_number,
+    )
+    movements = session.exec(
+        select(StockMovement)
+        .where(func.upper(func.coalesce(StockMovement.ref_type, "")) == "PURCHASE")
+        .where(StockMovement.ref_id == int(source.id))
+    ).all()
+    for movement in movements:
+        movement.ref_id = int(target.id)
+        session.add(movement)
+
+    target.subtotal_amount = round2(target.subtotal_amount + source.subtotal_amount)
+    target.discount_amount = round2(target.discount_amount + source.discount_amount)
+    target.gst_amount = round2(target.gst_amount + source.gst_amount)
+    target.rounding_adjustment = round2(target.rounding_adjustment + source.rounding_adjustment)
+    target.total_amount = purchase_total_amount(
+        target.subtotal_amount,
+        target.discount_amount,
+        target.gst_amount,
+        target.rounding_adjustment,
+    )
+    if source.notes:
+        merge_note = f"Clubbed purchase #{source.id}: {source.notes}"
+        target.notes = "\n".join(part for part in [target.notes, merge_note] if part)
+    target.updated_at = ts
+    session.add(target)
+
+    source.is_deleted = True
+    source.deleted_at = ts
+    source.paid_amount = 0.0
+    source.writeoff_amount = 0.0
+    source.payment_status = "PAID"
+    source.notes = "\n".join(
+        part for part in [source.notes, f"Clubbed into purchase #{target.id} ({target.invoice_number})"] if part
+    )
+    source.updated_at = ts
+    session.add(source)
+    session.flush()
+
+    active_payments = session.exec(
+        select(PurchasePayment).where(
+            PurchasePayment.purchase_id == target.id,
+            PurchasePayment.is_deleted == False,  # noqa: E712
+        )
+    ).all()
+    target.paid_amount = round2(sum(float(row.amount or 0) for row in active_payments if not row.is_writeoff))
+    target.writeoff_amount = round2(sum(float(row.amount or 0) for row in active_payments if row.is_writeoff))
+    covered = round2(target.paid_amount + target.writeoff_amount)
+    if target.total_amount <= 0 or covered + 0.0001 >= target.total_amount:
+        target.payment_status = "PAID"
+    elif covered <= 0:
+        target.payment_status = "UNPAID"
+    else:
+        target.payment_status = "PARTIAL"
+    session.add(target)
+    session.flush()
+
+    log_audit(
+        session,
+        entity_type="PURCHASE",
+        entity_id=int(target.id),
+        action="CLUB",
+        note=f"Clubbed purchase #{source.id} into purchase #{target.id}",
+        details={"before": target_before, "source": source_before, "after": purchase_snapshot(session, target)},
+    )
+    log_audit(
+        session,
+        entity_type="PURCHASE",
+        entity_id=int(source.id),
+        action="MERGED",
+        note=f"Clubbed into purchase #{target.id}",
+        details={"target_purchase_id": int(target.id), "target_invoice_number": target.invoice_number},
+    )
+    return target
+
+
 @router.post("/", response_model=PurchaseOut, status_code=201)
 def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
     invoice_number = clean_text(payload.invoice_number)
@@ -1286,8 +1396,17 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 Purchase.is_deleted == False,  # noqa: E712
             )
         ).first()
-        if duplicate:
-            raise HTTPException(status_code=400, detail="This invoice number already exists for the supplier")
+        if duplicate and not payload.club_duplicate:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DUPLICATE_PURCHASE_INVOICE",
+                    "message": "This invoice number already exists for the supplier",
+                    "purchase_id": int(duplicate.id),
+                    "invoice_number": duplicate.invoice_number,
+                    "invoice_date": duplicate.invoice_date,
+                },
+            )
 
         subtotal_amount = 0.0
         prepared_items: List[Dict[str, Any]] = []
@@ -1605,16 +1724,21 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             note=f"Created purchase #{purchase.id}",
             details={"after": purchase_snapshot(session, purchase)},
         )
+        result_purchase = purchase
+        if duplicate:
+            result_purchase = club_purchase_into_existing(session, source=purchase, target=duplicate)
         session.commit()
-        session.refresh(purchase)
-        sync_purchase_vouchers(session, purchase, supplier)
-        payments = session.exec(select(PurchasePayment).where(PurchasePayment.purchase_id == purchase.id)).all()
+        session.refresh(result_purchase)
+        if duplicate:
+            mark_voucher_deleted(session, source_type="PURCHASE", source_id=int(purchase.id))
+        sync_purchase_vouchers(session, result_purchase, supplier)
+        payments = session.exec(select(PurchasePayment).where(PurchasePayment.purchase_id == result_purchase.id)).all()
         for payment in payments:
             if bool(getattr(payment, "is_supplier_credit", False)):
                 continue
             post_purchase_payment_voucher(
                 session,
-                purchase,
+                result_purchase,
                 supplier,
                 int(payment.id or 0),
                 float(payment.amount or 0),
@@ -1628,7 +1752,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 getattr(payment, "transaction_id", None),
             )
         session.commit()
-        return make_purchase_out(session, purchase)
+        return make_purchase_out(session, result_purchase)
 
 
 @router.post("/free-stock", response_model=PurchaseOut, status_code=201)
@@ -1894,6 +2018,7 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
         old_invoice_number = row.invoice_number
 
         data = payload.model_dump(exclude_unset=True)
+        club_duplicate = bool(data.pop("club_duplicate", False))
         if "party_id" in data:
             supplier = ensure_supplier(session, int(data["party_id"]))
             row.party_id = supplier.id
@@ -1910,7 +2035,45 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
                 )
             ).first()
             if duplicate:
-                raise HTTPException(status_code=400, detail="This invoice number already exists for the supplier")
+                if not club_duplicate:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "DUPLICATE_PURCHASE_INVOICE",
+                            "message": "This invoice number already exists for the supplier",
+                            "purchase_id": int(duplicate.id),
+                            "invoice_number": duplicate.invoice_number,
+                            "invoice_date": duplicate.invoice_date,
+                        },
+                    )
+                if old_party_id != int(row.party_id):
+                    raise HTTPException(status_code=400, detail="Only purchases already belonging to the same supplier can be clubbed")
+                clubbed = club_purchase_into_existing(session, source=row, target=duplicate)
+                session.commit()
+                mark_voucher_deleted(session, source_type="PURCHASE", source_id=int(row.id))
+                supplier = ensure_supplier(session, clubbed.party_id)
+                sync_purchase_vouchers(session, clubbed, supplier)
+                for payment in session.exec(select(PurchasePayment).where(PurchasePayment.purchase_id == clubbed.id)).all():
+                    if bool(getattr(payment, "is_supplier_credit", False)):
+                        continue
+                    post_purchase_payment_voucher(
+                        session,
+                        clubbed,
+                        supplier,
+                        int(payment.id or 0),
+                        float(payment.amount or 0),
+                        bool(payment.is_writeoff),
+                        payment.note,
+                        payment.paid_at,
+                        float(getattr(payment, "cash_amount", 0) or 0),
+                        float(getattr(payment, "online_amount", 0) or 0),
+                        getattr(payment, "bank_mode", None),
+                        float(getattr(payment, "txn_charges", 0) or 0),
+                        getattr(payment, "transaction_id", None),
+                    )
+                session.commit()
+                session.refresh(clubbed)
+                return make_purchase_out(session, clubbed)
             row.invoice_number = invoice_number
             sync_purchase_stock_movement_invoice_number(
                 session,

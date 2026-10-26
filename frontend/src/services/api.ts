@@ -58,7 +58,9 @@ const message = Array.isArray(detail)
     const rowObj = row as Record<string, unknown>
     return rowObj?.msg || String(row)
   }).join(', ')
-: String(detail)
+: typeof detail === 'object' && detail !== null && 'message' in detail
+  ? String((detail as Record<string, unknown>).message)
+  : String(detail)
 error.message = message
 return Promise.reject(error)
 }

@@ -2963,6 +2963,7 @@ def migrate_db():
                 total_amount REAL NOT NULL DEFAULT 0,
                 refund_cash REAL NOT NULL DEFAULT 0,
                 refund_online REAL NOT NULL DEFAULT 0,
+                refund_manual INTEGER NOT NULL DEFAULT 0,
                 writeoff_reversal REAL NOT NULL DEFAULT 0,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT,
@@ -2985,6 +2986,8 @@ def migrate_db():
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN refund_cash REAL NOT NULL DEFAULT 0"))
         if "refund_online" not in purchase_return_col_names:
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN refund_online REAL NOT NULL DEFAULT 0"))
+        if "refund_manual" not in purchase_return_col_names:
+            session.exec(text("ALTER TABLE purchasereturn ADD COLUMN refund_manual INTEGER NOT NULL DEFAULT 0"))
         if "writeoff_reversal" not in purchase_return_col_names:
             session.exec(text("ALTER TABLE purchasereturn ADD COLUMN writeoff_reversal REAL NOT NULL DEFAULT 0"))
         if "settlement_purchase_id" not in purchase_return_col_names:
@@ -3005,6 +3008,7 @@ def migrate_db():
                 refund_online = 0,
                 writeoff_reversal = 0
             WHERE COALESCE(settlement_purchase_id, 0) = 0
+              AND COALESCE(refund_manual, 0) = 0
               AND is_deleted = 0
               AND instr(COALESCE(notes, ''), '{exchange_marker}') > 0
               AND EXISTS (
@@ -3206,7 +3210,7 @@ def migrate_db():
             """).bindparams(purchase_id=purchase_id)).all():
                 events.append((str(payment[1] or "")[:10], 0, int(payment[0]), "PAYMENT", payment))
             for returned in session.exec(text("""
-                SELECT id, return_date, total_amount
+                SELECT id, return_date, total_amount, refund_cash, refund_online, writeoff_reversal, refund_manual
                 FROM purchasereturn
                 WHERE purchase_id = :purchase_id AND COALESCE(is_deleted, 0) = 0
             """).bindparams(purchase_id=purchase_id)).all():
@@ -3230,6 +3234,13 @@ def migrate_db():
                         online_available = round(online_available + online, 2)
                     continue
                 return_total = round(float(event_row[2] or 0), 2)
+                if bool(event_row[6]):
+                    settled_back = round(
+                        float(event_row[3] or 0) + float(event_row[4] or 0) + float(event_row[5] or 0),
+                        2,
+                    )
+                    liability = round(liability - return_total + settled_back, 2)
+                    continue
                 settlement_needed = round(max(0.0, return_total - min(return_total, max(0.0, liability))), 2)
                 refund_cash = round(min(settlement_needed, cash_available), 2)
                 settlement_needed = round(settlement_needed - refund_cash, 2)
@@ -3256,7 +3267,8 @@ def migrate_db():
         session.exec(text("""
             UPDATE purchasereturn
             SET refund_cash = 0, refund_online = 0, writeoff_reversal = 0
-            WHERE COALESCE(is_deleted, 0) = 1 OR COALESCE(purchase_id, 0) = 0
+            WHERE COALESCE(is_deleted, 0) = 1
+               OR (COALESCE(purchase_id, 0) = 0 AND COALESCE(refund_manual, 0) = 0)
         """))
         session.commit()
 

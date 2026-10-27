@@ -945,6 +945,7 @@ class PurchaseReturn(SQLModel, table=True):
     total_amount: float = 0.0
     refund_cash: float = 0.0
     refund_online: float = 0.0
+    refund_manual: bool = Field(default=False, index=True)
     writeoff_reversal: float = 0.0
     is_deleted: bool = Field(default=False, index=True)
     deleted_at: Optional[str] = None
@@ -1353,6 +1354,8 @@ class PurchaseReturnCreate(SQLModel):
     return_number: Optional[str] = None
     notes: Optional[str] = None
     rounding_adjustment: float = 0.0
+    refund_cash: Optional[float] = None
+    refund_online: Optional[float] = None
     items: List[PurchaseReturnItemIn]
 
 
@@ -1362,6 +1365,8 @@ class PurchaseReturnUpdate(SQLModel):
     return_number: Optional[str] = None
     notes: Optional[str] = None
     rounding_adjustment: Optional[float] = None
+    refund_cash: Optional[float] = None
+    refund_online: Optional[float] = None
     items: List[PurchaseReturnItemIn]
 
 

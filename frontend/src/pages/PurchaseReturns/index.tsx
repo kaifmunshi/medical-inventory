@@ -10,6 +10,7 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  MenuItem,
   Paper,
   Stack,
   TextField,
@@ -108,6 +109,9 @@ export default function PurchaseReturnsPage() {
   const [returnNumber, setReturnNumber] = useState('')
   const [notes, setNotes] = useState('')
   const [roundingAdjustment, setRoundingAdjustment] = useState('0')
+  const [refundMode, setRefundMode] = useState<'none' | 'cash' | 'online' | 'split'>('none')
+  const [refundCash, setRefundCash] = useState('0')
+  const [refundOnline, setRefundOnline] = useState('0')
   const [lines, setLines] = useState<Record<number, LineDraft>>({})
   const [cancelTarget, setCancelTarget] = useState<PurchaseReturn | null>(null)
   const [editingReturn, setEditingReturn] = useState<PurchaseReturn | null>(null)
@@ -273,6 +277,9 @@ export default function PurchaseReturnsPage() {
       setReturnNumber('')
       setNotes('')
       setRoundingAdjustment('0')
+      setRefundMode('none')
+      setRefundCash('0')
+      setRefundOnline('0')
       setIncludeIncoming(false)
       setIncomingLines([])
       setIncomingProduct(null)
@@ -369,6 +376,10 @@ export default function PurchaseReturnsPage() {
       return_number: returnNumber.trim() || undefined,
       notes: notes.trim() || undefined,
       rounding_adjustment: Number(roundingAdjustment || 0),
+      ...((editingReturn || Number(refundCash || 0) > 0 || Number(refundOnline || 0) > 0) ? {
+        refund_cash: refundMode === 'cash' || refundMode === 'split' ? Number(refundCash || 0) : 0,
+        refund_online: refundMode === 'online' || refundMode === 'split' ? Number(refundOnline || 0) : 0,
+      } : {}),
       items: activeLines,
       },
     })
@@ -381,6 +392,11 @@ export default function PurchaseReturnsPage() {
     setReturnNumber(row.return_number)
     setNotes(row.notes || '')
     setRoundingAdjustment(String(row.rounding_adjustment || 0))
+    const existingCashRefund = Number(row.refund_cash || 0)
+    const existingOnlineRefund = Number(row.refund_online || 0)
+    setRefundMode(existingCashRefund > 0 && existingOnlineRefund > 0 ? 'split' : existingCashRefund > 0 ? 'cash' : existingOnlineRefund > 0 ? 'online' : 'none')
+    setRefundCash(String(existingCashRefund))
+    setRefundOnline(String(existingOnlineRefund))
     setEditingReturn(row)
     if (row.purchase_id) {
       setSourceMode('invoice')
@@ -428,6 +444,9 @@ export default function PurchaseReturnsPage() {
     setReturnNumber('')
     setNotes('')
     setRoundingAdjustment('0')
+    setRefundMode('none')
+    setRefundCash('0')
+    setRefundOnline('0')
     setReturnCategory(null)
     setIncomingCategory(null)
   }
@@ -782,6 +801,18 @@ export default function PurchaseReturnsPage() {
                     onChange={(event) => setRoundingAdjustment(event.target.value)}
                     sx={{ width: 160 }}
                   />
+                  <TextField select label="Refund mode" value={refundMode} onChange={(event) => setRefundMode(event.target.value as typeof refundMode)} sx={{ width: 150 }}>
+                    <MenuItem value="none">No refund</MenuItem>
+                    <MenuItem value="cash">Cash</MenuItem>
+                    <MenuItem value="online">Online</MenuItem>
+                    <MenuItem value="split">Cash + Online</MenuItem>
+                  </TextField>
+                  {(refundMode === 'cash' || refundMode === 'split') && (
+                    <TextField label="Cash refund" type="number" value={refundCash} inputProps={{ min: 0, step: 0.01 }} onChange={(event) => setRefundCash(event.target.value)} sx={{ width: 145 }} />
+                  )}
+                  {(refundMode === 'online' || refundMode === 'split') && (
+                    <TextField label="Online refund" type="number" value={refundOnline} inputProps={{ min: 0, step: 0.01 }} onChange={(event) => setRefundOnline(event.target.value)} sx={{ width: 145 }} />
+                  )}
                   <Typography variant="h6">{sourceMode === 'legacy' ? 'Trade-in total' : 'Credit total'}: {money(returnTotal)}</Typography>
                   <Button variant="contained" disabled={!canManage || saveM.isPending || activeLines.length === 0} onClick={submit}>
                     {editingReturn ? 'Save Changes' : includeIncoming && sourceMode === 'legacy' ? 'Save Trade-in + Incoming Purchase' : includeIncoming ? 'Save Return + Incoming Purchase' : 'Create Purchase Return'}

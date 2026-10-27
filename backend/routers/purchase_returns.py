@@ -291,10 +291,13 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             gst_amount=0,
             rounding_adjustment=round2(payload.rounding_adjustment),
             total_amount=0,
-            refund_cash=0,
-            refund_online=0,
+            refund_cash=round2(payload.refund_cash or 0),
+            refund_online=round2(payload.refund_online or 0),
+            refund_manual=payload.refund_cash is not None or payload.refund_online is not None,
             writeoff_reversal=0,
         )
+        if row.refund_cash < 0 or row.refund_online < 0:
+            raise HTTPException(status_code=400, detail="Supplier refund cannot be negative")
         session.add(row)
         session.flush()
         if not requested_number:
@@ -430,6 +433,8 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
         row.gst_amount = gst_total
         row.rounding_adjustment = rounding_adjustment
         row.total_amount = total
+        if round2(row.refund_cash + row.refund_online) > total + 0.0001:
+            raise HTTPException(status_code=400, detail="Supplier refund cannot exceed the purchase return total")
         row.updated_at = now_ts()
         session.add(row)
         session.flush()
@@ -650,6 +655,16 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
         row.gst_amount = gst_total
         row.rounding_adjustment = rounding_adjustment
         row.total_amount = total
+        if payload.refund_cash is not None or payload.refund_online is not None:
+            refund_cash = round2(payload.refund_cash or 0)
+            refund_online = round2(payload.refund_online or 0)
+            if refund_cash < 0 or refund_online < 0:
+                raise HTTPException(status_code=400, detail="Supplier refund cannot be negative")
+            if round2(refund_cash + refund_online) > total + 0.0001:
+                raise HTTPException(status_code=400, detail="Supplier refund cannot exceed the purchase return total")
+            row.refund_cash = refund_cash
+            row.refund_online = refund_online
+            row.refund_manual = True
         row.updated_at = now_ts()
         session.add(row)
         if purchase:

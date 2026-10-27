@@ -57,6 +57,10 @@ def recalculate_purchase_return_settlements(session, purchase: Purchase) -> list
             continue
 
         return_total = round2(row.total_amount)
+        if bool(getattr(row, "refund_manual", False)):
+            settled_back = round2(row.refund_cash + row.refund_online + row.writeoff_reversal)
+            liability = round2(liability - return_total + settled_back)
+            continue
         unpaid_credit = round2(min(return_total, max(0.0, liability)))
         settlement_needed = round2(max(0.0, return_total - unpaid_credit))
         refund_cash = round2(min(settlement_needed, cash_available))

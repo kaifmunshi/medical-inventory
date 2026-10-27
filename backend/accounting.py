@@ -410,6 +410,18 @@ def post_trade_in_voucher(session, trade_in: PurchaseReturn, party: Party) -> Vo
     ]
     if gst > 0:
         lines.append({"ledger_id": int(ledgers["OUTPUT_GST"].id), "entry_type": "CR", "amount": gst, "narration": "Output GST on trade-in"})
+    refund_cash = round2(getattr(trade_in, "refund_cash", 0.0))
+    refund_online = round2(getattr(trade_in, "refund_online", 0.0))
+    if refund_cash > 0:
+        lines.extend([
+            {"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "DR", "amount": refund_cash, "narration": "Supplier cash refund"},
+            {"ledger_id": int(creditor_ledger.id), "entry_type": "CR", "amount": refund_cash, "narration": "Trade-in difference refunded by supplier"},
+        ])
+    if refund_online > 0:
+        lines.extend([
+            {"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "DR", "amount": refund_online, "narration": "Supplier online refund"},
+            {"ledger_id": int(creditor_ledger.id), "entry_type": "CR", "amount": refund_online, "narration": "Trade-in difference refunded by supplier"},
+        ])
     return upsert_voucher(
         session,
         voucher_type="TRADE_IN",

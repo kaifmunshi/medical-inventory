@@ -132,14 +132,15 @@ function movementUnitLabel(row: any, fallbackUnit?: string | null) {
 function stockBreakdownForUnits(batches: any[], fallbackTotal: number) {
   const visibleBatches = batches.filter((batch) => !batch.is_archived)
   const activeBatches = visibleBatches.filter((batch) => Number(batch.stock || 0) !== 0)
-  const hasLoose = visibleBatches.some((batch) => Boolean(batch.is_loose_stock))
+  const hasLoose = visibleBatches.some((batch) => Boolean(batch.is_loose_stock || batch.loose_sale_enabled))
   if (!hasLoose) {
+    const firstBatch = visibleBatches[0]
     return {
       hasLoose: false,
       fallbackTotal,
       packQty: fallbackTotal,
       looseQty: 0,
-      packUnit: 'Stock',
+      packUnit: firstBatch?.stock_unit_label || firstBatch?.parent_unit_name || 'Unit',
       looseUnit: 'Unit',
       conversionQty: 0,
       equivalentQty: fallbackTotal,
@@ -155,7 +156,7 @@ function stockBreakdownForUnits(batches: any[], fallbackTotal: number) {
   const firstPack = visibleBatches.find((batch) => !batch.is_loose_stock)
   const firstLoose = visibleBatches.find((batch) => batch.is_loose_stock)
   const packUnit = firstPack?.stock_unit_label || firstPack?.parent_unit_name || 'Pack'
-  const looseUnit = firstLoose?.stock_unit_label || firstLoose?.child_unit_name || 'Unit'
+  const looseUnit = firstLoose?.stock_unit_label || firstLoose?.child_unit_name || firstPack?.child_unit_name || 'Unit'
   const conversionQty = Number(firstLoose?.conversion_qty || firstPack?.conversion_qty || 0)
   return {
     hasLoose: true,
@@ -781,7 +782,7 @@ export default function StockCardPage() {
         category_id: productForm.category_id || undefined,
         default_rack_number: Number(productForm.default_rack_number || 0),
         printed_price: Number(productForm.printed_price || 0),
-        parent_unit_name: productForm.loose_sale_enabled ? productForm.parent_unit_name?.trim() || 'Pack' : undefined,
+        parent_unit_name: productForm.parent_unit_name?.trim() || (productForm.loose_sale_enabled ? 'Pack' : 'Unit'),
         child_unit_name: productForm.loose_sale_enabled ? productForm.child_unit_name?.trim() || 'Unit' : undefined,
         default_conversion_qty: productForm.loose_sale_enabled ? Number(productForm.default_conversion_qty || 1) : undefined,
       }
@@ -1535,7 +1536,7 @@ export default function StockCardPage() {
                 ) : null}
               </>
             ) : (
-              summaryMetric('Stock', String(groupQ.data.total_stock))
+              summaryMetric('Stock', unitStockLabel(groupQ.data.total_stock, stockBreakdown.packUnit))
             )}
             {summaryMetric('MRP', mrpRange)}
             {summaryMetric(
@@ -1948,7 +1949,16 @@ export default function StockCardPage() {
             }
             label="Enable loose stock"
           />
-          {productForm.loose_sale_enabled ? (
+          {!productForm.loose_sale_enabled ? (
+            <TextField
+              label="Stock Unit"
+              value={productForm.parent_unit_name || ''}
+              onChange={(e) => setProductForm((prev) => ({ ...prev, parent_unit_name: e.target.value }))}
+              placeholder="Piece, Bottle, Box..."
+              helperText="Unit used to display and sell this product"
+              fullWidth
+            />
+          ) : (
             <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
               <TextField
                 label="Parent Unit"
@@ -1973,7 +1983,7 @@ export default function StockCardPage() {
                 fullWidth
               />
             </Stack>
-          ) : null}
+          )}
         </Stack>
       </DialogContent>
       <DialogActions>

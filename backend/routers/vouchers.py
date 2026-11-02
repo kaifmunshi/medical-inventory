@@ -83,6 +83,26 @@ class SuspenseStatementOut(BaseModel):
     book_entries: List[SuspenseBookEntryOut]
 
 
+class WriteOffTransactionOut(BaseModel):
+    voucher_id: int
+    account_type: str
+    payment_id: Optional[int] = None
+    document_id: Optional[int] = None
+    party_id: Optional[int] = None
+    can_edit: bool = False
+    can_delete: bool = False
+
+
+class WriteOffStatementOut(BaseModel):
+    customer_ledger: LedgerOut
+    supplier_ledger: LedgerOut
+    customer_writeoff_expense: float
+    supplier_writeoff_income: float
+    net_expense: float
+    vouchers: List[VoucherOut]
+    transactions: List[WriteOffTransactionOut]
+
+
 class SuspenseSaleItemIn(BaseModel):
     item_id: int
     quantity: int
@@ -499,6 +519,120 @@ def list_ledgers(
             stmt = stmt.where(func.lower(func.coalesce(Ledger.name, "")).like(f"%{qq}%"))
         rows = session.exec(stmt.order_by(Ledger.name.asc(), Ledger.id.asc())).all()
         return [LedgerOut(**row.dict()) for row in rows]
+
+
+@router.get("/writeoff-statement", response_model=WriteOffStatementOut)
+def writeoff_statement(
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    account_type: str = Query("all", pattern="^(all|customer|supplier)$"),
+    q: Optional[str] = Query(None),
+):
+    normalized_from = _normalize_ymd(from_date, default_to_today=False) if from_date else None
+    normalized_to = _normalize_ymd(to_date, default_to_today=False) if to_date else None
+    if normalized_from and normalized_to and normalized_from > normalized_to:
+        raise HTTPException(status_code=400, detail="From date cannot be after To date")
+
+    with get_session() as session:
+        ledgers = ensure_accounting_setup(session)
+        customer_ledger = ledgers["CUSTOMER_WRITE_OFF"]
+        supplier_ledger = ledgers["PURCHASE_WRITE_OFF"]
+        selected_ids = []
+        if account_type in {"all", "customer"}:
+            selected_ids.append(int(customer_ledger.id))
+        if account_type in {"all", "supplier"}:
+            selected_ids.append(int(supplier_ledger.id))
+
+        stmt = (
+            select(Voucher)
+            .join(VoucherEntry, VoucherEntry.voucher_id == Voucher.id)
+            .where(VoucherEntry.ledger_id.in_(selected_ids), Voucher.is_deleted == False)  # noqa: E712
+        )
+        if normalized_from:
+            stmt = stmt.where(Voucher.voucher_date >= normalized_from)
+        if normalized_to:
+            stmt = stmt.where(Voucher.voucher_date <= normalized_to)
+        query_text = str(q or "").strip().lower()
+        if query_text:
+            like = f"%{query_text}%"
+            stmt = stmt.where(
+                func.lower(
+                    func.coalesce(Voucher.voucher_no, "") + " "
+                    + func.coalesce(Voucher.narration, "") + " "
+                    + func.coalesce(VoucherEntry.narration, "")
+                ).like(like)
+            )
+        vouchers = session.exec(stmt.distinct().order_by(Voucher.voucher_date.desc(), Voucher.id.desc())).all()
+
+        customer_expense = 0.0
+        supplier_income = 0.0
+        voucher_out = []
+        transactions = []
+        for voucher in vouchers:
+            entries = session.exec(select(VoucherEntry).where(VoucherEntry.voucher_id == voucher.id)).all()
+            for entry in entries:
+                amount = _round2(entry.amount)
+                if int(entry.ledger_id) == int(customer_ledger.id):
+                    customer_expense += amount if str(entry.entry_type).upper() == "DR" else -amount
+                elif int(entry.ledger_id) == int(supplier_ledger.id):
+                    supplier_income += amount if str(entry.entry_type).upper() == "CR" else -amount
+            voucher_out.append(_voucher_out(session, voucher))
+            if str(voucher.source_type or "").upper() == "BILL_PAYMENT":
+                payment = session.get(BillPayment, int(voucher.source_id or 0))
+                bill = session.get(Bill, int(payment.bill_id)) if payment else None
+                party_id = int(bill.party_id) if bill and bill.party_id else None
+                if not party_id and bill and bill.customer_id:
+                    legacy_party = session.exec(
+                        select(Party).where(
+                            Party.party_group == "SUNDRY_DEBTOR",
+                            Party.legacy_customer_id == int(bill.customer_id),
+                        )
+                    ).first()
+                    party_id = int(legacy_party.id) if legacy_party and legacy_party.id else None
+                if not party_id:
+                    for entry in entries:
+                        entry_ledger = session.get(Ledger, int(entry.ledger_id))
+                        if entry_ledger and entry_ledger.party_id:
+                            entry_party = session.get(Party, int(entry_ledger.party_id))
+                            if entry_party and entry_party.party_group == "SUNDRY_DEBTOR":
+                                party_id = int(entry_party.id)
+                                break
+                transactions.append(WriteOffTransactionOut(
+                    voucher_id=int(voucher.id), account_type="customer",
+                    payment_id=int(payment.id) if payment and payment.id else None,
+                    document_id=int(bill.id) if bill and bill.id else None,
+                    party_id=party_id,
+                    can_edit=bool(payment and not payment.is_deleted and not bill.is_deleted),
+                    can_delete=bool(payment and not payment.is_deleted and not bill.is_deleted),
+                ))
+            elif str(voucher.source_type or "").upper() == "PURCHASE_WRITEOFF":
+                payment = session.get(PurchasePayment, int(voucher.source_id or 0))
+                purchase = session.get(Purchase, int(payment.purchase_id)) if payment else None
+                transactions.append(WriteOffTransactionOut(
+                    voucher_id=int(voucher.id), account_type="supplier",
+                    payment_id=int(payment.id) if payment and payment.id else None,
+                    document_id=int(purchase.id) if purchase and purchase.id else None,
+                    party_id=int(purchase.party_id) if purchase else (int(payment.party_id) if payment and payment.party_id else None),
+                    can_edit=bool(payment and not payment.is_deleted and purchase and not purchase.is_deleted),
+                    can_delete=bool(payment and not payment.is_deleted and purchase and not purchase.is_deleted),
+                ))
+            else:
+                transactions.append(WriteOffTransactionOut(
+                    voucher_id=int(voucher.id),
+                    account_type="customer" if any(int(e.ledger_id) == int(customer_ledger.id) for e in entries) else "supplier",
+                ))
+
+        customer_expense = _round2(customer_expense)
+        supplier_income = _round2(supplier_income)
+        return WriteOffStatementOut(
+            customer_ledger=LedgerOut(**customer_ledger.dict()),
+            supplier_ledger=LedgerOut(**supplier_ledger.dict()),
+            customer_writeoff_expense=customer_expense,
+            supplier_writeoff_income=supplier_income,
+            net_expense=_round2(customer_expense - supplier_income),
+            vouchers=voucher_out,
+            transactions=transactions,
+        )
 
 
 @router.post("/ledgers", response_model=LedgerOut)

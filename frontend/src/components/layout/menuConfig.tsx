@@ -23,6 +23,7 @@ import {
   Assignment,
   LocalShipping,
   Inventory,
+  MoneyOff,
 } from '@mui/icons-material'
 import { enableJournalEntry } from '../../lib/features'
 
@@ -98,6 +99,7 @@ export const appMenuGroups: AppMenuGroup[] = [
       { to: '/loans-advances', label: 'Loans & Advances', icon: <AccountBalanceWallet fontSize="small" />, hint: 'Loan accounts, debtors and adjustments' },
       { to: '/supplier-ledger', label: 'Supplier Ledger', icon: <LocalShipping fontSize="small" />, hint: 'Supplier purchases and settlements' },
       { to: '/suspense-account', label: 'Suspense Account', icon: <AccountBalanceWallet fontSize="small" />, hint: 'Date-wise suspense entries and adjustments' },
+      { to: '/write-off-account', label: 'Write-Off Account', icon: <MoneyOff fontSize="small" />, hint: 'Customer expenses and supplier write-off income' },
     ],
   },
   {

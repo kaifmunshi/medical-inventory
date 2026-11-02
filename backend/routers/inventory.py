@@ -10,7 +10,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel
 from backend.utils.archive_rules import apply_archive_rules
-from sqlalchemy import and_, case, func, literal, or_, exists
+from sqlalchemy import and_, case, func, or_, exists
 from sqlalchemy.orm import aliased
 
 from backend.accounting import sync_bill_vouchers
@@ -1104,21 +1104,11 @@ def _purchase_stock_movement_join_condition():
 
 
 def _stock_movement_effective_ts_expr():
-    purchase_recorded_time = func.substr(
-        func.coalesce(Purchase.created_at, StockMovement.ts),
-        12,
-        8,
-    )
-    return case(
-        (
-            and_(
-                func.upper(func.coalesce(StockMovement.ref_type, "")) == "PURCHASE",
-                Purchase.invoice_date.isnot(None),
-            ),
-            Purchase.invoice_date + literal("T") + purchase_recorded_time,
-        ),
-        else_=StockMovement.ts,
-    )
+    # StockMovement.ts is the physical stock chronology.  Do not derive it from
+    # the currently linked purchase header: clubbing an earlier receipt into a
+    # later supplier invoice changes ref_id, but must never move that receipt
+    # past sales that happened in between.
+    return StockMovement.ts
 
 
 def _future_delta_after_effective_ts(session, item_ids: List[int], to_ts: Optional[str]) -> int:

@@ -227,7 +227,7 @@ export default function LooseStockPage() {
 
       <Paper sx={{ p: 2 }}>
         <Box sx={{ overflowX: 'auto' }}>
-          <table className="table">
+          <table className="table loose-stock-table">
             <thead>
               <tr>
                 <th>Product</th>
@@ -301,7 +301,7 @@ export default function LooseStockPage() {
       <Paper sx={{ p: 2 }}>
         <Typography variant="h6" sx={{ mb: 2 }}>Recent Pack Events</Typography>
         <Box sx={{ overflowX: 'auto' }}>
-          <table className="table">
+          <table className="table pack-events-table">
             <thead>
               <tr>
                 <th>When</th>

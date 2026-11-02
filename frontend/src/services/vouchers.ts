@@ -23,6 +23,24 @@ export type SuspenseStatement = {
   book_entries: SuspenseBookEntry[]
 }
 
+export type WriteOffStatement = {
+  customer_ledger: Ledger
+  supplier_ledger: Ledger
+  customer_writeoff_expense: number
+  supplier_writeoff_income: number
+  net_expense: number
+  vouchers: PostedVoucher[]
+  transactions: Array<{
+    voucher_id: number
+    account_type: 'customer' | 'supplier'
+    payment_id?: number | null
+    document_id?: number | null
+    party_id?: number | null
+    can_edit: boolean
+    can_delete: boolean
+  }>
+}
+
 export type SuspenseBookEntry = {
   source_type: 'CASHBOOK' | 'BANKBOOK'
   source_id: number
@@ -70,6 +88,16 @@ export async function fetchSuspenseStatement(params?: {
   to_date?: string
 }): Promise<SuspenseStatement> {
   const { data } = await api.get<SuspenseStatement>('/vouchers/suspense-statement', { params })
+  return data
+}
+
+export async function fetchWriteOffStatement(params?: {
+  from_date?: string
+  to_date?: string
+  account_type?: 'all' | 'customer' | 'supplier'
+  q?: string
+}): Promise<WriteOffStatement> {
+  const { data } = await api.get<WriteOffStatement>('/vouchers/writeoff-statement', { params })
   return data
 }
 

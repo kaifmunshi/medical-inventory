@@ -25,7 +25,8 @@ import CloseIcon from '@mui/icons-material/Close'
 import EditIcon from '@mui/icons-material/Edit'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight'
-import { useSearchParams } from 'react-router-dom'
+import ArrowBackIcon from '@mui/icons-material/ArrowBack'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchCustomers, updateCustomer } from '../../services/customers'
 import {
@@ -323,6 +324,7 @@ type ReceiptHistoryRow = {
   note: string
   isDeleted?: boolean
   deletedAt?: string | null
+  isWriteoff?: boolean
 }
 
 export function customerClosingBalance(openingBalance: number, outstandingBills: number, unallocatedAdvance: number) {
@@ -332,6 +334,7 @@ export function customerClosingBalance(openingBalance: number, outstandingBills:
 }
 
 export default function CustomerLedgerPage() {
+  const navigate = useNavigate()
   const toast = useToast()
   const queryClient = useQueryClient()
   const today = new Date().toISOString().slice(0, 10)
@@ -411,20 +414,35 @@ export default function CustomerLedgerPage() {
   })
 
   const selectedCustomer = useMemo(
-    () => (customersQ.data || []).find((customer) => String(customer.id) === String(customerId || '')),
-    [customersQ.data, customerId],
+    () => {
+      const direct = (customersQ.data || []).find((customer) => String(customer.id) === String(customerId || ''))
+      if (direct) return direct
+      const requestedParty = (partiesQ.data || []).find((party) => String(party.id) === String(params.get('party_id') || ''))
+      if (!requestedParty) return undefined
+      return (customersQ.data || []).find((customer) =>
+        Number(requestedParty.legacy_customer_id || 0) === Number(customer.id) ||
+        String(requestedParty.name || '').trim().toLowerCase() === String(customer.name || '').trim().toLowerCase(),
+      )
+    },
+    [customersQ.data, customerId, params, partiesQ.data],
   )
 
   const selectedParty = useMemo(
-    () =>
-      (partiesQ.data || []).find((party) => {
+    () => {
+      const requestedPartyId = params.get('party_id')
+      const requestedParty = requestedPartyId
+        ? (partiesQ.data || []).find((party) => String(party.id) === requestedPartyId)
+        : undefined
+      if (requestedParty) return requestedParty
+      return (partiesQ.data || []).find((party) => {
         const selectedCustomerId = Number(selectedCustomer?.id || 0)
         const selectedCustomerName = String(selectedCustomer?.name || '').trim().toLowerCase()
         const legacyMatch = Number(party.legacy_customer_id || 0) > 0 && Number(party.legacy_customer_id) === selectedCustomerId
         const nameMatch = selectedCustomerName && String(party.name || '').trim().toLowerCase() === selectedCustomerName
         return legacyMatch || Boolean(nameMatch)
-      }),
-    [partiesQ.data, selectedCustomer],
+      })
+    },
+    [params, partiesQ.data, selectedCustomer],
   )
 
   const updateCustomerM = useMutation({
@@ -786,29 +804,30 @@ export default function CustomerLedgerPage() {
 
     const directPaymentRows = ((allPaymentsQ.data || []) as any[])
       .filter((payment) => billIds.has(Number(payment.bill_id)))
-      .filter((payment) => !payment.is_writeoff && Number(payment.writeoff_amount || 0) <= 0)
       .filter((payment) => !receiptManagedPaymentIds.has(Number(payment.id)))
       .map((payment) => {
+        const isWriteoff = Boolean(payment.is_writeoff) || Number(payment.writeoff_amount || 0) > 0
         const cash = Number(payment.cash_amount || 0)
         const online = Number(payment.online_amount || 0)
-        const total = cash + online
+        const total = isWriteoff ? Number(payment.writeoff_amount || 0) : cash + online
         return {
           id: `bill-payment-${payment.id}`,
           receiptId: payment.id,
           billId: Number(payment.bill_id),
           sourceType: 'bill_payment' as const,
           when: payment.received_at,
-          source: 'Bill payment',
-          mode: payment.mode,
+          source: isWriteoff ? 'Write-off' : 'Bill payment',
+          mode: isWriteoff ? 'writeoff' : payment.mode,
           cash,
           online,
           total,
           adjusted: total,
           onAccount: 0,
-          allocation: `Bill #${payment.bill_id}: ${money(total)}`,
+          allocation: `${isWriteoff ? 'Written off against Bill' : 'Bill'} #${payment.bill_id}: ${money(total)}`,
           note: payment.note || '',
           isDeleted: false,
           deletedAt: null,
+          isWriteoff,
         }
       })
 
@@ -835,22 +854,22 @@ export default function CustomerLedgerPage() {
   }, [adjustmentDetails, adjustmentMap, allPaymentsQ.data, ledgerRows, receiptManagedPaymentIds, receipts, selectedParty?.id, selectedParty?.name])
 
   useEffect(() => {
-    const receiptId = Number(params.get('receipt_id') || 0)
+    const receiptId = Number(params.get('receipt_id') || params.get('payment_id') || 0)
     if (receiptId <= 0) return
     const target = receiptHistory.find(
-      (row) => row.sourceType === 'party_receipt' && Number(row.receiptId) === receiptId,
+      (row) => Number(row.receiptId) === receiptId && (params.get('payment_id') ? row.sourceType === 'bill_payment' : row.sourceType === 'party_receipt'),
     )
     if (!target) return
     setSectionOpen((prev) => (prev.receipts ? prev : { ...prev, receipts: true }))
     setExpandedReceipts((prev) => (prev[target.id] ? prev : { [target.id]: true }))
     window.requestAnimationFrame(() => {
-      document.getElementById(`customer-receipt-${receiptId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      document.getElementById(`customer-transaction-${target.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     })
   }, [params, receiptHistory])
 
   const activeReceiptHistory = receiptHistory.filter((row) => !row.isDeleted && row.sourceType !== 'advance_refund')
   const activeAdvanceReturns = receiptHistory.filter((row) => !row.isDeleted && row.sourceType === 'advance_refund')
-  const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.total || 0), 0)
+  const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + (row.isWriteoff ? 0 : Number(row.total || 0)), 0)
   const receiptHistoryOnAccountTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
   const openingBalance = signedPartyOpening(selectedParty)
   const closingBalance = customerClosingBalance(openingBalance, totalOutstanding, receiptHistoryOnAccountTotal)
@@ -1328,7 +1347,10 @@ export default function CustomerLedgerPage() {
   return (
     <Stack gap={2}>
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
-        <Typography variant="h5">Customer Ledger</Typography>
+        <Stack direction="row" gap={1} alignItems="center">
+          {params.get('return_to') ? <Button size="small" startIcon={<ArrowBackIcon />} onClick={() => navigate(String(params.get('return_to')), { replace: true })}>Back</Button> : null}
+          <Typography variant="h5">Customer Ledger</Typography>
+        </Stack>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
           <Button variant="contained" onClick={openReceiptDialog} disabled={!selectedParty}>
             Record Receipt
@@ -1358,6 +1380,10 @@ export default function CustomerLedgerPage() {
             const newParams = new URLSearchParams(params)
             if (nextId) newParams.set('customer_id', nextId)
             else newParams.delete('customer_id')
+            newParams.delete('party_id')
+            newParams.delete('payment_id')
+            newParams.delete('bill_id')
+            newParams.delete('receipt_id')
             setParams(newParams, { replace: true })
           }}
           fullWidth
@@ -1820,7 +1846,7 @@ export default function CustomerLedgerPage() {
       </CollapsibleLedgerSection>
 
       <CollapsibleLedgerSection
-        title="Receipt History"
+        title="Receipt / Payment History"
         open={sectionOpen.receipts}
         onToggle={() => toggleSection('receipts')}
         summary={
@@ -1861,9 +1887,9 @@ export default function CustomerLedgerPage() {
                 return (
                   <Fragment key={receipt.id}>
                     <tr
-                      id={receipt.sourceType === 'party_receipt' ? `customer-receipt-${receipt.receiptId}` : undefined}
+                      id={`customer-transaction-${receipt.id}`}
                       className={rowClass}
-                      style={receipt.isDeleted ? { opacity: 0.68 } : undefined}
+                      style={{ opacity: receipt.isDeleted ? 0.68 : 1, backgroundColor: Number(params.get('payment_id') || params.get('receipt_id') || 0) === Number(receipt.receiptId) ? '#fff8e1' : undefined }}
                     >
                       <td className="expand-col">
                         <IconButton

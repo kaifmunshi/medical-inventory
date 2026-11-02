@@ -154,3 +154,83 @@ body {
   overflow: visible;
   text-overflow: clip;
 }
+
+/* Long medicine names must remain readable on the Loose Stock screen. */
+.table.loose-stock-table th:first-child,
+.table.loose-stock-table td:first-child {
+  width: 28%;
+  min-width: 220px;
+  max-width: 420px;
+  white-space: normal !important;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
+
+.table.loose-stock-table th:nth-child(3),
+.table.loose-stock-table td:nth-child(3) {
+  width: 52px;
+  padding-left: 6px;
+  padding-right: 6px;
+  text-align: center;
+}
+
+.table.loose-stock-table th:nth-child(6),
+.table.loose-stock-table td:nth-child(6),
+.table.loose-stock-table th:nth-child(7),
+.table.loose-stock-table td:nth-child(7) {
+  width: 58px;
+  padding-left: 6px;
+  padding-right: 6px;
+  text-align: center;
+}
+
+.table.loose-stock-table th:nth-child(8),
+.table.loose-stock-table td:nth-child(8) {
+  width: 82px;
+  padding-left: 6px;
+  padding-right: 6px;
+  text-align: center;
+}
+
+.table.pack-events-table th:nth-child(1),
+.table.pack-events-table td:nth-child(1) {
+  width: 180px;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.table.pack-events-table th:nth-child(2),
+.table.pack-events-table td:nth-child(2) {
+  width: 70px;
+}
+
+.table.pack-events-table th:nth-child(3),
+.table.pack-events-table td:nth-child(3),
+.table.pack-events-table th:nth-child(4),
+.table.pack-events-table td:nth-child(4) {
+  width: 90px;
+  text-align: center;
+}
+
+.table.pack-events-table th:nth-child(5),
+.table.pack-events-table td:nth-child(5),
+.table.pack-events-table th:nth-child(6),
+.table.pack-events-table td:nth-child(6) {
+  width: 100px;
+  text-align: center;
+}
+
+.table.pack-events-table th {
+  white-space: normal !important;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: normal;
+  line-height: 1.25;
+}
+
+.table.pack-events-table th:nth-child(n+2):nth-child(-n+6),
+.table.pack-events-table td:nth-child(n+2):nth-child(-n+6) {
+  padding-left: 6px;
+  padding-right: 6px;
+}

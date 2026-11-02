@@ -25,8 +25,9 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined'
 import PaymentsIcon from '@mui/icons-material/Payments'
+import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { fetchParties } from '../../services/parties'
 import { fetchPurchaseReturns } from '../../services/purchaseReturns'
 import { listIncomingStockEntries, type IncomingStockEntry } from '../../services/inventory'
@@ -226,6 +227,7 @@ function incomingEntryLabel(entry: IncomingStockEntry) {
 }
 
 export default function SupplierLedgerPage() {
+  const navigate = useNavigate()
   const toast = useToast()
   const queryClient = useQueryClient()
   const [params] = useSearchParams()
@@ -372,6 +374,21 @@ export default function SupplierLedgerPage() {
   )
   const openPurchaseOutstanding = openPurchases.reduce((sum, purchase) => sum + outstandingOf(purchase), 0)
   const selectedPurchase = purchases.find((purchase) => Number(purchase.id) === Number(selectedPurchaseId)) || null
+
+  useEffect(() => {
+    const supplierId = Number(params.get('supplier_id') || 0)
+    if (supplierId > 0 && supplierId !== Number(partyId || 0)) setPartyId(supplierId)
+  }, [params, partyId])
+
+  useEffect(() => {
+    const paymentId = Number(params.get('payment_id') || 0)
+    const purchaseId = Number(params.get('purchase_id') || 0)
+    if (!paymentId || !purchaseId || !purchases.some((purchase) => Number(purchase.id) === purchaseId)) return
+    setLedgerTypeFilter('all')
+    setShowDeletedLedgerRows(true)
+    setHighlightedPaymentId(paymentId)
+    setSelectedPurchaseId(purchaseId)
+  }, [params, purchases])
   const editItemsSubtotal = useMemo(
     () => editItems.reduce((sum, item) => sum + lineBaseTotal(item), 0),
     [editItems],
@@ -1595,7 +1612,10 @@ export default function SupplierLedgerPage() {
   return (
     <Stack gap={2}>
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
-        <Typography variant="h5">Supplier Ledger</Typography>
+        <Stack direction="row" gap={1} alignItems="center">
+          {params.get('return_to') ? <Button size="small" startIcon={<ArrowBackIcon />} onClick={() => navigate(String(params.get('return_to')), { replace: true })}>Back</Button> : null}
+          <Typography variant="h5">Supplier Ledger</Typography>
+        </Stack>
         <Button
           variant="contained"
           startIcon={<PaymentsIcon />}

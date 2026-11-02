@@ -187,10 +187,10 @@ def now_ts() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def purchase_event_ts(invoice_date: str, recorded_at: Optional[str] = None) -> str:
-    """Place a purchase on its invoice date while preserving its entry time."""
+def purchase_event_ts(stock_date: str, recorded_at: Optional[str] = None) -> str:
+    """Place stock on its physical receipt date while preserving entry time."""
     time_part = str(recorded_at or now_ts()).replace(" ", "T").partition("T")[2]
-    return f"{invoice_date}T{(time_part or '00:00:00')[:8]}"
+    return f"{stock_date}T{(time_part or '00:00:00')[:8]}"
 
 
 def clean_text(v: Optional[str]) -> Optional[str]:
@@ -920,7 +920,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
     existing_items = get_purchase_items(session, int(purchase.id))
     existing_by_id = {int(item.id or 0): item for item in existing_items}
     subtotal_amount = 0.0
-    purchase_stock_ts = purchase_event_ts(purchase.invoice_date, purchase.created_at)
+    purchase_stock_ts = purchase_event_ts(purchase.received_date or purchase.invoice_date, purchase.created_at)
     ts = now_ts()
     changed_lines: List[Dict[str, Any]] = []
 
@@ -1560,7 +1560,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             payment_status = "PAID"
 
         ts = now_ts()
-        purchase_stock_ts = purchase_event_ts(invoice_date, ts)
+        purchase_stock_ts = purchase_event_ts(received_date, ts)
         purchase = Purchase(
             party_id=supplier.id,
             invoice_number=invoice_number,
@@ -3002,7 +3002,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                 }
             )
 
-        purchase_stock_ts = purchase_event_ts(purchase.invoice_date, purchase.created_at)
+        purchase_stock_ts = purchase_event_ts(purchase.received_date or purchase.invoice_date, purchase.created_at)
         for purchase_item, inventory_item in touched:
             purchase_item_qty = purchase_item_total_qty(purchase_item)
             if purchase_item_stock_source(purchase_item) == STOCK_SOURCE_ATTACHED:
@@ -3200,7 +3200,7 @@ def cancel_purchase(purchase_id: int) -> PurchaseOut:
         assert_financial_year_unlocked(session, purchase.invoice_date, context="Purchase cancel")
         before_snapshot = purchase_snapshot(session, purchase)
 
-        purchase_stock_ts = purchase_event_ts(purchase.invoice_date, purchase.created_at)
+        purchase_stock_ts = purchase_event_ts(purchase.received_date or purchase.invoice_date, purchase.created_at)
         items = get_purchase_items(session, purchase_id)
         for item in items:
             qty = purchase_item_total_qty(item)

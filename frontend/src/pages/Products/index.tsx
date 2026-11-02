@@ -368,7 +368,7 @@ export default function ProductsPage() {
       default_rack_number: Number(form.default_rack_number || 0),
       printed_price: Number(form.printed_price || 0),
       loose_sale_enabled: Boolean(form.loose_sale_enabled),
-      parent_unit_name: form.loose_sale_enabled ? form.parent_unit_name?.trim() || undefined : undefined,
+      parent_unit_name: form.parent_unit_name?.trim() || (form.loose_sale_enabled ? 'Pack' : 'Unit'),
       child_unit_name: form.loose_sale_enabled ? form.child_unit_name?.trim() || undefined : undefined,
       default_conversion_qty: form.loose_sale_enabled ? Number(form.default_conversion_qty || 1) : undefined,
     }
@@ -797,7 +797,16 @@ export default function ProductsPage() {
                 }
                 label="Enable loose stock"
               />
-              {form.loose_sale_enabled ? (
+              {!form.loose_sale_enabled ? (
+                <TextField
+                  label="Stock Unit"
+                  value={form.parent_unit_name || ''}
+                  onChange={(e) => patchForm({ parent_unit_name: e.target.value })}
+                  placeholder="Piece, Bottle, Box..."
+                  helperText="Unit used to display and sell this product"
+                  fullWidth
+                />
+              ) : (
                 <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
                   <TextField
                     label="Parent Unit"
@@ -822,7 +831,7 @@ export default function ProductsPage() {
                     fullWidth
                   />
                 </Stack>
-              ) : null}
+              )}
             </Stack>
           </Stack>
         </DialogContent>

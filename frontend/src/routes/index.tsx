@@ -35,6 +35,7 @@ const SupplierLedgerPage = lazy(() => import('../pages/SupplierLedger'))
 const CustomerLedgerPage = lazy(() => import('../pages/CustomerLedger'))
 const SuspenseAccountPage = lazy(() => import('../pages/SuspenseAccount'))
 const LoansAdvancesPage = lazy(() => import('../pages/LoansAdvances'))
+const WriteOffAccountPage = lazy(() => import('../pages/WriteOffAccount'))
 
 function SessionAccessRoute({ children }: { children: ReactNode }) {
   const location = useLocation()
@@ -84,6 +85,7 @@ export default function AppRoutes() {
         <Route path="suspense-account" element={<SuspenseAccountPage />} />
         <Route path="customer-ledger" element={<CustomerLedgerPage />} />
         <Route path="loans-advances" element={<LoansAdvancesPage />} />
+        <Route path="write-off-account" element={<WriteOffAccountPage />} />
         <Route path="stock-audit" element={<StockAuditPage />} />
         <Route path="settings" element={<Settings />} />
         <Route path="requested-items" element={<RequestedItems />} />

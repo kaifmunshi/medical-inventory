@@ -69,6 +69,19 @@ def purchase_total_amount(subtotal: float, discount: float, gst: float, rounding
     return total
 
 
+def assert_purchase_total_covers_settlement(total_amount: float, paid_amount: float, writeoff_amount: float, *, context: str = "Purchase edit") -> None:
+    settled_amount = round2(float(paid_amount or 0) + float(writeoff_amount or 0))
+    total = round2(total_amount)
+    if total + 0.0001 < settled_amount:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{context} cannot reduce total below settled amount. "
+                f"Settled={settled_amount:.2f}, new total={total:.2f}"
+            ),
+        )
+
+
 def purchase_invoice_gst_amount(subtotal: float, discount: float, items: List[Dict[str, Any]], supplied_gst: Optional[float]) -> float:
     """Use GST printed on the supplier invoice when the client submitted it.
 
@@ -85,20 +98,29 @@ def purchase_invoice_gst_amount(subtotal: float, discount: float, items: List[Di
     return gst
 
 
-def purchase_line_discount(raw: PurchaseItemIn, quantity: int) -> tuple[float, float, float]:
-    first_percent = round2(raw.discount_percent)
-    additional_percent = round2(raw.additional_discount_percent)
-    if not 0 <= first_percent <= 100 or not 0 <= additional_percent <= 100:
+def purchase_line_discount(raw: PurchaseItemIn, quantity: int) -> tuple[float, float, float, float, float]:
+    percentages = [
+        round2(raw.discount_percent),
+        round2(raw.additional_discount_percent),
+        round2(raw.other_discount_percent),
+        round2(raw.scheme_discount_percent),
+    ]
+    if any(percent < 0 or percent > 100 for percent in percentages):
         raise HTTPException(status_code=400, detail="Discount percentages must be between 0 and 100")
+    first_percent, additional_percent, other_percent, scheme_percent = percentages
     gross = round2(int(quantity or 0) * float(raw.cost_price or 0))
-    if first_percent == 0 and additional_percent == 0 and round2(raw.discount_amount) != 0:
+    if not any(percentages) and round2(raw.discount_amount) != 0:
         # Backward compatibility for older clients that submitted a rupee amount.
         amount = min(gross, max(0.0, round2(raw.discount_amount)))
         derived_percent = round2(amount * 100.0 / gross) if gross > 0 else 0.0
-        return amount, derived_percent, 0.0
-    first_amount = round2(gross * first_percent / 100.0)
-    additional_amount = round2(max(0.0, gross - first_amount) * additional_percent / 100.0)
-    return round2(first_amount + additional_amount), first_percent, additional_percent
+        return amount, derived_percent, 0.0, 0.0, 0.0
+    remaining = gross
+    discount_amount = 0.0
+    for percent in percentages:
+        component = round2(remaining * percent / 100.0)
+        discount_amount = round2(discount_amount + component)
+        remaining = round2(max(0.0, remaining - component))
+    return discount_amount, first_percent, additional_percent, scheme_percent, other_percent
 
 
 def purchase_snapshot(session, purchase: Purchase) -> dict:
@@ -130,6 +152,9 @@ def purchase_snapshot(session, purchase: Purchase) -> dict:
                 "cost_price": round2(item.cost_price),
                 "discount_percent": round2(item.discount_percent),
                 "additional_discount_percent": round2(item.additional_discount_percent),
+                "scheme_discount_percent": round2(item.scheme_discount_percent),
+                "other_discount_percent": round2(item.other_discount_percent),
+                "discount_note": clean_text(item.discount_note),
                 "gst_percent": round2(item.gst_percent),
                 "discount_amount": round2(item.discount_amount),
                 "rounding_adjustment": round2(item.rounding_adjustment),
@@ -904,6 +929,9 @@ def purchase_item_matches_raw(raw: PurchaseItemIn, item: PurchaseItem) -> bool:
         and round2(raw.gst_percent) == round2(item.gst_percent)
         and round2(raw.discount_percent) == round2(item.discount_percent)
         and round2(raw.additional_discount_percent) == round2(item.additional_discount_percent)
+        and round2(raw.scheme_discount_percent) == round2(item.scheme_discount_percent)
+        and round2(raw.other_discount_percent) == round2(item.other_discount_percent)
+        and (clean_text(raw.discount_note) or "") == (clean_text(item.discount_note) or "")
         and round2(raw.rounding_adjustment) == round2(item.rounding_adjustment)
     )
 
@@ -913,10 +941,14 @@ def purchase_item_money_matches_raw(raw: PurchaseItemIn, item: PurchaseItem) -> 
     percentages_match = (
         round2(raw.discount_percent) == round2(item.discount_percent)
         and round2(raw.additional_discount_percent) == round2(item.additional_discount_percent)
+        and round2(raw.scheme_discount_percent) == round2(item.scheme_discount_percent)
+        and round2(raw.other_discount_percent) == round2(item.other_discount_percent)
     )
     discount_matches = percentages_match and (
         round2(raw.discount_percent) != 0
         or round2(raw.additional_discount_percent) != 0
+        or round2(raw.scheme_discount_percent) != 0
+        or round2(raw.other_discount_percent) != 0
         or round2(raw.discount_amount) == round2(item.discount_amount)
     )
     return (
@@ -1012,12 +1044,14 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
             line_discount = round2(item.discount_amount)
             discount_percent = round2(item.discount_percent)
             additional_discount_percent = round2(item.additional_discount_percent)
+            scheme_discount_percent = round2(item.scheme_discount_percent)
+            other_discount_percent = round2(item.other_discount_percent)
             line_total = round2(item.line_total)
             effective_cost = round2(item.effective_cost_price)
         else:
             money_changed = True
             line_rounding = round2(raw.rounding_adjustment)
-            line_discount, discount_percent, additional_discount_percent = purchase_line_discount(raw, qty)
+            line_discount, discount_percent, additional_discount_percent, scheme_discount_percent, other_discount_percent = purchase_line_discount(raw, qty)
             line_total = round2((qty * float(raw.cost_price or 0)) - line_discount + line_rounding)
             effective_cost = round2(line_total / new_qty) if new_qty > 0 else round2(raw.cost_price)
         subtotal_amount = round2(subtotal_amount + line_total)
@@ -1077,6 +1111,9 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         item.gst_percent = round2(raw.gst_percent)
         item.discount_percent = discount_percent
         item.additional_discount_percent = additional_discount_percent
+        item.scheme_discount_percent = scheme_discount_percent
+        item.other_discount_percent = other_discount_percent
+        item.discount_note = clean_text(raw.discount_note)
         item.discount_amount = line_discount
         item.rounding_adjustment = line_rounding
         item.line_total = line_total
@@ -1103,15 +1140,11 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         next_gst_amount,
         purchase.rounding_adjustment,
     )
-    settled_amount = round2(float(purchase.paid_amount or 0) + float(purchase.writeoff_amount or 0))
-    if next_total_amount + 0.0001 < settled_amount:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Purchase edit cannot reduce total below settled amount. "
-                f"Settled={settled_amount:.2f}, new total={next_total_amount:.2f}"
-            ),
-        )
+    assert_purchase_total_covers_settlement(
+        next_total_amount,
+        purchase.paid_amount,
+        purchase.writeoff_amount,
+    )
 
     purchase.subtotal_amount = subtotal_amount
     purchase.gst_amount = next_gst_amount
@@ -1477,7 +1510,7 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
 
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
             line_rounding = round2(raw.rounding_adjustment)
-            line_discount, discount_percent, additional_discount_percent = purchase_line_discount(raw, qty)
+            line_discount, discount_percent, additional_discount_percent, scheme_discount_percent, other_discount_percent = purchase_line_discount(raw, qty)
             line_total = round2((qty * float(raw.cost_price or 0)) - line_discount + line_rounding)
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
             opening_placeholder_movement = None
@@ -1510,6 +1543,9 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                     "gst_percent": round2(raw.gst_percent),
                     "discount_percent": discount_percent,
                     "additional_discount_percent": additional_discount_percent,
+                    "scheme_discount_percent": scheme_discount_percent,
+                    "other_discount_percent": other_discount_percent,
+                    "discount_note": clean_text(raw.discount_note),
                     "discount_amount": line_discount,
                     "rounding_adjustment": line_rounding,
                     "line_total": line_total,
@@ -1726,6 +1762,9 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 gst_percent=entry["gst_percent"],
                 discount_percent=entry["discount_percent"],
                 additional_discount_percent=entry["additional_discount_percent"],
+                scheme_discount_percent=entry["scheme_discount_percent"],
+                other_discount_percent=entry["other_discount_percent"],
+                discount_note=entry["discount_note"],
                 discount_amount=entry["discount_amount"],
                 rounding_adjustment=entry["rounding_adjustment"],
                 line_total=entry["line_total"],
@@ -1814,6 +1853,8 @@ def create_free_stock(payload: FreeStockCreate) -> PurchaseOut:
             round2(raw.discount_amount) != 0
             or round2(raw.discount_percent) != 0
             or round2(raw.additional_discount_percent) != 0
+            or round2(raw.scheme_discount_percent) != 0
+            or round2(raw.other_discount_percent) != 0
             or round2(raw.rounding_adjustment) != 0
         ):
             raise HTTPException(status_code=400, detail="Free stock cannot have discount or round off")
@@ -2160,6 +2201,11 @@ def update_purchase(purchase_id: int, payload: PurchaseUpdate) -> PurchaseOut:
             row.discount_amount,
             row.gst_amount,
             row.rounding_adjustment,
+        )
+        assert_purchase_total_covers_settlement(
+            row.total_amount,
+            row.paid_amount,
+            row.writeoff_amount,
         )
         row.updated_at = now_ts()
         session.add(row)
@@ -3000,7 +3046,7 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                 )
             rack_number = int(raw.rack_number if raw.rack_number is not None else product.default_rack_number or 0)
             line_rounding = round2(raw.rounding_adjustment)
-            line_discount, discount_percent, additional_discount_percent = purchase_line_discount(raw, qty)
+            line_discount, discount_percent, additional_discount_percent, scheme_discount_percent, other_discount_percent = purchase_line_discount(raw, qty)
             line_total = round2((qty * float(raw.cost_price or 0)) - line_discount + line_rounding)
             effective_cost = round2(line_total / total_qty) if total_qty > 0 else round2(raw.cost_price)
             opening_placeholder_movement = None
@@ -3033,6 +3079,9 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     "gst_percent": round2(raw.gst_percent),
                     "discount_percent": discount_percent,
                     "additional_discount_percent": additional_discount_percent,
+                    "scheme_discount_percent": scheme_discount_percent,
+                    "other_discount_percent": other_discount_percent,
+                    "discount_note": clean_text(raw.discount_note),
                     "discount_amount": line_discount,
                     "rounding_adjustment": line_rounding,
                     "line_total": line_total,
@@ -3187,6 +3236,9 @@ def replace_purchase_items(purchase_id: int, payload: PurchaseItemsReplace) -> P
                     gst_percent=entry["gst_percent"],
                     discount_percent=entry["discount_percent"],
                     additional_discount_percent=entry["additional_discount_percent"],
+                    scheme_discount_percent=entry["scheme_discount_percent"],
+                    other_discount_percent=entry["other_discount_percent"],
+                    discount_note=entry["discount_note"],
                     discount_amount=entry["discount_amount"],
                     rounding_adjustment=entry["rounding_adjustment"],
                     line_total=entry["line_total"],

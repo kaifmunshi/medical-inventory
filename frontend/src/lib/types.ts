@@ -187,6 +187,9 @@ export interface PurchaseItemPayload {
   gst_percent?: number
   discount_percent?: number
   additional_discount_percent?: number
+  scheme_discount_percent?: number
+  other_discount_percent?: number
+  discount_note?: string
   discount_amount?: number
   rounding_adjustment?: number
   loose_sale_enabled?: boolean
@@ -228,6 +231,9 @@ export interface PurchaseItem {
   gst_percent: number
   discount_percent: number
   additional_discount_percent: number
+  scheme_discount_percent: number
+  other_discount_percent: number
+  discount_note?: string | null
   discount_amount: number
   rounding_adjustment: number
   line_total: number

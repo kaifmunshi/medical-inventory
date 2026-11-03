@@ -2916,6 +2916,9 @@ def migrate_db():
                 gst_percent REAL NOT NULL DEFAULT 0,
                 discount_percent REAL NOT NULL DEFAULT 0,
                 additional_discount_percent REAL NOT NULL DEFAULT 0,
+                scheme_discount_percent REAL NOT NULL DEFAULT 0,
+                other_discount_percent REAL NOT NULL DEFAULT 0,
+                discount_note TEXT,
                 discount_amount REAL NOT NULL DEFAULT 0,
                 rounding_adjustment REAL NOT NULL DEFAULT 0,
                 line_total REAL NOT NULL DEFAULT 0
@@ -2948,6 +2951,12 @@ def migrate_db():
             """))
         if "additional_discount_percent" not in purchase_item_col_names:
             session.exec(text("ALTER TABLE purchaseitem ADD COLUMN additional_discount_percent REAL NOT NULL DEFAULT 0"))
+        if "scheme_discount_percent" not in purchase_item_col_names:
+            session.exec(text("ALTER TABLE purchaseitem ADD COLUMN scheme_discount_percent REAL NOT NULL DEFAULT 0"))
+        if "other_discount_percent" not in purchase_item_col_names:
+            session.exec(text("ALTER TABLE purchaseitem ADD COLUMN other_discount_percent REAL NOT NULL DEFAULT 0"))
+        if "discount_note" not in purchase_item_col_names:
+            session.exec(text("ALTER TABLE purchaseitem ADD COLUMN discount_note TEXT"))
 
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS purchasereturn (

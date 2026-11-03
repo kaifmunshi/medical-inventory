@@ -83,6 +83,9 @@ function makeEmptyItem(): DraftItem {
     gst_percent: 0,
     discount_percent: 0,
     additional_discount_percent: 0,
+    scheme_discount_percent: 0,
+    other_discount_percent: 0,
+    discount_note: '',
     discount_amount: 0,
     rounding_adjustment: 0,
     loose_sale_enabled: false,
@@ -106,6 +109,9 @@ function cloneItemForNewExpiry(item: DraftItem, copyPrices: boolean): DraftItem 
     gst_percent: copyPrices ? Number(item.gst_percent || 0) : 0,
     discount_percent: copyPrices ? Number(item.discount_percent || 0) : 0,
     additional_discount_percent: copyPrices ? Number(item.additional_discount_percent || 0) : 0,
+    scheme_discount_percent: copyPrices ? Number(item.scheme_discount_percent || 0) : 0,
+    other_discount_percent: copyPrices ? Number(item.other_discount_percent || 0) : 0,
+    discount_note: copyPrices ? String(item.discount_note || '') : '',
     discount_amount: copyPrices ? Number(item.discount_amount || 0) : 0,
     rounding_adjustment: copyPrices ? safeNumber(item.rounding_adjustment) : 0,
   }
@@ -169,15 +175,70 @@ function lineGrossTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price'>) {
   return Number(item.sealed_qty || 0) * Number(item.cost_price || 0)
 }
 
-function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
-  return lineGrossTotal(item) - Number(item.discount_amount || 0) + safeNumber(item.rounding_adjustment)
+function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'scheme_discount_percent' | 'other_discount_percent' | 'discount_amount' | 'rounding_adjustment'>) {
+  const gross = round2(lineGrossTotal(item))
+  const percentages = [
+    item.discount_percent,
+    item.additional_discount_percent,
+    item.other_discount_percent,
+    item.scheme_discount_percent,
+  ].map((value) => Math.min(100, Math.max(0, Number(value || 0))))
+  if (percentages.some((value) => value !== 0)) {
+    const net = percentages.reduce((remaining, percent) => {
+      const component = round2(remaining * percent / 100)
+      return round2(Math.max(0, remaining - component))
+    }, gross)
+    return round2(net + safeNumber(item.rounding_adjustment))
+  }
+  return round2(gross - Number(item.discount_amount || 0) + safeNumber(item.rounding_adjustment))
 }
 
 function lineTotalQty(item: Pick<DraftItem, 'sealed_qty' | 'free_qty'>) {
   return Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
 }
 
-function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'cost_price' | 'discount_amount' | 'rounding_adjustment'>) {
+function purchaseItemFinanciallyMatchesDraft(item: DraftItem, purchase?: Purchase | null) {
+  if (!purchase || !item.purchase_item_id) return false
+  const saved = purchase.items.find((row) => Number(row.id) === Number(item.purchase_item_id))
+  if (!saved) return false
+  return Number(item.sealed_qty || 0) === Number(saved.sealed_qty || 0)
+    && Number(item.free_qty || 0) === Number(saved.free_qty || 0)
+    && round2(Number(item.cost_price || 0)) === round2(Number(saved.cost_price || 0))
+    && round2(Number(item.mrp || 0)) === round2(Number(saved.mrp || 0))
+    && round2(Number(item.gst_percent || 0)) === round2(Number(saved.gst_percent || 0))
+    && round2(Number(item.discount_percent || 0)) === round2(Number(saved.discount_percent || 0))
+    && round2(Number(item.additional_discount_percent || 0)) === round2(Number(saved.additional_discount_percent || 0))
+    && round2(Number(item.other_discount_percent || 0)) === round2(Number(saved.other_discount_percent || 0))
+    && round2(Number(item.scheme_discount_percent || 0)) === round2(Number(saved.scheme_discount_percent || 0))
+    && round2(safeNumber(item.rounding_adjustment)) === round2(Number(saved.rounding_adjustment || 0))
+}
+
+function purchaseEditPreview(draftItems: DraftItem[], purchase?: Purchase | null) {
+  const bases = draftItems.map((item) => {
+    if (purchaseItemFinanciallyMatchesDraft(item, purchase)) {
+      return round2(Number(purchase?.items.find((row) => Number(row.id) === Number(item.purchase_item_id))?.line_total || 0))
+    }
+    return lineBaseTotal(item)
+  })
+  const subtotal = bases.reduce((sum, amount) => round2(sum + amount), 0)
+  const financialChanged = !purchase
+    || draftItems.length !== purchase.items.length
+    || draftItems.some((item) => !purchaseItemFinanciallyMatchesDraft(item, purchase))
+  const discount = Number(purchase?.discount_amount || 0)
+  let gst = Number(purchase?.gst_amount || 0)
+  if (financialChanged && subtotal > 0) {
+    const factor = Math.max(0, round2(subtotal - round2(discount))) / subtotal
+    const rawGst = draftItems.reduce(
+      (sum, item, index) => round2(sum + round2(Math.max(0, bases[index]) * Number(item.gst_percent || 0) / 100)),
+      0,
+    )
+    gst = round2(rawGst * factor)
+  }
+  const total = round2(subtotal - round2(discount) + round2(gst) + round2(Number(purchase?.rounding_adjustment || 0)))
+  return { subtotal, gst, total }
+}
+
+function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'scheme_discount_percent' | 'other_discount_percent' | 'discount_amount' | 'rounding_adjustment'>) {
   const totalQty = Number(item.sealed_qty || 0) + Number(item.free_qty || 0)
   if (totalQty <= 0) return 0
   return lineBaseTotal(item) / totalQty
@@ -401,10 +462,11 @@ export default function SupplierLedgerPage() {
     setHighlightedPaymentId(paymentId)
     setSelectedPurchaseId(purchaseId)
   }, [params, purchases])
-  const editItemsSubtotal = useMemo(
-    () => editItems.reduce((sum, item) => sum + lineBaseTotal(item), 0),
-    [editItems],
+  const editItemsPreview = useMemo(
+    () => purchaseEditPreview(editItems, selectedPurchase),
+    [editItems, selectedPurchase],
   )
+  const editItemsSubtotal = editItemsPreview.subtotal
   const editSubtotal = Number(selectedPurchase?.subtotal_amount || 0)
   const editDiscountValue = Number(editDiscountAmount || 0)
   const editDiscountChanged = round2(editDiscountValue) !== round2(Number(selectedPurchase?.discount_amount || 0))
@@ -1069,6 +1131,9 @@ export default function SupplierLedgerPage() {
       gst_percent: item.gst_percent,
       discount_percent: item.discount_percent,
       additional_discount_percent: item.additional_discount_percent,
+      scheme_discount_percent: item.scheme_discount_percent,
+      other_discount_percent: item.other_discount_percent,
+      discount_note: item.discount_note || '',
       discount_amount: item.discount_amount,
       rounding_adjustment: item.rounding_adjustment || 0,
       loose_sale_enabled: false,
@@ -1167,6 +1232,7 @@ export default function SupplierLedgerPage() {
       product_name: item.product_name.trim(),
       alias: item.alias?.trim() || undefined,
       brand: item.brand?.trim() || undefined,
+      discount_note: item.discount_note?.trim() || undefined,
       expiry_date: item.expiry_date?.trim() || undefined,
       gst_percent: Number(item.gst_percent || 0),
       rounding_adjustment: safeNumber(item.rounding_adjustment),
@@ -1179,6 +1245,10 @@ export default function SupplierLedgerPage() {
     if (!selectedPurchaseId || !editPartyId) return
     if (!editReceivedDate) {
       toast.push('Received date is required', 'error')
+      return
+    }
+    if (editBillAmount + 0.0001 < editCoveredAmount) {
+      toast.push(`Cannot save: new bill total Rs ${money(editBillAmount)} is below settled amount Rs ${money(editCoveredAmount)}. Edit or remove the payment first.`, 'error')
       return
     }
     updateM.mutate({
@@ -1222,6 +1292,12 @@ export default function SupplierLedgerPage() {
     }
     if (cleaned.some((item) => lineTotalQty(item) <= 0)) {
       toast.push('Each purchase item needs paid qty or free qty greater than 0', 'error')
+      return
+    }
+    const preview = purchaseEditPreview(cleaned as DraftItem[], selectedPurchase)
+    const settled = round2(Number(selectedPurchase?.paid_amount || 0) + Number(selectedPurchase?.writeoff_amount || 0))
+    if (preview.total + 0.0001 < settled) {
+      toast.push(`Cannot save: new bill total Rs ${money(preview.total)} is below settled amount Rs ${money(settled)}. Edit or remove the payment first.`, 'error')
       return
     }
     try {
@@ -1517,7 +1593,22 @@ export default function SupplierLedgerPage() {
                     <TextField size="small" label="MRP" type="number" value={item.mrp} onChange={(e) => patchEditItem(item.key, { mrp: Number(e.target.value) })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
-                    <TextField size="small" label="Discount (Rs)" type="number" value={item.discount_amount || 0} onChange={(e) => patchEditItem(item.key, { discount_amount: Number(e.target.value), discount_percent: 0, additional_discount_percent: 0 })} fullWidth />
+                    <TextField size="small" label="Discount 1 %" type="number" value={item.discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchEditItem(item.key, { discount_percent: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1.2}>
+                    <TextField size="small" label="Discount 2 %" type="number" value={item.additional_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchEditItem(item.key, { additional_discount_percent: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1.2}>
+                    <TextField size="small" label="Discount 3 %" type="number" value={item.other_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchEditItem(item.key, { other_discount_percent: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1.2}>
+                    <TextField size="small" label="Scheme Discount %" type="number" value={item.scheme_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchEditItem(item.key, { scheme_discount_percent: Number(e.target.value) })} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1.5}>
+                    <TextField size="small" label="Scheme Note" placeholder="e.g. 5+1" value={item.discount_note || ''} onChange={(e) => patchEditItem(item.key, { discount_note: e.target.value })} inputProps={{ maxLength: 80 }} fullWidth />
+                  </Grid>
+                  <Grid item xs={6} md={1.2}>
+                    <TextField size="small" label="Discount (Rs)" type="number" value={item.discount_amount || 0} onChange={(e) => patchEditItem(item.key, { discount_amount: Number(e.target.value), discount_percent: 0, additional_discount_percent: 0, scheme_discount_percent: 0, other_discount_percent: 0 })} fullWidth />
                   </Grid>
                   <Grid item xs={6} md={1.2}>
                     <TextField size="small" label="Round Off (+/-)" type="number" value={item.rounding_adjustment ?? 0} onChange={(e) => patchEditItem(item.key, { rounding_adjustment: e.target.value })} fullWidth />
@@ -1582,7 +1673,22 @@ export default function SupplierLedgerPage() {
                             <TextField size="small" label="MRP" type="number" value={batch.mrp} onChange={(e) => patchEditItem(batch.key, { mrp: Number(e.target.value) })} fullWidth />
                           </Grid>
                           <Grid item xs={6} md={1.2}>
-                            <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchEditItem(batch.key, { discount_amount: Number(e.target.value), discount_percent: 0, additional_discount_percent: 0 })} fullWidth />
+                            <TextField size="small" label="Discount 1 %" type="number" value={batch.discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchEditItem(batch.key, { discount_percent: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Discount 2 %" type="number" value={batch.additional_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchEditItem(batch.key, { additional_discount_percent: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Discount 3 %" type="number" value={batch.other_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchEditItem(batch.key, { other_discount_percent: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Scheme Discount %" type="number" value={batch.scheme_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchEditItem(batch.key, { scheme_discount_percent: Number(e.target.value) })} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.5}>
+                            <TextField size="small" label="Scheme Note" placeholder="e.g. 9+1" value={batch.discount_note || ''} onChange={(e) => patchEditItem(batch.key, { discount_note: e.target.value })} inputProps={{ maxLength: 80 }} fullWidth />
+                          </Grid>
+                          <Grid item xs={6} md={1.2}>
+                            <TextField size="small" label="Discount (Rs)" type="number" value={batch.discount_amount || 0} onChange={(e) => patchEditItem(batch.key, { discount_amount: Number(e.target.value), discount_percent: 0, additional_discount_percent: 0, scheme_discount_percent: 0, other_discount_percent: 0 })} fullWidth />
                           </Grid>
                           <Grid item xs={6} md={1.2}>
                             <TextField size="small" label="Round Off (+/-)" type="number" value={batch.rounding_adjustment ?? 0} onChange={(e) => patchEditItem(batch.key, { rounding_adjustment: e.target.value })} fullWidth />

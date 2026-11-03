@@ -82,6 +82,9 @@ function makeEmptyItem(): DraftItem {
     gst_percent: 0,
     discount_percent: 0,
     additional_discount_percent: 0,
+    scheme_discount_percent: 0,
+    other_discount_percent: 0,
+    discount_note: '',
     discount_amount: 0,
     rounding_adjustment: 0,
     loose_sale_enabled: false,
@@ -118,6 +121,9 @@ function cloneItemForNewExpiry(item: DraftItem, copyPrices: boolean): DraftItem 
     gst_percent: copyPrices ? Number(item.gst_percent || 0) : 0,
     discount_percent: copyPrices ? Number(item.discount_percent || 0) : 0,
     additional_discount_percent: copyPrices ? Number(item.additional_discount_percent || 0) : 0,
+    scheme_discount_percent: copyPrices ? Number(item.scheme_discount_percent || 0) : 0,
+    other_discount_percent: copyPrices ? Number(item.other_discount_percent || 0) : 0,
+    discount_note: copyPrices ? String(item.discount_note || '') : '',
     discount_amount: 0,
     rounding_adjustment: copyPrices ? safeNumber(item.rounding_adjustment) : 0,
   }
@@ -153,24 +159,30 @@ function lineGrossTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price'>) {
   return Number(item.sealed_qty || 0) * Number(item.cost_price || 0)
 }
 
-function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'rounding_adjustment'>) {
+function lineBaseTotal(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'scheme_discount_percent' | 'other_discount_percent' | 'rounding_adjustment'>) {
   // Keep this cent-for-cent identical to the server. Each discount component is
   // rounded before the next one is calculated; rounding only the final result can
   // make the UI's chosen invoice total differ from the value that is persisted.
   const gross = round2(lineGrossTotal(item))
-  const firstPercent = Math.min(100, Math.max(0, Number(item.discount_percent || 0)))
-  const additionalPercent = Math.min(100, Math.max(0, Number(item.additional_discount_percent || 0)))
-  const firstDiscount = round2(gross * firstPercent / 100)
-  const additionalDiscount = round2(Math.max(0, gross - firstDiscount) * additionalPercent / 100)
-  return round2(gross - firstDiscount - additionalDiscount + safeNumber(item.rounding_adjustment))
+  const percentages = [
+    item.discount_percent,
+    item.additional_discount_percent,
+    item.other_discount_percent,
+    item.scheme_discount_percent,
+  ].map((value) => Math.min(100, Math.max(0, Number(value || 0))))
+  const net = percentages.reduce((remaining, percent) => {
+    const component = round2(remaining * percent / 100)
+    return round2(Math.max(0, remaining - component))
+  }, gross)
+  return round2(net + safeNumber(item.rounding_adjustment))
 }
 
-function lineGstAmount(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'rounding_adjustment' | 'gst_percent'>) {
+function lineGstAmount(item: Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'scheme_discount_percent' | 'other_discount_percent' | 'rounding_adjustment' | 'gst_percent'>) {
   return round2(Math.max(0, lineBaseTotal(item)) * Number(item.gst_percent || 0) / 100)
 }
 
 function invoiceGst(
-  items: Array<Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'rounding_adjustment' | 'gst_percent'>>,
+  items: Array<Pick<DraftItem, 'sealed_qty' | 'cost_price' | 'discount_percent' | 'additional_discount_percent' | 'scheme_discount_percent' | 'other_discount_percent' | 'rounding_adjustment' | 'gst_percent'>>,
   discountAmount: number,
 ) {
   const subtotal = round2(items.reduce((sum, item) => round2(sum + lineBaseTotal(item)), 0))
@@ -227,8 +239,53 @@ function hasDraftItemContent(item: DraftItem) {
     Number(item.cost_price || 0) ||
     Number(item.discount_percent || 0) ||
     Number(item.additional_discount_percent || 0) ||
+    Number(item.scheme_discount_percent || 0) ||
+    Number(item.other_discount_percent || 0) ||
+    item.discount_note?.trim() ||
     safeNumber(item.rounding_adjustment),
   )
+}
+
+function purchaseItemFinanciallyMatchesDraft(item: DraftItem, purchase?: Purchase | null) {
+  if (!purchase || !item.purchase_item_id) return false
+  const saved = purchase.items.find((row) => Number(row.id) === Number(item.purchase_item_id))
+  if (!saved) return false
+  return Number(item.sealed_qty || 0) === Number(saved.sealed_qty || 0)
+    && Number(item.free_qty || 0) === Number(saved.free_qty || 0)
+    && round2(Number(item.cost_price || 0)) === round2(Number(saved.cost_price || 0))
+    && round2(Number(item.mrp || 0)) === round2(Number(saved.mrp || 0))
+    && round2(Number(item.gst_percent || 0)) === round2(Number(saved.gst_percent || 0))
+    && round2(Number(item.discount_percent || 0)) === round2(Number(saved.discount_percent || 0))
+    && round2(Number(item.additional_discount_percent || 0)) === round2(Number(saved.additional_discount_percent || 0))
+    && round2(Number(item.other_discount_percent || 0)) === round2(Number(saved.other_discount_percent || 0))
+    && round2(Number(item.scheme_discount_percent || 0)) === round2(Number(saved.scheme_discount_percent || 0))
+    && round2(safeNumber(item.rounding_adjustment)) === round2(Number(saved.rounding_adjustment || 0))
+}
+
+function purchaseEditPreview(draftItems: DraftItem[], purchase?: Purchase | null) {
+  const active = draftItems.filter(hasDraftItemContent)
+  const bases = active.map((item) => {
+    if (purchaseItemFinanciallyMatchesDraft(item, purchase)) {
+      return round2(Number(purchase?.items.find((row) => Number(row.id) === Number(item.purchase_item_id))?.line_total || 0))
+    }
+    return lineBaseTotal(item)
+  })
+  const subtotal = bases.reduce((sum, amount) => round2(sum + amount), 0)
+  const financialChanged = !purchase
+    || active.length !== purchase.items.length
+    || active.some((item) => !purchaseItemFinanciallyMatchesDraft(item, purchase))
+  const discount = Number(purchase?.discount_amount || 0)
+  let gst = Number(purchase?.gst_amount || 0)
+  if (financialChanged && subtotal > 0) {
+    const factor = Math.max(0, round2(subtotal - round2(discount))) / subtotal
+    const rawGst = active.reduce(
+      (sum, item, index) => round2(sum + round2(Math.max(0, bases[index]) * Number(item.gst_percent || 0) / 100)),
+      0,
+    )
+    gst = round2(rawGst * factor)
+  }
+  const total = round2(subtotal - round2(discount) + round2(gst) + round2(Number(purchase?.rounding_adjustment || 0)))
+  return { subtotal, gst, total, financialChanged }
 }
 
 function withSingleTrailingEmptyPurchaseRow(rows: DraftItem[]) {
@@ -1140,6 +1197,9 @@ export default function PurchasesPage() {
         gst_percent: item.gst_percent,
         discount_percent: item.discount_percent,
         additional_discount_percent: item.additional_discount_percent,
+        scheme_discount_percent: item.scheme_discount_percent,
+        other_discount_percent: item.other_discount_percent,
+        discount_note: item.discount_note || '',
         discount_amount: 0,
         rounding_adjustment: item.rounding_adjustment || 0,
         loose_sale_enabled: false,
@@ -1159,6 +1219,7 @@ export default function PurchasesPage() {
       product_name: item.product_name.trim(),
       alias: item.alias?.trim() || undefined,
       brand: item.brand?.trim() || undefined,
+      discount_note: item.discount_note?.trim() || undefined,
       expiry_date: item.expiry_date?.trim() || undefined,
       gst_percent: Number(item.gst_percent || 0),
       rounding_adjustment: safeNumber(item.rounding_adjustment),
@@ -1196,6 +1257,8 @@ export default function PurchasesPage() {
       gst_percent: 0,
       discount_percent: 0,
       additional_discount_percent: 0,
+      scheme_discount_percent: 0,
+      other_discount_percent: 0,
       discount_amount: 0,
       rounding_adjustment: 0,
     }))
@@ -1352,6 +1415,10 @@ export default function PurchasesPage() {
       toast.push('Received date is required', 'error')
       return
     }
+    if (editBillAmount + 0.0001 < editCoveredAmount) {
+      toast.push(`Cannot save: new bill total Rs ${money(editBillAmount)} is below settled amount Rs ${money(editCoveredAmount)}. Edit or remove the payment first.`, 'error')
+      return
+    }
     updateM.mutate({
       id: selectedPurchaseId,
       payload: {
@@ -1441,6 +1508,12 @@ export default function PurchasesPage() {
       toast.push('Each replacement purchase item needs paid qty or free qty greater than 0', 'error')
       return
     }
+    const preview = purchaseEditPreview(activeItems, selectedPurchase)
+    const settled = round2(Number(selectedPurchase?.paid_amount || 0) + Number(selectedPurchase?.writeoff_amount || 0))
+    if (preview.total + 0.0001 < settled) {
+      toast.push(`Cannot save: new bill total Rs ${money(preview.total)} is below settled amount Rs ${money(settled)}. Edit or remove the payment first.`, 'error')
+      return
+    }
     try {
       const ok = await confirmNewProductNames(activeItems)
       if (!ok) return
@@ -1511,14 +1584,15 @@ export default function PurchasesPage() {
     const patchItem = freeOnly ? updateFreeStockItem : (editMode ? updateEditItem : updateItem)
     const expandedLines = freeOnly ? expandedFreeStockLines : (editMode ? expandedEditLines : expandedDraftLines)
     const setExpandedLines = freeOnly ? setExpandedFreeStockLines : (editMode ? setExpandedEditLines : setExpandedDraftLines)
-    const draftSubtotal = draftItems.reduce(
-      (sum, item) => sum + lineBaseTotal(item),
+    const editPreview = editMode ? purchaseEditPreview(draftItems, selectedPurchase) : null
+    const draftSubtotal = editPreview?.subtotal ?? draftItems.reduce(
+      (sum, item) => round2(sum + lineBaseTotal(item)),
       0,
     )
     const headerDiscount = editMode ? Number(selectedPurchase?.discount_amount || 0) : 0
-    const headerGst = freeOnly ? 0 : invoiceGst(draftItems, headerDiscount)
+    const headerGst = freeOnly ? 0 : (editPreview?.gst ?? invoiceGst(draftItems, headerDiscount))
     const headerRoundOff = editMode ? Number(selectedPurchase?.rounding_adjustment || 0) : 0
-    const draftBillTotal = draftSubtotal - headerDiscount + headerGst + headerRoundOff
+    const draftBillTotal = editPreview?.total ?? round2(draftSubtotal - headerDiscount + headerGst + headerRoundOff)
     const draftCovered = editMode ? Number(selectedPurchase?.paid_amount || 0) + Number(selectedPurchase?.writeoff_amount || 0) : 0
     const setActiveSearchCategory = (item: DraftItem) => {
       const categoryId = item.category_id ? Number(item.category_id) : null
@@ -1660,10 +1734,19 @@ export default function PurchasesPage() {
                   <TextField size="small" label="Rate" type="number" value={batch.cost_price} onChange={(e) => patchItem(batch.key, { cost_price: Number(e.target.value) })} fullWidth />
                 </Grid>
                 <Grid item xs={6} md={1.2}>
-                  <TextField size="small" label="Discount %" type="number" value={batch.discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { discount_percent: Number(e.target.value) })} fullWidth />
+                  <TextField size="small" label="Discount 1 %" type="number" value={batch.discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { discount_percent: Number(e.target.value) })} fullWidth />
                 </Grid>
                 <Grid item xs={6} md={1.2}>
-                  <TextField size="small" label="Addl. Discount %" type="number" value={batch.additional_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { additional_discount_percent: Number(e.target.value) })} fullWidth />
+                  <TextField size="small" label="Discount 2 %" type="number" value={batch.additional_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { additional_discount_percent: Number(e.target.value) })} fullWidth />
+                </Grid>
+                <Grid item xs={6} md={1.2}>
+                  <TextField size="small" label="Discount 3 %" type="number" value={batch.other_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { other_discount_percent: Number(e.target.value) })} fullWidth />
+                </Grid>
+                <Grid item xs={6} md={1.2}>
+                  <TextField size="small" label="Scheme Discount %" type="number" value={batch.scheme_discount_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { scheme_discount_percent: Number(e.target.value) })} fullWidth />
+                </Grid>
+                <Grid item xs={6} md={1.5}>
+                  <TextField size="small" label="Scheme Note" placeholder="e.g. 5+1" value={batch.discount_note || ''} onChange={(e) => patchItem(batch.key, { discount_note: e.target.value })} inputProps={{ maxLength: 80 }} fullWidth />
                 </Grid>
                 <Grid item xs={6} md={1.2}>
                   <TextField size="small" label="GST %" type="number" value={batch.gst_percent || 0} inputProps={{ min: 0, max: 100, step: 0.01 }} onChange={(e) => patchItem(batch.key, { gst_percent: Number(e.target.value) })} fullWidth />
@@ -1673,7 +1756,7 @@ export default function PurchasesPage() {
                 </Grid>
               </>
             ) : null}
-            <Grid item xs={12} md={freeOnly ? 2 : 2.4}>
+            <Grid item xs={12} md={freeOnly ? 2 : 12}>
               {freeOnly ? (
                 <Typography variant="caption" color="text.secondary">Inward {Number(batch.sealed_qty || 0) + Number(batch.free_qty || 0)}</Typography>
               ) : batchSummaryPills(batch)}
@@ -2700,8 +2783,11 @@ export default function PurchasesPage() {
                       <th>Rate</th>
                       <th>Avg Rate</th>
                       <th>MRP</th>
-                      <th>Discount %</th>
-                      <th>Addl. Discount %</th>
+                      <th>Discount 1 %</th>
+                      <th>Discount 2 %</th>
+                      <th>Discount 3 %</th>
+                      <th>Scheme Discount %</th>
+                      <th>Scheme Note</th>
                       <th>GST %</th>
                       <th>Round Off (+/-)</th>
                       <th>Item Total</th>
@@ -2726,6 +2812,9 @@ export default function PurchasesPage() {
                         <td>{money(item.mrp)}</td>
                         <td>{money(item.discount_percent)}</td>
                         <td>{money(item.additional_discount_percent)}</td>
+                        <td>{money(item.other_discount_percent)}</td>
+                        <td>{money(item.scheme_discount_percent)}</td>
+                        <td>{item.discount_note || '-'}</td>
                         <td>{money(item.gst_percent)}</td>
                         <td>{money(item.rounding_adjustment || 0)}</td>
                         <td>{money(item.line_total)}</td>

@@ -905,6 +905,9 @@ class PurchaseItem(SQLModel, table=True):
     gst_percent: float = 0.0
     discount_percent: float = 0.0
     additional_discount_percent: float = 0.0
+    scheme_discount_percent: float = 0.0
+    other_discount_percent: float = 0.0
+    discount_note: Optional[str] = None
     discount_amount: float = 0.0
     rounding_adjustment: float = 0.0
     line_total: float = 0.0
@@ -1192,6 +1195,9 @@ class PurchaseItemIn(SQLModel):
     gst_percent: float = 0.0
     discount_percent: float = 0.0
     additional_discount_percent: float = 0.0
+    scheme_discount_percent: float = 0.0
+    other_discount_percent: float = 0.0
+    discount_note: Optional[str] = None
     discount_amount: float = 0.0
     rounding_adjustment: float = 0.0
     loose_sale_enabled: bool = False
@@ -1288,6 +1294,9 @@ class PurchaseItemOut(SQLModel):
     gst_percent: float
     discount_percent: float = 0.0
     additional_discount_percent: float = 0.0
+    scheme_discount_percent: float = 0.0
+    other_discount_percent: float = 0.0
+    discount_note: Optional[str] = None
     discount_amount: float
     rounding_adjustment: float = 0.0
     line_total: float

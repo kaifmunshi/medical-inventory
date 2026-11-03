@@ -69,6 +69,22 @@ def purchase_total_amount(subtotal: float, discount: float, gst: float, rounding
     return total
 
 
+def purchase_invoice_gst_amount(subtotal: float, discount: float, items: List[Dict[str, Any]], supplied_gst: Optional[float]) -> float:
+    """Use GST printed on the supplier invoice when the client submitted it.
+
+    Purchase entry already shows and settles against that invoice GST. Replacing
+    it with a second server-side estimate makes the accepted payment total differ
+    from the total the cashier saw. Clients that omit GST retain the legacy
+    item-derived calculation.
+    """
+    if supplied_gst is None:
+        return raw_purchase_gst_amount(subtotal, discount, items)
+    gst = round2(supplied_gst)
+    if gst < 0:
+        raise HTTPException(status_code=400, detail="GST amount cannot be negative")
+    return gst
+
+
 def purchase_line_discount(raw: PurchaseItemIn, quantity: int) -> tuple[float, float, float]:
     first_percent = round2(raw.discount_percent)
     additional_percent = round2(raw.additional_discount_percent)
@@ -923,6 +939,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
     purchase_stock_ts = purchase_event_ts(purchase.received_date or purchase.invoice_date, purchase.created_at)
     ts = now_ts()
     changed_lines: List[Dict[str, Any]] = []
+    money_changed = False
 
     for raw in raw_items:
         purchase_item_id = _purchase_item_edit_id(raw)
@@ -998,6 +1015,7 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
             line_total = round2(item.line_total)
             effective_cost = round2(item.effective_cost_price)
         else:
+            money_changed = True
             line_rounding = round2(raw.rounding_adjustment)
             line_discount, discount_percent, additional_discount_percent = purchase_line_discount(raw, qty)
             line_total = round2((qty * float(raw.cost_price or 0)) - line_discount + line_rounding)
@@ -1066,10 +1084,18 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         if old_expiry != new_expiry:
             changed_lines.append({"purchase_item_id": int(item.id), "old_expiry": old_expiry, "new_expiry": new_expiry})
 
-    next_gst_amount = purchase_gst_amount(
-        subtotal_amount,
-        purchase.discount_amount,
-        list(existing_by_id.values()),
+    # Preserve supplier-invoice GST for non-monetary edits (expiry, rack, etc.).
+    # Re-estimating GST here used to mutate the invoice total even though no
+    # price or tax input changed, which could make an already-paid invoice fail
+    # validation by a few paise.
+    next_gst_amount = (
+        purchase_gst_amount(
+            subtotal_amount,
+            purchase.discount_amount,
+            list(existing_by_id.values()),
+        )
+        if money_changed
+        else round2(purchase.gst_amount)
     )
     next_total_amount = purchase_total_amount(
         subtotal_amount,
@@ -1491,7 +1517,12 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
             )
 
         discount_amount = round2(payload.discount_amount)
-        gst_amount = raw_purchase_gst_amount(subtotal_amount, discount_amount, prepared_items)
+        gst_amount = purchase_invoice_gst_amount(
+            subtotal_amount,
+            discount_amount,
+            prepared_items,
+            payload.gst_amount,
+        )
         rounding_adjustment = round2(payload.rounding_adjustment)
         total_amount = purchase_total_amount(subtotal_amount, discount_amount, gst_amount, rounding_adjustment)
 
@@ -1543,7 +1574,13 @@ def create_purchase(payload: PurchaseCreate) -> PurchaseOut:
                 paid_amount = round2(paid_amount + amount)
 
         if paid_amount + writeoff_amount > total_amount + 0.0001:
-            raise HTTPException(status_code=400, detail="Payments and write-offs exceed purchase total")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Payments and write-offs ({paid_amount + writeoff_amount:.2f}) "
+                    f"exceed purchase total ({total_amount:.2f})"
+                ),
+            )
         credit_to_apply = round2(sum(
             float(payment["amount"] or 0) for payment in prepared_payments if payment["is_supplier_credit"]
         ))

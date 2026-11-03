@@ -777,7 +777,10 @@ export default function PurchasesPage() {
   const selectedPurchase = selectedPurchaseQ.data || null
   const editSubtotal = Number(selectedPurchase?.subtotal_amount || 0)
   const editDiscountValue = Number(editDiscountAmount || 0)
-  const editGstAmount = invoiceGst(selectedPurchase?.items || [], editDiscountValue)
+  const editDiscountChanged = round2(editDiscountValue) !== round2(Number(selectedPurchase?.discount_amount || 0))
+  const editGstAmount = editDiscountChanged
+    ? invoiceGst(selectedPurchase?.items || [], editDiscountValue)
+    : Number(selectedPurchase?.gst_amount || 0)
   const editRoundingValue = Number(editRoundingAdjustment || 0)
   const editBillAmount = round2(editSubtotal - editDiscountValue + editGstAmount + editRoundingValue)
   const editPaidAmount = Number(selectedPurchase?.paid_amount || 0)

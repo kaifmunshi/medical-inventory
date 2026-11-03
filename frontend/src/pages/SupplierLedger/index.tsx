@@ -183,6 +183,18 @@ function lineEffectiveCost(item: Pick<DraftItem, 'sealed_qty' | 'free_qty' | 'co
   return lineBaseTotal(item) / totalQty
 }
 
+function purchaseGstAfterInvoiceDiscount(purchase: Purchase, discountAmount: number) {
+  const subtotal = round2(Number(purchase.subtotal_amount || 0))
+  if (subtotal <= 0) return 0
+  const taxableAfterDiscount = Math.max(0, round2(subtotal - round2(discountAmount)))
+  const factor = taxableAfterDiscount / subtotal
+  const lineGst = purchase.items.reduce(
+    (sum, item) => round2(sum + round2(Math.max(0, Number(item.line_total || 0)) * Number(item.gst_percent || 0) / 100)),
+    0,
+  )
+  return round2(lineGst * factor)
+}
+
 function fmtDate(value?: string | null) {
   const raw = String(value || '')
   if (!raw) return '-'
@@ -394,8 +406,11 @@ export default function SupplierLedgerPage() {
     [editItems],
   )
   const editSubtotal = Number(selectedPurchase?.subtotal_amount || 0)
-  const editGstAmount = Number(selectedPurchase?.gst_amount || 0)
   const editDiscountValue = Number(editDiscountAmount || 0)
+  const editDiscountChanged = round2(editDiscountValue) !== round2(Number(selectedPurchase?.discount_amount || 0))
+  const editGstAmount = selectedPurchase && editDiscountChanged
+    ? purchaseGstAfterInvoiceDiscount(selectedPurchase, editDiscountValue)
+    : Number(selectedPurchase?.gst_amount || 0)
   const editRoundingValue = Number(editRoundingAdjustment || 0)
   const editBillAmount = editSubtotal - editDiscountValue + editGstAmount + editRoundingValue
   const editPaidAmount = Number(selectedPurchase?.paid_amount || 0)

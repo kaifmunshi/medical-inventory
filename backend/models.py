@@ -1221,7 +1221,10 @@ class PurchaseCreate(SQLModel):
     received_date: Optional[str] = None
     notes: Optional[str] = None
     discount_amount: float = 0.0
-    gst_amount: float = 0.0
+    # Supplier invoices are the source of truth for input GST.  When a client
+    # supplies the invoice GST, preserve it exactly; older/import clients may
+    # omit it and let the server derive GST from the item lines.
+    gst_amount: Optional[float] = None
     rounding_adjustment: float = 0.0
     items: List[PurchaseItemIn]
     payments: List[PurchasePaymentIn] = []

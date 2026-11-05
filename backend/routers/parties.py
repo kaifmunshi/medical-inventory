@@ -144,9 +144,18 @@ def _recalculate_bill_payment_state(session, bill: Bill) -> None:
     receipt_payments = [payment for payment in payments if not bool(getattr(payment, "is_writeoff", False))]
     writeoff_payments = [payment for payment in payments if bool(getattr(payment, "is_writeoff", False))]
 
-    total_cash = _round2(sum(_as_float(payment.cash_amount) for payment in receipt_payments))
-    total_online = _round2(sum(_as_float(payment.online_amount) for payment in receipt_payments))
-    total_paid = _round2(total_cash + total_online)
+    exchange = session.exec(
+        select(ExchangeRecord).where(ExchangeRecord.new_bill_id == int(bill.id or 0))
+    ).first()
+    exchange_cash = _round2(_as_float(exchange.payment_cash)) if exchange else 0.0
+    exchange_online = _round2(_as_float(exchange.payment_online)) if exchange else 0.0
+    exchange_settled_by_return = _round2(
+        max(0.0, _as_float(bill.total_amount) - max(0.0, _as_float(exchange.net_due)))
+    ) if exchange else 0.0
+
+    total_cash = _round2(exchange_cash + sum(_as_float(payment.cash_amount) for payment in receipt_payments))
+    total_online = _round2(exchange_online + sum(_as_float(payment.online_amount) for payment in receipt_payments))
+    total_paid = _round2(exchange_settled_by_return + total_cash + total_online)
     total_writeoff = _round2(sum(_as_float(getattr(payment, "writeoff_amount", 0.0)) for payment in writeoff_payments))
     bill_total = _round2(_as_float(bill.total_amount))
     covered = _round2(total_paid + total_writeoff)
@@ -421,6 +430,32 @@ def _sync_customer_debtor_parties(session) -> None:
         if changed:
             party.updated_at = ts
             session.add(party)
+            dirty = True
+    # Exchange replacement bills historically did not copy the source bill's
+    # customer linkage, so they disappeared from the customer ledger. Repair
+    # those rows in place as the ledger is loaded, while preserving any newer
+    # explicit linkage already stored on the replacement bill.
+    for exchange in session.exec(select(ExchangeRecord)).all():
+        source_bill = session.get(Bill, int(exchange.source_bill_id or 0))
+        new_bill = session.get(Bill, int(exchange.new_bill_id or 0))
+        if not source_bill or not new_bill:
+            continue
+        source_party = _debtor_party_for_bill(session, source_bill)
+        changed = False
+        if new_bill.customer_id is None and source_bill.customer_id is not None:
+            new_bill.customer_id = int(source_bill.customer_id)
+            changed = True
+        if new_bill.party_id is None and source_bill.party_id is not None:
+            new_bill.party_id = int(source_bill.party_id)
+            changed = True
+        if new_bill.party_id is None and source_party and source_party.id is not None:
+            new_bill.party_id = int(source_party.id)
+            changed = True
+        if new_bill.customer_id is None and source_party and source_party.legacy_customer_id is not None:
+            new_bill.customer_id = int(source_party.legacy_customer_id)
+            changed = True
+        if changed:
+            session.add(new_bill)
             dirty = True
     if dirty:
         session.commit()
@@ -734,7 +769,6 @@ def debtor_returns(party_id: int) -> List[CustomerReturnLedgerRow]:
 
         bills = session.exec(
             select(Bill)
-            .where(Bill.is_deleted == False)  # noqa: E712
             .where(_bill_matches_party_expr(party, customer_name))
         ).all()
         bill_ids = [int(bill.id) for bill in bills if bill.id is not None]
@@ -786,6 +820,13 @@ def debtor_returns(party_id: int) -> List[CustomerReturnLedgerRow]:
                     credit_amount=_return_credit_amount(row),
                     exchange_id=int(exchange.id) if exchange and exchange.id is not None else None,
                     exchange_new_bill_id=int(exchange.new_bill_id) if exchange and exchange.new_bill_id is not None else None,
+                    exchange_theoretical_net=_round2(exchange.theoretical_net) if exchange else None,
+                    exchange_net_due=_round2(exchange.net_due) if exchange else None,
+                    exchange_payment_mode=str(exchange.payment_mode or "cash") if exchange else None,
+                    exchange_payment_cash=_round2(exchange.payment_cash) if exchange else 0.0,
+                    exchange_payment_online=_round2(exchange.payment_online) if exchange else 0.0,
+                    exchange_refund_cash=_round2(exchange.refund_cash) if exchange else 0.0,
+                    exchange_refund_online=_round2(exchange.refund_online) if exchange else 0.0,
                     notes=row.notes,
                     items=items,
                 )

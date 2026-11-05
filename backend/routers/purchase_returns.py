@@ -75,6 +75,13 @@ def _out(session, row: PurchaseReturn) -> PurchaseReturnOut:
     data = row.model_dump()
     data["purchase_id"] = int(row.purchase_id or 0) or None
     data["settlement_purchase_id"] = int(row.settlement_purchase_id or 0) or None
+    source_purchase = session.get(Purchase, int(row.purchase_id or 0)) if int(row.purchase_id or 0) > 0 else None
+    settlement_purchase = session.get(Purchase, int(row.settlement_purchase_id or 0)) if int(row.settlement_purchase_id or 0) > 0 else None
+    data["source_purchase_invoice_number"] = source_purchase.invoice_number if source_purchase else None
+    data["settlement_purchase_invoice_number"] = settlement_purchase.invoice_number if settlement_purchase else None
+    data["settlement_purchase_total"] = round2(settlement_purchase.total_amount) if settlement_purchase else None
+    data["settlement_purchase_status"] = str(settlement_purchase.payment_status or "UNPAID") if settlement_purchase else None
+    data["settlement_purchase_is_deleted"] = bool(settlement_purchase.is_deleted) if settlement_purchase else False
     out_items = []
     for item in items:
         item_data = item.model_dump()

@@ -330,6 +330,11 @@ export interface PurchaseReturn {
   id: ID
   purchase_id?: ID | null
   settlement_purchase_id?: ID | null
+  source_purchase_invoice_number?: string | null
+  settlement_purchase_invoice_number?: string | null
+  settlement_purchase_total?: number | null
+  settlement_purchase_status?: string | null
+  settlement_purchase_is_deleted?: boolean
   party_id: ID
   transaction_type: 'PURCHASE_RETURN' | 'TRADE_IN'
   return_number: string
@@ -411,6 +416,13 @@ export interface CustomerReturnLedgerRow {
   credit_amount: number
   exchange_id?: ID | null
   exchange_new_bill_id?: ID | null
+  exchange_theoretical_net?: number | null
+  exchange_net_due?: number | null
+  exchange_payment_mode?: 'cash' | 'online' | 'split' | 'credit' | null
+  exchange_payment_cash?: number
+  exchange_payment_online?: number
+  exchange_refund_cash?: number
+  exchange_refund_online?: number
   notes?: string | null
   items?: Array<{
     item_id: ID

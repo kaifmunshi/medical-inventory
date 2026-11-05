@@ -1403,6 +1403,8 @@ def create_exchange(payload: ExchangeCreate):
         merged_notes = f"{base_note}\n{exchange_note}" if base_note else exchange_note
 
         b = Bill(
+            customer_id=int(bill.customer_id) if bill and bill.customer_id is not None else None,
+            party_id=int(bill.party_id) if bill and bill.party_id is not None else None,
             discount_percent=payload.discount_percent,
             subtotal=bill_subtotal,
             total_amount=bill_total,

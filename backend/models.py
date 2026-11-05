@@ -1404,6 +1404,11 @@ class PurchaseReturnOut(SQLModel):
     id: int
     purchase_id: Optional[int] = None
     settlement_purchase_id: Optional[int] = None
+    source_purchase_invoice_number: Optional[str] = None
+    settlement_purchase_invoice_number: Optional[str] = None
+    settlement_purchase_total: Optional[float] = None
+    settlement_purchase_status: Optional[str] = None
+    settlement_purchase_is_deleted: bool = False
     party_id: int
     transaction_type: str = "PURCHASE_RETURN"
     return_number: str
@@ -1483,6 +1488,13 @@ class CustomerReturnLedgerRow(SQLModel):
     credit_amount: float = 0.0
     exchange_id: Optional[int] = None
     exchange_new_bill_id: Optional[int] = None
+    exchange_theoretical_net: Optional[float] = None
+    exchange_net_due: Optional[float] = None
+    exchange_payment_mode: Optional[str] = None
+    exchange_payment_cash: float = 0.0
+    exchange_payment_online: float = 0.0
+    exchange_refund_cash: float = 0.0
+    exchange_refund_online: float = 0.0
     notes: Optional[str] = None
     items: List[CustomerReturnLedgerItem] = []
 

@@ -440,6 +440,10 @@ export default function SupplierLedgerPage() {
   const purchases = purchasesQ.data || []
   const supplierPayments = supplierPaymentsQ.data || []
   const purchaseReturns = purchaseReturnsQ.data || []
+  const purchaseReturnExchanges = purchaseReturns.filter((row) => (
+    Number(row.settlement_purchase_id || 0) > 0
+    && (Number(row.settlement_purchase_id || 0) !== Number(row.purchase_id || 0) || row.transaction_type === 'TRADE_IN')
+  ))
   const openingBalance = openingForSupplier(selectedSupplier)
   const openPurchases = purchases.filter((purchase) => outstandingOf(purchase) > 0.0001)
   const paymentAllocationPurchases = purchases.filter(
@@ -1776,6 +1780,86 @@ export default function SupplierLedgerPage() {
             <Chip label={`Supplier Credit: Rs ${money(ledgerQ.data?.supplier_credit || 0)}`} color={Number(ledgerQ.data?.supplier_credit || 0) > 0 ? 'info' : 'default'} variant="outlined" />
             <Chip label={`Closing: Rs ${money(totals.closingBalance)}`} color="primary" />
           </Stack>
+        </Paper>
+      )}
+
+      {partyId && (
+        <Paper sx={{ p: 2 }}>
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} mb={2}>
+            <Typography variant="h6" fontWeight={800}>Purchase Return Exchange History</Typography>
+            <Chip label={`${purchaseReturnExchanges.length} exchanges`} variant="outlined" sx={{ fontWeight: 800 }} />
+          </Stack>
+          <Box sx={{ overflowX: 'auto' }}>
+            <table className="table" style={{ minWidth: 1100 }}>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Return / Trade-in</th>
+                  <th>Source Purchase</th>
+                  <th>Incoming Purchase</th>
+                  <th style={{ textAlign: 'right' }}>Return Value</th>
+                  <th style={{ textAlign: 'right' }}>Incoming Value</th>
+                  <th style={{ textAlign: 'right' }}>Net Difference</th>
+                  <th style={{ textAlign: 'right' }}>Cash Refund</th>
+                  <th style={{ textAlign: 'right' }}>Online Refund</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {purchaseReturnExchanges.map((row) => {
+                  const incomingTotal = Number(row.settlement_purchase_total || 0)
+                  const returnValue = Number(row.total_amount || 0)
+                  const difference = round2(incomingTotal - returnValue)
+                  const sourcePurchase = purchases.find((purchase) => Number(purchase.id) === Number(row.purchase_id))
+                  const incomingPurchase = purchases.find((purchase) => Number(purchase.id) === Number(row.settlement_purchase_id))
+                  return (
+                    <tr key={`purchase-return-exchange-${row.id}`} style={{ opacity: row.is_deleted ? 0.62 : 1 }}>
+                      <td style={{ whiteSpace: 'nowrap' }}>{row.return_date}</td>
+                      <td>
+                        <Typography fontWeight={800}>{row.transaction_type === 'TRADE_IN' ? 'Trade-in' : 'Purchase Return'} {row.return_number}</Typography>
+                        <Typography variant="caption" color="text.secondary">#{row.id}{row.is_deleted ? ' · Cancelled' : ''}</Typography>
+                      </td>
+                      <td>
+                        {sourcePurchase ? (
+                          <Link component="button" underline="hover" onClick={() => setSelectedPurchaseId(Number(sourcePurchase.id))} sx={{ fontWeight: 800 }}>
+                            {row.source_purchase_invoice_number || sourcePurchase.invoice_number || `Purchase #${sourcePurchase.id}`}
+                          </Link>
+                        ) : row.purchase_id ? (row.source_purchase_invoice_number || `Purchase #${row.purchase_id}`) : 'Legacy stock'}
+                      </td>
+                      <td>
+                        {incomingPurchase ? (
+                          <Link component="button" underline="hover" onClick={() => setSelectedPurchaseId(Number(incomingPurchase.id))} sx={{ fontWeight: 800 }}>
+                            {row.settlement_purchase_invoice_number || incomingPurchase.invoice_number || `Purchase #${incomingPurchase.id}`}
+                          </Link>
+                        ) : (row.settlement_purchase_invoice_number || `Purchase #${row.settlement_purchase_id}`)}
+                        {row.settlement_purchase_is_deleted ? <Typography variant="caption" color="error.main" display="block">Cancelled purchase</Typography> : null}
+                      </td>
+                      <td style={{ textAlign: 'right' }}>{money(returnValue)}</td>
+                      <td style={{ textAlign: 'right' }}>{money(incomingTotal)}</td>
+                      <td style={{ textAlign: 'right' }}>
+                        <Typography fontWeight={800} color={difference > 0 ? 'warning.main' : difference < 0 ? 'info.main' : 'success.main'}>
+                          {difference > 0 ? `Pay Rs ${money(difference)}` : difference < 0 ? `Credit Rs ${money(Math.abs(difference))}` : 'Even'}
+                        </Typography>
+                      </td>
+                      <td style={{ textAlign: 'right' }}>{money(row.refund_cash)}</td>
+                      <td style={{ textAlign: 'right' }}>{money(row.refund_online)}</td>
+                      <td>
+                        <Chip
+                          size="small"
+                          label={row.is_deleted ? 'Cancelled' : row.settlement_purchase_status || 'Active'}
+                          color={row.is_deleted || row.settlement_purchase_is_deleted ? 'default' : row.settlement_purchase_status === 'PAID' ? 'success' : 'warning'}
+                          variant="outlined"
+                        />
+                      </td>
+                    </tr>
+                  )
+                })}
+                {purchaseReturnExchanges.length === 0 ? (
+                  <tr><td colSpan={10}><Box p={2} color="text.secondary">No purchase-return exchanges for this supplier yet.</Box></td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </Box>
         </Paper>
       )}
 

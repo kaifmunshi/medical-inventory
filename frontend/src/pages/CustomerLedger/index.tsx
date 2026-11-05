@@ -135,7 +135,7 @@ type SortState<Key extends string> = { key: Key; direction: SortDirection }
 type BillSortKey = 'bill_id' | 'bill_date' | 'total_amount' | 'paid_amount' | 'writeoff_amount' | 'outstanding_amount' | 'payment_status'
 type ReturnSortKey = 'return_id' | 'date_time' | 'source_bill_id' | 'refund_mode' | 'credit_amount' | 'refund_cash' | 'refund_online' | 'settlement_total'
 type ReceiptSortKey = 'receiptId' | 'when' | 'mode' | 'cash' | 'online' | 'total' | 'adjusted' | 'onAccount'
-type LedgerSectionKey = 'openBills' | 'billLedger' | 'returns' | 'receipts'
+type LedgerSectionKey = 'openBills' | 'billLedger' | 'exchanges' | 'returns' | 'receipts'
 
 function compareSortValues(a: string | number, b: string | number) {
   if (typeof a === 'number' && typeof b === 'number') return a - b
@@ -399,6 +399,7 @@ export default function CustomerLedgerPage() {
   const [sectionOpen, setSectionOpen] = useState<Record<LedgerSectionKey, boolean>>({
     openBills: false,
     billLedger: false,
+    exchanges: false,
     returns: false,
     receipts: false,
   })
@@ -714,11 +715,14 @@ export default function CustomerLedgerPage() {
     [openBills, otherReceiptOpenBillsQ.data, otherReceiptParty?.id, otherReceiptParty?.name, selectedParty?.id, selectedParty?.name],
   )
   const returnRows = returnsQ.data || []
+  const exchangeRows = returnRows.filter((row) => Boolean(row.exchange_id))
   const receipts = receiptsQ.data || []
   const adjustments = receiptAdjustmentsQ.data || []
   const totalOutstanding = ledgerRows.reduce((sum, row) => sum + Number(row.outstanding_amount || 0), 0)
   const totalReturnCredit = returnRows.reduce((sum, row) => sum + Number(row.credit_amount || 0), 0)
   const totalReturnRefund = returnRows.reduce((sum, row) => sum + Number(row.refund_cash || 0) + Number(row.refund_online || 0), 0)
+  const totalExchangePaid = exchangeRows.reduce((sum, row) => sum + Number(row.exchange_payment_cash || 0) + Number(row.exchange_payment_online || 0), 0)
+  const totalExchangeRefunded = exchangeRows.reduce((sum, row) => sum + Number(row.exchange_refund_cash || 0) + Number(row.exchange_refund_online || 0), 0)
   const adjustmentTotal = Object.values(adjustmentDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
   const receiptTotal = Number(receiptAmount || 0)
   const receiptCashAmount = mode === 'cash' ? receiptTotal : mode === 'online' ? 0 : Number(cashAmount || 0)
@@ -944,6 +948,7 @@ export default function CustomerLedgerPage() {
     setSectionOpen((prev) => ({
       openBills: false,
       billLedger: false,
+      exchanges: false,
       returns: false,
       receipts: false,
       [key]: !prev[key],
@@ -1686,6 +1691,71 @@ export default function CustomerLedgerPage() {
                   </td>
                 </tr>
               )}
+            </tbody>
+          </table>
+        </Box>
+      </CollapsibleLedgerSection>
+
+      <CollapsibleLedgerSection
+        title="Exchange History"
+        open={sectionOpen.exchanges}
+        onToggle={() => toggleSection('exchanges')}
+        summary={
+          <>
+            <Chip size="small" variant="outlined" label={`${exchangeRows.length} exchanges`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color="success" variant="outlined" label={`Collected Rs ${money(totalExchangePaid)}`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color="secondary" variant="outlined" label={`Refunded Rs ${money(totalExchangeRefunded)}`} sx={{ fontWeight: 800 }} />
+          </>
+        }
+      >
+        <Box sx={receiptGridSx}>
+          <table className="table customer-ledger-grid">
+            <thead>
+              <tr>
+                <th>Exchange</th>
+                <th className="date-col">Date</th>
+                <th>Source Bill</th>
+                <th>Sales Return</th>
+                <th>New Bill</th>
+                <th className="amount-col">Return Value</th>
+                <th className="amount-col">Net Difference</th>
+                <th className="mode-col">Mode</th>
+                <th className="amount-col">Cash</th>
+                <th className="amount-col">Online</th>
+                <th className="amount-col">Refund</th>
+              </tr>
+            </thead>
+            <tbody>
+              {exchangeRows.map((row) => {
+                const net = Number(row.exchange_net_due || 0)
+                const refund = Number(row.exchange_refund_cash || 0) + Number(row.exchange_refund_online || 0)
+                return (
+                  <tr key={`exchange-${row.exchange_id}`}>
+                    <td><Typography fontWeight={800}>Exchange #{row.exchange_id}</Typography></td>
+                    <td className="date-col"><LedgerDateCell value={row.date_time} /></td>
+                    <td>
+                      {row.source_bill_id ? <Link component="button" underline="hover" onClick={() => openBillDetail(Number(row.source_bill_id))} sx={{ fontWeight: 800 }}>Bill #{row.source_bill_id}</Link> : '-'}
+                    </td>
+                    <td><Typography fontWeight={700}>Return #{row.return_id}</Typography></td>
+                    <td>
+                      {row.exchange_new_bill_id ? <Link component="button" underline="hover" onClick={() => openBillDetail(Number(row.exchange_new_bill_id))} sx={{ fontWeight: 800 }}>Bill #{row.exchange_new_bill_id}</Link> : '-'}
+                    </td>
+                    <td className="amount-col"><MoneyCell value={row.subtotal_return} strong /></td>
+                    <td className="amount-col">
+                      <Typography fontWeight={800} color={net > 0 ? 'error.main' : net < 0 ? 'success.main' : 'text.primary'}>
+                        {net > 0 ? `Pay Rs ${money(net)}` : net < 0 ? `Refund Rs ${money(Math.abs(net))}` : 'Even'}
+                      </Typography>
+                    </td>
+                    <td>{modeChip(row.exchange_payment_mode || 'cash')}</td>
+                    <td className="amount-col"><MoneyCell value={row.exchange_payment_cash || 0} /></td>
+                    <td className="amount-col"><MoneyCell value={row.exchange_payment_online || 0} /></td>
+                    <td className="amount-col"><MoneyCell value={refund} /></td>
+                  </tr>
+                )
+              })}
+              {exchangeRows.length === 0 ? (
+                <tr><td colSpan={11}><Box p={2} color="text.secondary">{selectedParty ? 'No exchanges for this customer yet.' : 'Select a customer to view exchanges.'}</Box></td></tr>
+              ) : null}
             </tbody>
           </table>
         </Box>

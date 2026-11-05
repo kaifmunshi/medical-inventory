@@ -29,7 +29,7 @@ import BillPaymentsPanel from './BillPaymentsPanel'
 import { useUserSession } from '../session/UserSessionProvider'
 
 type EditMode = 'cash' | 'online' | 'split' | 'credit'
-type EditSplitCombination = 'cash-online' | 'cash-credit' | 'online-credit'
+type EditSplitCombination = 'cash-online' | 'cash-credit' | 'online-credit' | 'cash-online-credit'
 type EditLine = {
   item_id: number
   item_name: string
@@ -178,6 +178,7 @@ function inferEditPaymentShape(bill: any): { mode: EditMode; splitCombination: E
   if (credit > 0.009) {
     if (cash > 0.009 && online <= 0.009) splitCombination = 'cash-credit'
     if (online > 0.009 && cash <= 0.009) splitCombination = 'online-credit'
+    if (cash > 0.009 && online > 0.009) splitCombination = 'cash-online-credit'
   }
 
   const mode =
@@ -919,7 +920,7 @@ export default function BillEditDialog({
   const editDiscountAmount = useMemo(() => Math.max(0, round2(editSubtotal - editFinalByRows)), [editSubtotal, editFinalByRows])
   const editEffectiveDiscountPercent = useMemo(() => (editSubtotal > 0 ? (editDiscountAmount / editSubtotal) * 100 : 0), [editSubtotal, editDiscountAmount])
   const editSplitCreditAmount = useMemo(
-    () => round2(editSplitCombination === 'cash-credit' ? editSettlementTotal - Number(editCash || 0) : editSplitCombination === 'online-credit' ? editSettlementTotal - Number(editOnline || 0) : 0),
+    () => round2(editSplitCombination === 'cash-credit' ? editSettlementTotal - Number(editCash || 0) : editSplitCombination === 'online-credit' ? editSettlementTotal - Number(editOnline || 0) : editSplitCombination === 'cash-online-credit' ? editSettlementTotal - Number(editCash || 0) - Number(editOnline || 0) : 0),
     [editSplitCombination, editSettlementTotal, editCash, editOnline]
   )
   const editPartialCreditAmount = useMemo(
@@ -942,7 +943,8 @@ export default function BillEditDialog({
     if (editPaymentMode === 'online') return o > 0 && round2(o) <= editSettlementTotal
     if (editSplitCombination === 'cash-online') return round2(c + o) === editSettlementTotal
     if (editSplitCombination === 'cash-credit') return c >= 0 && c <= editSettlementTotal
-    return o >= 0 && o <= editSettlementTotal
+    if (editSplitCombination === 'online-credit') return o >= 0 && o <= editSettlementTotal
+    return c > 0 && o > 0 && round2(c + o) < editSettlementTotal
   }, [editPaymentMode, editCash, editOnline, editSettlementTotal, editSplitCombination])
 
   function handleEditCashAmountChange(raw: string) {
@@ -1080,10 +1082,15 @@ export default function BillEditDialog({
         payload.payment_online = 0
         payload.payment_credit = round2(finalForSubmit - Number(payload.payment_cash || 0))
         if (payload.payment_credit < 0) throw new Error('Cash amount cannot be greater than final amount')
-      } else {
+      } else if (editSplitCombination === 'online-credit') {
         payload.payment_cash = 0
         payload.payment_credit = round2(finalForSubmit - Number(payload.payment_online || 0))
         if (payload.payment_credit < 0) throw new Error('Online amount cannot be greater than final amount')
+      } else {
+        payload.payment_credit = round2(finalForSubmit - Number(payload.payment_cash || 0) - Number(payload.payment_online || 0))
+        if (Number(payload.payment_cash || 0) <= 0 || Number(payload.payment_online || 0) <= 0 || payload.payment_credit <= 0) {
+          throw new Error('Cash, Online, and Credit must each have a positive amount')
+        }
       }
 
       const selectedCustomerId = Number(editSelectedCustomer?.id || 0)
@@ -1494,6 +1501,7 @@ export default function BillEditDialog({
                       <MenuItem value="cash-online">Cash + Online</MenuItem>
                       <MenuItem value="cash-credit">Cash + Credit</MenuItem>
                       <MenuItem value="online-credit">Online + Credit</MenuItem>
+                      <MenuItem value="cash-online-credit">Cash + Online + Credit</MenuItem>
                     </TextField>
                   ) : null}
                 </Stack>
@@ -1506,7 +1514,7 @@ export default function BillEditDialog({
                   {(editPaymentMode === 'online' || (editPaymentMode === 'split' && editSplitCombination !== 'cash-credit')) ? (
                     <TextField label="Online Amount" type="text" value={String(editOnline)} onChange={(e) => handleEditOnlineAmountChange(e.target.value)} onWheel={blurOnWheel} sx={{ width: 170, ...noSpinnerSx }} inputProps={{ inputMode: 'decimal', pattern: '[0-9]*[.,]?[0-9]*' }} />
                   ) : null}
-                  {editPaymentMode === 'split' && (editSplitCombination === 'cash-credit' || editSplitCombination === 'online-credit') ? (
+                  {editPaymentMode === 'split' && (editSplitCombination === 'cash-credit' || editSplitCombination === 'online-credit' || editSplitCombination === 'cash-online-credit') ? (
                     <TextField label="Credit Amount" type="text" value={money(Math.max(0, editSplitCreditAmount))} sx={{ width: 170, ...noSpinnerSx }} inputProps={{ inputMode: 'decimal' }} disabled />
                   ) : null}
                   {(editPaymentMode === 'cash' || editPaymentMode === 'online') && editPartialCreditAmount > 0 ? (

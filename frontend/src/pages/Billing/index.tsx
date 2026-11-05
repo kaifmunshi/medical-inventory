@@ -256,7 +256,7 @@ export default function Billing() {
   const [newCustomerAddress, setNewCustomerAddress] = useState('')
 
   const [mode, setMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
-  const [splitCombination, setSplitCombination] = useState<'cash-online' | 'cash-credit' | 'online-credit'>(
+  const [splitCombination, setSplitCombination] = useState<'cash-online' | 'cash-credit' | 'online-credit' | 'cash-online-credit'>(
     'cash-online'
   )
   const [cash, setCash] = useState<number | ''>('')
@@ -640,6 +640,8 @@ export default function Billing() {
         ? chosenFinal - Number(cash || 0)
         : splitCombination === 'online-credit'
           ? chosenFinal - Number(online || 0)
+          : splitCombination === 'cash-online-credit'
+            ? chosenFinal - Number(cash || 0) - Number(online || 0)
           : 0
     ).toFixed(2)
   )
@@ -682,6 +684,9 @@ export default function Billing() {
     }
     if (splitCombination === 'online-credit') {
       return o >= 0 && o <= chosenFinal
+    }
+    if (splitCombination === 'cash-online-credit') {
+      return c > 0 && o > 0 && round2(c + o) < chosenFinal
     }
     return false
   }, [mode, cash, online, chosenFinal, splitCombination])
@@ -880,12 +885,18 @@ export default function Billing() {
             toast.push('Cash amount cannot be greater than Final Amount.', 'error')
             throw new Error('Invalid split amounts')
           }
-        } else {
+        } else if (splitCombination === 'online-credit') {
           payload.payment_cash = 0
           payload.payment_credit = Number((chosenFinal - Number(payload.payment_online || 0)).toFixed(2))
           if (payload.payment_credit < 0) {
             toast.push('Online amount cannot be greater than Final Amount.', 'error')
             throw new Error('Invalid split amounts')
+          }
+        } else {
+          payload.payment_credit = Number((chosenFinal - Number(payload.payment_cash || 0) - Number(payload.payment_online || 0)).toFixed(2))
+          if (Number(payload.payment_cash || 0) <= 0 || Number(payload.payment_online || 0) <= 0 || payload.payment_credit <= 0) {
+            toast.push('Cash, Online, and Credit must each have a positive amount.', 'error')
+            throw new Error('Invalid three-way split amounts')
           }
         }
       }
@@ -1757,7 +1768,7 @@ export default function Billing() {
                   label="Split Combination"
                   value={splitCombination}
                   onChange={(e) => {
-                    const v = e.target.value as 'cash-online' | 'cash-credit' | 'online-credit'
+                    const v = e.target.value as 'cash-online' | 'cash-credit' | 'online-credit' | 'cash-online-credit'
                     setSplitCombination(v)
                     setPaymentAutoFilledOnce(false)
                     setPaymentManuallyEdited(false)
@@ -1770,6 +1781,7 @@ export default function Billing() {
                   <MenuItem value="cash-online">Cash + Online</MenuItem>
                   <MenuItem value="cash-credit">Cash + Credit</MenuItem>
                   <MenuItem value="online-credit">Online + Credit</MenuItem>
+                  <MenuItem value="cash-online-credit">Cash + Online + Credit</MenuItem>
                 </TextField>
               )}
             </Stack>
@@ -1811,7 +1823,7 @@ export default function Billing() {
                 />
               )}
 
-              {mode === 'split' && (splitCombination === 'cash-credit' || splitCombination === 'online-credit') && (
+              {mode === 'split' && (splitCombination === 'cash-credit' || splitCombination === 'online-credit' || splitCombination === 'cash-online-credit') && (
                 <TextField
                   label="Credit Amount"
                   type="text"

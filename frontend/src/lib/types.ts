@@ -341,6 +341,7 @@ export interface PurchaseReturn {
   total_amount: number
   refund_cash: number
   refund_online: number
+  refund_manual: boolean
   writeoff_reversal: number
   is_deleted: boolean
   deleted_at?: string | null

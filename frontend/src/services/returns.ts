@@ -10,7 +10,7 @@ export type CreateReturnBody = {
   source_bill_id: number
   return_date?: string
   items: ReturnLine[]
-  refund_mode: 'cash' | 'online' | 'credit'      // required by backend; 'credit' adjusts the bill outstanding
+  refund_mode: 'cash' | 'online' | 'split' | 'credit' // required by backend; 'credit' adjusts the bill outstanding
   refund_cash: number                 // required by backend
   refund_online: number               // required by backend
   rounding_adjustment?: number        // actual refund minus computed return value
@@ -91,7 +91,7 @@ export type ExchangeRecord = {
   source_bill_id?: number | null
   return_id: number
   new_bill_id: number
-  payment_mode: 'cash' | 'online' | 'split'
+  payment_mode: 'cash' | 'online' | 'split' | 'credit'
   payment_cash: number
   payment_online: number
   refund_cash: number
@@ -142,7 +142,7 @@ export type ExchangePayload = {
   payment_cash?: number;
   payment_online?: number;
   // when you refund (net < 0)
-  refund_mode?: 'cash' | 'online';
+  refund_mode?: 'cash' | 'online' | 'split';
   refund_cash?: number;
   refund_online?: number;
   notes?: string;

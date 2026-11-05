@@ -106,6 +106,7 @@ def _snapshot(session, row: PurchaseReturn, items: Optional[List[PurchaseReturnI
             "total_amount": round2(row.total_amount),
             "refund_cash": round2(row.refund_cash),
             "refund_online": round2(row.refund_online),
+            "refund_manual": bool(row.refund_manual),
             "writeoff_reversal": round2(row.writeoff_reversal),
             "is_deleted": bool(row.is_deleted),
         },
@@ -279,6 +280,11 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             if duplicate:
                 raise HTTPException(status_code=400, detail="Purchase return number already exists")
 
+        refund_manual = (
+            bool(payload.refund_manual)
+            if payload.refund_manual is not None
+            else payload.refund_cash is not None or payload.refund_online is not None
+        )
         row = PurchaseReturn(
             purchase_id=int(purchase.id) if purchase else 0,
             settlement_purchase_id=settlement_purchase_id,
@@ -291,9 +297,9 @@ def create_purchase_return(payload: PurchaseReturnCreate) -> PurchaseReturnOut:
             gst_amount=0,
             rounding_adjustment=round2(payload.rounding_adjustment),
             total_amount=0,
-            refund_cash=round2(payload.refund_cash or 0),
-            refund_online=round2(payload.refund_online or 0),
-            refund_manual=payload.refund_cash is not None or payload.refund_online is not None,
+            refund_cash=round2(payload.refund_cash or 0) if refund_manual else 0.0,
+            refund_online=round2(payload.refund_online or 0) if refund_manual else 0.0,
+            refund_manual=refund_manual,
             writeoff_reversal=0,
         )
         if row.refund_cash < 0 or row.refund_online < 0:
@@ -655,7 +661,12 @@ def update_purchase_return(return_id: int, payload: PurchaseReturnUpdate) -> Pur
         row.gst_amount = gst_total
         row.rounding_adjustment = rounding_adjustment
         row.total_amount = total
-        if payload.refund_cash is not None or payload.refund_online is not None:
+        if payload.refund_manual is False:
+            row.refund_cash = 0.0
+            row.refund_online = 0.0
+            row.writeoff_reversal = 0.0
+            row.refund_manual = False
+        elif payload.refund_cash is not None or payload.refund_online is not None or payload.refund_manual is True:
             refund_cash = round2(payload.refund_cash or 0)
             refund_online = round2(payload.refund_online or 0)
             if refund_cash < 0 or refund_online < 0:

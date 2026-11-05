@@ -48,7 +48,7 @@ type Row = {
   remaining_value?: number
 }
 
-type RefundMode = 'cash' | 'online' | 'credit'
+type RefundMode = 'cash' | 'online' | 'split' | 'credit'
 const RETURN_ROUND_TOLERANCE = 20
 type PriorReturn = {
   refund_cash?: number
@@ -131,6 +131,8 @@ export default function Returns() {
   const [priorReturns, setPriorReturns] = useState<PriorReturn[]>([])
   const [customerAccount, setCustomerAccount] = useState<CustomerBalanceAccount | null>(null)
   const [mode, setMode] = useState<RefundMode>('cash')
+  const [refundCashSplit, setRefundCashSplit] = useState<number | ''>('')
+  const [refundOnlineSplit, setRefundOnlineSplit] = useState<number | ''>('')
   const [billViewOpen, setBillViewOpen] = useState(false)
 
   const [billPickerOpen, setBillPickerOpen] = useState(false)
@@ -298,6 +300,11 @@ export default function Returns() {
       takeOnline()
     } else if (mode === 'cash') {
       takeCash()
+    } else if (mode === 'split') {
+      takeCash(Number(refundCashSplit || 0))
+      takeOnline(Number(refundOnlineSplit || 0))
+      takeCash()
+      takeOnline()
     } else {
       takeCash()
       takeOnline()
@@ -319,7 +326,7 @@ export default function Returns() {
       originalCashAvailable,
       originalOnlineAvailable,
     }
-  }, [bill, computedRefund, finalRefund, mode, priorReturns])
+  }, [bill, computedRefund, finalRefund, mode, priorReturns, refundCashSplit, refundOnlineSplit])
 
   const billSummary = useMemo(() => {
     if (!bill) return { paid: 0, writeoff: 0, pending: 0, creditReturns: 0, originalTotal: 0 }
@@ -353,6 +360,14 @@ export default function Returns() {
   useEffect(() => {
     if (!finalTouched) setFinalRefund(clamp2(refund))
   }, [refund, finalTouched])
+
+  useEffect(() => {
+    if (mode !== 'split') return
+    const total = clamp2(Math.max(0, Number(finalRefund || 0)))
+    const cash = Math.min(total, Math.max(0, Number(refundCashSplit || 0)))
+    setRefundCashSplit(clamp2(cash))
+    setRefundOnlineSplit(clamp2(total - cash))
+  }, [mode, finalRefund])
 
   // ---------- BILL LOADER (NO TOAST HERE) ----------
   type LoadResult = {
@@ -478,8 +493,8 @@ export default function Returns() {
   const mCreate = useMutation({
     mutationFn: () => {
       const amt = clamp2(finalRefund)
-      const refund_cash = mode === 'cash' ? amt : 0
-      const refund_online = mode === 'online' ? amt : 0
+      const refund_cash = mode === 'cash' ? amt : mode === 'split' ? clamp2(Number(refundCashSplit || 0)) : 0
+      const refund_online = mode === 'online' ? amt : mode === 'split' ? clamp2(Number(refundOnlineSplit || 0)) : 0
 
       return createReturn({
         source_bill_id: Number(bill!.id),
@@ -500,6 +515,8 @@ export default function Returns() {
       setRows(prev => prev.map(r => ({ ...r, qty: 0 })))
       setFinalRefund(0)
       setFinalTouched(false)
+      setRefundCashSplit('')
+      setRefundOnlineSplit('')
       setReturnDate(todayYmd())
 
       void loadBill()
@@ -543,6 +560,10 @@ export default function Returns() {
     }
     if (mode !== 'credit' && Math.abs(clamp2(finalRefund) - computedRefund) > RETURN_ROUND_TOLERANCE) {
       toast.push(`Final refund must be within ±₹${RETURN_ROUND_TOLERANCE} of computed ₹${computedRefund.toFixed(2)}`, 'warning')
+      return
+    }
+    if (mode === 'split' && clamp2(Number(refundCashSplit || 0) + Number(refundOnlineSplit || 0)) !== clamp2(finalRefund)) {
+      toast.push(`Cash + Online must equal Rs ${money(finalRefund)}`, 'warning')
       return
     }
     if (!mCreate.isPending) mCreate.mutate()
@@ -677,14 +698,55 @@ export default function Returns() {
                 select
                 label="Refund Mode"
                 value={mode}
-                onChange={e => setMode(e.target.value as RefundMode)}
+                onChange={e => {
+                  const next = e.target.value as RefundMode
+                  setMode(next)
+                  if (next === 'split') {
+                    const cash = clamp2(Math.max(0, Number(finalRefund || 0)) / 2)
+                    setRefundCashSplit(cash)
+                    setRefundOnlineSplit(clamp2(Math.max(0, Number(finalRefund || 0)) - cash))
+                  } else {
+                    setRefundCashSplit('')
+                    setRefundOnlineSplit('')
+                  }
+                }}
                 SelectProps={{ native: true }}
                 sx={{ width: 180 }}
               >
                 <option value="cash">Cash</option>
                 <option value="online">Online</option>
+                <option value="split">Cash + Online</option>
                 <option value="credit">Auto settle (credit first)</option>
               </TextField>
+
+              {mode === 'split' ? (
+                <>
+                  <TextField
+                    label="Cash Refund"
+                    type="number"
+                    value={refundCashSplit}
+                    onChange={e => {
+                      const cash = Math.min(clamp2(finalRefund), Math.max(0, clamp2(Number(e.target.value || 0))))
+                      setRefundCashSplit(cash)
+                      setRefundOnlineSplit(clamp2(Math.max(0, finalRefund - cash)))
+                    }}
+                    inputProps={{ min: 0, step: 0.01 }}
+                    sx={{ width: 160 }}
+                  />
+                  <TextField
+                    label="Online Refund"
+                    type="number"
+                    value={refundOnlineSplit}
+                    onChange={e => {
+                      const online = Math.min(clamp2(finalRefund), Math.max(0, clamp2(Number(e.target.value || 0))))
+                      setRefundOnlineSplit(online)
+                      setRefundCashSplit(clamp2(Math.max(0, finalRefund - online)))
+                    }}
+                    inputProps={{ min: 0, step: 0.01 }}
+                    sx={{ width: 160 }}
+                  />
+                </>
+              ) : null}
 
               <TextField
                 label="Return Date"

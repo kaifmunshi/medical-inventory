@@ -35,6 +35,7 @@ import { useUserSession } from '../../components/session/UserSessionProvider'
 
 type LineDraft = { quantity: string; unitCost: string }
 type LegacyLine = { lot: InventoryLotBrowse; quantity: string; unitCost: string; gstPercent: string }
+type SettlementMode = 'auto' | 'credit' | 'cash' | 'online' | 'cash-online' | 'cash-credit' | 'online-credit' | 'cash-online-credit'
 type IncomingLine = {
   key: string
   product: Product
@@ -109,7 +110,7 @@ export default function PurchaseReturnsPage() {
   const [returnNumber, setReturnNumber] = useState('')
   const [notes, setNotes] = useState('')
   const [roundingAdjustment, setRoundingAdjustment] = useState('0')
-  const [refundMode, setRefundMode] = useState<'none' | 'cash' | 'online' | 'split'>('none')
+  const [refundMode, setRefundMode] = useState<SettlementMode>('auto')
   const [refundCash, setRefundCash] = useState('0')
   const [refundOnline, setRefundOnline] = useState('0')
   const [lines, setLines] = useState<Record<number, LineDraft>>({})
@@ -277,7 +278,7 @@ export default function PurchaseReturnsPage() {
       setReturnNumber('')
       setNotes('')
       setRoundingAdjustment('0')
-      setRefundMode('none')
+      setRefundMode('auto')
       setRefundCash('0')
       setRefundOnline('0')
       setIncludeIncoming(false)
@@ -335,6 +336,38 @@ export default function PurchaseReturnsPage() {
       toast.push('Credit total cannot be negative after round off', 'warning')
       return
     }
+    const cashRefund = Number(refundCash || 0)
+    const onlineRefund = Number(refundOnline || 0)
+    const manualRefund = refundMode !== 'auto'
+    const cashSelected = refundMode === 'cash' || refundMode === 'cash-online' || refundMode === 'cash-credit' || refundMode === 'cash-online-credit'
+    const onlineSelected = refundMode === 'online' || refundMode === 'cash-online' || refundMode === 'online-credit' || refundMode === 'cash-online-credit'
+    const creditSelected = refundMode === 'credit' || refundMode === 'cash-credit' || refundMode === 'online-credit' || refundMode === 'cash-online-credit'
+    const directRefund = cashRefund + onlineRefund
+    const supplierCredit = returnTotal - directRefund
+    if (manualRefund && (!Number.isFinite(cashRefund) || !Number.isFinite(onlineRefund) || cashRefund < 0 || onlineRefund < 0)) {
+      toast.push('Settlement amounts must be valid non-negative numbers', 'warning')
+      return
+    }
+    if (manualRefund && directRefund > returnTotal + 0.01) {
+      toast.push('Cash and online refunds cannot exceed the return total', 'warning')
+      return
+    }
+    if (cashSelected && cashRefund <= 0) {
+      toast.push('Enter a cash refund amount for the selected settlement', 'warning')
+      return
+    }
+    if (onlineSelected && onlineRefund <= 0) {
+      toast.push('Enter an online refund amount for the selected settlement', 'warning')
+      return
+    }
+    if (manualRefund && !creditSelected && Math.abs(directRefund - returnTotal) > 0.01) {
+      toast.push(`Cash and online refunds must total Rs ${money(returnTotal)}`, 'warning')
+      return
+    }
+    if (creditSelected && refundMode !== 'credit' && supplierCredit <= 0.01) {
+      toast.push('Leave a positive balance for supplier credit, or choose a settlement without credit', 'warning')
+      return
+    }
     if (includeIncoming) {
       if (editingReturn) {
         toast.push('Replacement purchases can only be added while creating a new return', 'warning')
@@ -376,9 +409,10 @@ export default function PurchaseReturnsPage() {
       return_number: returnNumber.trim() || undefined,
       notes: notes.trim() || undefined,
       rounding_adjustment: Number(roundingAdjustment || 0),
-      ...((editingReturn || Number(refundCash || 0) > 0 || Number(refundOnline || 0) > 0) ? {
-        refund_cash: refundMode === 'cash' || refundMode === 'split' ? Number(refundCash || 0) : 0,
-        refund_online: refundMode === 'online' || refundMode === 'split' ? Number(refundOnline || 0) : 0,
+      refund_manual: manualRefund,
+      ...(manualRefund ? {
+        refund_cash: cashSelected ? cashRefund : 0,
+        refund_online: onlineSelected ? onlineRefund : 0,
       } : {}),
       items: activeLines,
       },
@@ -394,7 +428,16 @@ export default function PurchaseReturnsPage() {
     setRoundingAdjustment(String(row.rounding_adjustment || 0))
     const existingCashRefund = Number(row.refund_cash || 0)
     const existingOnlineRefund = Number(row.refund_online || 0)
-    setRefundMode(existingCashRefund > 0 && existingOnlineRefund > 0 ? 'split' : existingCashRefund > 0 ? 'cash' : existingOnlineRefund > 0 ? 'online' : 'none')
+    const existingCredit = Math.max(0, Number(row.total_amount || 0) - existingCashRefund - existingOnlineRefund - Number(row.writeoff_reversal || 0))
+    setRefundMode(!row.refund_manual
+      ? 'auto'
+      : existingCashRefund > 0 && existingOnlineRefund > 0
+        ? (existingCredit > 0 ? 'cash-online-credit' : 'cash-online')
+        : existingCashRefund > 0
+          ? (existingCredit > 0 ? 'cash-credit' : 'cash')
+          : existingOnlineRefund > 0
+            ? (existingCredit > 0 ? 'online-credit' : 'online')
+            : 'credit')
     setRefundCash(String(existingCashRefund))
     setRefundOnline(String(existingOnlineRefund))
     setEditingReturn(row)
@@ -444,7 +487,7 @@ export default function PurchaseReturnsPage() {
     setReturnNumber('')
     setNotes('')
     setRoundingAdjustment('0')
-    setRefundMode('none')
+    setRefundMode('auto')
     setRefundCash('0')
     setRefundOnline('0')
     setReturnCategory(null)
@@ -801,17 +844,56 @@ export default function PurchaseReturnsPage() {
                     onChange={(event) => setRoundingAdjustment(event.target.value)}
                     sx={{ width: 160 }}
                   />
-                  <TextField select label="Refund mode" value={refundMode} onChange={(event) => setRefundMode(event.target.value as typeof refundMode)} sx={{ width: 150 }}>
-                    <MenuItem value="none">No refund</MenuItem>
+                  <TextField
+                    select
+                    label="Settlement mode"
+                    value={refundMode}
+                    onChange={(event) => {
+                      const next = event.target.value as SettlementMode
+                      setRefundMode(next)
+                      if (next === 'auto' || next === 'credit') {
+                        setRefundCash('0')
+                        setRefundOnline('0')
+                      } else if (next === 'cash') {
+                        setRefundCash(money(Math.max(0, returnTotal)))
+                        setRefundOnline('0')
+                      } else if (next === 'online') {
+                        setRefundCash('0')
+                        setRefundOnline(money(Math.max(0, returnTotal)))
+                      } else {
+                        if (!next.includes('cash')) setRefundCash('0')
+                        if (!next.includes('online')) setRefundOnline('0')
+                      }
+                    }}
+                    sx={{ width: 220 }}
+                  >
+                    <MenuItem value="auto">Automatic (credit first)</MenuItem>
+                    <MenuItem value="credit">Supplier Credit</MenuItem>
                     <MenuItem value="cash">Cash</MenuItem>
                     <MenuItem value="online">Online</MenuItem>
-                    <MenuItem value="split">Cash + Online</MenuItem>
+                    <MenuItem value="cash-online">Cash + Online</MenuItem>
+                    <MenuItem value="cash-credit">Cash + Credit</MenuItem>
+                    <MenuItem value="online-credit">Online + Credit</MenuItem>
+                    <MenuItem value="cash-online-credit">Cash + Online + Credit</MenuItem>
                   </TextField>
-                  {(refundMode === 'cash' || refundMode === 'split') && (
+                  {(refundMode === 'cash' || refundMode === 'cash-online' || refundMode === 'cash-credit' || refundMode === 'cash-online-credit') && (
                     <TextField label="Cash refund" type="number" value={refundCash} inputProps={{ min: 0, step: 0.01 }} onChange={(event) => setRefundCash(event.target.value)} sx={{ width: 145 }} />
                   )}
-                  {(refundMode === 'online' || refundMode === 'split') && (
+                  {(refundMode === 'online' || refundMode === 'cash-online' || refundMode === 'online-credit' || refundMode === 'cash-online-credit') && (
                     <TextField label="Online refund" type="number" value={refundOnline} inputProps={{ min: 0, step: 0.01 }} onChange={(event) => setRefundOnline(event.target.value)} sx={{ width: 145 }} />
+                  )}
+                  {(refundMode === 'credit' || refundMode === 'cash-credit' || refundMode === 'online-credit' || refundMode === 'cash-online-credit') && (
+                    <TextField
+                      label="Supplier credit"
+                      value={money(Math.max(0, returnTotal - Number(refundCash || 0) - Number(refundOnline || 0)))}
+                      InputProps={{ readOnly: true }}
+                      sx={{ width: 145 }}
+                    />
+                  )}
+                  {refundMode === 'auto' && (
+                    <Typography variant="caption" color="text.secondary" sx={{ maxWidth: 220 }}>
+                      Applies the return to unpaid supplier balance first, then refunds prior cash/online payments and reverses write-offs.
+                    </Typography>
                   )}
                   <Typography variant="h6">{sourceMode === 'legacy' ? 'Trade-in total' : 'Credit total'}: {money(returnTotal)}</Typography>
                   <Button variant="contained" disabled={!canManage || saveM.isPending || activeLines.length === 0} onClick={submit}>

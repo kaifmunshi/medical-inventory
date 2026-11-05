@@ -12,6 +12,7 @@ export interface PurchaseReturnCreatePayload {
   rounding_adjustment?: number
   refund_cash?: number
   refund_online?: number
+  refund_manual?: boolean
   items: Array<{
     purchase_item_id?: number
     inventory_item_id?: number

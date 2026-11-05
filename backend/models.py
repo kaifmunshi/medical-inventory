@@ -1368,6 +1368,7 @@ class PurchaseReturnCreate(SQLModel):
     rounding_adjustment: float = 0.0
     refund_cash: Optional[float] = None
     refund_online: Optional[float] = None
+    refund_manual: Optional[bool] = None
     items: List[PurchaseReturnItemIn]
 
 
@@ -1379,6 +1380,7 @@ class PurchaseReturnUpdate(SQLModel):
     rounding_adjustment: Optional[float] = None
     refund_cash: Optional[float] = None
     refund_online: Optional[float] = None
+    refund_manual: Optional[bool] = None
     items: List[PurchaseReturnItemIn]
 
 
@@ -1413,6 +1415,7 @@ class PurchaseReturnOut(SQLModel):
     total_amount: float
     refund_cash: float = 0.0
     refund_online: float = 0.0
+    refund_manual: bool = False
     writeoff_reversal: float = 0.0
     is_deleted: bool
     deleted_at: Optional[str] = None

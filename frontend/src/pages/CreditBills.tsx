@@ -1574,10 +1574,10 @@ export default function CreditBills() {
                   <Typography>Final Net Due: <b>₹{money(exchangeDetail.net_due)}</b></Typography>
                   <Typography>
                     Payment: <b>{String(exchangeDetail.payment_mode || '').toUpperCase() || '-'}</b>
-                    {' '}| Cash ₹{money(exchangeDetail.payment_cash)} | Online ₹{money(exchangeDetail.payment_online)}
+                    {' '}| Cash ₹{money(exchangeDetail.payment_cash)} | Online ₹{money(exchangeDetail.payment_online)} | Credit ₹{money(exchangeDetail.payment_credit)}
                   </Typography>
                   <Typography>
-                    Refund: Cash ₹{money(exchangeDetail.refund_cash)} | Online ₹{money(exchangeDetail.refund_online)}
+                    Refund: Cash ₹{money(exchangeDetail.refund_cash)} | Online ₹{money(exchangeDetail.refund_online)} | Credit ₹{money(exchangeDetail.refund_credit)}
                   </Typography>
                 </Stack>
               </Stack>

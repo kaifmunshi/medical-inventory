@@ -1055,7 +1055,11 @@ def refund_customer_advance(party_id: int, receipt_id: int, payload: CustomerAdv
         if amount <= 0:
             raise HTTPException(status_code=400, detail="Refund amount must be greater than 0")
         _sync_party_receipt_unallocated(session, receipt)
-        refundable = _round2(min(_as_float(receipt.unallocated_amount), _party_net_advance(session, party)))
+        refundable = _round2(
+            _as_float(receipt.unallocated_amount)
+            if str(receipt.mode or "").lower() == "credit"
+            else min(_as_float(receipt.unallocated_amount), _party_net_advance(session, party))
+        )
         if amount > refundable + 0.0001:
             raise HTTPException(status_code=400, detail=f"Refund exceeds customer's actual available advance of {refundable:.2f}")
         refund_ts = _normalize_payment_ts(payload.refund_date)

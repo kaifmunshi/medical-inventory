@@ -1057,8 +1057,10 @@ def get_exchange_by_return(return_id: int):
             "payment_mode": ex.payment_mode,
             "payment_cash": ex.payment_cash,
             "payment_online": ex.payment_online,
+            "payment_credit": ex.payment_credit,
             "refund_cash": ex.refund_cash,
             "refund_online": ex.refund_online,
+            "refund_credit": ex.refund_credit,
             "notes": ex.notes,
             "return": {
                 "id": ret.id,
@@ -1067,6 +1069,7 @@ def get_exchange_by_return(return_id: int):
                 "refund_mode": infer_refund_mode(ret),
                 "refund_cash": ret.refund_cash,
                 "refund_online": ret.refund_online,
+                "credit_amount": return_credit_amount(ret),
                 "items": [
                     {
                         "item_id": i.item_id,

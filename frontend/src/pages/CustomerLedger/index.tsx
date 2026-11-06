@@ -371,6 +371,7 @@ export default function CustomerLedgerPage() {
   const [refundBankMode, setRefundBankMode] = useState<'UPI' | 'NEFT' | 'RTGS' | 'IMPS'>('UPI')
   const [refundNote, setRefundNote] = useState('')
   const [advancePickerOpen, setAdvancePickerOpen] = useState(false)
+  const [advancePickerKind, setAdvancePickerKind] = useState<'advance' | 'credit'>('advance')
   const [advanceTargetBillId, setAdvanceTargetBillId] = useState<number | null>(null)
   const [writeoffBill, setWriteoffBill] = useState<OpenBill | null>(null)
   const [writeoffAmount, setWriteoffAmount] = useState('')
@@ -881,10 +882,18 @@ export default function CustomerLedgerPage() {
   const openingBalance = signedPartyOpening(selectedParty)
   const closingBalance = customerClosingBalance(openingBalance, totalOutstanding, receiptHistoryOnAccountTotal)
   const actualRefundableAdvance = round2(Math.max(0, -closingBalance))
-  const refundAvailable = round2(Math.min(Number(refundTarget?.onAccount || 0), actualRefundableAdvance))
+  const refundableForReceipt = (row: ReceiptHistoryRow | null | undefined) => round2(
+    row?.mode === 'credit'
+      ? Number(row?.onAccount || 0)
+      : Math.min(Number(row?.onAccount || 0), actualRefundableAdvance),
+  )
+  const refundAvailable = refundableForReceipt(refundTarget)
   const availableAdvanceReceipts = activeReceiptHistory.filter(
     (row) => row.sourceType === 'party_receipt' && Number(row.onAccount || 0) > 0.0001,
   )
+  const availableCustomerCredits = availableAdvanceReceipts.filter((row) => row.mode === 'credit')
+  const availableCashAdvances = availableAdvanceReceipts.filter((row) => row.mode !== 'credit')
+  const pickerBalances = advancePickerKind === 'credit' ? availableCustomerCredits : availableCashAdvances
 
   function billSortValue(row: DebtorLedgerRow | OpenBill, key: BillSortKey): string | number {
     if (key === 'payment_status') {
@@ -1363,12 +1372,27 @@ export default function CustomerLedgerPage() {
           <Button variant="contained" onClick={openReceiptDialog} disabled={!selectedParty}>
             Record Receipt
           </Button>
-          <Tooltip title={availableAdvanceReceipts.length > 0 ? 'Apply an available customer advance to open bills' : 'No available advance for this customer'} arrow>
+          <Tooltip title={availableCustomerCredits.length > 0 ? 'Apply exchange credit to outstanding bills' : 'No customer credit is available'} arrow>
             <span>
               <Button
                 variant="outlined"
-                onClick={() => setAdvancePickerOpen(true)}
-                disabled={!selectedParty || availableAdvanceReceipts.length === 0}
+                color="warning"
+                onClick={() => {
+                  if (availableCustomerCredits.length === 1) openApplyAdvance(availableCustomerCredits[0])
+                  else { setAdvancePickerKind('credit'); setAdvancePickerOpen(true) }
+                }}
+                disabled={!selectedParty || availableCustomerCredits.length === 0}
+              >
+                Adjust Customer Credit
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip title={availableCashAdvances.length > 0 ? 'Apply an available customer advance to open bills' : 'No available advance for this customer'} arrow>
+            <span>
+              <Button
+                variant="outlined"
+                onClick={() => { setAdvancePickerKind('advance'); setAdvancePickerOpen(true) }}
+                disabled={!selectedParty || availableCashAdvances.length === 0}
               >
                 Adjust Advance
               </Button>
@@ -1593,7 +1617,7 @@ export default function CustomerLedgerPage() {
         </Box>
         <Menu anchorEl={billActionsAnchor} open={Boolean(billActionsAnchor)} onClose={()=>{setBillActionsAnchor(null);setBillActionsRow(null)}}>
           <MenuItem onClick={()=>{const row=billActionsRow;setBillActionsAnchor(null);setBillActionsRow(null);if(row)openReceiptForBill(row)}}>Receive Payment</MenuItem>
-          <MenuItem disabled={availableAdvanceReceipts.length===0} onClick={()=>{const row=billActionsRow;setBillActionsAnchor(null);setBillActionsRow(null);if(row){setAdvanceTargetBillId(Number(row.bill_id));setAdvancePickerOpen(true)}}}>Adjust Advance</MenuItem>
+          <MenuItem disabled={availableCashAdvances.length===0} onClick={()=>{const row=billActionsRow;setBillActionsAnchor(null);setBillActionsRow(null);if(row){setAdvanceTargetBillId(Number(row.bill_id));setAdvancePickerKind('advance');setAdvancePickerOpen(true)}}}>Adjust Advance</MenuItem>
           <MenuItem onClick={()=>{const row=billActionsRow;setBillActionsAnchor(null);setBillActionsRow(null);if(row){setWriteoffBill(row);setWriteoffAmount(String(row.outstanding_amount))}}}>Write-off</MenuItem>
         </Menu>
       </CollapsibleLedgerSection>
@@ -2048,7 +2072,7 @@ export default function CustomerLedgerPage() {
           <Menu anchorEl={receiptActionsAnchor} open={Boolean(receiptActionsAnchor)} onClose={()=>{setReceiptActionsAnchor(null);setReceiptActionsRow(null)}}>
             <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || receiptActionsRow.hasCrossCustomerAllocation || Boolean(receiptActionsRow.exchangeId)} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openEditReceipt(row)}}>Edit Receipt</MenuItem>
             <MenuItem disabled={!receiptActionsRow || receiptActionsRow.isDeleted || Number(receiptActionsRow.onAccount||0)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openApplyAdvance(row)}}>{receiptActionsRow?.mode === 'credit' ? 'Apply Credit to Bill' : 'Adjust Advance'}</MenuItem>
-            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || Math.min(Number(receiptActionsRow.onAccount||0),actualRefundableAdvance)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row){setRefundTarget(row);setRefundAmount(String(Math.min(Number(row.onAccount),actualRefundableAdvance)));setRefundDate(today);setRefundBook('CASH');setRefundNote('')}}}>{receiptActionsRow?.mode === 'credit' ? 'Refund Credit' : 'Return Advance'}</MenuItem>
+            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || refundableForReceipt(receiptActionsRow)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row){setRefundTarget(row);setRefundAmount(String(refundableForReceipt(row)));setRefundDate(today);setRefundBook('CASH');setRefundNote('')}}}>{receiptActionsRow?.mode === 'credit' ? 'Refund Credit' : 'Return Advance'}</MenuItem>
             {receiptActionsRow?.isDeleted && receiptActionsRow.sourceType === 'party_receipt' && !receiptActionsRow.exchangeId ? <MenuItem onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setRecoverReceiptTarget(row)}}>Recover Receipt</MenuItem> : !receiptActionsRow?.isDeleted && !receiptActionsRow?.exchangeId ? <MenuItem sx={{color:'error.main'}} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setDeleteTarget(row)}}>{receiptActionsRow?.sourceType === 'advance_refund' ? 'Reverse Advance Return' : 'Delete'}</MenuItem> : null}
           </Menu>
         </Box>
@@ -2274,10 +2298,10 @@ export default function CustomerLedgerPage() {
       </Dialog>
 
       <Dialog open={advancePickerOpen} onClose={() => setAdvancePickerOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Choose Advance Receipt</DialogTitle>
+        <DialogTitle>{advancePickerKind === 'credit' ? 'Choose Customer Credit' : 'Choose Advance Receipt'}</DialogTitle>
         <DialogContent dividers>
           <Stack gap={1}>
-            {availableAdvanceReceipts.map((receipt) => (
+            {pickerBalances.map((receipt) => (
               <Button
                 key={receipt.id}
                 variant="outlined"
@@ -2289,12 +2313,12 @@ export default function CustomerLedgerPage() {
                 }}
                 sx={{ justifyContent: 'space-between', textTransform: 'none' }}
               >
-                <span>Receipt #{receipt.receiptId} | {String(receipt.when || '').slice(0, 10)}</span>
+                <span>{receipt.mode === 'credit' ? receipt.source : `Receipt #${receipt.receiptId}`} | {String(receipt.when || '').slice(0, 10)}</span>
                 <b>Available Rs {money(receipt.onAccount)}</b>
               </Button>
             ))}
-            {availableAdvanceReceipts.length === 0 ? (
-              <Typography color="text.secondary">No unused advance is available for this customer.</Typography>
+            {pickerBalances.length === 0 ? (
+              <Typography color="text.secondary">No unused {advancePickerKind === 'credit' ? 'customer credit' : 'advance'} is available.</Typography>
             ) : null}
           </Stack>
         </DialogContent>

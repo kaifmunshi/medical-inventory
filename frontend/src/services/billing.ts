@@ -189,6 +189,7 @@ export interface BillPaymentRow {
   mode: 'cash' | 'online' | 'split' | 'credit' | 'writeoff'
   cash_amount: number
   online_amount: number
+  credit_amount?: number
   writeoff_amount: number
   note?: string | null
   is_writeoff: boolean

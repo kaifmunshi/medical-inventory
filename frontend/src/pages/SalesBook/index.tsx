@@ -306,7 +306,7 @@ export default function SalesBookPage() {
 
     const billsMap = new Map<string, { billed: number; credit: number }>()
     const paymentsMap = new Map<string, { cash: number; online: number }>()
-    const returnsMap = new Map<string, number>()
+    const returnsMap = new Map<string, { cash: number; online: number; credit: number }>()
     const purchaseMap = new Map<string, number>()
     const cashbookMap = new Map<string, { expenses: number; withdrawals: number }>()
     const bankbookMap = new Map<string, { expenses: number; withdrawals: number }>()
@@ -334,8 +334,11 @@ export default function SalesBookPage() {
     for (const r0 of (qReturns.data || []) as any[]) {
       const d = String(r0?.date_time || '').slice(0, 10)
       if (!d) continue
-      const prev = returnsMap.get(d) || 0
-      returnsMap.set(d, prev + Number(r0?.refund_cash || 0) + Number(r0?.refund_online || 0))
+      const prev = returnsMap.get(d) || { cash: 0, online: 0, credit: 0 }
+      prev.cash += Number(r0?.refund_cash || 0)
+      prev.online += Number(r0?.refund_online || 0)
+      prev.credit += Number(r0?.credit_amount || 0)
+      returnsMap.set(d, prev)
     }
 
     for (const purchase of (qPurchases.data || []) as any[]) {
@@ -380,16 +383,17 @@ export default function SalesBookPage() {
     for (let d = from; d <= to; d = addDaysYmd(d, 1)) {
       const b = billsMap.get(d) || { billed: 0, credit: 0 }
       const p = paymentsMap.get(d) || { cash: 0, online: 0 }
-      const rt = returnsMap.get(d) || 0
+      const rt = returnsMap.get(d) || { cash: 0, online: 0, credit: 0 }
       const purchaseAmount = purchaseMap.get(d) || 0
       const cb = cashbookMap.get(d) || { expenses: 0, withdrawals: 0 }
       const bank = bankbookMap.get(d) || { expenses: 0, withdrawals: 0 }
       const collected = p.cash + p.online
-      const returnsCashOnline = rt
+      const returnsTotal = rt.cash + rt.online + rt.credit
+      const returnsCashOnline = rt.cash + rt.online
       const expenses = cb.expenses + bank.expenses
       const withdrawals = cb.withdrawals + bank.withdrawals
       const cashOut = expenses + withdrawals
-      const pnl = b.billed - returnsCashOnline - expenses - purchaseAmount
+      const pnl = b.billed - returnsTotal - expenses - purchaseAmount
 
       out.push({
         date: d,
@@ -398,13 +402,13 @@ export default function SalesBookPage() {
         online: to2(p.online),
         collected: to2(collected),
         credit: to2(b.credit),
-        returns: to2(returnsCashOnline),
+        returns: to2(returnsTotal),
         purchases: to2(purchaseAmount),
         expenses: to2(expenses),
         withdrawals: to2(withdrawals),
         outflow: to2(returnsCashOnline + expenses + withdrawals + purchaseAmount),
-        netCash: to2(p.cash - returnsCashOnline - cashOut),
-        netOnline: to2(p.online),
+        netCash: to2(p.cash - rt.cash - cashOut),
+        netOnline: to2(p.online - rt.online),
         net: to2(pnl),
       })
     }

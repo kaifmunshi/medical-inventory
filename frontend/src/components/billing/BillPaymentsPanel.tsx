@@ -264,6 +264,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                 <th>Mode</th>
                 <th>Cash</th>
                 <th>Online</th>
+                <th>Credit</th>
                 <th>Status</th>
                 <th style={{ minWidth: 220 }}>Note</th>
                 <th style={{ width: 92 }}></th>
@@ -280,6 +281,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                     <td>{p.mode || '-'}</td>
                     <td>{money(p.cash_amount)}</td>
                     <td>{money(p.online_amount)}</td>
+                    <td>{money(p.credit_amount)}</td>
                     <td>{managedByReceipt ? 'Receipt' : 'Active'}</td>
                     <td style={{ minWidth: 220 }}>{p.note || ''}</td>
                     <td align="right">
@@ -294,7 +296,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                       >
                         <Tooltip title="Edit payment" arrow>
                           <span>
-                            <IconButton size="small" onClick={() => openEditPayment(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
+                            <IconButton size="small" onClick={() => openEditPayment(p)} disabled={managedByReceipt || bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
                               <EditOutlinedIcon fontSize="small" />
                             </IconButton>
                           </span>
@@ -320,6 +322,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                     <td>{p.mode || '-'}</td>
                     <td>{money(p.cash_amount)}</td>
                     <td>{money(p.online_amount)}</td>
+                    <td>{money(p.credit_amount)}</td>
                     <td>
                       Deleted{p.deleted_at ? ` ${String(p.deleted_at).slice(0, 10)}` : ''}
                     </td>
@@ -338,7 +341,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
               })}
               {payments.length === 0 && (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={8}>
                     <Box p={2} color="text.secondary">
                       No payments yet.
                     </Box>
@@ -405,7 +408,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
         <DialogContent dividers>
           <Stack gap={2}>
             <Typography>
-              Payment #{deletePaymentRow?.id} for Rs.{money(Number(deletePaymentRow?.cash_amount || 0) + Number(deletePaymentRow?.online_amount || 0))}
+              Payment #{deletePaymentRow?.id} for Rs.{money(Number(deletePaymentRow?.cash_amount || 0) + Number(deletePaymentRow?.online_amount || 0) + Number(deletePaymentRow?.credit_amount || 0))}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               The bill payment status will be recalculated.

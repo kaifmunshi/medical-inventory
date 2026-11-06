@@ -581,10 +581,10 @@ export default function ReturnsReport(props: {
                   <Typography>Final Net Due: <b>₹{money(detail.net_due)}</b></Typography>
                   <Typography>
                     Payment: <b>{String(detail.payment_mode || '').toUpperCase() || '-'}</b>
-                    {' '}| Cash ₹{money(detail.payment_cash)} | Online ₹{money(detail.payment_online)}
+                    {' '}| Cash ₹{money(detail.payment_cash)} | Online ₹{money(detail.payment_online)} | Credit ₹{money(detail.payment_credit)}
                   </Typography>
                   <Typography>
-                    Refund: Cash ₹{money(detail.refund_cash)} | Online ₹{money(detail.refund_online)}
+                    Refund: Cash ₹{money(detail.refund_cash)} | Online ₹{money(detail.refund_online)} | Credit ₹{money(detail.refund_credit)}
                   </Typography>
                 </Stack>
               </Stack>

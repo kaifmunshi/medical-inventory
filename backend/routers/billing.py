@@ -15,7 +15,7 @@ from backend.db import get_session
 from backend.models import (
     Item, Category, Bill, BillItem, BillPayment, Return, ExchangeRecord,
     BillCreate, BillOut, BillItemOut,
-    AppUser, Customer, Party, PartyReceipt, ReceiptBillAdjustment,
+    AppUser, Customer, Party, PartyReceipt, ReceiptBillAdjustment, CustomerAdvanceRefund,
     StockMovement,  # ✅ NEW
 )
 from backend.inventory_lot_sync import item_stock_kind, item_stock_meta, sync_lot_quantity_for_item
@@ -379,6 +379,7 @@ def active_receipt_channel_totals(session, receipt_id: int, *, exclude_adjustmen
     ).all()
     cash = 0.0
     online = 0.0
+    credit = 0.0
     for adjustment in adjustments:
         if exclude_adjustment_id is not None and int(adjustment.id or 0) == int(exclude_adjustment_id):
             continue
@@ -389,10 +390,11 @@ def active_receipt_channel_totals(session, receipt_id: int, *, exclude_adjustmen
             continue
         cash += as_f(payment.cash_amount)
         online += as_f(payment.online_amount)
-    return {"cash": round2(cash), "online": round2(online)}
+        credit += as_f(getattr(payment, "credit_amount", 0.0))
+    return {"cash": round2(cash), "online": round2(online), "credit": round2(credit)}
 
 
-def validate_receipt_payment_channels(session, adjustment: ReceiptBillAdjustment, cash: float, online: float) -> None:
+def validate_receipt_payment_channels(session, adjustment: ReceiptBillAdjustment, cash: float, online: float, credit: float = 0.0) -> None:
     receipt = session.get(PartyReceipt, int(adjustment.receipt_id))
     if not receipt:
         raise HTTPException(status_code=400, detail="Customer receipt for this payment was not found")
@@ -403,10 +405,13 @@ def validate_receipt_payment_channels(session, adjustment: ReceiptBillAdjustment
     )
     proposed_cash = round2(used["cash"] + cash)
     proposed_online = round2(used["online"] + online)
+    proposed_credit = round2(used["credit"] + credit)
     if proposed_cash > round2(as_f(receipt.cash_amount)) + 0.0001:
         raise HTTPException(status_code=400, detail="Cash amount exceeds cash balance on the customer receipt")
     if proposed_online > round2(as_f(receipt.online_amount)) + 0.0001:
         raise HTTPException(status_code=400, detail="Online amount exceeds online balance on the customer receipt")
+    if proposed_credit > round2(as_f(getattr(receipt, "credit_amount", 0.0))) + 0.0001:
+        raise HTTPException(status_code=400, detail="Credit amount exceeds available customer credit")
 
 
 def sync_party_receipt_unallocated(session, receipt_id: int) -> None:
@@ -414,7 +419,10 @@ def sync_party_receipt_unallocated(session, receipt_id: int) -> None:
     if not receipt:
         return
     adjusted = active_receipt_adjusted_total(session, int(receipt.id))
-    receipt.unallocated_amount = round2(max(0.0, as_f(receipt.total_amount) - adjusted))
+    refunded = round2(sum(as_f(row.amount) for row in session.exec(select(CustomerAdvanceRefund).where(
+        CustomerAdvanceRefund.receipt_id == int(receipt.id), CustomerAdvanceRefund.is_deleted == False,  # noqa: E712
+    )).all()))
+    receipt.unallocated_amount = round2(max(0.0, as_f(receipt.total_amount) - adjusted - refunded))
     session.add(receipt)
 
 
@@ -431,7 +439,10 @@ def sync_receipt_adjustment_for_payment(session, payment: BillPayment, amount: f
         int(receipt.id),
         exclude_adjustment_id=int(adjustment.id or 0),
     )
-    if proposed > 0 and other_adjusted + proposed > round2(as_f(receipt.total_amount)) + 0.0001:
+    refunded = round2(sum(as_f(row.amount) for row in session.exec(select(CustomerAdvanceRefund).where(
+        CustomerAdvanceRefund.receipt_id == int(receipt.id), CustomerAdvanceRefund.is_deleted == False,  # noqa: E712
+    )).all()))
+    if proposed > 0 and other_adjusted + refunded + proposed > round2(as_f(receipt.total_amount)) + 0.0001:
         raise HTTPException(status_code=400, detail="Amount exceeds available amount on customer receipt")
     adjustment.adjusted_amount = proposed
     session.add(adjustment)
@@ -1964,13 +1975,15 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
         receipt_adjustment = receipt_adjustment_for_payment(session, int(p.id or 0))
         receipt_managed = receipt_adjustment is not None
         if receipt_adjustment:
+            if as_f(getattr(p, "credit_amount", 0.0)) > 0:
+                raise HTTPException(status_code=400, detail="Customer credit allocations must be changed from Customer Ledger")
             if is_writeoff or writeoff > 0:
                 raise HTTPException(status_code=400, detail="Customer receipt allocations cannot be changed to write-off")
             validate_receipt_payment_channels(session, receipt_adjustment, cash, online)
 
         other_active_total = round2(
             sum(
-                as_f(row.cash_amount) + as_f(row.online_amount) + as_f(getattr(row, "writeoff_amount", 0.0))
+                as_f(row.cash_amount) + as_f(row.online_amount) + as_f(getattr(row, "credit_amount", 0.0)) + as_f(getattr(row, "writeoff_amount", 0.0))
                 for row in session.exec(active_bill_payments_query(b.id)).all()
                 if int(getattr(row, "id", 0) or 0) != int(p.id)
             )
@@ -2035,6 +2048,7 @@ def list_bill_payments(bill_id: int):
                 "mode": p.mode,
                 "cash_amount": p.cash_amount,
                 "online_amount": p.online_amount,
+                "credit_amount": getattr(p, "credit_amount", 0.0),
                 "writeoff_amount": getattr(p, "writeoff_amount", 0.0),
                 "note": p.note,
                 "is_writeoff": bool(getattr(p, "is_writeoff", False)),
@@ -2095,7 +2109,7 @@ def recover_bill_payment(bill_id: int, payment_id: int):
         if receipt_adjustment:
             if bool(getattr(p, "is_writeoff", False)) or as_f(getattr(p, "writeoff_amount", 0.0)) > 0:
                 raise HTTPException(status_code=400, detail="Customer receipt allocations cannot be recovered as write-off")
-            validate_receipt_payment_channels(session, receipt_adjustment, round2(as_f(p.cash_amount)), round2(as_f(p.online_amount)))
+            validate_receipt_payment_channels(session, receipt_adjustment, round2(as_f(p.cash_amount)), round2(as_f(p.online_amount)), round2(as_f(getattr(p, "credit_amount", 0.0))))
 
         p.is_deleted = False
         p.deleted_at = None
@@ -2103,7 +2117,7 @@ def recover_bill_payment(bill_id: int, payment_id: int):
         sync_receipt_adjustment_for_payment(
             session,
             p,
-            round2(as_f(p.cash_amount) + as_f(p.online_amount)),
+            round2(as_f(p.cash_amount) + as_f(p.online_amount) + as_f(getattr(p, "credit_amount", 0.0))),
             restore_receipt=True,
         )
 
@@ -2196,7 +2210,10 @@ def payments_summary(
         online = round2(sum(as_f(p.online_amount) for p in pays))
         receipt_rows: List[PartyReceipt] = []
         if deleted_filter != "deleted":
-            receipt_stmt = select(PartyReceipt).where(PartyReceipt.is_deleted == False)  # noqa: E712
+            receipt_stmt = select(PartyReceipt).where(
+                PartyReceipt.is_deleted == False,  # noqa: E712
+                PartyReceipt.mode != "credit",
+            )
             receipt_date_expr = func.substr(func.coalesce(PartyReceipt.received_at, ""), 1, 10)
             if from_date:
                 receipt_stmt = receipt_stmt.where(receipt_date_expr >= from_date)
@@ -2293,6 +2310,7 @@ def payments_aggregate(
                 )
                 .select_from(PartyReceipt)
                 .where(PartyReceipt.is_deleted == False)  # noqa: E712
+                .where(PartyReceipt.mode != "credit")
                 .where(PartyReceipt.received_at >= start_ts)
                 .where(PartyReceipt.received_at <= end_ts)
                 .group_by(receipt_period_expr)

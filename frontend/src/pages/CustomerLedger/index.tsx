@@ -325,6 +325,7 @@ type ReceiptHistoryRow = {
   isDeleted?: boolean
   deletedAt?: string | null
   isWriteoff?: boolean
+  exchangeId?: number | null
 }
 
 export function customerClosingBalance(openingBalance: number, outstandingBills: number, unallocatedAdvance: number) {
@@ -789,7 +790,7 @@ export default function CustomerLedgerPage() {
         receiptId: receipt.id,
         sourceType: 'party_receipt' as const,
         when: receipt.received_at,
-        source: 'Customer receipt',
+        source: receipt.exchange_id ? `Exchange credit #${receipt.exchange_id}` : 'Customer receipt',
         mode: receipt.mode,
         cash: Number(receipt.cash_amount || 0),
         online: Number(receipt.online_amount || 0),
@@ -803,6 +804,7 @@ export default function CustomerLedgerPage() {
         note: receipt.note || '',
         isDeleted: Boolean(receipt.is_deleted),
         deletedAt: receipt.deleted_at || null,
+        exchangeId: receipt.exchange_id ? Number(receipt.exchange_id) : null,
       }
     })
 
@@ -873,7 +875,8 @@ export default function CustomerLedgerPage() {
 
   const activeReceiptHistory = receiptHistory.filter((row) => !row.isDeleted && row.sourceType !== 'advance_refund')
   const activeAdvanceReturns = receiptHistory.filter((row) => !row.isDeleted && row.sourceType === 'advance_refund')
-  const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + (row.isWriteoff ? 0 : Number(row.total || 0)), 0)
+  const receiptHistoryTotal = activeReceiptHistory.reduce((sum, row) => sum + (row.isWriteoff || row.mode === 'credit' ? 0 : Number(row.total || 0)), 0)
+  const exchangeCreditAvailable = activeReceiptHistory.filter((row) => row.mode === 'credit').reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
   const receiptHistoryOnAccountTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
   const openingBalance = signedPartyOpening(selectedParty)
   const closingBalance = customerClosingBalance(openingBalance, totalOutstanding, receiptHistoryOnAccountTotal)
@@ -1927,7 +1930,8 @@ export default function CustomerLedgerPage() {
           <>
             <Chip size="small" variant="outlined" label={`${activeReceiptHistory.length} receipts`} sx={{ fontWeight: 800 }} />
             {activeAdvanceReturns.length ? <Chip size="small" color="warning" variant="outlined" label={`${activeAdvanceReturns.length} returns · Rs ${money(-activeAdvanceReturns.reduce((sum,row)=>sum+row.total,0))}`} sx={{ fontWeight: 800 }} /> : null}
-            <Chip size="small" color="success" variant="outlined" label={`Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
+            <Chip size="small" color="success" variant="outlined" label={`Receipts Rs ${money(receiptHistoryTotal)}`} sx={{ fontWeight: 800 }} />
+            {exchangeCreditAvailable > 0 ? <Chip size="small" color="warning" label={`Customer credit Rs ${money(exchangeCreditAvailable)}`} sx={{ fontWeight: 800 }} /> : null}
             <Chip size="small" color="info" variant="outlined" label={`Advance Rs ${money(actualRefundableAdvance)}`} sx={{ fontWeight: 800 }} />
           </>
         }
@@ -2042,25 +2046,25 @@ export default function CustomerLedgerPage() {
             </tbody>
           </table>
           <Menu anchorEl={receiptActionsAnchor} open={Boolean(receiptActionsAnchor)} onClose={()=>{setReceiptActionsAnchor(null);setReceiptActionsRow(null)}}>
-            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || receiptActionsRow.hasCrossCustomerAllocation} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openEditReceipt(row)}}>Edit Receipt</MenuItem>
-            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.isDeleted || Number(receiptActionsRow.onAccount||0)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openApplyAdvance(row)}}>Adjust Advance</MenuItem>
-            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || Math.min(Number(receiptActionsRow.onAccount||0),actualRefundableAdvance)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row){setRefundTarget(row);setRefundAmount(String(Math.min(Number(row.onAccount),actualRefundableAdvance)));setRefundDate(today);setRefundBook('CASH');setRefundNote('')}}}>Return Advance</MenuItem>
-            {receiptActionsRow?.isDeleted && receiptActionsRow.sourceType === 'party_receipt' ? <MenuItem onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setRecoverReceiptTarget(row)}}>Recover Receipt</MenuItem> : !receiptActionsRow?.isDeleted ? <MenuItem sx={{color:'error.main'}} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setDeleteTarget(row)}}>{receiptActionsRow?.sourceType === 'advance_refund' ? 'Reverse Advance Return' : 'Delete'}</MenuItem> : null}
+            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || receiptActionsRow.hasCrossCustomerAllocation || Boolean(receiptActionsRow.exchangeId)} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openEditReceipt(row)}}>Edit Receipt</MenuItem>
+            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.isDeleted || Number(receiptActionsRow.onAccount||0)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)openApplyAdvance(row)}}>{receiptActionsRow?.mode === 'credit' ? 'Apply Credit to Bill' : 'Adjust Advance'}</MenuItem>
+            <MenuItem disabled={!receiptActionsRow || receiptActionsRow.sourceType!=='party_receipt' || receiptActionsRow.isDeleted || Math.min(Number(receiptActionsRow.onAccount||0),actualRefundableAdvance)<=0} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row){setRefundTarget(row);setRefundAmount(String(Math.min(Number(row.onAccount),actualRefundableAdvance)));setRefundDate(today);setRefundBook('CASH');setRefundNote('')}}}>{receiptActionsRow?.mode === 'credit' ? 'Refund Credit' : 'Return Advance'}</MenuItem>
+            {receiptActionsRow?.isDeleted && receiptActionsRow.sourceType === 'party_receipt' && !receiptActionsRow.exchangeId ? <MenuItem onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setRecoverReceiptTarget(row)}}>Recover Receipt</MenuItem> : !receiptActionsRow?.isDeleted && !receiptActionsRow?.exchangeId ? <MenuItem sx={{color:'error.main'}} onClick={()=>{const row=receiptActionsRow;setReceiptActionsAnchor(null);setReceiptActionsRow(null);if(row)setDeleteTarget(row)}}>{receiptActionsRow?.sourceType === 'advance_refund' ? 'Reverse Advance Return' : 'Delete'}</MenuItem> : null}
           </Menu>
         </Box>
       </CollapsibleLedgerSection>
 
       <Dialog open={Boolean(refundTarget)} onClose={()=>!refundAdvanceM.isPending&&setRefundTarget(null)} fullWidth maxWidth="sm">
-        <DialogTitle>Return Customer Advance</DialogTitle>
+        <DialogTitle>{refundTarget?.mode === 'credit' ? 'Refund Customer Credit' : 'Return Customer Advance'}</DialogTitle>
         <DialogContent dividers><Stack gap={2} sx={{pt:1}}>
-          <Alert severity="info">Actual refundable advance: Rs {money(refundAvailable)}. This accounts for the opening balance and outstanding bills.</Alert>
+          <Alert severity="info">Available {refundTarget?.mode === 'credit' ? 'customer credit' : 'refundable advance'}: Rs {money(refundAvailable)}. This accounts for the opening balance and outstanding bills.</Alert>
           <TextField select label="Pay from" value={refundBook} onChange={e=>setRefundBook(e.target.value as 'CASH'|'BANK')}><MenuItem value="CASH">Cashbook</MenuItem><MenuItem value="BANK">Bankbook</MenuItem></TextField>
           {refundBook==='BANK'?<TextField select label="Bank mode" value={refundBankMode} onChange={e=>setRefundBankMode(e.target.value as any)}>{['UPI','NEFT','RTGS','IMPS'].map(v=><MenuItem key={v} value={v}>{v}</MenuItem>)}</TextField>:null}
           <TextField label="Amount" type="number" value={refundAmount} onChange={e=>setRefundAmount(normalizeAmountInput(e.target.value))} inputProps={{min:0.01,max:refundAvailable,step:'0.01'}} />
           <TextField label="Return date" type="date" value={refundDate} onChange={e=>setRefundDate(e.target.value)} InputLabelProps={{shrink:true}} />
           <TextField label="Note" value={refundNote} onChange={e=>setRefundNote(e.target.value)} multiline minRows={2} />
         </Stack></DialogContent>
-        <DialogActions><Button onClick={()=>setRefundTarget(null)} disabled={refundAdvanceM.isPending}>Cancel</Button><Button variant="contained" color="warning" disabled={refundAdvanceM.isPending||Number(refundAmount)<=0||Number(refundAmount)>refundAvailable} onClick={()=>refundAdvanceM.mutate()}>{refundAdvanceM.isPending?'Returning…':'Return Advance'}</Button></DialogActions>
+        <DialogActions><Button onClick={()=>setRefundTarget(null)} disabled={refundAdvanceM.isPending}>Cancel</Button><Button variant="contained" color="warning" disabled={refundAdvanceM.isPending||Number(refundAmount)<=0||Number(refundAmount)>refundAvailable} onClick={()=>refundAdvanceM.mutate()}>{refundAdvanceM.isPending?'Saving…':refundTarget?.mode === 'credit' ? 'Refund Credit' : 'Return Advance'}</Button></DialogActions>
       </Dialog>
 
       <Dialog
@@ -2300,7 +2304,7 @@ export default function CustomerLedgerPage() {
       </Dialog>
 
       <Dialog open={Boolean(applyTarget)} onClose={() => !applyReceiptM.isPending && setApplyTarget(null)} fullWidth maxWidth="lg">
-        <DialogTitle>Apply Advance to Bills</DialogTitle>
+        <DialogTitle>{applyTarget?.mode === 'credit' ? 'Apply Customer Credit to Bills' : 'Apply Advance to Bills'}</DialogTitle>
         <DialogContent dividers>
           <Stack gap={2}>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2} justifyContent="space-between">
@@ -2413,7 +2417,7 @@ export default function CustomerLedgerPage() {
             onClick={saveApplyAdvance}
             disabled={applyReceiptM.isPending}
           >
-            Apply Advance
+            {applyTarget?.mode === 'credit' ? 'Apply Credit' : 'Apply Advance'}
           </Button>
         </DialogActions>
       </Dialog>

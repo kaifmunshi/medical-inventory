@@ -310,7 +310,8 @@ def recalculate_bill_payment_state(session, bill: Bill) -> Dict[str, Any]:
 
     total_cash = round2(sum(as_f(x.cash_amount) for x in receipt_pays))
     total_online = round2(sum(as_f(x.online_amount) for x in receipt_pays))
-    total_paid = round2(total_cash + total_online)
+    total_credit = round2(sum(as_f(getattr(x, "credit_amount", 0.0)) for x in receipt_pays))
+    total_paid = round2(total_cash + total_online + total_credit)
     total_writeoff = round2(sum(as_f(getattr(x, "writeoff_amount", 0.0)) for x in writeoff_pays))
     total_amount = round2(as_f(bill.total_amount))
     covered_total = round2(total_paid + total_writeoff)

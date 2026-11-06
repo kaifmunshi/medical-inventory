@@ -58,6 +58,7 @@ SYSTEM_LEDGERS = {
     "CASH_IN_HAND": ("Cash in Hand", "CASH_BANK"),
     "BANK_ACCOUNT": ("Bank Account", "CASH_BANK"),
     "SALES_ACCOUNT": ("Sales Account", "SALES"),
+    "SALES_RETURN_ACCOUNT": ("Sales Returns", "SALES"),
     "PURCHASE_ACCOUNT": ("Purchase Account", "PURCHASES"),
     "PURCHASE_RETURN_ACCOUNT": ("Purchase Returns", "PURCHASES"),
     "INPUT_GST": ("Input GST", "DUTIES_TAXES"),
@@ -507,6 +508,10 @@ def post_party_receipt_voucher(session, receipt_id: int, party: Party, received_
         lines.append({"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "DR", "amount": round2(cash_amount), "narration": note or "Customer receipt"})
     if round2(online_amount) > 0:
         lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "DR", "amount": round2(online_amount), "narration": note or "Customer receipt"})
+    receipt = session.get(PartyReceipt, int(receipt_id))
+    credit_amount = round2(float(getattr(receipt, "credit_amount", 0.0) or 0.0)) if receipt else 0.0
+    if credit_amount > 0:
+        lines.append({"ledger_id": int(ledgers["SALES_RETURN_ACCOUNT"].id), "entry_type": "DR", "amount": credit_amount, "narration": note or "Customer exchange credit"})
     credits_by_ledger: Dict[int, float] = {}
     allocated_total = 0.0
     adjustments = session.exec(
@@ -538,11 +543,11 @@ def post_party_receipt_voucher(session, receipt_id: int, party: Party, received_
         lines.append({"ledger_id": ledger_id, "entry_type": "CR", "amount": amount, "narration": note or "Customer receipt"})
     return upsert_voucher(
         session,
-        voucher_type="RECEIPT",
+        voucher_type="CREDIT_NOTE" if credit_amount > 0 else "RECEIPT",
         source_type="PARTY_RECEIPT",
         source_id=int(receipt_id),
         voucher_date=str(received_at or "")[:10],
-        voucher_no=f"R-{receipt_id}",
+        voucher_no=f"CN-{receipt_id}" if credit_amount > 0 else f"R-{receipt_id}",
         narration=note or f"Receipt from {party.name}",
         total_amount=round2(total_amount),
         lines=lines,

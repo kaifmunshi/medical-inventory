@@ -11,7 +11,7 @@ from backend.security import require_min_role
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
-    Item, Bill, BillItem, BillPayment,
+    Item, Bill, BillItem, BillPayment, Customer, Party, PartyReceipt, ReceiptBillAdjustment, CustomerAdvanceRefund,
     Return, ReturnItem,
     ReturnCreate, ReturnOut, ReturnItemOut,
     AuditLog, AuditLogOut,
@@ -20,6 +20,7 @@ from backend.models import (
     ExchangeRecord,
     StockMovement,
 )
+from backend.accounting import post_party_receipt_voucher, mark_voucher_deleted
 from backend.inventory_lot_sync import item_stock_meta, sync_lot_quantity_for_item
 
 router = APIRouter()
@@ -33,6 +34,69 @@ def round2(x: float) -> float:
 ROUND_TOLERANCE = 20.0  # supports practical cash rounding such as Rs 239.69 -> Rs 250
 MONEY_EPSILON = 0.01   # allow 1 paisa drift between FE/BE rounding paths
 EXCHANGE_SETTLE_EPSILON = 0.05  # absorb small FE/BE rounding drift in exchange settlement
+
+
+def exchange_customer_party(session, source_bill: Optional[Bill]) -> Optional[Party]:
+    if not source_bill:
+        return None
+    if source_bill.party_id:
+        party = session.get(Party, int(source_bill.party_id))
+        if party:
+            return party
+    if source_bill.customer_id:
+        return session.exec(select(Party).where(
+            Party.party_group == "SUNDRY_DEBTOR",
+            Party.legacy_customer_id == int(source_bill.customer_id),
+        )).first()
+    return None
+
+
+def sync_exchange_customer_credit(session, exchange: ExchangeRecord, source_bill: Optional[Bill], amount: float) -> None:
+    amount = round2(max(0.0, float(amount or 0.0)))
+    receipt = session.exec(select(PartyReceipt).where(PartyReceipt.exchange_id == int(exchange.id or 0))).first()
+    party = exchange_customer_party(session, source_bill)
+    if amount > MONEY_EPSILON and not party:
+        raise HTTPException(status_code=400, detail="Customer credit requires a customer linked to the source bill")
+    used = 0.0
+    if receipt:
+        for adjustment in session.exec(select(ReceiptBillAdjustment).where(ReceiptBillAdjustment.receipt_id == int(receipt.id or 0))).all():
+            payment = session.get(BillPayment, int(adjustment.bill_payment_id or 0)) if adjustment.bill_payment_id else None
+            if not payment or not bool(getattr(payment, "is_deleted", False)):
+                used += float(adjustment.adjusted_amount or 0.0)
+        used += sum(float(row.amount or 0.0) for row in session.exec(select(CustomerAdvanceRefund).where(
+            CustomerAdvanceRefund.receipt_id == int(receipt.id or 0), CustomerAdvanceRefund.is_deleted == False,  # noqa: E712
+        )).all())
+    used = round2(used)
+    if amount + MONEY_EPSILON < used:
+        raise HTTPException(status_code=409, detail=f"Credit already used: ₹{used:.2f}. Reverse its bill adjustments/refunds before reducing it.")
+    if amount <= MONEY_EPSILON:
+        if receipt:
+            receipt.is_deleted = True
+            receipt.deleted_at = now_ts()
+            receipt.unallocated_amount = 0.0
+            session.add(receipt)
+            mark_voucher_deleted(session, source_type="PARTY_RECEIPT", source_id=int(receipt.id or 0))
+        return
+    if not receipt:
+        receipt = PartyReceipt(
+            party_id=int(party.id), received_at=str(exchange.created_at), mode="credit",
+            cash_amount=0.0, online_amount=0.0, credit_amount=amount,
+            total_amount=amount, unallocated_amount=amount, exchange_id=int(exchange.id or 0),
+            note=f"Customer credit from exchange #{exchange.id}", is_deleted=False,
+        )
+        session.add(receipt); session.flush()
+    else:
+        receipt.party_id = int(party.id)
+        receipt.received_at = str(exchange.created_at)
+        receipt.mode = "credit"
+        receipt.cash_amount = receipt.online_amount = 0.0
+        receipt.credit_amount = amount
+        receipt.total_amount = amount
+        receipt.unallocated_amount = round2(amount - used)
+        receipt.is_deleted = False
+        receipt.deleted_at = None
+        session.add(receipt); session.flush()
+    post_party_receipt_voucher(session, int(receipt.id), party, receipt.received_at, amount, 0.0, 0.0, receipt.note)
 
 
 class ReturnRefundUpdate(BaseModel):
@@ -789,6 +853,10 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
         exchange.refund_cash = refund_cash
         exchange.refund_online = refund_online
         exchange.refund_credit = refund_credit
+        if not bool(getattr(exchange, "customer_credit_migrated", False)) and old_credit > MONEY_EPSILON and source_bill:
+            source_bill.total_amount = round2(float(source_bill.total_amount or 0.0) + old_credit)
+            session.add(source_bill)
+        exchange.customer_credit_migrated = True
         session.add(exchange)
 
         ret.date_time = new_datetime
@@ -818,8 +886,9 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
                 session.add(movement)
 
         session.flush()
-        if old_credit != refund_credit:
-            apply_return_credit_to_bill(session, ret, old_credit, refund_credit)
+        sync_exchange_customer_credit(session, exchange, source_bill, refund_credit)
+        if source_bill:
+            sync_bill_vouchers(session, source_bill)
         sync_bill_vouchers(session, replacement_bill)
         log_audit(
             session,
@@ -1631,12 +1700,12 @@ def create_exchange(payload: ExchangeCreate):
             refund_cash=r_cash,
             refund_online=r_online,
             refund_credit=round2(getattr(ret, "credit_amount", 0.0) or 0.0),
+            customer_credit_migrated=True,
             notes=merged_notes,
         )
         session.add(exchange)
         session.flush()
-        if float(getattr(ret, "credit_amount", 0.0) or 0.0) > MONEY_EPSILON:
-            apply_return_credit_to_bill(session, ret, 0.0, float(ret.credit_amount))
+        sync_exchange_customer_credit(session, exchange, bill, float(getattr(ret, "credit_amount", 0.0) or 0.0))
         log_audit(
             session,
             entity_type="SALES_RETURN",

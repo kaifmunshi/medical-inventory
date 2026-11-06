@@ -82,6 +82,7 @@ class BillPayment(SQLModel, table=True):
     mode: str  # "cash" | "online" | "split"
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    credit_amount: float = 0.0
     writeoff_amount: float = 0.0
     note: Optional[str] = None
     is_writeoff: bool = Field(default=False, index=True)
@@ -129,6 +130,7 @@ class ExchangeRecord(SQLModel, table=True):
     refund_cash: float = 0.0
     refund_online: float = 0.0
     refund_credit: float = 0.0
+    customer_credit_migrated: bool = False
     notes: Optional[str] = None
 
 
@@ -1005,6 +1007,8 @@ class PartyReceipt(SQLModel, table=True):
     mode: str
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    credit_amount: float = 0.0
+    exchange_id: Optional[int] = Field(default=None, index=True)
     total_amount: float = 0.0
     unallocated_amount: float = 0.0
     note: Optional[str] = None
@@ -1589,6 +1593,7 @@ class ReceiptBillAdjustmentOut(SQLModel):
     created_at: str
     cash_amount: float = 0.0
     online_amount: float = 0.0
+    credit_amount: float = 0.0
     party_id: Optional[int] = None
     customer_name: Optional[str] = None
 
@@ -1600,6 +1605,8 @@ class PartyReceiptOut(SQLModel):
     mode: str
     cash_amount: float
     online_amount: float
+    credit_amount: float = 0.0
+    exchange_id: Optional[int] = None
     total_amount: float
     unallocated_amount: float
     refunded_amount: float = 0.0

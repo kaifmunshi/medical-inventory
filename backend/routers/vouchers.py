@@ -1281,10 +1281,10 @@ def daybook(
             rows.append(
                 VoucherDayBookRow(
                     ts=receipt.received_at,
-                    voucher_type="RECEIPT",
+                    voucher_type="CREDIT_NOTE" if str(receipt.mode or "").lower() == "credit" else "RECEIPT",
                     source_type="PARTY_RECEIPT",
                     source_id=int(receipt.id or 0),
-                    voucher_no=f"R-{receipt.id}",
+                    voucher_no=f"CN-{receipt.id}" if str(receipt.mode or "").lower() == "credit" else f"R-{receipt.id}",
                     party_name=party_map.get(int(receipt.party_id or 0)),
                     narration=receipt.note or "Customer receipt",
                     amount=_round2(receipt.total_amount),

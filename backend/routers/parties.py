@@ -155,7 +155,8 @@ def _recalculate_bill_payment_state(session, bill: Bill) -> None:
 
     total_cash = _round2(exchange_cash + sum(_as_float(payment.cash_amount) for payment in receipt_payments))
     total_online = _round2(exchange_online + sum(_as_float(payment.online_amount) for payment in receipt_payments))
-    total_paid = _round2(exchange_settled_by_return + total_cash + total_online)
+    total_credit = _round2(sum(_as_float(getattr(payment, "credit_amount", 0.0)) for payment in receipt_payments))
+    total_paid = _round2(exchange_settled_by_return + total_cash + total_online + total_credit)
     total_writeoff = _round2(sum(_as_float(getattr(payment, "writeoff_amount", 0.0)) for payment in writeoff_payments))
     bill_total = _round2(_as_float(bill.total_amount))
     covered = _round2(total_paid + total_writeoff)
@@ -326,9 +327,11 @@ def _receipt_adjustment_outs_by_receipt(
                 continue
             cash_amount = _round2(_as_float(payment.cash_amount)) if payment else 0.0
             online_amount = _round2(_as_float(payment.online_amount)) if payment else 0.0
+            credit_amount = _round2(_as_float(getattr(payment, "credit_amount", 0.0))) if payment else 0.0
         else:
             cash_amount = 0.0
             online_amount = 0.0
+            credit_amount = 0.0
 
         receipt_id = int(adjustment.receipt_id)
         bill = session.get(Bill, int(adjustment.bill_id))
@@ -338,6 +341,7 @@ def _receipt_adjustment_outs_by_receipt(
                 **adjustment.model_dump(),
                 cash_amount=cash_amount,
                 online_amount=online_amount,
+                credit_amount=credit_amount,
                 party_id=int(bill_party.id) if bill_party and bill_party.id is not None else None,
                 customer_name=bill_party.name if bill_party else None,
             )
@@ -456,6 +460,20 @@ def _sync_customer_debtor_parties(session) -> None:
             changed = True
         if changed:
             session.add(new_bill)
+            dirty = True
+        credit_amount = _round2(float(getattr(exchange, "refund_credit", 0.0) or 0.0))
+        if credit_amount > 0:
+            if not bool(getattr(exchange, "customer_credit_migrated", False)):
+                # Earlier exchange-credit handling reduced the source bill. Restore
+                # that bill once; the credit now lives as a separate liability.
+                source_bill.total_amount = _round2(float(source_bill.total_amount or 0.0) + credit_amount)
+                exchange.customer_credit_migrated = True
+                session.add(source_bill)
+                session.add(exchange)
+                _recalculate_bill_payment_state(session, source_bill)
+                dirty = True
+            from backend.routers.returns import sync_exchange_customer_credit
+            sync_exchange_customer_credit(session, exchange, source_bill, credit_amount)
             dirty = True
     if dirty:
         session.commit()
@@ -1146,20 +1164,26 @@ def apply_party_receipt(party_id: int, receipt_id: int, payload: PartyReceiptApp
             normalized_adjustments.append((bill, amount))
 
         remaining_cash, remaining_online = _receipt_remaining_channels(session, receipt)
+        is_credit_receipt = str(receipt.mode or "").lower() == "credit"
         allocation_note = _normalize_text(payload.note)
         for bill, amount in normalized_adjustments:
-            cash_share, online_share = _allocate_receipt_channels(amount, remaining_cash, remaining_online)
-            if _round2(cash_share + online_share) != _round2(amount):
+            if is_credit_receipt:
+                cash_share, online_share, credit_share = 0.0, 0.0, amount
+            else:
+                cash_share, online_share = _allocate_receipt_channels(amount, remaining_cash, remaining_online)
+                credit_share = 0.0
+            if _round2(cash_share + online_share + credit_share) != _round2(amount):
                 raise HTTPException(status_code=400, detail="Receipt advance balance is not available for this allocation")
             remaining_cash = _round2(remaining_cash - cash_share)
             remaining_online = _round2(remaining_online - online_share)
-            payment_mode = "split" if cash_share > 0 and online_share > 0 else "cash" if cash_share > 0 else "online"
+            payment_mode = "credit" if credit_share > 0 else "split" if cash_share > 0 and online_share > 0 else "cash" if cash_share > 0 else "online"
             bill_payment = BillPayment(
                 bill_id=bill.id,
                 received_at=allocation_ts,
                 mode=payment_mode,
                 cash_amount=cash_share,
                 online_amount=online_share,
+                credit_amount=credit_share,
                 writeoff_amount=0.0,
                 note=f"party receipt #{receipt.id} advance allocation{f': {allocation_note}' if allocation_note else ''}",
                 is_writeoff=False,
@@ -1214,6 +1238,8 @@ def update_party_receipt(party_id: int, receipt_id: int, payload: PartyReceiptUp
             raise HTTPException(status_code=404, detail="Receipt not found")
         if bool(getattr(receipt, "is_deleted", False)):
             raise HTTPException(status_code=400, detail="Deleted receipt cannot be edited. Recover it first.")
+        if getattr(receipt, "exchange_id", None):
+            raise HTTPException(status_code=400, detail="Exchange credit must be edited from Exchange History")
 
         cash, online, total_amount = _validate_receipt_mode(payload.mode, payload.cash_amount, payload.online_amount)
         receipt_ts = _normalize_payment_ts(payload.payment_date) if payload.payment_date else str(receipt.received_at or datetime.now().isoformat(timespec="seconds"))
@@ -1447,6 +1473,8 @@ def delete_party_receipt(party_id: int, receipt_id: int) -> PartyReceiptOut:
             raise HTTPException(status_code=404, detail="Receipt not found")
         if bool(getattr(receipt, "is_deleted", False)):
             return _party_receipt_out(session, receipt)
+        if getattr(receipt, "exchange_id", None):
+            raise HTTPException(status_code=400, detail="Exchange credit cannot be deleted here; edit the exchange settlement instead")
         if session.exec(select(CustomerAdvanceRefund).where(CustomerAdvanceRefund.receipt_id == receipt.id, CustomerAdvanceRefund.is_deleted == False)).first():  # noqa: E712
             raise HTTPException(status_code=409, detail="Delete the advance return before deleting this receipt")
 

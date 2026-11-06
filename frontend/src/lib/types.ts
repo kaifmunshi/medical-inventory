@@ -454,9 +454,11 @@ export interface PartyReceipt {
   id: ID
   party_id: ID
   received_at: string
-  mode: 'cash' | 'online' | 'split'
+  mode: 'cash' | 'online' | 'split' | 'credit'
   cash_amount: number
   online_amount: number
+  credit_amount?: number
+  exchange_id?: ID | null
   total_amount: number
   unallocated_amount: number
   note?: string | null
@@ -489,6 +491,7 @@ export interface ReceiptBillAdjustment {
   created_at: string
   cash_amount?: number
   online_amount?: number
+  credit_amount?: number
   party_id?: ID | null
   customer_name?: string | null
 }

@@ -2510,6 +2510,7 @@ def migrate_db():
                 mode TEXT NOT NULL,
                 cash_amount REAL NOT NULL DEFAULT 0,
                 online_amount REAL NOT NULL DEFAULT 0,
+                credit_amount REAL NOT NULL DEFAULT 0,
                 writeoff_amount REAL NOT NULL DEFAULT 0,
                 note TEXT,
                 is_writeoff INTEGER NOT NULL DEFAULT 0,
@@ -2519,6 +2520,8 @@ def migrate_db():
         """))
         bp_cols = session.exec(text("PRAGMA table_info(billpayment)")).all()
         bp_col_names = {c[1] for c in bp_cols}
+        if "credit_amount" not in bp_col_names:
+            session.exec(text("ALTER TABLE billpayment ADD COLUMN credit_amount REAL NOT NULL DEFAULT 0"))
         if "writeoff_amount" not in bp_col_names:
             session.exec(text(
                 "ALTER TABLE billpayment ADD COLUMN writeoff_amount REAL NOT NULL DEFAULT 0"
@@ -3290,6 +3293,8 @@ def migrate_db():
                 mode TEXT NOT NULL,
                 cash_amount REAL NOT NULL DEFAULT 0,
                 online_amount REAL NOT NULL DEFAULT 0,
+                credit_amount REAL NOT NULL DEFAULT 0,
+                exchange_id INTEGER,
                 total_amount REAL NOT NULL DEFAULT 0,
                 unallocated_amount REAL NOT NULL DEFAULT 0,
                 note TEXT,
@@ -3297,6 +3302,11 @@ def migrate_db():
                 deleted_at TEXT
             )
         """))
+        pr_cols = {c[1] for c in session.exec(text("PRAGMA table_info(partyreceipt)")).all()}
+        if "credit_amount" not in pr_cols:
+            session.exec(text("ALTER TABLE partyreceipt ADD COLUMN credit_amount REAL NOT NULL DEFAULT 0"))
+        if "exchange_id" not in pr_cols:
+            session.exec(text("ALTER TABLE partyreceipt ADD COLUMN exchange_id INTEGER"))
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS receiptbilladjustment (
                 id INTEGER PRIMARY KEY,
@@ -3386,6 +3396,7 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_partyreceipt_party_id ON partyreceipt (party_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_partyreceipt_received_at ON partyreceipt (received_at)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_partyreceipt_is_deleted ON partyreceipt (is_deleted)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_partyreceipt_exchange_id ON partyreceipt (exchange_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_receiptbilladjustment_receipt_id ON receiptbilladjustment (receipt_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_receiptbilladjustment_bill_id ON receiptbilladjustment (bill_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_receiptbilladjustment_bill_payment_id ON receiptbilladjustment (bill_payment_id)"))
@@ -3435,6 +3446,8 @@ def migrate_db():
             session.exec(text("ALTER TABLE exchangerecord ADD COLUMN payment_credit REAL NOT NULL DEFAULT 0"))
         if "refund_credit" not in exchange_cols:
             session.exec(text("ALTER TABLE exchangerecord ADD COLUMN refund_credit REAL NOT NULL DEFAULT 0"))
+        if "customer_credit_migrated" not in exchange_cols:
+            session.exec(text("ALTER TABLE exchangerecord ADD COLUMN customer_credit_migrated INTEGER NOT NULL DEFAULT 0"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_exchangerecord_created_at ON exchangerecord (created_at)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_exchangerecord_return_id ON exchangerecord (return_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_exchangerecord_new_bill_id ON exchangerecord (new_bill_id)"))

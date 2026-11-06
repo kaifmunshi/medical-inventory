@@ -1,9 +1,11 @@
 // src/pages/Returns/Exchange.tsx
 import { useEffect, useMemo, useState } from 'react'
-import { Box, Button, Paper, Stack, TextField, Typography, IconButton, MenuItem } from '@mui/material'
+import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Paper, Stack, TextField, Typography, IconButton, MenuItem } from '@mui/material'
 import DeleteIcon from '@mui/icons-material/Delete'
-import { useMutation, useQuery } from '@tanstack/react-query'
-import { findBill, createExchange, getReturnSummary } from '../../services/returns'
+import EditIcon from '@mui/icons-material/Edit'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { findBill, createExchange, getReturnSummary, listExchangeRecords, updateExchangeSettlement, type ExchangeRecord } from '../../services/returns'
+import { useSearchParams } from 'react-router-dom'
 import ItemPicker from '../../components/billing/ItemPicker'
 import BillPickerDialog from '../../components/billing/BillPickerDialog'
 import { useToast } from '../../components/ui/Toaster'
@@ -19,6 +21,9 @@ function asString(x:any){
 
 export default function Exchange() {
   const toast = useToast()
+  const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const today = new Date().toLocaleDateString('en-CA')
 
   const [query, setQuery] = useState('')
   const [bill, setBill] = useState<any | null>(null)
@@ -34,14 +39,105 @@ export default function Exchange() {
   const [paymentMode, setPaymentMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
   const [paymentCashSplit, setPaymentCashSplit] = useState<number | ''>('')
   const [paymentOnlineSplit, setPaymentOnlineSplit] = useState<number | ''>('')
-  const [refundMode, setRefundMode] = useState<'cash' | 'online' | 'split'>('cash')
+  const [paymentCreditSplit, setPaymentCreditSplit] = useState<number | ''>('')
+  const [refundMode, setRefundMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
+  const [exchangeDate, setExchangeDate] = useState(today)
   const [refundCashSplit, setRefundCashSplit] = useState<number | ''>('')
   const [refundOnlineSplit, setRefundOnlineSplit] = useState<number | ''>('')
+  const [refundCreditSplit, setRefundCreditSplit] = useState<number | ''>('')
+  const [historySearch, setHistorySearch] = useState('')
+  const [historyFrom, setHistoryFrom] = useState('')
+  const [historyTo, setHistoryTo] = useState('')
+  const [historySettlement, setHistorySettlement] = useState<'all' | 'cash' | 'online' | 'split' | 'credit'>('all')
+  const [editExchange, setEditExchange] = useState<ExchangeRecord | null>(null)
+  const [editDate, setEditDate] = useState('')
+  const [editCash, setEditCash] = useState<number | ''>('')
+  const [editOnline, setEditOnline] = useState<number | ''>('')
+  const [editCredit, setEditCredit] = useState<number | ''>('')
 
   const { refetch } = useQuery({
     queryKey: ['ex-bill', query],
     queryFn: () => findBill(query),
     enabled: false,
+  })
+
+  const history = useQuery({
+    queryKey: ['exchange-history'],
+    queryFn: async () => {
+      const all = []
+      const limit = 1000
+      for (let offset = 0; ; offset += limit) {
+        const page = await listExchangeRecords({ limit, offset })
+        all.push(...page)
+        if (page.length < limit) return all
+      }
+    },
+  })
+
+  const filteredHistory = useMemo(() => {
+    const search = historySearch.trim().toLowerCase().replace(/^#/, '')
+    return (history.data || []).filter((row) => {
+      const date = String(row.created_at || '').slice(0, 10)
+      if (historyFrom && date < historyFrom) return false
+      if (historyTo && date > historyTo) return false
+      if (historySettlement !== 'all' && row.payment_mode !== historySettlement) return false
+      if (!search) return true
+      return [row.id, row.source_bill_id, row.return_id, row.new_bill_id]
+        .some((value) => value != null && String(value).toLowerCase().includes(search))
+    })
+  }, [history.data, historyFrom, historySearch, historySettlement, historyTo])
+
+  const historyFiltersActive = Boolean(
+    historySearch || historyFrom || historyTo || historySettlement !== 'all'
+  )
+
+  function openExchangeEditor(row: ExchangeRecord) {
+    const refundSide = Number(row.net_due || 0) < 0
+    setEditExchange(row)
+    setEditDate(String(row.created_at || '').slice(0, 10))
+    setEditCash(refundSide ? Number(row.refund_cash || 0) : Number(row.payment_cash || 0))
+    setEditOnline(refundSide ? Number(row.refund_online || 0) : Number(row.payment_online || 0))
+    setEditCredit(refundSide ? Number(row.refund_credit || 0) : Number(row.payment_credit || 0))
+  }
+
+  useEffect(() => {
+    const editId = Number(searchParams.get('edit') || 0)
+    if (!editId || !history.data || editExchange) return
+    const row = history.data.find((item) => Number(item.id) === editId)
+    if (row) openExchangeEditor(row)
+  }, [history.data, searchParams, editExchange])
+
+  const editMutation = useMutation({
+    mutationFn: async () => {
+      if (!editExchange) throw new Error('No exchange selected')
+      const refundSide = Number(editExchange.net_due || 0) < 0
+      const cash = round2(Number(editCash || 0))
+      const online = round2(Number(editOnline || 0))
+      const credit = round2(Number(editCredit || 0))
+      const expected = round2(Math.abs(Number(editExchange.net_due || 0)))
+      if (round2(cash + online + credit) !== expected) {
+        throw new Error(`Cash + Online + Credit must equal ₹${expected.toFixed(2)}`)
+      }
+      return updateExchangeSettlement(editExchange.id, {
+        exchange_date: editDate,
+        payment_cash: refundSide ? 0 : cash,
+        payment_online: refundSide ? 0 : online,
+        payment_credit: refundSide ? 0 : credit,
+        refund_cash: refundSide ? cash : 0,
+        refund_online: refundSide ? online : 0,
+        refund_credit: refundSide ? credit : 0,
+      })
+    },
+    onSuccess: () => {
+      toast.push('Exchange settlement updated', 'success')
+      setEditExchange(null)
+      setSearchParams({}, { replace: true })
+      queryClient.invalidateQueries({ queryKey: ['exchange-history'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-returns'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook'] })
+    },
+    onError: (error: any) => toast.push(String(error?.response?.data?.detail || error?.message || 'Exchange update failed'), 'error'),
   })
 
   const clamp = (v:number, lo:number, hi:number) => Math.max(lo, Math.min(v, hi))
@@ -115,9 +211,11 @@ export default function Exchange() {
     setPaymentMode('cash')
     setPaymentCashSplit('')
     setPaymentOnlineSplit('')
+    setPaymentCreditSplit('')
     setRefundMode('cash')
     setRefundCashSplit('')
     setRefundOnlineSplit('')
+    setRefundCreditSplit('')
   }
 
   // ====== return pricing context ======
@@ -203,20 +301,6 @@ export default function Exchange() {
 
   // -------------------------------------------------------
 
-  useEffect(() => {
-    if (chosenDelta <= 0 || paymentMode !== 'split') return
-    const c = Math.min(chosenAmountAbs, Math.max(0, round2(Number(paymentCashSplit || 0))))
-    setPaymentCashSplit(c)
-    setPaymentOnlineSplit(round2(Math.max(0, chosenAmountAbs - c)))
-  }, [chosenDelta, chosenAmountAbs, paymentMode])
-
-  useEffect(() => {
-    if (chosenDelta >= 0 || refundMode !== 'split') return
-    const c = Math.min(chosenAmountAbs, Math.max(0, round2(Number(refundCashSplit || 0))))
-    setRefundCashSplit(c)
-    setRefundOnlineSplit(round2(Math.max(0, chosenAmountAbs - c)))
-  }, [chosenDelta, chosenAmountAbs, refundMode])
-
   function buildExchangePayload() {
     if (!bill) throw new Error('No bill loaded')
 
@@ -235,11 +319,14 @@ export default function Exchange() {
       rounding_adjustment: roundingAdjustment,    // 🔴 IMPORTANT
 
       notes: '',
-      payment_mode: paymentMode,
+      exchange_date: exchangeDate,
+      payment_mode: chosenDelta < 0 ? refundMode : paymentMode,
       payment_cash: 0,
       payment_online: 0,
+      payment_credit: 0,
       refund_cash: 0,
       refund_online: 0,
+      refund_credit: 0,
     }
 
     if (chosenDelta > 0) {
@@ -250,34 +337,39 @@ export default function Exchange() {
       } else if (paymentMode === 'online') {
         payload.payment_online = payAbs
       } else if (paymentMode === 'credit') {
-        payload.payment_cash = 0
-        payload.payment_online = 0
+        payload.payment_credit = payAbs
       } else {
         const c = round2(Number(paymentCashSplit || 0))
         const o = round2(Number(paymentOnlineSplit || 0))
-        if (c < 0 || o < 0) throw new Error('Payment split amounts cannot be negative')
-        if (round2(c + o) !== payAbs) {
-          throw new Error(`Payment split mismatch. Cash + Online must equal ₹${payAbs.toFixed(2)}.`)
+        const cr = round2(Number(paymentCreditSplit || 0))
+        if (c < 0 || o < 0 || cr < 0) throw new Error('Payment split amounts cannot be negative')
+        if (round2(c + o + cr) !== payAbs) {
+          throw new Error(`Payment split mismatch. Cash + Online + Credit must equal ₹${payAbs.toFixed(2)}.`)
         }
         payload.payment_cash = c
         payload.payment_online = o
+        payload.payment_credit = cr
       }
     } else if (chosenDelta < 0) {
       // refund to customer
       const refundAbs = round2(-chosenDelta)
-      if (refundMode === 'cash') {
+      if (refundMode === 'credit') {
+        payload.refund_credit = refundAbs
+      } else if (refundMode === 'cash') {
         payload.refund_cash = refundAbs
       } else if (refundMode === 'online') {
         payload.refund_online = refundAbs
       } else {
         const c = round2(Number(refundCashSplit || 0))
         const o = round2(Number(refundOnlineSplit || 0))
-        if (c < 0 || o < 0) throw new Error('Refund split amounts cannot be negative')
-        if (round2(c + o) !== refundAbs) {
-          throw new Error(`Refund split mismatch. Cash + Online must equal ₹${refundAbs.toFixed(2)}.`)
+        const cr = round2(Number(refundCreditSplit || 0))
+        if (c < 0 || o < 0 || cr < 0) throw new Error('Refund split amounts cannot be negative')
+        if (round2(c + o + cr) !== refundAbs) {
+          throw new Error(`Refund split mismatch. Cash + Online + Credit must equal ₹${refundAbs.toFixed(2)}.`)
         }
         payload.refund_cash = c
         payload.refund_online = o
+        payload.refund_credit = cr
       }
     }
     return payload
@@ -290,7 +382,9 @@ export default function Exchange() {
       setBill(null); setRet([]); setAdd([]); setQuery('')
       setExDiscount(0); setFinalOverride('')
       setPaymentMode('cash'); setPaymentCashSplit(''); setPaymentOnlineSplit('')
-      setRefundMode('cash'); setRefundCashSplit(''); setRefundOnlineSplit('')
+      setPaymentCreditSplit('')
+      setRefundMode('cash'); setRefundCashSplit(''); setRefundOnlineSplit(''); setRefundCreditSplit('')
+      queryClient.invalidateQueries({ queryKey: ['exchange-history'] })
     },
     onError: (err: any) => {
       const d = err?.response?.data
@@ -333,6 +427,15 @@ export default function Exchange() {
           <TextField label="Bill Number" value={query} onChange={(e) => setQuery(e.target.value)} fullWidth />
           <Button variant="contained" onClick={load} disabled={!query}>Load Bill</Button>
           <Button variant="outlined" onClick={() => setBillPickerOpen(true)}>Find Bill</Button>
+          <TextField
+            label="Exchange Date"
+            type="date"
+            value={exchangeDate}
+            onChange={(e) => setExchangeDate(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+            inputProps={{ max: today }}
+            sx={{ minWidth: 180 }}
+          />
         </Stack>
       </Paper>
 
@@ -524,6 +627,7 @@ export default function Exchange() {
                       if (mode !== 'split') {
                         setPaymentCashSplit('')
                         setPaymentOnlineSplit('')
+                        setPaymentCreditSplit('')
                       }
                     }}
                     sx={{ width: 210 }}
@@ -541,17 +645,7 @@ export default function Exchange() {
                         label="Payment Cash"
                         type="number"
                         value={paymentCashSplit}
-                        onChange={(e) => {
-                          const raw = e.target.value
-                          if (raw === '') {
-                            setPaymentCashSplit('')
-                            setPaymentOnlineSplit(chosenAmountAbs > 0 ? chosenAmountAbs : '')
-                            return
-                          }
-                          const c = Math.min(chosenAmountAbs, Math.max(0, round2(Number(raw))))
-                          setPaymentCashSplit(c)
-                          setPaymentOnlineSplit(round2(Math.max(0, chosenAmountAbs - c)))
-                        }}
+                        onChange={(e) => setPaymentCashSplit(e.target.value === '' ? '' : Math.max(0, round2(Number(e.target.value))))}
                         sx={{ width: 160 }}
                         inputProps={{ min: 0, step: '0.01' }}
                       />
@@ -560,19 +654,15 @@ export default function Exchange() {
                         label="Payment Online"
                         type="number"
                         value={paymentOnlineSplit}
-                        onChange={(e) => {
-                          const raw = e.target.value
-                          if (raw === '') {
-                            setPaymentOnlineSplit('')
-                            setPaymentCashSplit(chosenAmountAbs > 0 ? chosenAmountAbs : '')
-                            return
-                          }
-                          const o = Math.min(chosenAmountAbs, Math.max(0, round2(Number(raw))))
-                          setPaymentOnlineSplit(o)
-                          setPaymentCashSplit(round2(Math.max(0, chosenAmountAbs - o)))
-                        }}
+                        onChange={(e) => setPaymentOnlineSplit(e.target.value === '' ? '' : Math.max(0, round2(Number(e.target.value))))}
                         sx={{ width: 160 }}
                         inputProps={{ min: 0, step: '0.01' }}
+                      />
+                      <TextField
+                        size="small" label="Payment Credit" type="number"
+                        value={paymentCreditSplit}
+                        onChange={(e) => setPaymentCreditSplit(e.target.value === '' ? '' : Math.max(0, round2(Number(e.target.value))))}
+                        sx={{ width: 160 }} inputProps={{ min: 0, step: '0.01' }}
                       />
                     </>
                   )}
@@ -592,11 +682,12 @@ export default function Exchange() {
                     label="Refund Mode"
                     value={refundMode}
                     onChange={(e) => {
-                      const mode = e.target.value as 'cash' | 'online' | 'split'
+                      const mode = e.target.value as 'cash' | 'online' | 'split' | 'credit'
                       setRefundMode(mode)
                       if (mode !== 'split') {
                         setRefundCashSplit('')
                         setRefundOnlineSplit('')
+                        setRefundCreditSplit('')
                       }
                     }}
                     sx={{ width: 210 }}
@@ -604,6 +695,7 @@ export default function Exchange() {
                     <MenuItem value="cash">Cash</MenuItem>
                     <MenuItem value="online">Online</MenuItem>
                     <MenuItem value="split">Split</MenuItem>
+                    <MenuItem value="credit">Credit (customer balance)</MenuItem>
                   </TextField>
 
                   {refundMode === 'split' && (
@@ -613,17 +705,7 @@ export default function Exchange() {
                         label="Refund Cash"
                         type="number"
                         value={refundCashSplit}
-                        onChange={(e) => {
-                          const raw = e.target.value
-                          if (raw === '') {
-                            setRefundCashSplit('')
-                            setRefundOnlineSplit(chosenAmountAbs > 0 ? chosenAmountAbs : '')
-                            return
-                          }
-                          const c = Math.min(chosenAmountAbs, Math.max(0, round2(Number(raw))))
-                          setRefundCashSplit(c)
-                          setRefundOnlineSplit(round2(Math.max(0, chosenAmountAbs - c)))
-                        }}
+                        onChange={(e) => setRefundCashSplit(e.target.value === '' ? '' : Math.max(0, round2(Number(e.target.value))))}
                         sx={{ width: 160 }}
                         inputProps={{ min: 0, step: '0.01' }}
                       />
@@ -632,19 +714,15 @@ export default function Exchange() {
                         label="Refund Online"
                         type="number"
                         value={refundOnlineSplit}
-                        onChange={(e) => {
-                          const raw = e.target.value
-                          if (raw === '') {
-                            setRefundOnlineSplit('')
-                            setRefundCashSplit(chosenAmountAbs > 0 ? chosenAmountAbs : '')
-                            return
-                          }
-                          const o = Math.min(chosenAmountAbs, Math.max(0, round2(Number(raw))))
-                          setRefundOnlineSplit(o)
-                          setRefundCashSplit(round2(Math.max(0, chosenAmountAbs - o)))
-                        }}
+                        onChange={(e) => setRefundOnlineSplit(e.target.value === '' ? '' : Math.max(0, round2(Number(e.target.value))))}
                         sx={{ width: 160 }}
                         inputProps={{ min: 0, step: '0.01' }}
+                      />
+                      <TextField
+                        size="small" label="Refund Credit" type="number"
+                        value={refundCreditSplit}
+                        onChange={(e) => setRefundCreditSplit(e.target.value === '' ? '' : Math.max(0, round2(Number(e.target.value))))}
+                        sx={{ width: 160 }} inputProps={{ min: 0, step: '0.01' }}
                       />
                     </>
                   )}
@@ -671,6 +749,145 @@ export default function Exchange() {
           </Box>
         </Paper>
       )}
+
+      <Paper sx={{ p: 2 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" mb={1}>
+          <Typography variant="h6">Exchange History</Typography>
+          <Typography variant="body2" color="text.secondary">
+            {historyFiltersActive
+              ? `${filteredHistory.length} of ${history.data?.length || 0}`
+              : history.data?.length || 0}{' '}
+            record{filteredHistory.length === 1 ? '' : 's'}
+          </Typography>
+        </Stack>
+        <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} mb={2}>
+          <TextField
+            size="small"
+            label="Search IDs"
+            placeholder="Exchange, source bill, return or new bill"
+            value={historySearch}
+            onChange={(e) => setHistorySearch(e.target.value)}
+            sx={{ minWidth: 280, flexGrow: 1 }}
+          />
+          <TextField
+            size="small"
+            label="From"
+            type="date"
+            value={historyFrom}
+            onChange={(e) => setHistoryFrom(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+            inputProps={{ max: historyTo || undefined }}
+            sx={{ minWidth: 155 }}
+          />
+          <TextField
+            size="small"
+            label="To"
+            type="date"
+            value={historyTo}
+            onChange={(e) => setHistoryTo(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+            inputProps={{ min: historyFrom || undefined }}
+            sx={{ minWidth: 155 }}
+          />
+          <TextField
+            select
+            size="small"
+            label="Settlement"
+            value={historySettlement}
+            onChange={(e) => setHistorySettlement(e.target.value as typeof historySettlement)}
+            sx={{ minWidth: 155 }}
+          >
+            <MenuItem value="all">All</MenuItem>
+            <MenuItem value="cash">Cash</MenuItem>
+            <MenuItem value="online">Online</MenuItem>
+            <MenuItem value="split">Split</MenuItem>
+            <MenuItem value="credit">Credit</MenuItem>
+          </TextField>
+          <Button
+            variant="outlined"
+            disabled={!historyFiltersActive}
+            onClick={() => {
+              setHistorySearch('')
+              setHistoryFrom('')
+              setHistoryTo('')
+              setHistorySettlement('all')
+            }}
+          >
+            Clear
+          </Button>
+        </Stack>
+        <Box sx={{ overflowX: 'auto' }}>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Date</th><th>Exchange</th><th>Source Bill</th><th>Return</th><th>New Bill</th>
+                <th>Settlement</th><th>Customer Pays / (Credit)</th><th>Refund / (Credit)</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredHistory.map((row) => {
+                const credit = row.payment_mode === 'credit'
+                const payable = Number(row.net_due || 0) > 0 ? Number(row.net_due) : 0
+                const refundable = Number(row.net_due || 0) < 0 ? Math.abs(Number(row.net_due)) : 0
+                return (
+                  <tr key={row.id}>
+                    <td>{String(row.created_at || '').slice(0, 10)}</td>
+                    <td>#{row.id}</td>
+                    <td>{row.source_bill_id ? `#${row.source_bill_id}` : '—'}</td>
+                    <td>#{row.return_id}</td>
+                    <td>#{row.new_bill_id}</td>
+                    <td>{credit ? 'Credit' : row.payment_mode}</td>
+                    <td>{payable ? `₹${payable.toFixed(2)}${credit ? ' credit' : ''}` : '—'}</td>
+                    <td>{refundable ? `₹${refundable.toFixed(2)}${credit ? ' credit' : ''}` : '—'}</td>
+                    <td>
+                      <IconButton aria-label={`Edit exchange ${row.id}`} onClick={() => openExchangeEditor(row)}>
+                        <EditIcon fontSize="small" />
+                      </IconButton>
+                    </td>
+                  </tr>
+                )
+              })}
+              {!history.isLoading && filteredHistory.length === 0 && (
+                <tr><td colSpan={9}><Box p={2}>{historyFiltersActive ? 'No exchanges match these filters.' : 'No exchange records yet.'}</Box></td></tr>
+              )}
+              {history.isLoading && <tr><td colSpan={9}><Box p={2}>Loading history…</Box></td></tr>}
+            </tbody>
+          </table>
+        </Box>
+      </Paper>
+
+      <Dialog open={Boolean(editExchange)} onClose={() => !editMutation.isPending && setEditExchange(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Edit Exchange #{editExchange?.id}</DialogTitle>
+        <DialogContent>
+          <Stack gap={2} mt={1}>
+            <Typography color="text.secondary">
+              Items and quantities are locked. This safely changes only the date and settlement allocation.
+            </Typography>
+            <TextField
+              label="Exchange Date" type="date" value={editDate}
+              onChange={(e) => setEditDate(e.target.value)} InputLabelProps={{ shrink: true }}
+              inputProps={{ max: today }} fullWidth
+            />
+            <Typography fontWeight={700}>
+              {Number(editExchange?.net_due || 0) < 0 ? 'Customer receives' : 'Customer pays'}: ₹{Math.abs(Number(editExchange?.net_due || 0)).toFixed(2)}
+            </Typography>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
+              <TextField label="Cash" type="number" value={editCash} onChange={(e) => setEditCash(e.target.value === '' ? '' : Number(e.target.value))} inputProps={{ min: 0, step: '0.01' }} fullWidth />
+              <TextField label="Online" type="number" value={editOnline} onChange={(e) => setEditOnline(e.target.value === '' ? '' : Number(e.target.value))} inputProps={{ min: 0, step: '0.01' }} fullWidth />
+              <TextField label="Credit" type="number" value={editCredit} onChange={(e) => setEditCredit(e.target.value === '' ? '' : Number(e.target.value))} inputProps={{ min: 0, step: '0.01' }} fullWidth />
+            </Stack>
+            <Typography variant="body2" color={round2(Number(editCash || 0) + Number(editOnline || 0) + Number(editCredit || 0)) === round2(Math.abs(Number(editExchange?.net_due || 0))) ? 'success.main' : 'error.main'}>
+              Allocated ₹{round2(Number(editCash || 0) + Number(editOnline || 0) + Number(editCredit || 0)).toFixed(2)} of ₹{Math.abs(Number(editExchange?.net_due || 0)).toFixed(2)}
+            </Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditExchange(null)} disabled={editMutation.isPending}>Cancel</Button>
+          <Button variant="contained" onClick={() => editMutation.mutate()} disabled={editMutation.isPending || !editDate}>
+            {editMutation.isPending ? 'Saving…' : 'Save Exchange'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <ItemPicker
         open={picker}

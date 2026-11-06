@@ -3423,11 +3423,18 @@ def migrate_db():
                 payment_mode TEXT NOT NULL DEFAULT 'cash',
                 payment_cash REAL NOT NULL DEFAULT 0,
                 payment_online REAL NOT NULL DEFAULT 0,
+                payment_credit REAL NOT NULL DEFAULT 0,
                 refund_cash REAL NOT NULL DEFAULT 0,
                 refund_online REAL NOT NULL DEFAULT 0,
+                refund_credit REAL NOT NULL DEFAULT 0,
                 notes TEXT
             )
         """))
+        exchange_cols = {c[1] for c in session.exec(text("PRAGMA table_info(exchangerecord)")).all()}
+        if "payment_credit" not in exchange_cols:
+            session.exec(text("ALTER TABLE exchangerecord ADD COLUMN payment_credit REAL NOT NULL DEFAULT 0"))
+        if "refund_credit" not in exchange_cols:
+            session.exec(text("ALTER TABLE exchangerecord ADD COLUMN refund_credit REAL NOT NULL DEFAULT 0"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_exchangerecord_created_at ON exchangerecord (created_at)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_exchangerecord_return_id ON exchangerecord (return_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_exchangerecord_new_bill_id ON exchangerecord (new_bill_id)"))

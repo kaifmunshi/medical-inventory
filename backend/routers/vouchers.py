@@ -1296,7 +1296,12 @@ def daybook(
             )
 
         return_stmt = select(Return).where(Return.date_time >= start_iso, Return.date_time <= end_iso)
+        exchange_return_ids = {
+            int(value) for value in session.exec(select(ExchangeRecord.return_id)).all() if value is not None
+        }
         for row in session.exec(return_stmt).all():
+            if int(row.id or 0) in exchange_return_ids:
+                continue
             rows.append(
                 VoucherDayBookRow(
                     ts=row.date_time,

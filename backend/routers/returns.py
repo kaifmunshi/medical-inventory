@@ -16,6 +16,7 @@ from backend.models import (
     ReturnCreate, ReturnOut, ReturnItemOut,
     AuditLog, AuditLogOut,
     ExchangeCreate,
+    ExchangeSettlementUpdate,
     ExchangeRecord,
     StockMovement,
 )
@@ -166,7 +167,10 @@ def bill_credit_return_total(session, bill_id: int) -> float:
     total = 0.0
     rows = session.exec(select(Return).where(Return.source_bill_id == bill_id)).all()
     for row in rows:
-        if row.id is None or int(row.id) in exchange_return_ids:
+        if row.id is None:
+            continue
+        if int(row.id) in exchange_return_ids:
+            total += round2(float(getattr(row, "credit_amount", 0.0) or 0.0))
             continue
         total += return_credit_amount(row)
     return round2(total)
@@ -688,12 +692,155 @@ def list_exchange_records(
                 "payment_mode": r.payment_mode,
                 "payment_cash": r.payment_cash,
                 "payment_online": r.payment_online,
+                "payment_credit": r.payment_credit,
                 "refund_cash": r.refund_cash,
                 "refund_online": r.refund_online,
+                "refund_credit": r.refund_credit,
+                "theoretical_net": r.theoretical_net,
                 "net_due": r.net_due,
+                "rounding_adjustment": r.rounding_adjustment,
+                "notes": r.notes,
             }
             for r in rows
         ]
+
+
+@router.patch("/exchange/{exchange_id}", response_model=dict)
+def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpdate):
+    """Edit only an exchange's date and settlement channels, atomically."""
+    require_min_role("MANAGER", context="Exchange settlement edit")
+    values = [
+        payload.payment_cash, payload.payment_online, payload.payment_credit,
+        payload.refund_cash, payload.refund_online, payload.refund_credit,
+    ]
+    if any(float(value or 0) < 0 for value in values):
+        raise HTTPException(status_code=400, detail="Settlement amounts cannot be negative")
+
+    with get_session() as session:
+        exchange = session.get(ExchangeRecord, exchange_id)
+        if not exchange:
+            raise HTTPException(status_code=404, detail="Exchange not found")
+        ret = session.get(Return, int(exchange.return_id or 0))
+        replacement_bill = session.get(Bill, int(exchange.new_bill_id or 0))
+        source_bill = session.get(Bill, int(exchange.source_bill_id or 0)) if exchange.source_bill_id else None
+        if not ret or not replacement_bill:
+            raise HTTPException(status_code=409, detail="Linked exchange return or replacement bill is missing")
+
+        old_datetime = str(exchange.created_at)
+        new_datetime = normalize_return_datetime(payload.exchange_date, fallback=old_datetime)
+        assert_financial_year_unlocked(session, old_datetime, context="Exchange settlement edit")
+        assert_financial_year_unlocked(session, new_datetime, context="Exchange settlement edit")
+        if source_bill and new_datetime[:10] < str(source_bill.date_time or "")[:10]:
+            raise HTTPException(status_code=400, detail="Exchange date cannot be before the source bill date")
+
+        net_due = round2(float(exchange.net_due or 0.0))
+        pay_cash = round2(float(payload.payment_cash or 0.0))
+        pay_online = round2(float(payload.payment_online or 0.0))
+        pay_credit = round2(float(payload.payment_credit or 0.0))
+        refund_cash = round2(float(payload.refund_cash or 0.0))
+        refund_online = round2(float(payload.refund_online or 0.0))
+        refund_credit = round2(float(payload.refund_credit or 0.0))
+
+        if net_due > MONEY_EPSILON:
+            if round2(pay_cash + pay_online + pay_credit) != round2(net_due):
+                raise HTTPException(status_code=400, detail=f"Cash + online + credit must equal ₹{net_due:.2f}")
+            if refund_cash + refund_online + refund_credit > MONEY_EPSILON:
+                raise HTTPException(status_code=400, detail="Refund fields must be zero when the customer pays")
+        elif net_due < -MONEY_EPSILON:
+            expected = round2(abs(net_due))
+            if round2(refund_cash + refund_online + refund_credit) != expected:
+                raise HTTPException(status_code=400, detail=f"Cash + online + credit must equal ₹{expected:.2f}")
+            if pay_cash + pay_online + pay_credit > MONEY_EPSILON:
+                raise HTTPException(status_code=400, detail="Payment fields must be zero when the customer receives value")
+        elif any(round2(value) > MONEY_EPSILON for value in values):
+            raise HTTPException(status_code=400, detail="Settlement must be zero for an even exchange")
+
+        active_payments = session.exec(select(BillPayment).where(
+            BillPayment.bill_id == int(replacement_bill.id or 0),
+            BillPayment.is_deleted == False,  # noqa: E712
+        )).all()
+        if active_payments:
+            raise HTTPException(status_code=409, detail="This exchange bill has later receipts. Remove those allocations before editing the exchange settlement.")
+
+        old_credit = round2(float(getattr(ret, "credit_amount", 0.0) or 0.0))
+        before = {
+            "date": old_datetime,
+            "payment_cash": exchange.payment_cash,
+            "payment_online": exchange.payment_online,
+            "payment_credit": exchange.payment_credit,
+            "refund_cash": exchange.refund_cash,
+            "refund_online": exchange.refund_online,
+            "refund_credit": exchange.refund_credit,
+        }
+
+        channels = [
+            ("cash", pay_cash + refund_cash),
+            ("online", pay_online + refund_online),
+            ("credit", pay_credit + refund_credit),
+        ]
+        used_modes = [name for name, amount in channels if amount > MONEY_EPSILON]
+        mode = used_modes[0] if len(used_modes) == 1 else "split" if used_modes else "credit"
+
+        exchange.created_at = new_datetime
+        exchange.payment_mode = mode
+        exchange.payment_cash = pay_cash
+        exchange.payment_online = pay_online
+        exchange.payment_credit = pay_credit
+        exchange.refund_cash = refund_cash
+        exchange.refund_online = refund_online
+        exchange.refund_credit = refund_credit
+        session.add(exchange)
+
+        ret.date_time = new_datetime
+        ret.refund_cash = refund_cash
+        ret.refund_online = refund_online
+        ret.credit_amount = refund_credit
+        session.add(ret)
+
+        replacement_bill.date_time = new_datetime
+        replacement_bill.payment_mode = mode
+        replacement_bill.payment_cash = pay_cash
+        replacement_bill.payment_online = pay_online
+        settled_by_return = round2(max(0.0, float(replacement_bill.total_amount or 0.0) - max(0.0, net_due)))
+        replacement_bill.paid_amount = round2(settled_by_return + pay_cash + pay_online)
+        covered = round2(replacement_bill.paid_amount + float(getattr(replacement_bill, "writeoff_amount", 0.0) or 0.0))
+        total = round2(float(replacement_bill.total_amount or 0.0))
+        replacement_bill.is_credit = covered + MONEY_EPSILON < total
+        replacement_bill.payment_status = "PAID" if not replacement_bill.is_credit else "PARTIAL" if covered > MONEY_EPSILON else "UNPAID"
+        replacement_bill.paid_at = new_datetime if not replacement_bill.is_credit else None
+        session.add(replacement_bill)
+
+        for movement in session.exec(select(StockMovement).where(StockMovement.ref_type == "EXCHANGE")).all():
+            is_return_leg = str(movement.reason) == "EXCHANGE_IN" and int(movement.ref_id or 0) == int(ret.id or 0)
+            is_bill_leg = str(movement.reason) == "EXCHANGE_OUT" and int(movement.ref_id or 0) == int(replacement_bill.id or 0)
+            if is_return_leg or is_bill_leg:
+                movement.ts = new_datetime
+                session.add(movement)
+
+        session.flush()
+        if old_credit != refund_credit:
+            apply_return_credit_to_bill(session, ret, old_credit, refund_credit)
+        sync_bill_vouchers(session, replacement_bill)
+        log_audit(
+            session,
+            entity_type="SALES_RETURN",
+            entity_id=int(ret.id or 0),
+            action="UPDATE_EXCHANGE_SETTLEMENT",
+            note=f"Updated exchange #{exchange.id} settlement",
+            details={"exchange_id": exchange.id, "before": before, "after": {
+                "date": new_datetime, "payment_mode": mode,
+                "payment_cash": pay_cash, "payment_online": pay_online, "payment_credit": pay_credit,
+                "refund_cash": refund_cash, "refund_online": refund_online, "refund_credit": refund_credit,
+            }},
+        )
+        session.commit()
+        return {
+            "id": exchange.id, "created_at": exchange.created_at, "payment_mode": exchange.payment_mode,
+            "payment_cash": exchange.payment_cash, "payment_online": exchange.payment_online,
+            "payment_credit": exchange.payment_credit, "refund_cash": exchange.refund_cash,
+            "refund_online": exchange.refund_online, "refund_credit": exchange.refund_credit,
+            "net_due": exchange.net_due,
+        }
 
 
 @router.get("/{return_id}", response_model=ReturnOut)
@@ -1156,13 +1303,17 @@ def create_exchange(payload: ExchangeCreate):
     if (
         payload.payment_cash < 0
         or payload.payment_online < 0
+        or payload.payment_credit < 0
         or payload.refund_cash < 0
         or payload.refund_online < 0
+        or payload.refund_credit < 0
     ):
         raise HTTPException(status_code=400, detail="Payment/refund amounts cannot be negative")
 
+    exchange_datetime = normalize_return_datetime(payload.exchange_date)
+
     with get_session() as session:
-        assert_financial_year_unlocked(session, now_ts(), context="Exchange creation")
+        assert_financial_year_unlocked(session, exchange_datetime, context="Exchange creation")
         sold_lookup = {}
         returned_lookup = {}
         charged_unit_lookup = {}
@@ -1303,41 +1454,51 @@ def create_exchange(payload: ExchangeCreate):
                 if abs(pay_diff) > MONEY_EPSILON:
                     b_online = round2(b_online + pay_diff)
             else:  # split
-                paid_total = round2(payload.payment_cash + payload.payment_online)
+                paid_total = round2(payload.payment_cash + payload.payment_online + payload.payment_credit)
                 pay_diff = round2(net_due - paid_total)
                 if abs(pay_diff) > EXCHANGE_SETTLE_EPSILON:
-                    raise HTTPException(status_code=400, detail="Payment amounts must equal net due")
+                    raise HTTPException(status_code=400, detail="Cash + online + credit must equal net due")
                 r_cash, r_online = 0.0, 0.0
                 b_cash = round2(payload.payment_cash)
                 b_online = round2(payload.payment_online)
                 if abs(pay_diff) > MONEY_EPSILON:
                     b_cash = round2(b_cash + pay_diff)
         elif net_due < 0:
-            refund_total = round2(payload.refund_cash + payload.refund_online)
-            refund_diff = round2(abs(net_due) - refund_total)
-            if abs(refund_diff) > EXCHANGE_SETTLE_EPSILON:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Refund amounts must equal |net due|. "
-                        f"Expected ₹{abs(net_due):.2f}, got ₹{refund_total:.2f} "
-                        f"(cash ₹{round2(payload.refund_cash):.2f} + online ₹{round2(payload.refund_online):.2f})."
-                    ),
-                )
-            r_cash, r_online = round2(payload.refund_cash), round2(payload.refund_online)
-            if abs(refund_diff) > MONEY_EPSILON:
-                if r_online > 0 and r_cash == 0:
-                    r_online = round2(r_online + refund_diff)
-                else:
-                    r_cash = round2(r_cash + refund_diff)
-            b_cash, b_online = 0.0, 0.0
+            if payload.payment_mode == "credit":
+                # Keep the amount on the customer's account; no cash/bank movement.
+                r_cash = r_online = 0.0
+                b_cash = b_online = 0.0
+                refund_total = 0.0
+                refund_diff = 0.0
+            else:
+                refund_total = round2(payload.refund_cash + payload.refund_online + payload.refund_credit)
+                refund_diff = round2(abs(net_due) - refund_total)
+                if abs(refund_diff) > EXCHANGE_SETTLE_EPSILON:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Refund amounts must equal |net due|. "
+                            f"Expected ₹{abs(net_due):.2f}, got ₹{refund_total:.2f} "
+                            f"(cash ₹{round2(payload.refund_cash):.2f} + online ₹{round2(payload.refund_online):.2f} "
+                            f"+ credit ₹{round2(payload.refund_credit):.2f})."
+                        ),
+                    )
+                r_cash, r_online = round2(payload.refund_cash), round2(payload.refund_online)
+                if abs(refund_diff) > MONEY_EPSILON:
+                    if r_online > 0 and r_cash == 0:
+                        r_online = round2(r_online + refund_diff)
+                    else:
+                        r_cash = round2(r_cash + refund_diff)
+                b_cash, b_online = 0.0, 0.0
         else:
             r_cash = r_online = b_cash = b_online = 0.0
 
         # 4) Create Return + add stock, then create Bill + deduct stock
         ret = Return(
+            date_time=exchange_datetime,
             source_bill_id=payload.source_bill_id,
             subtotal_return=return_subtotal,
+            credit_amount=(round2(abs(net_due)) if net_due < 0 and payload.payment_mode == "credit" else round2(payload.refund_credit)),
             refund_cash=r_cash,
             refund_online=r_online,
             notes=payload.notes,
@@ -1363,6 +1524,7 @@ def create_exchange(payload: ExchangeCreate):
                 ref_type="EXCHANGE",
                 ref_id=ret.id,
                 note=f"Exchange return #{ret.id}",
+                ts=exchange_datetime,
             )
 
             if itm.id in return_line_total_by_item:
@@ -1387,9 +1549,10 @@ def create_exchange(payload: ExchangeCreate):
         # In exchange, part of bill value can be settled by returned items.
         # For credit mode, customer owes only net_due now.
         settled_by_return = round2(max(0.0, bill_total - max(0.0, net_due)))
-        if net_due > 0 and payload.payment_mode == "credit":
+        payment_credit = round2(net_due) if net_due > 0 and payload.payment_mode == "credit" else round2(payload.payment_credit)
+        if net_due > 0 and payment_credit > 0:
             is_credit = True
-            paid_amount = settled_by_return
+            paid_amount = round2(settled_by_return + b_cash + b_online)
             payment_status = "PARTIAL" if paid_amount > 0 else "UNPAID"
             paid_at = now_ts() if paid_amount > 0 else None
         else:
@@ -1403,6 +1566,7 @@ def create_exchange(payload: ExchangeCreate):
         merged_notes = f"{base_note}\n{exchange_note}" if base_note else exchange_note
 
         b = Bill(
+            date_time=exchange_datetime,
             customer_id=int(bill.customer_id) if bill and bill.customer_id is not None else None,
             party_id=int(bill.party_id) if bill and bill.party_id is not None else None,
             discount_percent=payload.discount_percent,
@@ -1415,12 +1579,12 @@ def create_exchange(payload: ExchangeCreate):
             is_credit=is_credit,
             payment_status=payment_status,
             paid_amount=paid_amount,
-            paid_at=paid_at,
+            paid_at=exchange_datetime if paid_at else None,
         )
         session.add(b)
         session.flush()
         from backend.routers.billing import assign_bill_number
-        assign_bill_number(session, b)
+        assign_bill_number(session, b, backdated=bool(payload.exchange_date))
         session.refresh(b)
 
         # new items: stock OUT + ledger
@@ -1440,6 +1604,7 @@ def create_exchange(payload: ExchangeCreate):
                 ref_type="EXCHANGE",
                 ref_id=b.id,
                 note=f"Exchange bill #{b.id}",
+                ts=exchange_datetime,
             )
 
             session.add(BillItem(
@@ -1452,6 +1617,7 @@ def create_exchange(payload: ExchangeCreate):
         bill_items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
 
         exchange = ExchangeRecord(
+            created_at=exchange_datetime,
             source_bill_id=payload.source_bill_id,
             return_id=int(ret.id),
             new_bill_id=int(b.id),
@@ -1461,12 +1627,16 @@ def create_exchange(payload: ExchangeCreate):
             payment_mode=payload.payment_mode,
             payment_cash=b_cash,
             payment_online=b_online,
+            payment_credit=payment_credit,
             refund_cash=r_cash,
             refund_online=r_online,
+            refund_credit=round2(getattr(ret, "credit_amount", 0.0) or 0.0),
             notes=merged_notes,
         )
         session.add(exchange)
         session.flush()
+        if float(getattr(ret, "credit_amount", 0.0) or 0.0) > MONEY_EPSILON:
+            apply_return_credit_to_bill(session, ret, 0.0, float(ret.credit_amount))
         log_audit(
             session,
             entity_type="SALES_RETURN",

@@ -957,7 +957,7 @@ export default function BankBookPage() {
     const exchangeByReturnId = new Map<number, any>()
     for (const ex of (qDayExchanges.data || []) as any[]) exchangeByReturnId.set(Number(ex.return_id), ex)
     return returns
-      .filter((r) => Number(r?.refund_online || 0) > 0)
+      .filter((r) => Number(r?.refund_online || 0) > 0 && !exchangeByReturnId.has(Number(r.id)))
       .map((r) => ({
         id: `return-${r.id}`,
         created_at: r.date_time,
@@ -978,7 +978,7 @@ export default function BankBookPage() {
     const exchangeByReturnId = new Map<number, any>()
     for (const ex of (qAllExchanges.data || []) as any[]) exchangeByReturnId.set(Number(ex.return_id), ex)
     return returns
-      .filter((r) => Number(r?.refund_online || 0) > 0)
+      .filter((r) => Number(r?.refund_online || 0) > 0 && !exchangeByReturnId.has(Number(r.id)))
       .map((r) => ({
         id: `return-${r.id}`,
         created_at: r.date_time,

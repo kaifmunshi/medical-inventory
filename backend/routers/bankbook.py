@@ -207,8 +207,18 @@ def _sum_return_online(session, *, start_iso: Optional[str] = None, end_iso: Opt
     if end_iso:
         stmt = stmt.where(Return.date_time <= end_iso)
     rows = session.exec(stmt).all()
+    # Exchange refunds are represented separately by ExchangeRecord below.
+    # Excluding their linked Return rows prevents the same bank withdrawal
+    # from being counted twice in balances and summaries.
+    exchange_return_ids = {
+        int(row)
+        for row in session.exec(select(ExchangeRecord.return_id)).all()
+        if row is not None
+    }
     total = 0.0
     for r in rows:
+        if r.id is not None and int(r.id) in exchange_return_ids:
+            continue
         total += float(getattr(r, "refund_online", 0) or 0)
     return round(total, 2)
 

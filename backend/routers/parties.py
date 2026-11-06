@@ -825,8 +825,10 @@ def debtor_returns(party_id: int) -> List[CustomerReturnLedgerRow]:
                     exchange_payment_mode=str(exchange.payment_mode or "cash") if exchange else None,
                     exchange_payment_cash=_round2(exchange.payment_cash) if exchange else 0.0,
                     exchange_payment_online=_round2(exchange.payment_online) if exchange else 0.0,
+                    exchange_payment_credit=_round2(exchange.payment_credit) if exchange else 0.0,
                     exchange_refund_cash=_round2(exchange.refund_cash) if exchange else 0.0,
                     exchange_refund_online=_round2(exchange.refund_online) if exchange else 0.0,
+                    exchange_refund_credit=_round2(exchange.refund_credit) if exchange else 0.0,
                     notes=row.notes,
                     items=items,
                 )

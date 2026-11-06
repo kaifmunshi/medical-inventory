@@ -94,9 +94,13 @@ export type ExchangeRecord = {
   payment_mode: 'cash' | 'online' | 'split' | 'credit'
   payment_cash: number
   payment_online: number
+  payment_credit?: number
   refund_cash: number
   refund_online: number
+  refund_credit?: number
   net_due: number
+  theoretical_net?: number
+  rounding_adjustment?: number
 }
 
 // --- API calls ---
@@ -141,11 +145,15 @@ export type ExchangePayload = {
   payment_mode?: 'cash' | 'online' | 'split' | 'credit';
   payment_cash?: number;
   payment_online?: number;
+  payment_credit?: number;
   // when you refund (net < 0)
   refund_mode?: 'cash' | 'online' | 'split';
   refund_cash?: number;
   refund_online?: number;
+  refund_credit?: number;
   notes?: string;
+  exchange_date?: string;
+  rounding_adjustment?: number;
 };
 
 export async function createExchange(payload: ExchangePayload) {
@@ -190,6 +198,19 @@ export async function listExchangeRecords(params: {
   offset?: number
 }) {
   const { data } = await api.get<ExchangeRecord[]>('/returns/exchange/records', { params })
+  return data
+}
+
+export async function updateExchangeSettlement(id: number, payload: {
+  exchange_date: string
+  payment_cash: number
+  payment_online: number
+  payment_credit: number
+  refund_cash: number
+  refund_online: number
+  refund_credit: number
+}) {
+  const { data } = await api.patch(`/returns/exchange/${id}`, payload)
   return data
 }
 

@@ -421,8 +421,10 @@ export interface CustomerReturnLedgerRow {
   exchange_payment_mode?: 'cash' | 'online' | 'split' | 'credit' | null
   exchange_payment_cash?: number
   exchange_payment_online?: number
+  exchange_payment_credit?: number
   exchange_refund_cash?: number
   exchange_refund_online?: number
+  exchange_refund_credit?: number
   notes?: string | null
   items?: Array<{
     item_id: ID

@@ -1722,13 +1722,15 @@ export default function CustomerLedgerPage() {
                 <th className="mode-col">Mode</th>
                 <th className="amount-col">Cash</th>
                 <th className="amount-col">Online</th>
+                <th className="amount-col">Credit</th>
                 <th className="amount-col">Refund</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {exchangeRows.map((row) => {
                 const net = Number(row.exchange_net_due || 0)
-                const refund = Number(row.exchange_refund_cash || 0) + Number(row.exchange_refund_online || 0)
+                const refund = Number(row.exchange_refund_cash || 0) + Number(row.exchange_refund_online || 0) + Number(row.exchange_refund_credit || 0)
                 return (
                   <tr key={`exchange-${row.exchange_id}`}>
                     <td><Typography fontWeight={800}>Exchange #{row.exchange_id}</Typography></td>
@@ -1749,12 +1751,14 @@ export default function CustomerLedgerPage() {
                     <td>{modeChip(row.exchange_payment_mode || 'cash')}</td>
                     <td className="amount-col"><MoneyCell value={row.exchange_payment_cash || 0} /></td>
                     <td className="amount-col"><MoneyCell value={row.exchange_payment_online || 0} /></td>
+                    <td className="amount-col"><MoneyCell value={row.exchange_payment_credit || row.exchange_refund_credit || 0} /></td>
                     <td className="amount-col"><MoneyCell value={refund} /></td>
+                    <td><IconButton aria-label={`Edit exchange ${row.exchange_id}`} onClick={() => navigate(`/exchange?edit=${row.exchange_id}`)}><EditIcon fontSize="small" /></IconButton></td>
                   </tr>
                 )
               })}
               {exchangeRows.length === 0 ? (
-                <tr><td colSpan={11}><Box p={2} color="text.secondary">{selectedParty ? 'No exchanges for this customer yet.' : 'Select a customer to view exchanges.'}</Box></td></tr>
+                <tr><td colSpan={13}><Box p={2} color="text.secondary">{selectedParty ? 'No exchanges for this customer yet.' : 'Select a customer to view exchanges.'}</Box></td></tr>
               ) : null}
             </tbody>
           </table>

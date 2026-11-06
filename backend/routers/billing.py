@@ -106,7 +106,10 @@ def bill_credit_return_total(session, bill_id: int) -> float:
     }
     total = 0.0
     for row in session.exec(select(Return).where(Return.source_bill_id == bill_id)).all():
-        if row.id is None or int(row.id) in exchange_return_ids:
+        if row.id is None:
+            continue
+        if int(row.id) in exchange_return_ids:
+            total += round2(as_f(getattr(row, "credit_amount", 0.0)))
             continue
         credit = round2(as_f(getattr(row, "credit_amount", 0.0)))
         if credit > 0:

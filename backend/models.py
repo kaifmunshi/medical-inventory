@@ -125,8 +125,10 @@ class ExchangeRecord(SQLModel, table=True):
     payment_mode: str = "cash"
     payment_cash: float = 0.0
     payment_online: float = 0.0
+    payment_credit: float = 0.0
     refund_cash: float = 0.0
     refund_online: float = 0.0
+    refund_credit: float = 0.0
     notes: Optional[str] = None
 
 
@@ -272,7 +274,6 @@ class BillCreate(SQLModel):
     payment_mode: str                 # "cash" | "online" | "split" | "credit"
     payment_cash: float = 0.0
     payment_online: float = 0.0
-    payment_credit: float = 0.0
     customer_id: Optional[int] = None
     party_id: Optional[int] = None
     final_amount: Optional[float] = None
@@ -386,10 +387,23 @@ class ExchangeCreate(SQLModel):
     payment_mode: str
     payment_cash: float = 0.0
     payment_online: float = 0.0
+    payment_credit: float = 0.0
     refund_cash: float = 0.0
     refund_online: float = 0.0
+    refund_credit: float = 0.0
     notes: Optional[str] = None
     rounding_adjustment: float = 0.0
+    exchange_date: Optional[str] = None  # YYYY-MM-DD; backdates all linked records
+
+
+class ExchangeSettlementUpdate(SQLModel):
+    exchange_date: str
+    payment_cash: float = 0.0
+    payment_online: float = 0.0
+    payment_credit: float = 0.0
+    refund_cash: float = 0.0
+    refund_online: float = 0.0
+    refund_credit: float = 0.0
 
 
 # ---------- Requested Items (Schemas) ----------
@@ -1493,8 +1507,10 @@ class CustomerReturnLedgerRow(SQLModel):
     exchange_payment_mode: Optional[str] = None
     exchange_payment_cash: float = 0.0
     exchange_payment_online: float = 0.0
+    exchange_payment_credit: float = 0.0
     exchange_refund_cash: float = 0.0
     exchange_refund_online: float = 0.0
+    exchange_refund_credit: float = 0.0
     notes: Optional[str] = None
     items: List[CustomerReturnLedgerItem] = []
 

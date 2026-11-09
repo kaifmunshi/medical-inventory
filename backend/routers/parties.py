@@ -155,7 +155,14 @@ def _recalculate_bill_payment_state(session, bill: Bill) -> None:
 
     total_cash = _round2(exchange_cash + sum(_as_float(payment.cash_amount) for payment in receipt_payments))
     total_online = _round2(exchange_online + sum(_as_float(payment.online_amount) for payment in receipt_payments))
-    total_credit = _round2(sum(_as_float(getattr(payment, "credit_amount", 0.0)) for payment in receipt_payments))
+    # The automatic bill row uses credit_amount to record the portion still
+    # owed. Only later receipt allocations represent credit that actually
+    # settled the bill.
+    total_credit = _round2(sum(
+        _as_float(getattr(payment, "credit_amount", 0.0))
+        for payment in receipt_payments
+        if str(getattr(payment, "note", "") or "").strip().lower() != "auto: payment at bill creation"
+    ))
     total_paid = _round2(exchange_settled_by_return + total_cash + total_online + total_credit)
     total_writeoff = _round2(sum(_as_float(getattr(payment, "writeoff_amount", 0.0)) for payment in writeoff_payments))
     bill_total = _round2(_as_float(bill.total_amount))

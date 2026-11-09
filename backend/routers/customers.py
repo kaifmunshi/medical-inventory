@@ -193,6 +193,7 @@ def _to_bill_out(session, bill: Bill) -> BillOut:
         payment_mode=bill.payment_mode,
         payment_cash=bill.payment_cash,
         payment_online=bill.payment_online,
+        payment_credit=max(0.0, float(bill.total_amount or 0) - float(bill.paid_amount or 0) - float(getattr(bill, "writeoff_amount", 0.0) or 0)),
         notes=bill.notes,
         is_credit=bill.is_credit,
         payment_status=bill.payment_status,

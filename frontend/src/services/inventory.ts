@@ -355,6 +355,7 @@ export async function convertManualStockAdjustmentToSale(
     payment_mode: 'cash' | 'online' | 'split' | 'credit'
     payment_cash?: number
     payment_online?: number
+    payment_credit?: number
     notes?: string
   },
 ): Promise<{ bill_id: number; item_id: number; quantity: number; total_amount: number; payment_status: string }> {

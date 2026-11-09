@@ -1053,6 +1053,11 @@ export default function StockCardPage() {
         payment_mode: adjustSaleMode,
         payment_cash: Number(adjustSaleCash || 0),
         payment_online: Number(adjustSaleOnline || 0),
+        payment_credit: adjustSaleMode === 'credit'
+          ? adjustSaleTotal
+          : adjustSaleMode === 'split'
+            ? Math.max(0, Number((adjustSaleTotal - Number(adjustSaleCash || 0) - Number(adjustSaleOnline || 0)).toFixed(2)))
+            : 0,
         notes: adjustSaleNotes.trim() || undefined,
       })
     },

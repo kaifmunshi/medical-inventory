@@ -318,6 +318,7 @@ class BillOut(SQLModel):
     payment_mode: str
     payment_cash: float
     payment_online: float
+    payment_credit: float = 0.0
     notes: Optional[str] = None
 
     is_credit: bool = False

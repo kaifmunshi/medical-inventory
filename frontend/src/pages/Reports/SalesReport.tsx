@@ -231,7 +231,10 @@ export default function SalesReport(props: {
       const paidAmount =
         b.paid_amount !== undefined && b.paid_amount !== null ? Number(b.paid_amount) : 0
 
-      const pendingAmount = Math.max(0, totalAmount - paidAmount)
+      const writeoffAmount =
+        b.writeoff_amount !== undefined && b.writeoff_amount !== null ? Number(b.writeoff_amount) : 0
+
+      const pendingAmount = Math.max(0, totalAmount - paidAmount - writeoffAmount)
 
       const status =
         b.payment_status ||

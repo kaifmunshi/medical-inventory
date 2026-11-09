@@ -62,7 +62,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   })
 
   const payPending = useMemo(
-    () => round2(Math.max(0, Number(bill?.total_amount || 0) - Number(bill?.paid_amount || 0))),
+    () => round2(Math.max(0, Number(bill?.total_amount || 0) - Number(bill?.paid_amount || 0) - Number(bill?.writeoff_amount || 0))),
     [bill]
   )
 
@@ -128,6 +128,10 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
 
   function isPartyReceiptPayment(payment: BillPaymentRow) {
     return Boolean(payment?.is_receipt_managed) || /^party receipt #/i.test(String(payment?.note || '').trim())
+  }
+
+  function isInitialBillPayment(payment: BillPaymentRow) {
+    return String(payment?.note || '').trim().toLowerCase() === 'auto: payment at bill creation'
   }
 
   function handleSplitCash(raw: string) {
@@ -294,9 +298,9 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        <Tooltip title="Edit payment" arrow>
+                        <Tooltip title={isInitialBillPayment(p) ? 'Use Edit Bill to change the initial settlement' : 'Edit payment'} arrow>
                           <span>
-                            <IconButton size="small" onClick={() => openEditPayment(p)} disabled={managedByReceipt || bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
+                            <IconButton size="small" onClick={() => openEditPayment(p)} disabled={managedByReceipt || isInitialBillPayment(p) || bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="primary" sx={{ p: 0.25 }}>
                               <EditOutlinedIcon fontSize="small" />
                             </IconButton>
                           </span>

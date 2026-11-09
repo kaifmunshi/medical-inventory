@@ -3567,6 +3567,93 @@ def migrate_db():
         """))
         session.commit()
 
+        # ---------- one-time repair: credit dropped from automatic split rows ----------
+        # A regression preserved the bill's pending balance but omitted that
+        # balance from BillPayment.credit_amount. Repair only the narrow,
+        # identifiable shape and take an online SQLite backup before changing it.
+        auto_credit_repair_key = "repair_auto_bill_payment_credit_v1"
+        auto_credit_repair_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=auto_credit_repair_key),
+        ).first()
+        if not auto_credit_repair_done:
+            candidate_count_row = session.exec(text("""
+                SELECT COUNT(*)
+                FROM billpayment AS p
+                JOIN bill AS b ON b.id = p.bill_id
+                WHERE COALESCE(p.is_deleted, 0) = 0
+                  AND lower(trim(COALESCE(p.note, ''))) = 'auto: payment at bill creation'
+                  AND COALESCE(p.credit_amount, 0) <= 0.0001
+                  AND COALESCE(p.cash_amount, 0) + COALESCE(p.online_amount, 0) > 0.0001
+                  AND lower(trim(COALESCE(b.payment_mode, ''))) = 'split'
+                  AND COALESCE(b.total_amount, 0) - COALESCE(b.paid_amount, 0) - COALESCE(b.writeoff_amount, 0) > 0.0001
+                  AND COALESCE(b.is_deleted, 0) = 0
+            """)).one()
+            candidate_count = int(candidate_count_row[0] or 0)
+            backup_path = create_data_repair_backup("before_auto_bill_payment_credit_repair") if candidate_count else None
+            if candidate_count:
+                session.exec(text("""
+                    UPDATE billpayment
+                    SET credit_amount = (
+                        SELECT MAX(0, COALESCE(b.total_amount, 0) - COALESCE(b.paid_amount, 0) - COALESCE(b.writeoff_amount, 0))
+                        FROM bill AS b
+                        WHERE b.id = billpayment.bill_id
+                    ),
+                    mode = 'split'
+                    WHERE COALESCE(is_deleted, 0) = 0
+                      AND lower(trim(COALESCE(note, ''))) = 'auto: payment at bill creation'
+                      AND COALESCE(credit_amount, 0) <= 0.0001
+                      AND COALESCE(cash_amount, 0) + COALESCE(online_amount, 0) > 0.0001
+                      AND EXISTS (
+                          SELECT 1 FROM bill AS b
+                          WHERE b.id = billpayment.bill_id
+                            AND lower(trim(COALESCE(b.payment_mode, ''))) = 'split'
+                            AND COALESCE(b.total_amount, 0) - COALESCE(b.paid_amount, 0) - COALESCE(b.writeoff_amount, 0) > 0.0001
+                            AND COALESCE(b.is_deleted, 0) = 0
+                      )
+                """))
+            session.exec(text("""
+                INSERT INTO appmeta (key, value, updated_at)
+                VALUES (:k, :v, :ts)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """).bindparams(
+                k=auto_credit_repair_key,
+                v=f"done:{candidate_count};backup:{backup_path or ''}",
+                ts=_now_ts(),
+            ))
+            session.commit()
+
+        zero_total_status_repair_key = "repair_zero_total_bill_status_v1"
+        zero_total_status_repair_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=zero_total_status_repair_key),
+        ).first()
+        if not zero_total_status_repair_done:
+            zero_total_count_row = session.exec(text("""
+                SELECT COUNT(*) FROM bill
+                WHERE COALESCE(total_amount, 0) <= 0.0001
+                  AND upper(trim(COALESCE(payment_status, ''))) != 'PAID'
+            """)).one()
+            zero_total_count = int(zero_total_count_row[0] or 0)
+            backup_path = create_data_repair_backup("before_zero_total_bill_status_repair") if zero_total_count else None
+            if zero_total_count:
+                session.exec(text("""
+                    UPDATE bill
+                    SET payment_status = 'PAID',
+                        is_credit = 0,
+                        paid_at = COALESCE(NULLIF(paid_at, ''), date_time)
+                    WHERE COALESCE(total_amount, 0) <= 0.0001
+                      AND upper(trim(COALESCE(payment_status, ''))) != 'PAID'
+                """))
+            session.exec(text("""
+                INSERT INTO appmeta (key, value, updated_at)
+                VALUES (:k, :v, :ts)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """).bindparams(
+                k=zero_total_status_repair_key,
+                v=f"done:{zero_total_count};backup:{backup_path or ''}",
+                ts=_now_ts(),
+            ))
+            session.commit()
+
         kalonji_repair_key = "club_kalonji_1527_1693_remove_duplicate_opening_v3"
         if not session.exec(text("SELECT 1 FROM appmeta WHERE key = :k").bindparams(k=kalonji_repair_key)).first():
             fixed_count, backup_path = merge_kalonji_1693_into_1527_once(session)

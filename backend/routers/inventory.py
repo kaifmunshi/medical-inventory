@@ -415,6 +415,7 @@ class ManualAdjustmentSaleIn(BaseModel):
     payment_mode: str = "cash"
     payment_cash: float = 0.0
     payment_online: float = 0.0
+    payment_credit: float = 0.0
     notes: Optional[str] = None
 
 
@@ -2220,18 +2221,23 @@ def convert_manual_stock_adjustment_to_sale(
         if payment_mode not in {"cash", "online", "split", "credit"}:
             raise HTTPException(status_code=400, detail="Invalid payment mode")
 
-        cash = round(float(payload.payment_cash or 0.0), 2)
-        online = round(float(payload.payment_online or 0.0), 2)
-        if not isfinite(cash) or not isfinite(online) or cash < 0 or online < 0:
-            raise HTTPException(status_code=400, detail="Payment amounts must be valid non-negative amounts")
-        if payment_mode == "cash":
-            cash, online = total, 0.0
-        elif payment_mode == "online":
-            cash, online = 0.0, total
-        elif payment_mode == "credit":
-            cash, online = 0.0, 0.0
-        elif round(cash + online, 2) > total:
-            raise HTTPException(status_code=400, detail="Cash + online cannot exceed the sale total")
+        from backend.routers.billing import normalize_bill_payment
+        requested_cash = total if payment_mode == "cash" else payload.payment_cash
+        requested_online = total if payment_mode == "online" else payload.payment_online
+        requested_credit = (
+            total
+            if payment_mode == "credit"
+            else round(total - float(payload.payment_cash or 0.0) - float(payload.payment_online or 0.0), 2)
+            if payment_mode == "split" and round(float(payload.payment_credit or 0.0), 2) == 0
+            else payload.payment_credit
+        )
+        cash, online, credit, stored_mode = normalize_bill_payment(
+            total=total,
+            mode=payment_mode,
+            cash_amount=requested_cash,
+            online_amount=requested_online,
+            credit_amount=requested_credit,
+        )
 
         sale_date = str(payload.sale_date or "").strip()
         if not sale_date:
@@ -2283,7 +2289,6 @@ def convert_manual_stock_adjustment_to_sale(
         paid_amount = round(cash + online, 2)
         pending = round(total - paid_amount, 2)
         status = "PAID" if pending <= 0.009 else "UNPAID" if paid_amount <= 0.009 else "PARTIAL"
-        stored_mode = payment_mode
         bill = Bill(
             date_time=sale_ts,
             customer_id=customer_id,
@@ -2321,6 +2326,7 @@ def convert_manual_stock_adjustment_to_sale(
                 mode=stored_mode,
                 cash_amount=cash,
                 online_amount=online,
+                credit_amount=credit,
                 writeoff_amount=0.0,
                 note="auto: payment at bill creation",
                 is_writeoff=False,

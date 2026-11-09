@@ -347,6 +347,13 @@ def active_bill_payments_query(bill_id: int):
     return select(BillPayment).where(BillPayment.bill_id == bill_id, BillPayment.is_deleted == False)  # noqa: E712
 
 
+AUTO_BILL_PAYMENT_NOTE = "auto: payment at bill creation"
+
+
+def is_auto_bill_payment(payment: BillPayment) -> bool:
+    return str(getattr(payment, "note", "") or "").strip().lower() == AUTO_BILL_PAYMENT_NOTE
+
+
 def bill_outstanding_amount(bill: Bill) -> float:
     total_amount = round2(as_f(bill.total_amount))
     covered = round2(as_f(bill.paid_amount) + as_f(getattr(bill, "writeoff_amount", 0.0)))
@@ -361,7 +368,13 @@ def recalculate_bill_payment_state(session, bill: Bill) -> Dict[str, Any]:
 
     total_cash = round2(sum(as_f(x.cash_amount) for x in receipt_pays))
     total_online = round2(sum(as_f(x.online_amount) for x in receipt_pays))
-    total_credit = round2(sum(as_f(getattr(x, "credit_amount", 0.0)) for x in receipt_pays))
+    # Credit on the automatic row is the unpaid portion selected at billing
+    # time. Display it in history, but do not count it as money received.
+    total_credit = round2(sum(
+        as_f(getattr(x, "credit_amount", 0.0))
+        for x in receipt_pays
+        if not is_auto_bill_payment(x)
+    ))
     total_paid = round2(total_cash + total_online + total_credit)
     total_writeoff = round2(sum(as_f(getattr(x, "writeoff_amount", 0.0)) for x in writeoff_pays))
     total_amount = round2(as_f(bill.total_amount))
@@ -617,6 +630,7 @@ def list_bills(
                 payment_mode=b.payment_mode,
                 payment_cash=b.payment_cash,
                 payment_online=b.payment_online,
+                payment_credit=bill_outstanding_amount(b),
                 notes=b.notes,
 
                 # ✅ credit fields
@@ -727,6 +741,7 @@ def list_bills_paged(
                 payment_mode=b.payment_mode,
                 payment_cash=b.payment_cash,
                 payment_online=b.payment_online,
+                payment_credit=bill_outstanding_amount(b),
                 notes=b.notes,
 
                 is_credit=b.is_credit,
@@ -900,6 +915,7 @@ def list_payments(
                 "mode": p.mode,
                 "cash_amount": round2(as_f(p.cash_amount)),
                 "online_amount": round2(as_f(p.online_amount)),
+                "credit_amount": round2(as_f(getattr(p, "credit_amount", 0.0))),
                 "writeoff_amount": round2(as_f(getattr(p, "writeoff_amount", 0.0))),
                 "note": p.note,
                 "is_writeoff": bool(getattr(p, "is_writeoff", False)),
@@ -933,6 +949,7 @@ def get_bill(bill_id: str):
             payment_mode=b.payment_mode,
             payment_cash=b.payment_cash,
             payment_online=b.payment_online,
+            payment_credit=bill_outstanding_amount(b),
             notes=b.notes,
 
             is_credit=b.is_credit,
@@ -1119,8 +1136,9 @@ def create_bill(payload: BillCreate):
                     mode=stored_payment_mode,  # cash/online/split
                     cash_amount=cash,
                     online_amount=online,
+                    credit_amount=credit,
                     writeoff_amount=0.0,
-                    note="auto: payment at bill creation",
+                    note=AUTO_BILL_PAYMENT_NOTE,
                     is_writeoff=False,
                 )
                 session.add(p)
@@ -1150,6 +1168,7 @@ def create_bill(payload: BillCreate):
             payment_mode=b.payment_mode,
             payment_cash=b.payment_cash,
             payment_online=b.payment_online,
+            payment_credit=bill_outstanding_amount(b),
             notes=b.notes,
 
             is_credit=b.is_credit,
@@ -1208,6 +1227,7 @@ def bill_to_out(session, b: Bill) -> BillOut:
         payment_mode=b.payment_mode,
         payment_cash=b.payment_cash,
         payment_online=b.payment_online,
+        payment_credit=bill_outstanding_amount(b),
         notes=b.notes,
         is_credit=b.is_credit,
         payment_status=b.payment_status,
@@ -1475,7 +1495,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         pays = session.exec(active_bill_payments_query(b.id)).all()
         manual_receipts = [
             p for p in pays
-            if str(getattr(p, "note", "") or "") != "auto: payment at bill creation"
+            if not is_auto_bill_payment(p)
         ]
         has_manual_receipts = len(manual_receipts) > 0
 
@@ -1499,7 +1519,7 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                     detail="Bill payment cannot be below existing manual receipt amounts",
                 )
             credit = round2(max(0.0, total - (cash + online + total_writeoff)))
-            if cash > 0 and online > 0:
+            if sum(amount > 0 for amount in (cash, online, credit)) > 1:
                 effective_payment_mode = "split"
             elif cash > 0:
                 effective_payment_mode = "cash"
@@ -1643,22 +1663,28 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
 
             auto_payments = [
                 p for p in pays
-                if str(getattr(p, "note", "") or "") == "auto: payment at bill creation"
+                if is_auto_bill_payment(p)
             ]
             for p in auto_payments:
                 session.delete(p)
 
             auto_cash = round2(cash - sum(as_f(getattr(p, "cash_amount", 0.0)) for p in manual_receipts))
             auto_online = round2(online - sum(as_f(getattr(p, "online_amount", 0.0)) for p in manual_receipts))
+            auto_credit = credit
             if auto_cash > 0 or auto_online > 0:
                 session.add(BillPayment(
                     bill_id=b.id,
                     received_at=bill_ts,
-                    mode=("split" if auto_cash > 0 and auto_online > 0 else "cash" if auto_cash > 0 else "online"),
+                    mode=(
+                        "split"
+                        if sum(amount > 0 for amount in (auto_cash, auto_online, auto_credit)) > 1
+                        else "cash" if auto_cash > 0 else "online"
+                    ),
                     cash_amount=auto_cash,
                     online_amount=auto_online,
+                    credit_amount=auto_credit,
                     writeoff_amount=0.0,
-                    note="auto: payment at bill creation",
+                    note=AUTO_BILL_PAYMENT_NOTE,
                     is_writeoff=False,
                 ))
 
@@ -1985,6 +2011,11 @@ def edit_bill_payment(bill_id: int, payment_id: int, payload: ReceivePaymentIn):
         p = session.get(BillPayment, payment_id)
         if not p or int(p.bill_id) != int(bill_id) or bool(getattr(p, "is_deleted", False)):
             raise HTTPException(status_code=404, detail="Payment not found")
+        if is_auto_bill_payment(p):
+            raise HTTPException(
+                status_code=400,
+                detail="Initial bill settlement must be changed through Edit Bill",
+            )
         receipt_adjustment = receipt_adjustment_for_payment(session, int(p.id or 0))
         receipt_managed = receipt_adjustment is not None
         if receipt_adjustment:

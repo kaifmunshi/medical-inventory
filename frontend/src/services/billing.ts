@@ -89,6 +89,7 @@ export interface Bill {
   payment_mode: 'cash' | 'online' | 'split' | 'credit'
   payment_cash: number
   payment_online: number
+  payment_credit: number
   notes: string
 
   // credit bill fields

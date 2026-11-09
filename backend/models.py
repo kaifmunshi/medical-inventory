@@ -276,6 +276,7 @@ class BillCreate(SQLModel):
     payment_mode: str                 # "cash" | "online" | "split" | "credit"
     payment_cash: float = 0.0
     payment_online: float = 0.0
+    payment_credit: float = 0.0
     customer_id: Optional[int] = None
     party_id: Optional[int] = None
     final_amount: Optional[float] = None

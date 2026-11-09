@@ -941,9 +941,9 @@ export default function BillEditDialog({
     if (editPaymentMode === 'credit') return true
     if (editPaymentMode === 'cash') return c > 0 && round2(c) <= editSettlementTotal
     if (editPaymentMode === 'online') return o > 0 && round2(o) <= editSettlementTotal
-    if (editSplitCombination === 'cash-online') return round2(c + o) === editSettlementTotal
-    if (editSplitCombination === 'cash-credit') return c >= 0 && c <= editSettlementTotal
-    if (editSplitCombination === 'online-credit') return o >= 0 && o <= editSettlementTotal
+    if (editSplitCombination === 'cash-online') return c > 0 && o > 0 && round2(c + o) === editSettlementTotal
+    if (editSplitCombination === 'cash-credit') return c > 0 && round2(c) < editSettlementTotal
+    if (editSplitCombination === 'online-credit') return o > 0 && round2(o) < editSettlementTotal
     return c > 0 && o > 0 && round2(c + o) < editSettlementTotal
   }, [editPaymentMode, editCash, editOnline, editSettlementTotal, editSplitCombination])
 
@@ -1024,6 +1024,7 @@ export default function BillEditDialog({
       const finalForSubmit = round2(
         itemsForSubmit.reduce((s, it) => s + editLineTotal(it), 0)
       )
+      const settlementForSubmit = round2(Math.max(0, finalForSubmit - editCreditReturnTotal))
       const cleanedItems = itemsForSubmit
         .map((it) => ({
           item_id: Number(it.item_id),
@@ -1047,7 +1048,7 @@ export default function BillEditDialog({
       }
       if (oldBillPasswordForSave) payload.old_bill_password = oldBillPasswordForSave
 
-      if (finalForSubmit <= 0) {
+      if (settlementForSubmit <= 0) {
         payload.payment_mode = 'cash'
         payload.payment_cash = 0
         payload.payment_online = 0
@@ -1057,37 +1058,37 @@ export default function BillEditDialog({
         payload.payment_online = 0
       } else if (editPaymentMode === 'cash') {
         const paidCash = round2(Number(payload.payment_cash || 0))
-        if (paidCash > finalForSubmit) throw new Error('Cash amount cannot be greater than final amount')
+        if (paidCash > settlementForSubmit) throw new Error('Cash amount cannot be greater than amount due')
         payload.payment_cash = paidCash
         payload.payment_online = 0
-        if (paidCash < finalForSubmit) {
+        if (paidCash < settlementForSubmit) {
           payload.payment_mode = 'split'
-          payload.payment_credit = round2(finalForSubmit - paidCash)
+          payload.payment_credit = round2(settlementForSubmit - paidCash)
         }
       } else if (editPaymentMode === 'online') {
         const paidOnline = round2(Number(payload.payment_online || 0))
-        if (paidOnline > finalForSubmit) throw new Error('Online amount cannot be greater than final amount')
+        if (paidOnline > settlementForSubmit) throw new Error('Online amount cannot be greater than amount due')
         payload.payment_cash = 0
         payload.payment_online = paidOnline
-        if (paidOnline < finalForSubmit) {
+        if (paidOnline < settlementForSubmit) {
           payload.payment_mode = 'split'
-          payload.payment_credit = round2(finalForSubmit - paidOnline)
+          payload.payment_credit = round2(settlementForSubmit - paidOnline)
         }
       } else if (editSplitCombination === 'cash-online') {
         const sum = round2(Number(payload.payment_cash || 0) + Number(payload.payment_online || 0))
-        if (sum !== finalForSubmit) {
-          throw new Error(`Cash + Online must equal Final Amount (₹${money(finalForSubmit)})`)
+        if (Number(payload.payment_cash || 0) <= 0 || Number(payload.payment_online || 0) <= 0 || sum !== settlementForSubmit) {
+          throw new Error(`Cash + Online must equal Amount Due (₹${money(settlementForSubmit)})`)
         }
       } else if (editSplitCombination === 'cash-credit') {
         payload.payment_online = 0
-        payload.payment_credit = round2(finalForSubmit - Number(payload.payment_cash || 0))
-        if (payload.payment_credit < 0) throw new Error('Cash amount cannot be greater than final amount')
+        payload.payment_credit = round2(settlementForSubmit - Number(payload.payment_cash || 0))
+        if (Number(payload.payment_cash || 0) <= 0 || payload.payment_credit <= 0) throw new Error('Cash and Credit must each have a positive amount')
       } else if (editSplitCombination === 'online-credit') {
         payload.payment_cash = 0
-        payload.payment_credit = round2(finalForSubmit - Number(payload.payment_online || 0))
-        if (payload.payment_credit < 0) throw new Error('Online amount cannot be greater than final amount')
+        payload.payment_credit = round2(settlementForSubmit - Number(payload.payment_online || 0))
+        if (Number(payload.payment_online || 0) <= 0 || payload.payment_credit <= 0) throw new Error('Online and Credit must each have a positive amount')
       } else {
-        payload.payment_credit = round2(finalForSubmit - Number(payload.payment_cash || 0) - Number(payload.payment_online || 0))
+        payload.payment_credit = round2(settlementForSubmit - Number(payload.payment_cash || 0) - Number(payload.payment_online || 0))
         if (Number(payload.payment_cash || 0) <= 0 || Number(payload.payment_online || 0) <= 0 || payload.payment_credit <= 0) {
           throw new Error('Cash, Online, and Credit must each have a positive amount')
         }
@@ -1475,6 +1476,16 @@ export default function BillEditDialog({
                       if (v === 'credit') {
                         setEditCash(0)
                         setEditOnline(0)
+                      } else if (v === 'cash') {
+                        setEditCash(editSettlementTotal)
+                        setEditOnline(0)
+                      } else if (v === 'online') {
+                        setEditCash(0)
+                        setEditOnline(editSettlementTotal)
+                      } else {
+                        const first = round2(editSettlementTotal / 2)
+                        setEditCash(first)
+                        setEditOnline(round2(editSettlementTotal - first))
                       }
                     }}
                     sx={{ width: 170 }}
@@ -1493,8 +1504,21 @@ export default function BillEditDialog({
                       onChange={(e) => {
                         const v = e.target.value as EditSplitCombination
                         setEditSplitCombination(v)
-                        if (v === 'cash-credit') setEditOnline(0)
-                        if (v === 'online-credit') setEditCash(0)
+                        if (v === 'cash-online') {
+                          const first = round2(editSettlementTotal / 2)
+                          setEditCash(first)
+                          setEditOnline(round2(editSettlementTotal - first))
+                        } else if (v === 'cash-credit') {
+                          setEditCash(round2(editSettlementTotal / 2))
+                          setEditOnline(0)
+                        } else if (v === 'online-credit') {
+                          setEditCash(0)
+                          setEditOnline(round2(editSettlementTotal / 2))
+                        } else {
+                          const third = round2(editSettlementTotal / 3)
+                          setEditCash(third)
+                          setEditOnline(third)
+                        }
                       }}
                       sx={{ width: 230 }}
                     >

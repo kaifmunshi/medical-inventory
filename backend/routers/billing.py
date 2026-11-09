@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import re
+import math
 from pydantic import BaseModel
 from sqlmodel import select
 from sqlalchemy import or_, exists, func, cast
@@ -50,6 +51,56 @@ def as_i(x: Any) -> int:
         return int(x)
     except Exception:
         return 0
+
+
+def normalize_bill_payment(
+    *,
+    total: float,
+    mode: str,
+    cash_amount: Any = 0.0,
+    online_amount: Any = 0.0,
+    credit_amount: Any = 0.0,
+) -> tuple[float, float, float, str]:
+    """Validate and normalize every supported bill-payment allocation."""
+    safe_total = round2(as_f(total))
+    raw_amounts = {
+        "payment_cash": as_f(cash_amount),
+        "payment_online": as_f(online_amount),
+        "payment_credit": as_f(credit_amount),
+    }
+    for label, amount in raw_amounts.items():
+        if not math.isfinite(amount):
+            raise HTTPException(status_code=400, detail=f"{label} must be a finite number")
+        if amount < 0:
+            raise HTTPException(status_code=400, detail=f"{label} cannot be negative")
+
+    cash = round2(raw_amounts["payment_cash"])
+    online = round2(raw_amounts["payment_online"])
+    credit = round2(raw_amounts["payment_credit"])
+
+    if safe_total <= 0:
+        if cash or online or credit:
+            raise HTTPException(status_code=400, detail="Payment amounts must be zero when total_amount is zero")
+        return 0.0, 0.0, 0.0, "cash"
+    if mode == "credit":
+        if cash or online:
+            raise HTTPException(status_code=400, detail="Credit payment mode cannot include cash or online amounts")
+        return 0.0, 0.0, safe_total, "credit"
+    if mode == "cash":
+        if cash != safe_total or online or credit:
+            raise HTTPException(status_code=400, detail="Cash payment must equal total_amount")
+        return safe_total, 0.0, 0.0, "cash"
+    if mode == "online":
+        if online != safe_total or cash or credit:
+            raise HTTPException(status_code=400, detail="Online payment must equal total_amount")
+        return 0.0, safe_total, 0.0, "online"
+    if mode != "split":
+        raise HTTPException(status_code=400, detail="Invalid payment_mode")
+    if round2(cash + online + credit) != safe_total:
+        raise HTTPException(status_code=400, detail="Cash + Online + Credit must equal total_amount")
+    if sum(amount > 0 for amount in (cash, online, credit)) < 2:
+        raise HTTPException(status_code=400, detail="Split payment must contain at least two positive amounts")
+    return cash, online, credit, "split"
 
 
 def bill_line_unit_price(line: Any, item: Item) -> float:
@@ -965,32 +1016,13 @@ def create_bill(payload: BillCreate):
         pay_online_in = round2(as_f(getattr(payload, "payment_online", 0.0)))
         pay_credit_in = round2(as_f(getattr(payload, "payment_credit", 0.0)))
 
-        if total <= 0:
-            cash, online, credit = 0.0, 0.0, 0.0
-            stored_payment_mode = "cash"
-        elif payload.payment_mode == "credit":
-            cash, online, credit = 0.0, 0.0, total
-            stored_payment_mode = payload.payment_mode
-        elif payload.payment_mode == "cash":
-            if round2(pay_cash_in) != total:
-                raise HTTPException(status_code=400, detail="payment_cash must equal total_amount")
-            cash, online, credit = total, 0.0, 0.0
-            stored_payment_mode = payload.payment_mode
-        elif payload.payment_mode == "online":
-            if round2(pay_online_in) != total:
-                raise HTTPException(status_code=400, detail="payment_online must equal total_amount")
-            cash, online, credit = 0.0, total, 0.0
-            stored_payment_mode = payload.payment_mode
-        else:  # split
-            if pay_credit_in < 0:
-                raise HTTPException(status_code=400, detail="payment_credit cannot be negative")
-            if round2(pay_cash_in + pay_online_in + pay_credit_in) != total:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cash + Online + Credit must equal total_amount"
-                )
-            cash, online, credit = round2(pay_cash_in), round2(pay_online_in), round2(pay_credit_in)
-            stored_payment_mode = payload.payment_mode
+        cash, online, credit, stored_payment_mode = normalize_bill_payment(
+            total=total,
+            mode=payload.payment_mode,
+            cash_amount=pay_cash_in,
+            online_amount=pay_online_in,
+            credit_amount=pay_credit_in,
+        )
 
         # 4) Create Bill + BillItems and deduct stock (✅ single transaction)
         now_iso = now_ts()
@@ -1432,32 +1464,13 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
         pay_cash_in = round2(as_f(payload.payment_cash))
         pay_online_in = round2(as_f(payload.payment_online))
         pay_credit_in = round2(as_f(getattr(payload, "payment_credit", 0.0)))
-        if total <= 0:
-            cash, online, credit = 0.0, 0.0, 0.0
-            requested_payment_mode = "cash"
-        elif payload.payment_mode == "credit":
-            cash, online, credit = 0.0, 0.0, total
-            requested_payment_mode = payload.payment_mode
-        elif payload.payment_mode == "cash":
-            if pay_cash_in != total:
-                raise HTTPException(status_code=400, detail="payment_cash must equal total_amount")
-            cash, online, credit = total, 0.0, 0.0
-            requested_payment_mode = payload.payment_mode
-        elif payload.payment_mode == "online":
-            if pay_online_in != total:
-                raise HTTPException(status_code=400, detail="payment_online must equal total_amount")
-            cash, online, credit = 0.0, total, 0.0
-            requested_payment_mode = payload.payment_mode
-        else:
-            if pay_credit_in < 0:
-                raise HTTPException(status_code=400, detail="payment_credit cannot be negative")
-            if round2(pay_cash_in + pay_online_in + pay_credit_in) != total:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cash + Online + Credit must equal total_amount"
-                )
-            cash, online, credit = pay_cash_in, pay_online_in, pay_credit_in
-            requested_payment_mode = payload.payment_mode
+        cash, online, credit, requested_payment_mode = normalize_bill_payment(
+            total=total,
+            mode=payload.payment_mode,
+            cash_amount=pay_cash_in,
+            online_amount=pay_online_in,
+            credit_amount=pay_credit_in,
+        )
 
         pays = session.exec(active_bill_payments_query(b.id)).all()
         manual_receipts = [

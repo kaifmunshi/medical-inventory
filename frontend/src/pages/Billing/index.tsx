@@ -677,13 +677,13 @@ export default function Billing() {
     if (mode === 'cash') return c > 0 && round2(c) <= chosenFinal
     if (mode === 'online') return o > 0 && round2(o) <= chosenFinal
     if (splitCombination === 'cash-online') {
-      return Number((c + o).toFixed(2)) === chosenFinal
+      return c > 0 && o > 0 && round2(c + o) === chosenFinal
     }
     if (splitCombination === 'cash-credit') {
-      return c >= 0 && c <= chosenFinal
+      return c > 0 && round2(c) < chosenFinal
     }
     if (splitCombination === 'online-credit') {
-      return o >= 0 && o <= chosenFinal
+      return o > 0 && round2(o) < chosenFinal
     }
     if (splitCombination === 'cash-online-credit') {
       return c > 0 && o > 0 && round2(c + o) < chosenFinal
@@ -728,13 +728,19 @@ export default function Billing() {
     if (chosenFinal <= 0) return
     if (kind === 'cash') {
       if (cash !== '') return
-      handleCashAmountChange(String(chosenFinal))
+      const suggested = mode === 'split'
+        ? round2(chosenFinal / (splitCombination === 'cash-online-credit' ? 3 : 2))
+        : chosenFinal
+      handleCashAmountChange(String(suggested))
       setPaymentAutoFilledOnce(true)
       setPaymentManuallyEdited(false)
       return
     }
     if (online !== '') return
-    handleOnlineAmountChange(String(chosenFinal))
+    const suggested = mode === 'split'
+      ? round2(chosenFinal / (splitCombination === 'cash-online-credit' ? 3 : 2))
+      : chosenFinal
+    handleOnlineAmountChange(String(suggested))
     setPaymentAutoFilledOnce(true)
     setPaymentManuallyEdited(false)
   }
@@ -871,7 +877,7 @@ export default function Billing() {
           const sum = +(
             Number(payload.payment_cash || 0) + Number(payload.payment_online || 0)
           ).toFixed(2)
-          if (sum !== chosenFinal) {
+          if (Number(payload.payment_cash || 0) <= 0 || Number(payload.payment_online || 0) <= 0 || sum !== chosenFinal) {
             toast.push(
               `Split payment mismatch. Cash + Online must equal Final Amount (₹${chosenFinal.toFixed(2)}).`,
               'error'
@@ -881,15 +887,15 @@ export default function Billing() {
         } else if (splitCombination === 'cash-credit') {
           payload.payment_online = 0
           payload.payment_credit = Number((chosenFinal - Number(payload.payment_cash || 0)).toFixed(2))
-          if (payload.payment_credit < 0) {
-            toast.push('Cash amount cannot be greater than Final Amount.', 'error')
+          if (Number(payload.payment_cash || 0) <= 0 || payload.payment_credit <= 0) {
+            toast.push('Cash and Credit must each have a positive amount.', 'error')
             throw new Error('Invalid split amounts')
           }
         } else if (splitCombination === 'online-credit') {
           payload.payment_cash = 0
           payload.payment_credit = Number((chosenFinal - Number(payload.payment_online || 0)).toFixed(2))
-          if (payload.payment_credit < 0) {
-            toast.push('Online amount cannot be greater than Final Amount.', 'error')
+          if (Number(payload.payment_online || 0) <= 0 || payload.payment_credit <= 0) {
+            toast.push('Online and Credit must each have a positive amount.', 'error')
             throw new Error('Invalid split amounts')
           }
         } else {
@@ -1752,6 +1758,16 @@ export default function Billing() {
                   if (v === 'credit') {
                     setCash('')
                     setOnline('')
+                  } else if (v === 'cash') {
+                    setCash(chosenFinal || '')
+                    setOnline('')
+                  } else if (v === 'online') {
+                    setCash('')
+                    setOnline(chosenFinal || '')
+                  } else {
+                    const first = round2(chosenFinal / 2)
+                    setCash(first || '')
+                    setOnline(round2(chosenFinal - first) || '')
                   }
                 }}
                 sx={{ width: 170 }}
@@ -1772,9 +1788,21 @@ export default function Billing() {
                     setSplitCombination(v)
                     setPaymentAutoFilledOnce(false)
                     setPaymentManuallyEdited(false)
-                    if (v === 'cash-online') return
-                    if (v === 'cash-credit') setOnline('')
-                    if (v === 'online-credit') setCash('')
+                    if (v === 'cash-online') {
+                      const first = round2(chosenFinal / 2)
+                      setCash(first || '')
+                      setOnline(round2(chosenFinal - first) || '')
+                    } else if (v === 'cash-credit') {
+                      setCash(round2(chosenFinal / 2) || '')
+                      setOnline('')
+                    } else if (v === 'online-credit') {
+                      setCash('')
+                      setOnline(round2(chosenFinal / 2) || '')
+                    } else {
+                      const third = round2(chosenFinal / 3)
+                      setCash(third || '')
+                      setOnline(third || '')
+                    }
                   }}
                   sx={{ width: 230 }}
                 >

@@ -1195,6 +1195,7 @@ export default function BillEditDialog({
     setPaymentPanelBill(updated)
     skipEditHydrateBillIdRef.current = Number(updated?.id || 0) || null
     await Promise.resolve(onSaved?.(updated))
+    onClose()
   }
 
   return (

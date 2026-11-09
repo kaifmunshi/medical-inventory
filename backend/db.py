@@ -3622,6 +3622,68 @@ def migrate_db():
             ))
             session.commit()
 
+        auto_credit_sync_key = "sync_auto_bill_payment_credit_to_outstanding_v2"
+        auto_credit_sync_done = session.exec(
+            text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=auto_credit_sync_key),
+        ).first()
+        if not auto_credit_sync_done:
+            sync_count_row = session.exec(text("""
+                SELECT COUNT(*)
+                FROM billpayment AS p
+                JOIN bill AS b ON b.id = p.bill_id
+                WHERE COALESCE(p.is_deleted, 0) = 0
+                  AND COALESCE(b.is_deleted, 0) = 0
+                  AND lower(trim(COALESCE(p.note, ''))) = 'auto: payment at bill creation'
+                  AND ABS(
+                      COALESCE(p.credit_amount, 0)
+                      - MAX(0, COALESCE(b.total_amount, 0) - COALESCE(b.paid_amount, 0) - COALESCE(b.writeoff_amount, 0))
+                  ) > 0.0001
+            """)).one()
+            sync_count = int(sync_count_row[0] or 0)
+            backup_path = create_data_repair_backup("before_auto_bill_payment_credit_sync") if sync_count else None
+            if sync_count:
+                session.exec(text("""
+                    UPDATE billpayment
+                    SET credit_amount = (
+                            SELECT MAX(0, COALESCE(b.total_amount, 0) - COALESCE(b.paid_amount, 0) - COALESCE(b.writeoff_amount, 0))
+                            FROM bill AS b WHERE b.id = billpayment.bill_id
+                        ),
+                        mode = CASE
+                            WHEN (
+                                (CASE WHEN COALESCE(cash_amount, 0) > 0.0001 THEN 1 ELSE 0 END)
+                                + (CASE WHEN COALESCE(online_amount, 0) > 0.0001 THEN 1 ELSE 0 END)
+                                + (CASE WHEN (
+                                    SELECT MAX(0, COALESCE(b.total_amount, 0) - COALESCE(b.paid_amount, 0) - COALESCE(b.writeoff_amount, 0))
+                                    FROM bill AS b WHERE b.id = billpayment.bill_id
+                                  ) > 0.0001 THEN 1 ELSE 0 END)
+                            ) > 1 THEN 'split'
+                            WHEN COALESCE(cash_amount, 0) > 0.0001 THEN 'cash'
+                            WHEN COALESCE(online_amount, 0) > 0.0001 THEN 'online'
+                            ELSE 'credit'
+                        END
+                    WHERE COALESCE(is_deleted, 0) = 0
+                      AND lower(trim(COALESCE(note, ''))) = 'auto: payment at bill creation'
+                      AND EXISTS (
+                          SELECT 1 FROM bill AS b
+                          WHERE b.id = billpayment.bill_id
+                            AND COALESCE(b.is_deleted, 0) = 0
+                            AND ABS(
+                                COALESCE(billpayment.credit_amount, 0)
+                                - MAX(0, COALESCE(b.total_amount, 0) - COALESCE(b.paid_amount, 0) - COALESCE(b.writeoff_amount, 0))
+                            ) > 0.0001
+                      )
+                """))
+            session.exec(text("""
+                INSERT INTO appmeta (key, value, updated_at)
+                VALUES (:k, :v, :ts)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """).bindparams(
+                k=auto_credit_sync_key,
+                v=f"done:{sync_count};backup:{backup_path or ''}",
+                ts=_now_ts(),
+            ))
+            session.commit()
+
         zero_total_status_repair_key = "repair_zero_total_bill_status_v1"
         zero_total_status_repair_done = session.exec(
             text("SELECT value FROM appmeta WHERE key = :k LIMIT 1").bindparams(k=zero_total_status_repair_key),

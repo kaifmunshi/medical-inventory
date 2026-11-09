@@ -380,6 +380,30 @@ def recalculate_bill_payment_state(session, bill: Bill) -> Dict[str, Any]:
     total_amount = round2(as_f(bill.total_amount))
     covered_total = round2(total_paid + total_writeoff)
 
+    # Keep the automatic allocation row aligned with the bill's current
+    # outstanding balance after later receipts, deletions, or recoveries.
+    # Its credit value is descriptive debt, not money received.
+    remaining_credit = round2(max(0.0, total_amount - covered_total))
+    for payment in receipt_pays:
+        if not is_auto_bill_payment(payment):
+            continue
+        payment.credit_amount = remaining_credit
+        channel_count = sum(
+            amount > 0
+            for amount in (
+                as_f(payment.cash_amount),
+                as_f(payment.online_amount),
+                remaining_credit,
+            )
+        )
+        payment.mode = (
+            "split" if channel_count > 1
+            else "cash" if as_f(payment.cash_amount) > 0
+            else "online" if as_f(payment.online_amount) > 0
+            else "credit"
+        )
+        session.add(payment)
+
     bill.payment_cash = total_cash
     bill.payment_online = total_online
     bill.paid_amount = total_paid

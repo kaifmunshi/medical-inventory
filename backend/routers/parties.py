@@ -168,6 +168,27 @@ def _recalculate_bill_payment_state(session, bill: Bill) -> None:
     bill_total = _round2(_as_float(bill.total_amount))
     covered = _round2(total_paid + total_writeoff)
 
+    remaining_credit = _round2(max(0.0, bill_total - covered))
+    for payment in receipt_payments:
+        if str(getattr(payment, "note", "") or "").strip().lower() != "auto: payment at bill creation":
+            continue
+        payment.credit_amount = remaining_credit
+        channel_count = sum(
+            amount > 0
+            for amount in (
+                _as_float(payment.cash_amount),
+                _as_float(payment.online_amount),
+                remaining_credit,
+            )
+        )
+        payment.mode = (
+            "split" if channel_count > 1
+            else "cash" if _as_float(payment.cash_amount) > 0
+            else "online" if _as_float(payment.online_amount) > 0
+            else "credit"
+        )
+        session.add(payment)
+
     bill.payment_cash = total_cash
     bill.payment_online = total_online
     bill.paid_amount = total_paid

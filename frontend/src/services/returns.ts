@@ -59,6 +59,7 @@ export type ReturnRecord = {
   date_time?: string
   subtotal_return?: number
   rounding_adjustment?: number
+  return_value?: number
 }
 
 export type ReturnsDashboardSummary = {
@@ -101,6 +102,7 @@ export type ExchangeRecord = {
   net_due: number
   theoretical_net?: number
   rounding_adjustment?: number
+  return_value?: number
 }
 
 // --- API calls ---
@@ -138,8 +140,8 @@ export async function getReturnsDashboardSummary(params: Pick<ListReturnsParams,
 // ✅ Exchange API — matches Swagger: POST /returns/exchange
 export type ExchangePayload = {
   source_bill_id: number;
-  return_items: { item_id: number; quantity: number }[];
-  new_items: { item_id: number; quantity: number }[];
+  return_items: { item_id: number; quantity: number; custom_return_value?: number; opened_loose_quantity?: number }[];
+  new_items: { item_id: number; quantity: number; custom_unit_price?: number }[];
   discount_percent?: number;
   // when customer pays (net > 0)
   payment_mode?: 'cash' | 'online' | 'split' | 'credit';
@@ -203,6 +205,7 @@ export async function listExchangeRecords(params: {
 
 export async function updateExchangeSettlement(id: number, payload: {
   exchange_date: string
+  return_value: number
   payment_cash: number
   payment_online: number
   payment_credit: number
@@ -211,6 +214,16 @@ export async function updateExchangeSettlement(id: number, payload: {
   refund_credit: number
 }) {
   const { data } = await api.patch(`/returns/exchange/${id}`, payload)
+  return data
+}
+
+export async function undoExchange(id: number) {
+  const { data } = await api.delete(`/returns/exchange/${id}`)
+  return data as { exchange_id: number; undone: boolean }
+}
+
+export async function updateExchange(id: number, payload: ExchangePayload & { exchange_date: string }) {
+  const { data } = await api.put(`/returns/exchange/${id}`, payload)
   return data
 }
 

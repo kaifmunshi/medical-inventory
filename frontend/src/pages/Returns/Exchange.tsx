@@ -3,20 +3,67 @@ import { useEffect, useMemo, useState } from 'react'
 import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Paper, Stack, TextField, Typography, IconButton, MenuItem } from '@mui/material'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditIcon from '@mui/icons-material/Edit'
+import UndoIcon from '@mui/icons-material/Undo'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { findBill, createExchange, getReturnSummary, listExchangeRecords, updateExchangeSettlement, type ExchangeRecord } from '../../services/returns'
+import { findBill, createExchange, getExchangeByReturn, getReturnHistory, getReturnSummary, listExchangeRecords, undoExchange, updateExchange, type ExchangeRecord } from '../../services/returns'
 import { useSearchParams } from 'react-router-dom'
-import ItemPicker from '../../components/billing/ItemPicker'
+import ItemPicker, { type PickerItem } from '../../components/billing/ItemPicker'
 import BillPickerDialog from '../../components/billing/BillPickerDialog'
 import { useToast } from '../../components/ui/Toaster'
 
-type RetRow = { item_id:number; name:string; brand?: string | null; qty:number; max:number; mrp:number; charged_unit_price?: number; remaining_value?: number }
-type AddRow = { item_id:number; name:string; brand?: string | null; qty:number; mrp:number }
+type RetRow = { item_id:number; name:string; brand?: string | null; qty:number; max:number; mrp:number; charged_unit_price?: number; remaining_value?: number; custom_return_value?: number | ''; editing_return_value?: boolean; loose_sale_enabled?: boolean; is_loose_stock?: boolean; conversion_qty?: number | null; child_unit_name?: string | null; opened_loose_quantity?: number }
+type AddRow = { item_id:number; name:string; brand?: string | null; qty:number | ''; mrp:number; selling_price?: number | ''; available_stock?: number; inventory_lot_id?: number | null }
 
 function round2(n:number){ return Math.round(n*100)/100 }
 function asString(x:any){
   if (typeof x === 'string') return x
   try { return JSON.stringify(x, null, 2) } catch { return String(x) }
+}
+
+function exchangeAuditDetails(detailsJson?: string | null) {
+  if (!detailsJson) return [] as string[]
+  try {
+    const details = JSON.parse(detailsJson)
+    const before = details?.before || {}
+    const after = details?.after || details || {}
+    const changes: string[] = []
+    const money = (value: any) => `₹${Number(value || 0).toFixed(2)}`
+    const addChange = (label: string, oldValue: any, newValue: any, format = (value: any) => String(value ?? '—')) => {
+      if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) changes.push(`${label}: ${format(oldValue)} → ${format(newValue)}`)
+    }
+    addChange('Date', before.date, after.date, (value) => String(value || '').slice(0, 10))
+    addChange('Return total', before.return_value, after.return_value, money)
+    addChange('Replacement total', before.replacement_total, after.replacement_total, money)
+    addChange('Discount', before.discount_percent, after.discount_percent, (value) => `${Number(value || 0)}%`)
+    addChange('Net settlement', before.net_due, after.net_due, money)
+    addChange('Payment mode', before.payment_mode, after.payment_mode, (value) => String(value || '—').toUpperCase())
+
+    const compareProducts = (label: string, oldRows: any[] = [], newRows: any[] = [], isReplacement = false) => {
+      const oldMap = new Map(oldRows.map((row) => [Number(row.item_id), row]))
+      const newMap = new Map(newRows.map((row) => [Number(row.item_id), row]))
+      for (const id of new Set([...oldMap.keys(), ...newMap.keys()])) {
+        const oldRow = oldMap.get(id); const newRow = newMap.get(id)
+        const name = newRow?.name || oldRow?.name || `Item #${id}`
+        if (!oldRow) { changes.push(`${label} added: ${name}, qty ${newRow.quantity}${isReplacement ? ` at ${money(newRow.selling_price)}` : `, value ${money(newRow.return_value)}`}`); continue }
+        if (!newRow) { changes.push(`${label} removed: ${name}, qty ${oldRow.quantity}`); continue }
+        if (Number(oldRow.quantity) !== Number(newRow.quantity)) changes.push(`${label} qty — ${name}: ${oldRow.quantity} → ${newRow.quantity}`)
+        if (isReplacement && Number(oldRow.selling_price) !== Number(newRow.selling_price)) changes.push(`Selling price — ${name}: ${money(oldRow.selling_price)} → ${money(newRow.selling_price)}`)
+        if (!isReplacement && Number(oldRow.return_value) !== Number(newRow.return_value)) changes.push(`Return value — ${name}: ${money(oldRow.return_value)} → ${money(newRow.return_value)}`)
+        if (!isReplacement && Number(oldRow.opened_loose_quantity || 0) !== Number(newRow.opened_loose_quantity || 0)) changes.push(`Loose units — ${name}: ${oldRow.opened_loose_quantity || 0} → ${newRow.opened_loose_quantity || 0}`)
+      }
+    }
+    compareProducts('Returned product', before.returned_products, after.returned_products)
+    compareProducts('Exchange product', before.exchange_products, after.exchange_products, true)
+    addChange('Cash payment', before.payment?.cash, after.payment?.cash, money)
+    addChange('Online payment', before.payment?.online, after.payment?.online, money)
+    addChange('Credit payment', before.payment?.credit, after.payment?.credit, money)
+    addChange('Cash refund', before.refund?.cash, after.refund?.cash, money)
+    addChange('Online refund', before.refund?.online, after.refund?.online, money)
+    addChange('Credit refund', before.refund?.credit, after.refund?.credit, money)
+    return changes
+  } catch {
+    return [] as string[]
+  }
 }
 
 export default function Exchange() {
@@ -35,7 +82,6 @@ export default function Exchange() {
 
   // Exchange discount on NEW items + final amount override
   const [exDiscount, setExDiscount] = useState(0)
-  const [finalOverride, setFinalOverride] = useState<number | ''>('') // abs amount
   const [paymentMode, setPaymentMode] = useState<'cash' | 'online' | 'split' | 'credit'>('cash')
   const [paymentCashSplit, setPaymentCashSplit] = useState<number | ''>('')
   const [paymentOnlineSplit, setPaymentOnlineSplit] = useState<number | ''>('')
@@ -50,10 +96,10 @@ export default function Exchange() {
   const [historyTo, setHistoryTo] = useState('')
   const [historySettlement, setHistorySettlement] = useState<'all' | 'cash' | 'online' | 'split' | 'credit'>('all')
   const [editExchange, setEditExchange] = useState<ExchangeRecord | null>(null)
-  const [editDate, setEditDate] = useState('')
-  const [editCash, setEditCash] = useState<number | ''>('')
-  const [editOnline, setEditOnline] = useState<number | ''>('')
-  const [editCredit, setEditCredit] = useState<number | ''>('')
+  const [undoTarget, setUndoTarget] = useState<ExchangeRecord | null>(null)
+  const [editLoading, setEditLoading] = useState(false)
+  const [releasedExchangeItems, setReleasedExchangeItems] = useState<PickerItem[]>([])
+  const [releasedQtyByItemId, setReleasedQtyByItemId] = useState<Record<number, number>>({})
 
   const { refetch } = useQuery({
     queryKey: ['ex-bill', query],
@@ -74,6 +120,12 @@ export default function Exchange() {
     },
   })
 
+  const openExchangeHistory = useQuery({
+    queryKey: ['exchange-audit-history', editExchange?.return_id],
+    queryFn: () => getReturnHistory(Number(editExchange?.return_id)),
+    enabled: Boolean(editExchange?.return_id),
+  })
+
   const filteredHistory = useMemo(() => {
     const search = historySearch.trim().toLowerCase().replace(/^#/, '')
     return (history.data || []).filter((row) => {
@@ -91,13 +143,67 @@ export default function Exchange() {
     historySearch || historyFrom || historyTo || historySettlement !== 'all'
   )
 
-  function openExchangeEditor(row: ExchangeRecord) {
+  async function openExchangeEditor(row: ExchangeRecord) {
     const refundSide = Number(row.net_due || 0) < 0
-    setEditExchange(row)
-    setEditDate(String(row.created_at || '').slice(0, 10))
-    setEditCash(refundSide ? Number(row.refund_cash || 0) : Number(row.payment_cash || 0))
-    setEditOnline(refundSide ? Number(row.refund_online || 0) : Number(row.payment_online || 0))
-    setEditCredit(refundSide ? Number(row.refund_credit || 0) : Number(row.payment_credit || 0))
+    setEditLoading(true)
+    try {
+      const [details, summary, source] = await Promise.all([
+        getExchangeByReturn(row.return_id),
+        getReturnSummary(Number(row.source_bill_id || 0)),
+        findBill(String(row.source_bill_id || '')),
+      ])
+      const sourceBill = Array.isArray(source) ? source[0] : source
+      if (!sourceBill) throw new Error('Source bill could not be loaded')
+      const remainingByItem = new Map((summary || []).map((item: any) => [Number(item.item_id), Number(item.remaining || 0)]))
+      const currentQtyByItem = new Map((details.return?.items || []).map((item: any) => [Number(item.item_id), Number(item.quantity || 0)]))
+      const currentReturnByItem = new Map((details.return?.items || []).map((item: any) => [Number(item.item_id), item]))
+      setBill(sourceBill)
+      setQuery(String(row.source_bill_id || ''))
+      setRet((summary || []).map((item: any) => {
+        const current: any = currentReturnByItem.get(Number(item.item_id))
+        return {
+          item_id: Number(item.item_id), name: item.item_name, brand: item.brand || null,
+          qty: Number(current?.quantity || 0), max: Number(remainingByItem.get(Number(item.item_id)) || 0) + Number(currentQtyByItem.get(Number(item.item_id)) || 0),
+          mrp: Number(item.mrp || 0), charged_unit_price: Number(item.charged_unit_price || 0) || undefined,
+          remaining_value: Number(item.remaining_value || 0), custom_return_value: current ? Number(current.line_total || 0) : undefined,
+          loose_sale_enabled: Boolean(item.loose_sale_enabled), is_loose_stock: Boolean(item.is_loose_stock),
+          conversion_qty: Number(item.conversion_qty || 0) || null, child_unit_name: item.child_unit_name || null,
+          opened_loose_quantity: Number(current?.opened_loose_quantity || 0) || undefined,
+        }
+      }))
+      const originalReplacementItems = (details.bill?.items || []).map((item: any) => ({
+        item_id: Number(item.item_id), name: item.item_name, brand: item.brand || null,
+        qty: Number(item.quantity || 0), mrp: Number(item.mrp || 0), selling_price: Number(item.line_total || 0) / Math.max(1, Number(item.quantity || 0)),
+        available_stock: Number(item.stock || 0) + Number(item.quantity || 0), inventory_lot_id: item.inventory_lot_id || null,
+      }))
+      setAdd(originalReplacementItems)
+      setReleasedExchangeItems((details.bill?.items || []).map((item: any) => ({
+        id: Number(item.item_id), name: item.item_name, brand: item.brand || null, mrp: Number(item.mrp || 0), stock: Number(item.stock || 0),
+        expiry_date: item.expiry_date || null, inventory_lot_id: item.inventory_lot_id || null,
+        opened_from_lot_id: item.opened_from_lot_id || null, is_loose_stock: Boolean(item.is_loose_stock),
+        stock_unit_label: item.stock_unit_label || null, parent_unit_name: item.parent_unit_name || null,
+        child_unit_name: item.child_unit_name || null, conversion_qty: item.conversion_qty || null,
+        loose_sale_enabled: Boolean(item.loose_sale_enabled),
+      })))
+      setReleasedQtyByItemId(Object.fromEntries((details.bill?.items || []).map((item: any) => [Number(item.item_id), Number(item.quantity || 0)])))
+      setExDiscount(Number(details.bill?.discount_percent || 0))
+      setExchangeDate(String(row.created_at || '').slice(0, 10))
+      const mode = row.payment_mode || 'cash'
+      if (refundSide) {
+        setRefundMode(mode)
+        setRefundCashSplit(Number(row.refund_cash || 0)); setRefundOnlineSplit(Number(row.refund_online || 0)); setRefundCreditSplit(Number(row.refund_credit || 0))
+      } else {
+        setPaymentMode(mode)
+        setPaymentCashSplit(Number(row.payment_cash || 0)); setPaymentOnlineSplit(Number(row.payment_online || 0)); setPaymentCreditSplit(Number(row.payment_credit || 0))
+      }
+      setEditExchange(row)
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    } catch (error: any) {
+      toast.push(String(error?.response?.data?.detail || error?.message || 'Could not load exchange products'), 'error')
+      setEditExchange(null)
+    } finally {
+      setEditLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -110,34 +216,44 @@ export default function Exchange() {
   const editMutation = useMutation({
     mutationFn: async () => {
       if (!editExchange) throw new Error('No exchange selected')
-      const refundSide = Number(editExchange.net_due || 0) < 0
-      const cash = round2(Number(editCash || 0))
-      const online = round2(Number(editOnline || 0))
-      const credit = round2(Number(editCredit || 0))
-      const expected = round2(Math.abs(Number(editExchange.net_due || 0)))
-      if (round2(cash + online + credit) !== expected) {
-        throw new Error(`Cash + Online + Credit must equal ₹${expected.toFixed(2)}`)
-      }
-      return updateExchangeSettlement(editExchange.id, {
-        exchange_date: editDate,
-        payment_cash: refundSide ? 0 : cash,
-        payment_online: refundSide ? 0 : online,
-        payment_credit: refundSide ? 0 : credit,
-        refund_cash: refundSide ? cash : 0,
-        refund_online: refundSide ? online : 0,
-        refund_credit: refundSide ? credit : 0,
-      })
+      return updateExchange(editExchange.id, buildExchangePayload())
     },
-    onSuccess: () => {
-      toast.push('Exchange settlement updated', 'success')
+    onSuccess: (result: any) => {
+      toast.push(result?.unchanged ? 'No changes to save' : 'Exchange updated', result?.unchanged ? 'info' : 'success')
       setEditExchange(null)
+      setBill(null); setRet([]); setAdd([]); setQuery('')
+      setReleasedExchangeItems([]); setReleasedQtyByItemId({})
       setSearchParams({}, { replace: true })
+      queryClient.invalidateQueries({ queryKey: ['exchange-history'] })
+      queryClient.invalidateQueries({ queryKey: ['exchange-audit-history', editExchange?.return_id] })
+      queryClient.invalidateQueries({ queryKey: ['customer-returns'] })
+      queryClient.invalidateQueries({ queryKey: ['bankbook'] })
+      queryClient.invalidateQueries({ queryKey: ['cashbook'] })
+      queryClient.invalidateQueries({ queryKey: ['billing'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
+      // Exchange edits touch sales/returns books, ledgers, vouchers, credit,
+      // dashboard totals, stock cards and reports. Refresh any mounted view.
+      queryClient.invalidateQueries()
+    },
+    onError: (error: any) => toast.push(String(error?.response?.data?.detail || error?.message || 'Exchange update failed'), 'error'),
+  })
+
+  const undoMutation = useMutation({
+    mutationFn: (id: number) => undoExchange(id),
+    onSuccess: () => {
+      toast.push('Exchange undone and stock restored', 'success')
+      setUndoTarget(null)
       queryClient.invalidateQueries({ queryKey: ['exchange-history'] })
       queryClient.invalidateQueries({ queryKey: ['customer-returns'] })
       queryClient.invalidateQueries({ queryKey: ['bankbook'] })
       queryClient.invalidateQueries({ queryKey: ['cashbook'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries()
     },
-    onError: (error: any) => toast.push(String(error?.response?.data?.detail || error?.message || 'Exchange update failed'), 'error'),
+    onError: (error: any) => toast.push(String(error?.response?.data?.detail || error?.message || 'Exchange could not be undone'), 'error'),
   })
 
   const clamp = (v:number, lo:number, hi:number) => Math.max(lo, Math.min(v, hi))
@@ -201,13 +317,16 @@ export default function Exchange() {
         mrp,
         charged_unit_price: Number(summaryById[item_id]?.charged_unit_price ?? 0) || undefined,
         remaining_value: Number(summaryById[item_id]?.remaining_value ?? 0),
+        loose_sale_enabled: Boolean(summaryById[item_id]?.loose_sale_enabled),
+        is_loose_stock: Boolean(summaryById[item_id]?.is_loose_stock),
+        conversion_qty: Number(summaryById[item_id]?.conversion_qty || 0) || null,
+        child_unit_name: summaryById[item_id]?.child_unit_name || null,
       }
     })
 
     setRet(rows)
     setAdd([]) // clear added items when bill changes
     setExDiscount(0)
-    setFinalOverride('')
     setPaymentMode('cash')
     setPaymentCashSplit('')
     setPaymentOnlineSplit('')
@@ -262,15 +381,43 @@ export default function Exchange() {
     return round2(Number(mrp) * Number(qty) * pricing.factor)
   }
 
+  const automaticReturnLine = (r: RetRow) => {
+    const sealedValue = chargedLine(r.item_id, r.mrp, r.qty, r.charged_unit_price, r.remaining_value, r.max)
+    return r.opened_loose_quantity && Number(r.conversion_qty || 0) > 0
+      ? round2(sealedValue * r.opened_loose_quantity / Number(r.conversion_qty))
+      : sealedValue
+  }
+
   const returnAmt = useMemo(() => {
     if (!bill) return 0
-    return ret.reduce((s, r) => s + chargedLine(r.item_id, r.mrp, r.qty, r.charged_unit_price, r.remaining_value, r.max), 0)
+    return ret.reduce((s, r) => s + (r.custom_return_value == null
+      ? automaticReturnLine(r)
+      : Number(r.custom_return_value)), 0)
   }, [bill, ret])
 
   const newAmt = useMemo(
-    () => add.reduce((s, r) => s + r.qty * r.mrp, 0),
+    () => add.reduce((s, r) => s + Number(r.qty || 0) * Number(r.selling_price === '' || r.selling_price == null ? r.mrp : r.selling_price), 0),
     [add]
   )
+
+  const reservedReplacementStock = useMemo(() => Object.fromEntries(add.map((row) => [
+    row.inventory_lot_id ? `lot:${row.inventory_lot_id}` : `item:${row.item_id}`,
+    Number(row.qty || 0),
+  ])), [add])
+
+  function updateReplacementQty(index: number, rawValue: string) {
+    if (rawValue === '') {
+      setAdd(prev => prev.map((row, i) => i === index ? { ...row, qty: '' } : row))
+      return
+    }
+    const requested = Math.max(1, Math.floor(Number(rawValue)))
+    const row = add[index]
+    const maximum = Math.max(0, Number(row?.available_stock ?? requested))
+    if (requested > maximum) {
+      toast.push(`Only ${maximum} unit${maximum === 1 ? '' : 's'} of ${row?.name || 'this product'} are available. Quantity was reduced to ${maximum}.`, 'warning')
+    }
+    setAdd(prev => prev.map((item, i) => i === index ? { ...item, qty: Math.min(requested, maximum) } : item))
+  }
 
   // ---------- EXCHANGE MATH (FE + BE must match) ----------
 
@@ -285,8 +432,7 @@ export default function Exchange() {
   const autoAmountAbs = round2(Math.abs(autoDelta))
 
   // What we *show/edit* in the final amount box
-  const chosenAmountAbs =
-    finalOverride === '' ? autoAmountAbs : round2(Number(finalOverride) || 0)
+  const chosenAmountAbs = autoAmountAbs
 
   // Decide sign for final amount (customer pays vs refund)
   const sign = autoDelta !== 0
@@ -308,10 +454,16 @@ export default function Exchange() {
       source_bill_id: Number(bill.id),
       return_items: ret
         .filter((r) => r.qty > 0)
-        .map((r) => ({ item_id: r.item_id, quantity: r.qty })),
+        .map((r) => ({
+          item_id: r.item_id,
+          quantity: r.qty,
+          ...(r.custom_return_value == null || r.custom_return_value === '' ? {} : { custom_return_value: round2(Number(r.custom_return_value)) }),
+          ...(r.opened_loose_quantity ? { opened_loose_quantity: r.opened_loose_quantity } : {}),
+        })),
       new_items: add.map((a) => ({
         item_id: a.item_id,
-        quantity: a.qty,
+        quantity: Number(a.qty || 0),
+        custom_unit_price: round2(Number(a.selling_price === '' || a.selling_price == null ? a.mrp : a.selling_price)),
       })),
       discount_percent: Number(exDiscount) || 0,  // extra discount on NEW items
 
@@ -380,11 +532,12 @@ export default function Exchange() {
     onSuccess: () => {
       toast.push('Exchange completed', 'success')
       setBill(null); setRet([]); setAdd([]); setQuery('')
-      setExDiscount(0); setFinalOverride('')
+      setExDiscount(0)
       setPaymentMode('cash'); setPaymentCashSplit(''); setPaymentOnlineSplit('')
       setPaymentCreditSplit('')
       setRefundMode('cash'); setRefundCashSplit(''); setRefundOnlineSplit(''); setRefundCreditSplit('')
       queryClient.invalidateQueries({ queryKey: ['exchange-history'] })
+      queryClient.invalidateQueries()
     },
     onError: (err: any) => {
       const d = err?.response?.data
@@ -411,22 +564,32 @@ export default function Exchange() {
   })
 
   function submitExchange() {
-    if (ret.every((r) => r.qty === 0) && add.length === 0) {
-      toast.push('Enter at least one return quantity or add one exchange item', 'warning')
+    if (ret.every((r) => r.qty === 0) || add.length === 0) {
+      toast.push('Keep at least one returned product and one replacement product', 'warning')
       return
     }
-    if (!mEx.isPending) mEx.mutate()
+    if (add.some((row) => Number(row.qty || 0) <= 0)) {
+      toast.push('Enter a valid replacement quantity', 'warning')
+      return
+    }
+    if (editExchange) {
+      if (!editMutation.isPending) editMutation.mutate()
+    } else if (!mEx.isPending) mEx.mutate()
   }
 
   return (
     <Stack gap={2}>
-      <Typography variant="h5">Exchange</Typography>
+      <Stack direction="row" justifyContent="space-between" alignItems="center">
+        <Typography variant="h5">{editExchange ? `Edit Exchange #${editExchange.id}` : 'Exchange'}</Typography>
+        {editExchange ? <Button variant="outlined" onClick={() => { setEditExchange(null); setBill(null); setRet([]); setAdd([]); setQuery(''); setReleasedExchangeItems([]); setReleasedQtyByItemId({}); setSearchParams({}, { replace: true }) }}>Cancel Edit</Button> : null}
+      </Stack>
+      {editLoading ? <Typography color="text.secondary">Loading exchange into the editor…</Typography> : null}
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
-          <TextField label="Bill Number" value={query} onChange={(e) => setQuery(e.target.value)} fullWidth />
-          <Button variant="contained" onClick={load} disabled={!query}>Load Bill</Button>
-          <Button variant="outlined" onClick={() => setBillPickerOpen(true)}>Find Bill</Button>
+          <TextField label="Bill Number" value={query} onChange={(e) => setQuery(e.target.value)} disabled={Boolean(editExchange)} fullWidth />
+          <Button variant="contained" onClick={load} disabled={!query || Boolean(editExchange)}>Load Bill</Button>
+          <Button variant="outlined" onClick={() => setBillPickerOpen(true)} disabled={Boolean(editExchange)}>Find Bill</Button>
           <TextField
             label="Exchange Date"
             type="date"
@@ -454,6 +617,7 @@ export default function Exchange() {
                   <th>Return Qty</th>
                   <th>MRP</th>
                   <th>Return Value</th>
+                  {editExchange ? <th></th> : null}
                 </tr>
               </thead>
               <tbody>
@@ -471,23 +635,64 @@ export default function Exchange() {
                     </td>
                     <td>{r.max}</td>
                     <td>
-                      <TextField
-                        type="number"
-                        value={r.qty}
-                        onChange={(e) =>
-                          setRet((prev) =>
-                            prev.map((x, idx) =>
-                              idx === i ? { ...x, qty: clamp(Number(e.target.value || 0), 0, r.max) } : x
+                      <Stack gap={0.75} alignItems="flex-start">
+                        <TextField
+                          type="number"
+                          value={r.qty}
+                          disabled={Boolean(r.opened_loose_quantity)}
+                          onChange={(e) =>
+                            setRet((prev) =>
+                              prev.map((x, idx) =>
+                                idx === i ? { ...x, qty: clamp(Number(e.target.value || 0), 0, r.max), custom_return_value: undefined } : x
+                              )
                             )
+                          }
+                          inputProps={{ min: 0, max: r.max }} sx={{ width: 110 }}
+                        />
+                        {r.loose_sale_enabled && !r.is_loose_stock && Number(r.conversion_qty || 0) > 1 && r.max > 0 ? (
+                          r.opened_loose_quantity ? (
+                            <Button size="small" onClick={() => setRet(prev => prev.map((x, idx) => idx === i ? { ...x, opened_loose_quantity: undefined, custom_return_value: undefined } : x))}>
+                              Return sealed box
+                            </Button>
+                          ) : (
+                            <Button size="small" variant="outlined" onClick={() => setRet(prev => prev.map((x, idx) => idx === i ? { ...x, qty: 1, opened_loose_quantity: Math.max(1, Math.floor(Number(x.conversion_qty || 2) / 2)), custom_return_value: undefined } : x))}>
+                              Open returned box
+                            </Button>
                           )
-                        }
-                        inputProps={{ min: 0, max: r.max }} sx={{ width: 110 }}
-                      />
+                        ) : null}
+                        {r.opened_loose_quantity ? (
+                          <TextField
+                            size="small" type="number"
+                            label={`${r.child_unit_name || 'Loose units'} returned`}
+                            value={r.opened_loose_quantity}
+                            onChange={(e) => setRet(prev => prev.map((x, idx) => idx === i ? { ...x, opened_loose_quantity: clamp(Math.floor(Number(e.target.value || 1)), 1, Number(x.conversion_qty || 2) - 1), custom_return_value: undefined } : x))}
+                            inputProps={{ min: 1, max: Number(r.conversion_qty || 2) - 1 }} sx={{ width: 160 }}
+                          />
+                        ) : null}
+                      </Stack>
                     </td>
                     <td>{r.mrp}</td>
                     <td>
-                      {chargedLine(r.item_id, r.mrp, r.qty, r.charged_unit_price, r.remaining_value, r.max).toFixed(2)}
+                      <Stack direction="row" alignItems="center" gap={0.5}>
+                        {r.editing_return_value ? (
+                          <TextField
+                            autoFocus size="small" type="number" value={r.custom_return_value ?? ''}
+                            onFocus={(e) => e.target.select()}
+                            onChange={(e) => setRet(prev => prev.map((x, idx) => idx === i ? { ...x, custom_return_value: e.target.value === '' ? '' : Math.max(0, Number(e.target.value)) } : x))}
+                            onBlur={() => setRet(prev => prev.map((x, idx) => idx === i ? { ...x, editing_return_value: false } : x))}
+                            inputProps={{ min: 0, step: '0.01' }} sx={{ width: 120 }}
+                          />
+                        ) : (
+                          <Typography variant="body2">
+                            {(r.custom_return_value == null || r.custom_return_value === '' ? automaticReturnLine(r) : Number(r.custom_return_value)).toFixed(2)}
+                          </Typography>
+                        )}
+                        <IconButton size="small" aria-label={`Edit return value for ${r.name}`} onClick={() => setRet(prev => prev.map((x, idx) => idx === i ? { ...x, editing_return_value: true, custom_return_value: x.custom_return_value ?? automaticReturnLine(x) } : x))}>
+                          <EditIcon fontSize="small" />
+                        </IconButton>
+                      </Stack>
                     </td>
+                    {editExchange ? <td><IconButton color="error" aria-label={`Remove ${r.name} from return`} disabled={r.qty === 0} onClick={() => setRet(prev => prev.map((x, idx) => idx === i ? { ...x, qty: 0, custom_return_value: undefined, opened_loose_quantity: undefined } : x))}><DeleteIcon /></IconButton></td> : null}
                   </tr>
                 ))}
               </tbody>
@@ -506,6 +711,7 @@ export default function Exchange() {
                   <tr>
                     <th>Item</th>
                     <th>MRP</th>
+                    <th>Selling Price</th>
                     <th>Qty</th>
                     <th>Line</th>
                     <th></th>
@@ -527,19 +733,25 @@ export default function Exchange() {
                       <td>{r.mrp}</td>
                       <td>
                         <TextField
+                          type="number" size="small"
+                          value={r.selling_price ?? r.mrp}
+                          onFocus={(e) => e.target.select()}
+                          onChange={(e) => setAdd(prev => prev.map((x, idx) => idx === i ? { ...x, selling_price: e.target.value === '' ? '' : Math.max(0, Number(e.target.value)) } : x))}
+                          inputProps={{ min: 0, step: '0.01' }} sx={{ width: 125 }}
+                        />
+                      </td>
+                      <td>
+                        <TextField
                           type="number"
                           value={r.qty}
-                          onChange={(e) =>
-                            setAdd((prev) =>
-                              prev.map((x, idx) =>
-                                idx === i ? { ...x, qty: Math.max(1, Number(e.target.value || 1)) } : x
-                              )
-                            )
-                          }
+                          onFocus={(e) => e.target.select()}
+                          onChange={(e) => updateReplacementQty(i, e.target.value)}
+                          onBlur={() => setAdd(prev => prev.map((x, idx) => idx === i && x.qty === '' ? { ...x, qty: 1 } : x))}
+                          inputProps={{ min: 1, max: r.available_stock }}
                           sx={{ width: 110 }}
                         />
                       </td>
-                      <td>{(r.qty * r.mrp).toFixed(2)}</td>
+                      <td>{(Number(r.qty || 0) * Number(r.selling_price === '' || r.selling_price == null ? r.mrp : r.selling_price)).toFixed(2)}</td>
                       <td>
                         <IconButton
                           aria-label="Remove item"
@@ -554,7 +766,7 @@ export default function Exchange() {
                     </tr>
                   ))}
                   {add.length === 0 && (
-                    <tr><td colSpan={5}><Box p={2}>No new items.</Box></td></tr>
+                    <tr><td colSpan={6}><Box p={2}>No new items.</Box></td></tr>
                   )}
                 </tbody>
               </table>
@@ -565,21 +777,22 @@ export default function Exchange() {
           <Stack
             direction={{ xs: 'column', md: 'row' }}
             justifyContent="space-between"
-            mt={2}
-            gap={2}
+            mt={4}
+            gap={4}
+            sx={{ pt: 2, borderTop: '1px solid', borderColor: 'divider' }}
           >
             <Typography>
               Return Value: ₹{returnAmt.toFixed(2)} | New Items: ₹{newAmt.toFixed(2)}
             </Typography>
 
-            <Stack alignItems={{ xs: 'flex-start', md: 'flex-end' }} gap={0.75}>
+            <Stack alignItems={{ xs: 'stretch', md: 'flex-end' }} gap={2} sx={{ minWidth: { md: 680 } }}>
               <Typography variant="body2" color="text.secondary">
                 Base {baseDiff >= 0 ? 'Customer Pays' : 'Refund'} (no extra discount): ₹{Math.abs(baseDiff).toFixed(2)}
               </Typography>
 
               <Stack
                 direction={{ xs: 'column', sm: 'row' }}
-                spacing={1}
+                spacing={2}
                 alignItems="center"
                 justifyContent="flex-end"
               >
@@ -591,28 +804,12 @@ export default function Exchange() {
                   onChange={(e) => setExDiscount(Number(e.target.value || 0))}
                   sx={{ width: 210 }}
                 />
-                <TextField
-                  size="small"
-                  label={sign >= 0 ? 'Final Amount Customer Pays' : 'Final Refund Amount'}
-                  type="number"
-                  value={chosenAmountAbs}
-                  onChange={(e) => {
-                    const v = e.target.value
-                    if (v === '') {
-                      setFinalOverride('')
-                    } else {
-                      setFinalOverride(Number(v) || 0)
-                    }
-                  }}
-                  sx={{ width: 210 }}
-                  inputProps={{ min: 0, step: '0.01' }}
-                />
               </Stack>
 
               {chosenDelta > 0 && (
                 <Stack
                   direction={{ xs: 'column', sm: 'row' }}
-                  spacing={1}
+                  spacing={2}
                   alignItems="center"
                   justifyContent="flex-end"
                 >
@@ -672,7 +869,7 @@ export default function Exchange() {
               {chosenDelta < 0 && (
                 <Stack
                   direction={{ xs: 'column', sm: 'row' }}
-                  spacing={1}
+                  spacing={2}
                   alignItems="center"
                   justifyContent="flex-end"
                 >
@@ -738,18 +935,52 @@ export default function Exchange() {
             </Stack>
           </Stack>
 
-          <Box textAlign="right" mt={2}>
+          <Box textAlign="right" mt={4} pt={1}>
             <Button
               variant="contained"
-              disabled={mEx.isPending}
+              disabled={mEx.isPending || editMutation.isPending || editLoading}
               onClick={submitExchange}
             >
-              {mEx.isPending ? 'Submitting…' : 'Submit Exchange'}
+              {editMutation.isPending ? 'Saving…' : mEx.isPending ? 'Submitting…' : editExchange ? 'Save Exchange' : 'Submit Exchange'}
             </Button>
           </Box>
         </Paper>
       )}
 
+      {editExchange ? (
+        <Paper sx={{ p: 3 }}>
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} mb={2}>
+            <Box>
+              <Typography variant="h6">History for Exchange #{editExchange.id}</Typography>
+              <Typography variant="body2" color="text.secondary">Only changes made to this exchange are shown here.</Typography>
+            </Box>
+            <Typography variant="body2" color="text.secondary">{openExchangeHistory.data?.length || 0} event{openExchangeHistory.data?.length === 1 ? '' : 's'}</Typography>
+          </Stack>
+          <Box sx={{ overflowX: 'auto' }}>
+            <table className="table">
+              <thead><tr><th>Date & Time</th><th>Action</th><th>Details</th><th>User</th></tr></thead>
+              <tbody>
+                {(openExchangeHistory.data || []).map((event) => {
+                  const details = exchangeAuditDetails(event.details_json)
+                  return <tr key={event.id}>
+                    <td>{String(event.event_ts || '').replace('T', ' ').slice(0, 19)}</td>
+                    <td>{String(event.action || '').replaceAll('_', ' ')}</td>
+                    <td style={{ minWidth: 360, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
+                      <Stack gap={0.5}>
+                        <Typography variant="body2">{event.note || '—'}</Typography>
+                        {details.map((detail, index) => <Typography key={`${event.id}-detail-${index}`} variant="caption" color="text.secondary">• {detail}</Typography>)}
+                      </Stack>
+                    </td>
+                    <td>{event.actor || 'System'}</td>
+                  </tr>
+                })}
+                {openExchangeHistory.isLoading ? <tr><td colSpan={4}><Box p={2}>Loading this exchange’s history…</Box></td></tr> : null}
+                {!openExchangeHistory.isLoading && (openExchangeHistory.data || []).length === 0 ? <tr><td colSpan={4}><Box p={2}>No recorded changes for this exchange yet.</Box></td></tr> : null}
+              </tbody>
+            </table>
+          </Box>
+        </Paper>
+      ) : (
       <Paper sx={{ p: 2 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" mb={1}>
           <Typography variant="h6">Exchange History</Typography>
@@ -843,6 +1074,9 @@ export default function Exchange() {
                       <IconButton aria-label={`Edit exchange ${row.id}`} onClick={() => openExchangeEditor(row)}>
                         <EditIcon fontSize="small" />
                       </IconButton>
+                      <IconButton color="error" aria-label={`Undo exchange ${row.id}`} onClick={() => setUndoTarget(row)}>
+                        <UndoIcon fontSize="small" />
+                      </IconButton>
                     </td>
                   </tr>
                 )
@@ -855,36 +1089,19 @@ export default function Exchange() {
           </table>
         </Box>
       </Paper>
+      )}
 
-      <Dialog open={Boolean(editExchange)} onClose={() => !editMutation.isPending && setEditExchange(null)} fullWidth maxWidth="sm">
-        <DialogTitle>Edit Exchange #{editExchange?.id}</DialogTitle>
+      <Dialog open={Boolean(undoTarget)} onClose={() => !undoMutation.isPending && setUndoTarget(null)} fullWidth maxWidth="xs">
+        <DialogTitle>Undo Exchange #{undoTarget?.id}?</DialogTitle>
         <DialogContent>
-          <Stack gap={2} mt={1}>
-            <Typography color="text.secondary">
-              Items and quantities are locked. This safely changes only the date and settlement allocation.
-            </Typography>
-            <TextField
-              label="Exchange Date" type="date" value={editDate}
-              onChange={(e) => setEditDate(e.target.value)} InputLabelProps={{ shrink: true }}
-              inputProps={{ max: today }} fullWidth
-            />
-            <Typography fontWeight={700}>
-              {Number(editExchange?.net_due || 0) < 0 ? 'Customer receives' : 'Customer pays'}: ₹{Math.abs(Number(editExchange?.net_due || 0)).toFixed(2)}
-            </Typography>
-            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.5}>
-              <TextField label="Cash" type="number" value={editCash} onChange={(e) => setEditCash(e.target.value === '' ? '' : Number(e.target.value))} inputProps={{ min: 0, step: '0.01' }} fullWidth />
-              <TextField label="Online" type="number" value={editOnline} onChange={(e) => setEditOnline(e.target.value === '' ? '' : Number(e.target.value))} inputProps={{ min: 0, step: '0.01' }} fullWidth />
-              <TextField label="Credit" type="number" value={editCredit} onChange={(e) => setEditCredit(e.target.value === '' ? '' : Number(e.target.value))} inputProps={{ min: 0, step: '0.01' }} fullWidth />
-            </Stack>
-            <Typography variant="body2" color={round2(Number(editCash || 0) + Number(editOnline || 0) + Number(editCredit || 0)) === round2(Math.abs(Number(editExchange?.net_due || 0))) ? 'success.main' : 'error.main'}>
-              Allocated ₹{round2(Number(editCash || 0) + Number(editOnline || 0) + Number(editCredit || 0)).toFixed(2)} of ₹{Math.abs(Number(editExchange?.net_due || 0)).toFixed(2)}
-            </Typography>
-          </Stack>
+          <Typography>
+            This reverses both the return and replacement bill, restores their stock movements, and removes the exchange settlement. It will be blocked if returned stock or customer credit has already been used.
+          </Typography>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setEditExchange(null)} disabled={editMutation.isPending}>Cancel</Button>
-          <Button variant="contained" onClick={() => editMutation.mutate()} disabled={editMutation.isPending || !editDate}>
-            {editMutation.isPending ? 'Saving…' : 'Save Exchange'}
+          <Button onClick={() => setUndoTarget(null)} disabled={undoMutation.isPending}>Cancel</Button>
+          <Button color="error" variant="contained" disabled={undoMutation.isPending} onClick={() => undoTarget && undoMutation.mutate(undoTarget.id)}>
+            {undoMutation.isPending ? 'Undoing…' : 'Undo Exchange'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -892,16 +1109,19 @@ export default function Exchange() {
       <ItemPicker
         open={picker}
         onClose={() => setPicker(false)}
+        reservedByItemId={reservedReplacementStock}
+        additionalItems={editExchange ? releasedExchangeItems : []}
+        stockAdjustmentsByItemId={editExchange ? releasedQtyByItemId : {}}
         onPick={(it: any) => {
           setAdd((prev) => {
             const idx = prev.findIndex((p) => p.item_id === it.id)
             const mrp = Number(it.mrp) || 0
             if (idx >= 0) {
               const c = [...prev]
-              c[idx] = { ...c[idx], qty: c[idx].qty + 1, mrp, brand: it.brand ?? c[idx].brand ?? null }
+              c[idx] = { ...c[idx], qty: Number(c[idx].qty || 0) + 1, mrp, selling_price: c[idx].selling_price ?? mrp, brand: it.brand ?? c[idx].brand ?? null }
               return c
             }
-            return [...prev, { item_id: it.id, name: it.name, brand: it.brand || null, mrp, qty: 1 }]
+            return [...prev, { item_id: it.id, name: it.name, brand: it.brand || null, mrp, selling_price: mrp, qty: 1, available_stock: Number(it.stock || 0), inventory_lot_id: it.inventory_lot_id || null }]
           })
         }}
       />

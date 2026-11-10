@@ -898,6 +898,7 @@ def _build_stock_reconciliation(
         .join(Return, Return.id == ReturnItem.return_id)
         .outerjoin(ExchangeRecord, ExchangeRecord.return_id == ReturnItem.return_id)
         .where(ReturnItem.item_id.in_(target_item_ids))
+        .where(func.coalesce(ReturnItem.opened_loose_quantity, 0) == 0)
         .group_by(ReturnItem.item_id, ReturnItem.return_id, ExchangeRecord.return_id)
     ).all()
     for row in return_rows:
@@ -916,6 +917,40 @@ def _build_stock_reconciliation(
             delta=qty,
             source_ts=return_ts,
             note=f"{'Exchange return' if is_exchange else 'Return'} #{return_id}",
+        )
+
+    # Opened-pack exchange returns belong to the child loose item, not the
+    # sealed parent item recorded on the customer return line.
+    parent_lot = aliased(InventoryLot)
+    loose_lot = aliased(InventoryLot)
+    loose_exchange_rows = session.exec(
+        select(
+            loose_lot.legacy_item_id,
+            ReturnItem.return_id,
+            func.coalesce(func.sum(ReturnItem.opened_loose_quantity), 0),
+            func.max(Return.date_time),
+        )
+        .join(Return, Return.id == ReturnItem.return_id)
+        .join(ExchangeRecord, ExchangeRecord.return_id == ReturnItem.return_id)
+        .join(parent_lot, parent_lot.legacy_item_id == ReturnItem.item_id)
+        .join(loose_lot, loose_lot.opened_from_lot_id == parent_lot.id)
+        .where(func.coalesce(ReturnItem.opened_loose_quantity, 0) > 0)
+        .where(loose_lot.legacy_item_id.in_(target_item_ids))
+        .group_by(loose_lot.legacy_item_id, ReturnItem.return_id)
+    ).all()
+    for row in loose_exchange_rows:
+        loose_item_id = int(row[0])
+        return_id = int(row[1])
+        _add_expected(
+            expected,
+            meta,
+            item_id=loose_item_id,
+            reason="EXCHANGE_IN_LOOSE",
+            ref_type="EXCHANGE",
+            ref_id=return_id,
+            delta=int(row[2] or 0),
+            source_ts=row[3],
+            note=f"Partial pack exchange return #{return_id}",
         )
 
     exchange_out_rows = session.exec(

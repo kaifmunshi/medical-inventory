@@ -2341,6 +2341,24 @@ def merge_safe_duplicate_products(session) -> tuple[int, str | None]:
 
 def migrate_db():
     with Session(engine) as session:
+        return_item_cols = {c[1] for c in session.exec(text("PRAGMA table_info(returnitem)")).all()}
+        if "opened_loose_quantity" not in return_item_cols:
+            session.exec(text("ALTER TABLE returnitem ADD COLUMN opened_loose_quantity INTEGER NOT NULL DEFAULT 0"))
+            # Preserve partial-pack exchanges created before the field existed.
+            session.exec(text("""
+                UPDATE returnitem
+                SET opened_loose_quantity = COALESCE((
+                    SELECT SUM(sm.delta)
+                    FROM stockmovement sm
+                    JOIN inventorylot loose_lot ON loose_lot.legacy_item_id = sm.item_id
+                    JOIN inventorylot parent_lot ON parent_lot.id = loose_lot.opened_from_lot_id
+                    WHERE sm.ref_type = 'EXCHANGE'
+                      AND sm.reason = 'EXCHANGE_IN_LOOSE'
+                      AND sm.ref_id = returnitem.return_id
+                      AND parent_lot.legacy_item_id = returnitem.item_id
+                ), 0)
+            """))
+            session.commit()
         cashbook_cols = {c[1] for c in session.exec(text("PRAGMA table_info(cashbookentry)")).all()}
         if "party_id" not in cashbook_cols:
             session.exec(text("ALTER TABLE cashbookentry ADD COLUMN party_id INTEGER"))

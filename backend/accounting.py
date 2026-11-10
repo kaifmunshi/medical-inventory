@@ -10,6 +10,7 @@ from backend.models import (
     BankbookEntry,
     CashbookEntry,
     CustomerAdvanceRefund,
+    ExchangeRecord,
     Ledger,
     LedgerGroup,
     Party,
@@ -18,6 +19,7 @@ from backend.models import (
     PurchasePayment,
     PurchaseReturn,
     ReceiptBillAdjustment,
+    Return,
     Voucher,
     VoucherEntry,
 )
@@ -286,6 +288,44 @@ def post_sales_voucher(session, bill: Bill) -> Voucher:
     ledgers = ensure_accounting_setup(session)
     lines: List[PostingLine] = []
     total = round2(getattr(bill, "total_amount", 0.0))
+    exchange = session.exec(select(ExchangeRecord).where(ExchangeRecord.new_bill_id == int(bill.id or 0))).first()
+    if exchange:
+        returned = session.get(Return, int(exchange.return_id or 0))
+        pay_cash = round2(exchange.payment_cash)
+        pay_online = round2(exchange.payment_online)
+        pay_credit = round2(exchange.payment_credit)
+        refund_cash = round2(exchange.refund_cash)
+        refund_online = round2(exchange.refund_online)
+        refund_credit = round2(exchange.refund_credit)
+        # Customer-credit refunds have their own CREDIT_NOTE voucher through
+        # PartyReceipt. The remaining exchange is posted here as one balanced
+        # transaction so returned value never appears as a false receivable.
+        return_debit = round2(total + refund_cash + refund_online - pay_cash - pay_online - pay_credit)
+        if return_debit > 0:
+            lines.append({"ledger_id": int(ledgers["SALES_RETURN_ACCOUNT"].id), "entry_type": "DR", "amount": return_debit, "narration": "Products returned in exchange"})
+        if pay_cash > 0:
+            lines.append({"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "DR", "amount": pay_cash, "narration": "Cash received in exchange"})
+        if pay_online > 0:
+            lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "DR", "amount": pay_online, "narration": "Online received in exchange"})
+        if pay_credit > 0:
+            debtor = resolve_bill_party_ledger(session, bill) or ledgers["SALES_RECEIVABLE_CONTROL"]
+            lines.append({"ledger_id": int(debtor.id), "entry_type": "DR", "amount": pay_credit, "narration": "Exchange amount receivable"})
+        lines.append({"ledger_id": int(ledgers["SALES_ACCOUNT"].id), "entry_type": "CR", "amount": total, "narration": "Replacement products supplied"})
+        if refund_cash > 0:
+            lines.append({"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "CR", "amount": refund_cash, "narration": "Cash refunded in exchange"})
+        if refund_online > 0:
+            lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "CR", "amount": refund_online, "narration": "Online refunded in exchange"})
+        return upsert_voucher(
+            session,
+            voucher_type="EXCHANGE",
+            source_type="BILL",
+            source_id=int(bill.id),
+            voucher_date=str(exchange.created_at or bill.date_time or "")[:10],
+            voucher_no=f"EX-{exchange.id}",
+            narration=exchange.notes or f"Exchange #{exchange.id}",
+            total_amount=round2(max(total, float(getattr(returned, "subtotal_return", 0.0) or 0.0))),
+            lines=lines,
+        )
     payments = session.exec(
         select(BillPayment).where(
             BillPayment.bill_id == bill.id,

@@ -122,11 +122,15 @@ export default function ItemPicker({
   onClose,
   onPick,
   reservedByItemId = {},
+  additionalItems = [],
+  stockAdjustmentsByItemId = {},
 }: {
   open: boolean
   onClose: () => void
   onPick: (it: PickerItem) => void
   reservedByItemId?: Record<string, number>
+  additionalItems?: PickerItem[]
+  stockAdjustmentsByItemId?: Record<number, number>
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
@@ -207,9 +211,13 @@ export default function ItemPicker({
     refetchOnWindowFocus: 'always',
     retry: false,
   })
-  const rawItems = canSearchItems ? ((data?.items || []) as PickerItem[]) : []
+  const fetchedItems = canSearchItems ? ((data?.items || []) as PickerItem[]) : []
+  const matchingAdditionalItems = canSearchItems ? additionalItems.filter((item) => (
+    hasCategoryFilter || String(item.name || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase())
+  )) : []
+  const rawItems = Array.from(new Map([...matchingAdditionalItems, ...fetchedItems].map((item) => [Number(item.id), item])).values())
   const availableStock = (item: PickerItem) =>
-    Math.max(0, Number(item.stock || 0) - Number(reservedByItemId[stockReservationKey(item)] || 0))
+    Math.max(0, Number(item.stock || 0) + Number(stockAdjustmentsByItemId[Number(item.id)] || 0) - Number(reservedByItemId[stockReservationKey(item)] || 0))
   const totalItems = Number(data?.total || 0)
   const pageStart = rawItems.length > 0 ? pageOffset + 1 : 0
   const pageEnd = rawItems.length > 0 ? pageOffset + rawItems.length : 0
@@ -274,7 +282,7 @@ export default function ItemPicker({
       toast.push('Out of stock', 'warning')
       return
     }
-    onPick(it)
+    onPick({ ...it, stock: availableStock(it) })
     toast.push('Item added', 'success')
     onClose()
   }

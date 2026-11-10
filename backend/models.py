@@ -112,6 +112,9 @@ class ReturnItem(SQLModel, table=True):
     mrp: float
     quantity: int
     line_total: float
+    # For an exchange return of an opened pack, quantity remains one sold pack
+    # while this stores the usable child units actually put back into loose stock.
+    opened_loose_quantity: int = 0
 
 
 class ExchangeRecord(SQLModel, table=True):
@@ -338,6 +341,15 @@ class ReturnItemIn(SQLModel):
     quantity: int
 
 
+class ExchangeReturnItemIn(ReturnItemIn):
+    # Optional manual credit for this line.  Kept exchange-only so ordinary
+    # sales returns retain their existing pricing rules.
+    custom_return_value: Optional[float] = None
+    # When set, one returned sealed unit is opened and only this many child
+    # units are put back into stock (for a partially used returned pack).
+    opened_loose_quantity: Optional[int] = None
+
+
 class ReturnCreate(SQLModel):
     source_bill_id: Optional[int] = None
     return_date: Optional[str] = None
@@ -385,7 +397,7 @@ class ReturnOut(SQLModel):
 # ---------- Exchange (Schema only – uses Bill + Return under the hood) ----------
 class ExchangeCreate(SQLModel):
     source_bill_id: Optional[int] = None
-    return_items: List[ReturnItemIn]
+    return_items: List[ExchangeReturnItemIn]
     new_items: List[BillItemIn]
     discount_percent: float = 0.0
     payment_mode: str
@@ -402,12 +414,21 @@ class ExchangeCreate(SQLModel):
 
 class ExchangeSettlementUpdate(SQLModel):
     exchange_date: str
+    return_value: Optional[float] = None
     payment_cash: float = 0.0
     payment_online: float = 0.0
     payment_credit: float = 0.0
     refund_cash: float = 0.0
     refund_online: float = 0.0
     refund_credit: float = 0.0
+
+
+class ExchangeEditUpdate(ExchangeSettlementUpdate):
+    return_items: List[ExchangeReturnItemIn]
+    new_items: List[BillItemIn]
+    discount_percent: float = 0.0
+    rounding_adjustment: float = 0.0
+    payment_mode: str = "cash"
 
 
 # ---------- Requested Items (Schemas) ----------

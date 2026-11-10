@@ -11,23 +11,69 @@ from backend.security import require_min_role
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
-    Item, Bill, BillItem, BillPayment, Customer, Party, PartyReceipt, ReceiptBillAdjustment, CustomerAdvanceRefund,
+    Item, Product, InventoryLot, Bill, BillItem, BillItemAllocation, BillPayment, Customer, Party, PartyReceipt, ReceiptBillAdjustment, CustomerAdvanceRefund,
     Return, ReturnItem,
     ReturnCreate, ReturnOut, ReturnItemOut,
     AuditLog, AuditLogOut,
     ExchangeCreate,
     ExchangeSettlementUpdate,
+    ExchangeEditUpdate,
     ExchangeRecord,
     StockMovement,
 )
 from backend.accounting import post_party_receipt_voucher, mark_voucher_deleted
-from backend.inventory_lot_sync import item_stock_meta, sync_lot_quantity_for_item
+from backend.inventory_lot_sync import get_lot_for_item, item_stock_meta, sync_lot_quantity_for_item
 
 router = APIRouter()
 
 
 def round2(x: float) -> float:
     return float(f"{x:.2f}")
+
+
+def add_partial_pack_return_to_loose_stock(session, parent_item: Item, loose_quantity: int, *, ts: str, return_id: int) -> Item:
+    """Put the usable contents of one returned, opened pack into its loose lot."""
+    parent_lot = get_lot_for_item(session, int(parent_item.id or 0))
+    product = session.get(Product, int(parent_item.product_id or 0)) if parent_item.product_id else None
+    if not parent_lot or parent_lot.opened_from_lot_id is not None or not product or not product.loose_sale_enabled:
+        raise HTTPException(status_code=400, detail=f"{parent_item.name} is not configured as an openable sealed item")
+    conversion = int(parent_lot.conversion_qty or product.default_conversion_qty or 0)
+    if loose_quantity <= 0 or loose_quantity >= conversion:
+        raise HTTPException(status_code=400, detail=f"Loose return quantity must be between 1 and {conversion - 1}")
+
+    loose_lot = session.exec(select(InventoryLot).where(
+        InventoryLot.opened_from_lot_id == int(parent_lot.id),
+        InventoryLot.is_active == True,  # noqa: E712
+    )).first()
+    loose_item = session.get(Item, int(loose_lot.legacy_item_id or 0)) if loose_lot and loose_lot.legacy_item_id else None
+    if not loose_item:
+        loose_item = Item(
+            name=product.name, brand=product.brand, product_id=product.id, category_id=product.category_id,
+            expiry_date=parent_item.expiry_date, mrp=round2(float(parent_lot.mrp or parent_item.mrp) / conversion),
+            cost_price=round2(float(parent_lot.cost_price or parent_item.cost_price or 0) / conversion),
+            stock=0, rack_number=int(parent_lot.rack_number or parent_item.rack_number or 0),
+            created_at=ts, updated_at=ts,
+        )
+        session.add(loose_item)
+        session.flush()
+        loose_lot = InventoryLot(
+            product_id=int(product.id), expiry_date=parent_lot.expiry_date, mrp=loose_item.mrp,
+            cost_price=loose_item.cost_price, rack_number=int(parent_lot.rack_number or 0), sealed_qty=0,
+            loose_qty=0, conversion_qty=conversion, opened_from_lot_id=int(parent_lot.id),
+            legacy_item_id=int(loose_item.id), is_active=True, created_at=ts, updated_at=ts,
+        )
+        session.add(loose_lot)
+        session.flush()
+
+    loose_item.stock = int(loose_item.stock or 0) + loose_quantity
+    loose_item.updated_at = ts
+    session.add(loose_item)
+    apply_archive_rules(session, loose_item)
+    sync_lot_quantity_for_item(session, loose_item, ts=ts)
+    add_movement(session, item_id=int(loose_item.id), delta=loose_quantity, reason="EXCHANGE_IN_LOOSE",
+                 ref_type="EXCHANGE", ref_id=return_id,
+                 note=f"Partial pack return: {loose_quantity} loose unit(s)", ts=ts)
+    return loose_item
 
 
 # Allow manual round-off near the computed amount
@@ -161,6 +207,21 @@ def add_movement(
             note=note,
         )
     )
+
+
+def add_exchange_bill_allocation(session, bill_item: BillItem, item: Item, quantity: int) -> None:
+    """Keep exchange replacement lines visible to lot-level billing/stock features."""
+    session.flush()
+    lot = get_lot_for_item(session, int(item.id or 0))
+    meta = item_stock_meta(session, int(item.id or 0))
+    session.add(BillItemAllocation(
+        bill_id=int(bill_item.bill_id),
+        bill_item_id=int(bill_item.id or 0),
+        item_id=int(item.id or 0),
+        lot_id=int(lot.id) if lot and lot.id else None,
+        quantity=int(quantity),
+        stock_unit=str(meta.get("stock_unit_label") or "Unit"),
+    ))
 
 
 def return_item_to_out(session, row: ReturnItem) -> ReturnItemOut:
@@ -763,6 +824,7 @@ def list_exchange_records(
                 "theoretical_net": r.theoretical_net,
                 "net_due": r.net_due,
                 "rounding_adjustment": r.rounding_adjustment,
+                "return_value": round2(float(ret.subtotal_return or 0.0)) if (ret := session.get(Return, int(r.return_id or 0))) else 0.0,
                 "notes": r.notes,
             }
             for r in rows
@@ -771,7 +833,7 @@ def list_exchange_records(
 
 @router.patch("/exchange/{exchange_id}", response_model=dict)
 def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpdate):
-    """Edit only an exchange's date and settlement channels, atomically."""
+    """Edit an exchange's return value, date, and settlement channels atomically."""
     require_min_role("MANAGER", context="Exchange settlement edit")
     values = [
         payload.payment_cash, payload.payment_online, payload.payment_credit,
@@ -792,12 +854,14 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
 
         old_datetime = str(exchange.created_at)
         new_datetime = normalize_return_datetime(payload.exchange_date, fallback=old_datetime)
-        assert_financial_year_unlocked(session, old_datetime, context="Exchange settlement edit")
-        assert_financial_year_unlocked(session, new_datetime, context="Exchange settlement edit")
         if source_bill and new_datetime[:10] < str(source_bill.date_time or "")[:10]:
             raise HTTPException(status_code=400, detail="Exchange date cannot be before the source bill date")
 
-        net_due = round2(float(exchange.net_due or 0.0))
+        return_value = round2(float(ret.subtotal_return or 0.0)) if payload.return_value is None else round2(float(payload.return_value))
+        if return_value < 0:
+            raise HTTPException(status_code=400, detail="Return value cannot be negative")
+        theoretical_net = round2(float(replacement_bill.total_amount or 0.0) - return_value)
+        net_due = round2(theoretical_net + float(exchange.rounding_adjustment or 0.0))
         pay_cash = round2(float(payload.payment_cash or 0.0))
         pay_online = round2(float(payload.payment_online or 0.0))
         pay_credit = round2(float(payload.payment_credit or 0.0))
@@ -829,6 +893,8 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
         old_credit = round2(float(getattr(ret, "credit_amount", 0.0) or 0.0))
         before = {
             "date": old_datetime,
+            "return_value": ret.subtotal_return,
+            "net_due": exchange.net_due,
             "payment_cash": exchange.payment_cash,
             "payment_online": exchange.payment_online,
             "payment_credit": exchange.payment_credit,
@@ -846,6 +912,8 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
         mode = used_modes[0] if len(used_modes) == 1 else "split" if used_modes else "credit"
 
         exchange.created_at = new_datetime
+        exchange.theoretical_net = theoretical_net
+        exchange.net_due = net_due
         exchange.payment_mode = mode
         exchange.payment_cash = pay_cash
         exchange.payment_online = pay_online
@@ -860,10 +928,26 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
         session.add(exchange)
 
         ret.date_time = new_datetime
+        ret.subtotal_return = return_value
         ret.refund_cash = refund_cash
         ret.refund_online = refund_online
         ret.credit_amount = refund_credit
         session.add(ret)
+
+        # Keep line values consistent with the edited return total. For a
+        # multi-line return, preserve the existing relative allocation.
+        return_lines = session.exec(select(ReturnItem).where(ReturnItem.return_id == int(ret.id or 0))).all()
+        if return_lines:
+            old_lines_total = round2(sum(float(line.line_total or 0.0) for line in return_lines))
+            remaining_value = return_value
+            for index, line in enumerate(return_lines):
+                if index == len(return_lines) - 1:
+                    line.line_total = round2(remaining_value)
+                else:
+                    share = (float(line.line_total or 0.0) / old_lines_total) if old_lines_total > MONEY_EPSILON else (1 / len(return_lines))
+                    line.line_total = round2(return_value * share)
+                    remaining_value = round2(remaining_value - line.line_total)
+                session.add(line)
 
         replacement_bill.date_time = new_datetime
         replacement_bill.payment_mode = mode
@@ -879,7 +963,7 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
         session.add(replacement_bill)
 
         for movement in session.exec(select(StockMovement).where(StockMovement.ref_type == "EXCHANGE")).all():
-            is_return_leg = str(movement.reason) == "EXCHANGE_IN" and int(movement.ref_id or 0) == int(ret.id or 0)
+            is_return_leg = str(movement.reason).startswith("EXCHANGE_IN") and int(movement.ref_id or 0) == int(ret.id or 0)
             is_bill_leg = str(movement.reason) == "EXCHANGE_OUT" and int(movement.ref_id or 0) == int(replacement_bill.id or 0)
             if is_return_leg or is_bill_leg:
                 movement.ts = new_datetime
@@ -898,6 +982,7 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
             note=f"Updated exchange #{exchange.id} settlement",
             details={"exchange_id": exchange.id, "before": before, "after": {
                 "date": new_datetime, "payment_mode": mode,
+                "return_value": return_value, "net_due": net_due,
                 "payment_cash": pay_cash, "payment_online": pay_online, "payment_credit": pay_credit,
                 "refund_cash": refund_cash, "refund_online": refund_online, "refund_credit": refund_credit,
             }},
@@ -908,8 +993,310 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
             "payment_cash": exchange.payment_cash, "payment_online": exchange.payment_online,
             "payment_credit": exchange.payment_credit, "refund_cash": exchange.refund_cash,
             "refund_online": exchange.refund_online, "refund_credit": exchange.refund_credit,
+            "net_due": exchange.net_due, "return_value": ret.subtotal_return,
+        }
+
+
+@router.put("/exchange/{exchange_id}", response_model=dict)
+def update_exchange_items(exchange_id: int, payload: ExchangeEditUpdate):
+    """Edit both product legs of an exchange and resettle it atomically."""
+    require_min_role("MANAGER", context="Exchange edit")
+    if not payload.return_items or not payload.new_items:
+        raise HTTPException(status_code=400, detail="An exchange needs at least one returned and one replacement product")
+    if payload.discount_percent < 0 or payload.discount_percent > 100:
+        raise HTTPException(status_code=400, detail="Discount must be between 0 and 100")
+
+    with get_session() as session:
+        exchange = session.get(ExchangeRecord, exchange_id)
+        if not exchange:
+            raise HTTPException(status_code=404, detail="Exchange not found")
+        ret = session.get(Return, int(exchange.return_id or 0))
+        replacement_bill = session.get(Bill, int(exchange.new_bill_id or 0))
+        source_bill = session.get(Bill, int(exchange.source_bill_id or 0)) if exchange.source_bill_id else None
+        if not ret or not replacement_bill or not source_bill:
+            raise HTTPException(status_code=409, detail="Linked exchange records are missing")
+        new_datetime = normalize_return_datetime(payload.exchange_date, fallback=exchange.created_at)
+
+        old_return_lines = session.exec(select(ReturnItem).where(ReturnItem.return_id == int(ret.id or 0))).all()
+        old_bill_lines = session.exec(select(BillItem).where(BillItem.bill_id == int(replacement_bill.id or 0))).all()
+        audit_before = {
+            "date": str(exchange.created_at),
+            "return_value": round2(float(ret.subtotal_return or 0)),
+            "replacement_subtotal": round2(float(replacement_bill.subtotal or 0)),
+            "replacement_total": round2(float(replacement_bill.total_amount or 0)),
+            "discount_percent": round2(float(replacement_bill.discount_percent or 0)),
+            "net_due": round2(float(exchange.net_due or 0)),
+            "payment_mode": str(exchange.payment_mode or "cash"),
+            "payment": {"cash": round2(float(exchange.payment_cash or 0)), "online": round2(float(exchange.payment_online or 0)), "credit": round2(float(exchange.payment_credit or 0))},
+            "refund": {"cash": round2(float(exchange.refund_cash or 0)), "online": round2(float(exchange.refund_online or 0)), "credit": round2(float(exchange.refund_credit or 0))},
+            "returned_products": [
+                {"item_id": int(row.item_id), "name": row.item_name, "quantity": int(row.quantity or 0), "return_value": round2(float(row.line_total or 0))}
+                for row in old_return_lines
+            ],
+            "exchange_products": [
+                {"item_id": int(row.item_id), "name": row.item_name, "quantity": int(row.quantity or 0),
+                 "mrp": round2(float(row.mrp or 0)), "selling_price": round2(float(row.line_total or 0) / max(1, int(row.quantity or 0))),
+                 "line_total": round2(float(row.line_total or 0))}
+                for row in old_bill_lines
+            ],
+        }
+        old_return_qty = {int(row.item_id): int(row.quantity or 0) for row in old_return_lines}
+        old_return_by_item = {int(row.item_id): row for row in old_return_lines}
+        old_bill_by_item = {int(row.item_id): row for row in old_bill_lines}
+        sold = sold_map_for_bill(session, int(source_bill.id or 0))
+        returned = already_returned_map_for_bill(session, int(source_bill.id or 0))
+
+        # Reverse the old exchange stock legs first, then validate and apply the
+        # edited rows in the same transaction.
+        movements = session.exec(select(StockMovement).where(StockMovement.ref_type == "EXCHANGE")).all()
+        linked = [m for m in movements if (
+            (int(m.ref_id or 0) == int(ret.id or 0) and str(m.reason).startswith("EXCHANGE_IN"))
+            or (int(m.ref_id or 0) == int(replacement_bill.id or 0) and str(m.reason) == "EXCHANGE_OUT")
+        )]
+        current_loose_by_parent: Dict[int, int] = {}
+        for movement in linked:
+            if str(movement.reason) != "EXCHANGE_IN_LOOSE" or int(movement.ref_id or 0) != int(ret.id or 0):
+                continue
+            loose_lot = get_lot_for_item(session, int(movement.item_id or 0))
+            parent_lot = session.get(InventoryLot, int(loose_lot.opened_from_lot_id or 0)) if loose_lot and loose_lot.opened_from_lot_id else None
+            if parent_lot and parent_lot.legacy_item_id:
+                current_loose_by_parent[int(parent_lot.legacy_item_id)] = int(movement.delta or 0)
+
+        current_signature = {
+            "date": str(exchange.created_at),
+            "discount_percent": round2(float(replacement_bill.discount_percent or 0)),
+            "rounding_adjustment": round2(float(exchange.rounding_adjustment or 0)),
+            "payment_mode": str(exchange.payment_mode or "cash").lower(),
+            "payment": [round2(float(exchange.payment_cash or 0)), round2(float(exchange.payment_online or 0)), round2(float(exchange.payment_credit or 0))],
+            "refund": [round2(float(exchange.refund_cash or 0)), round2(float(exchange.refund_online or 0)), round2(float(exchange.refund_credit or 0))],
+            "returned_products": sorted([
+                [int(row.item_id), int(row.quantity or 0), round2(float(row.line_total or 0)), int(current_loose_by_parent.get(int(row.item_id), 0))]
+                for row in old_return_lines
+            ]),
+            "exchange_products": sorted([
+                [int(row.item_id), int(row.quantity or 0), round2(float(row.line_total or 0) / max(1, int(row.quantity or 0)))]
+                for row in old_bill_lines
+            ]),
+        }
+        requested_exchange_products = []
+        for line in payload.new_items:
+            item = session.get(Item, int(line.item_id))
+            if not item:
+                raise HTTPException(status_code=404, detail=f"Replacement item {line.item_id} not found")
+            selling_price = float(line.custom_unit_price) if line.custom_unit_price is not None else float(item.mrp or 0)
+            requested_exchange_products.append([int(line.item_id), int(line.quantity or 0), round2(selling_price)])
+        requested_signature = {
+            "date": new_datetime,
+            "discount_percent": round2(float(payload.discount_percent or 0)),
+            "rounding_adjustment": round2(float(payload.rounding_adjustment or 0)),
+            "payment_mode": str(payload.payment_mode or "cash").lower(),
+            "payment": [round2(float(payload.payment_cash or 0)), round2(float(payload.payment_online or 0)), round2(float(payload.payment_credit or 0))],
+            "refund": [round2(float(payload.refund_cash or 0)), round2(float(payload.refund_online or 0)), round2(float(payload.refund_credit or 0))],
+            "returned_products": sorted([
+                [int(line.item_id), int(line.quantity or 0), round2(float(line.custom_return_value or 0)), int(line.opened_loose_quantity or 0)]
+                for line in payload.return_items
+            ]),
+            "exchange_products": sorted(requested_exchange_products),
+        }
+        if current_signature == requested_signature:
+            return {
+                "id": exchange.id, "return_id": ret.id, "new_bill_id": replacement_bill.id,
+                "return_value": ret.subtotal_return, "replacement_total": replacement_bill.total_amount,
+                "net_due": exchange.net_due, "unchanged": True,
+            }
+
+        if active_bill_payments(session, int(replacement_bill.id or 0)):
+            raise HTTPException(status_code=409, detail="Remove later receipts from the replacement bill before editing this exchange")
+        if (old_return_lines or old_bill_lines) and not linked:
+            raise HTTPException(status_code=409, detail="This older exchange has no reversible stock ledger and cannot be edited safely")
+        for movement in linked:
+            item = session.get(Item, int(movement.item_id or 0))
+            if not item or int(item.stock or 0) - int(movement.delta or 0) < 0:
+                raise HTTPException(status_code=409, detail="Returned stock has already been used; this exchange cannot be edited")
+        for movement in linked:
+            item = session.get(Item, int(movement.item_id or 0))
+            item.stock = int(item.stock or 0) - int(movement.delta or 0)
+            session.add(item)
+            apply_archive_rules(session, item)
+            sync_lot_quantity_for_item(session, item)
+            session.delete(movement)
+        for allocation in session.exec(select(BillItemAllocation).where(
+            BillItemAllocation.bill_id == int(replacement_bill.id or 0)
+        )).all():
+            session.delete(allocation)
+        for row in old_return_lines + old_bill_lines:
+            session.delete(row)
+        session.flush()
+
+        return_total = 0.0
+        audit_returned_products = []
+        for line in payload.return_items:
+            item = session.get(Item, int(line.item_id))
+            if not item or int(line.quantity or 0) <= 0:
+                raise HTTPException(status_code=400, detail="Invalid returned product row")
+            available = max(0, int(sold.get(int(item.id), 0)) - int(returned.get(int(item.id), 0)) + int(old_return_qty.get(int(item.id), 0)))
+            if int(line.quantity) > available:
+                raise HTTPException(status_code=400, detail=f"Return quantity exceeds available quantity for {item.name}")
+            value = getattr(line, "custom_return_value", None)
+            if value is None or float(value) < 0:
+                raise HTTPException(status_code=400, detail=f"Enter a valid return value for {item.name}")
+            value = round2(float(value)); return_total = round2(return_total + value)
+            loose_qty = int(getattr(line, "opened_loose_quantity", 0) or 0)
+            if loose_qty:
+                if int(line.quantity) != 1:
+                    raise HTTPException(status_code=400, detail="A partial-box row must return exactly one box")
+                add_partial_pack_return_to_loose_stock(session, item, loose_qty, ts=new_datetime, return_id=int(ret.id))
+            else:
+                item.stock = int(item.stock or 0) + int(line.quantity)
+                session.add(item)
+                apply_archive_rules(session, item)
+                sync_lot_quantity_for_item(session, item)
+                add_movement(session, item_id=int(item.id), delta=int(line.quantity), reason="EXCHANGE_IN", ref_type="EXCHANGE", ref_id=int(ret.id), note=f"Edited exchange return #{ret.id}", ts=new_datetime)
+            old_line = old_return_by_item.get(int(item.id))
+            recorded_name = old_line.item_name if old_line else item.name
+            recorded_mrp = float(old_line.mrp) if old_line else float(item.mrp or 0)
+            session.add(ReturnItem(
+                return_id=int(ret.id), item_id=int(item.id), item_name=recorded_name,
+                mrp=recorded_mrp, quantity=int(line.quantity), line_total=value,
+                opened_loose_quantity=loose_qty,
+            ))
+            audit_returned_products.append({"item_id": int(item.id), "name": recorded_name, "quantity": int(line.quantity), "return_value": value, "opened_loose_quantity": loose_qty or None})
+
+        bill_subtotal = 0.0
+        audit_exchange_products = []
+        for line in payload.new_items:
+            item = session.get(Item, int(line.item_id))
+            qty = int(line.quantity or 0)
+            if not item or qty <= 0:
+                raise HTTPException(status_code=400, detail="Invalid replacement product row")
+            if int(item.stock or 0) < qty:
+                raise HTTPException(status_code=400, detail=f"Insufficient stock for {item.name}")
+            selling_price = float(line.custom_unit_price) if line.custom_unit_price is not None else float(item.mrp or 0)
+            if selling_price < 0:
+                raise HTTPException(status_code=400, detail=f"Selling price cannot be negative for {item.name}")
+            line_total = round2(selling_price * qty); bill_subtotal = round2(bill_subtotal + line_total)
+            item.stock = int(item.stock or 0) - qty
+            session.add(item)
+            apply_archive_rules(session, item)
+            sync_lot_quantity_for_item(session, item)
+            add_movement(session, item_id=int(item.id), delta=-qty, reason="EXCHANGE_OUT", ref_type="EXCHANGE", ref_id=int(replacement_bill.id), note=f"Edited exchange bill #{replacement_bill.id}", ts=new_datetime)
+            old_line = old_bill_by_item.get(int(item.id))
+            recorded_name = old_line.item_name if old_line else item.name
+            recorded_mrp = float(old_line.mrp) if old_line else float(item.mrp or 0)
+            bill_item = BillItem(bill_id=int(replacement_bill.id), item_id=int(item.id), item_name=recorded_name, mrp=recorded_mrp, quantity=qty, line_total=line_total)
+            session.add(bill_item)
+            add_exchange_bill_allocation(session, bill_item, item, qty)
+            audit_exchange_products.append({"item_id": int(item.id), "name": recorded_name, "quantity": qty, "mrp": round2(recorded_mrp), "selling_price": round2(selling_price), "line_total": line_total})
+
+        bill_total = round2(bill_subtotal * (1 - float(payload.discount_percent or 0) / 100))
+        theoretical = round2(bill_total - return_total)
+        rounding_adjustment = round2(float(payload.rounding_adjustment or 0))
+        net_due = round2(theoretical + rounding_adjustment)
+        pay_cash, pay_online, pay_credit = map(round2, [payload.payment_cash, payload.payment_online, payload.payment_credit])
+        ref_cash, ref_online, ref_credit = map(round2, [payload.refund_cash, payload.refund_online, payload.refund_credit])
+        if net_due > MONEY_EPSILON and (round2(pay_cash + pay_online + pay_credit) != net_due or round2(ref_cash + ref_online + ref_credit) > MONEY_EPSILON):
+            raise HTTPException(status_code=400, detail=f"Payment allocation must equal ₹{net_due:.2f}")
+        if net_due < -MONEY_EPSILON and (round2(ref_cash + ref_online + ref_credit) != round2(abs(net_due)) or round2(pay_cash + pay_online + pay_credit) > MONEY_EPSILON):
+            raise HTTPException(status_code=400, detail=f"Refund allocation must equal ₹{abs(net_due):.2f}")
+        if abs(net_due) <= MONEY_EPSILON and round2(pay_cash + pay_online + pay_credit + ref_cash + ref_online + ref_credit) > MONEY_EPSILON:
+            raise HTTPException(status_code=400, detail="Settlement must be zero for an even exchange")
+
+        mode = str(payload.payment_mode or "cash").lower()
+        if mode not in {"cash", "online", "split", "credit"}:
+            raise HTTPException(status_code=400, detail="Invalid exchange payment mode")
+        ret.date_time = new_datetime; ret.subtotal_return = return_total; ret.refund_cash = ref_cash; ret.refund_online = ref_online; ret.credit_amount = ref_credit; ret.rounding_adjustment = rounding_adjustment
+        replacement_bill.date_time = new_datetime; replacement_bill.discount_percent = payload.discount_percent; replacement_bill.subtotal = bill_subtotal; replacement_bill.total_amount = bill_total
+        replacement_bill.payment_mode = mode; replacement_bill.payment_cash = pay_cash; replacement_bill.payment_online = pay_online
+        settled_by_return = round2(max(0.0, bill_total - max(0.0, net_due)))
+        replacement_bill.paid_amount = round2(settled_by_return + pay_cash + pay_online)
+        replacement_bill.is_credit = replacement_bill.paid_amount + MONEY_EPSILON < bill_total
+        replacement_bill.payment_status = "PAID" if not replacement_bill.is_credit else "PARTIAL" if replacement_bill.paid_amount > MONEY_EPSILON else "UNPAID"
+        replacement_bill.paid_at = new_datetime if not replacement_bill.is_credit else None
+        exchange.created_at = new_datetime; exchange.theoretical_net = theoretical; exchange.net_due = net_due; exchange.rounding_adjustment = rounding_adjustment; exchange.payment_mode = mode
+        exchange.payment_cash = pay_cash; exchange.payment_online = pay_online; exchange.payment_credit = pay_credit
+        exchange.refund_cash = ref_cash; exchange.refund_online = ref_online; exchange.refund_credit = ref_credit
+        session.add(ret); session.add(replacement_bill); session.add(exchange); session.flush()
+        sync_exchange_customer_credit(session, exchange, source_bill, ref_credit)
+        sync_bill_vouchers(session, source_bill); sync_bill_vouchers(session, replacement_bill)
+        audit_after = {
+            "date": new_datetime, "return_value": return_total, "replacement_subtotal": bill_subtotal,
+            "replacement_total": bill_total, "discount_percent": round2(float(payload.discount_percent or 0)), "net_due": net_due,
+            "payment_mode": mode, "payment": {"cash": pay_cash, "online": pay_online, "credit": pay_credit},
+            "refund": {"cash": ref_cash, "online": ref_online, "credit": ref_credit},
+            "returned_products": audit_returned_products, "exchange_products": audit_exchange_products,
+        }
+        log_audit(session, entity_type="SALES_RETURN", entity_id=int(ret.id), action="UPDATE_EXCHANGE_ITEMS", note=f"Edited exchange #{exchange.id}", details={"exchange_id": exchange.id, "before": audit_before, "after": audit_after})
+        session.commit()
+        return {"id": exchange.id, "return_id": ret.id, "new_bill_id": replacement_bill.id, "return_value": return_total, "replacement_total": bill_total, "net_due": net_due}
+
+
+@router.delete("/exchange/{exchange_id}", response_model=dict)
+def undo_exchange(exchange_id: int):
+    """Atomically reverse an exchange while preserving an audit trail."""
+    require_min_role("MANAGER", context="Exchange undo")
+    with get_session() as session:
+        exchange = session.get(ExchangeRecord, exchange_id)
+        if not exchange:
+            raise HTTPException(status_code=404, detail="Exchange not found")
+        ret = session.get(Return, int(exchange.return_id or 0))
+        replacement_bill = session.get(Bill, int(exchange.new_bill_id or 0))
+        source_bill = session.get(Bill, int(exchange.source_bill_id or 0)) if exchange.source_bill_id else None
+        if not ret or not replacement_bill:
+            raise HTTPException(status_code=409, detail="Linked exchange return or replacement bill is missing")
+
+        later_payments = active_bill_payments(session, int(replacement_bill.id or 0))
+        if later_payments:
+            raise HTTPException(status_code=409, detail="This exchange bill has later receipts. Remove them before undoing the exchange.")
+
+        # This also rejects reversal when customer credit from the exchange has
+        # already been consumed by another bill or refunded.
+        sync_exchange_customer_credit(session, exchange, source_bill, 0.0)
+
+        movements = session.exec(select(StockMovement).where(
+            StockMovement.ref_type == "EXCHANGE",
+        )).all()
+        linked_movements = [m for m in movements if (
+            (int(m.ref_id or 0) == int(ret.id or 0) and str(m.reason).startswith("EXCHANGE_IN"))
+            or (int(m.ref_id or 0) == int(replacement_bill.id or 0) and str(m.reason) == "EXCHANGE_OUT")
+        )]
+        for movement in linked_movements:
+            item = session.get(Item, int(movement.item_id or 0))
+            if not item:
+                raise HTTPException(status_code=409, detail=f"Stock item {movement.item_id} is missing")
+            reverse_delta = -int(movement.delta or 0)
+            if int(item.stock or 0) + reverse_delta < 0:
+                raise HTTPException(status_code=409, detail=f"Cannot undo: returned stock for {item.name} has already been used")
+
+        for movement in linked_movements:
+            item = session.get(Item, int(movement.item_id or 0))
+            item.stock = int(item.stock or 0) - int(movement.delta or 0)
+            session.add(item)
+            apply_archive_rules(session, item)
+            sync_lot_quantity_for_item(session, item)
+            session.delete(movement)
+
+        before = {
+            "exchange_id": exchange.id, "source_bill_id": exchange.source_bill_id,
+            "return_id": exchange.return_id, "new_bill_id": exchange.new_bill_id,
             "net_due": exchange.net_due,
         }
+        log_audit(session, entity_type="SALES_RETURN", entity_id=int(ret.id or 0),
+                  action="UNDO_EXCHANGE", note=f"Undid exchange #{exchange.id}", details=before)
+        mark_voucher_deleted(session, source_type="BILL", source_id=int(replacement_bill.id or 0))
+        for row in session.exec(select(ReturnItem).where(ReturnItem.return_id == int(ret.id or 0))).all():
+            session.delete(row)
+        for row in session.exec(select(BillItemAllocation).where(BillItemAllocation.bill_id == int(replacement_bill.id or 0))).all():
+            session.delete(row)
+        for row in session.exec(select(BillItem).where(BillItem.bill_id == int(replacement_bill.id or 0))).all():
+            session.delete(row)
+        session.delete(exchange)
+        session.delete(ret)
+        session.delete(replacement_bill)
+        session.commit()
+        if source_bill:
+            sync_bill_vouchers(session, source_bill)
+            session.commit()
+        return {"exchange_id": exchange_id, "undone": True}
 
 
 @router.get("/{return_id}", response_model=ReturnOut)
@@ -1044,6 +1431,15 @@ def get_exchange_by_return(return_id: int):
 
         ret_items = session.exec(select(ReturnItem).where(ReturnItem.return_id == ret.id)).all()
         bill_items = session.exec(select(BillItem).where(BillItem.bill_id == bill.id)).all()
+        partial_return_by_parent: Dict[int, int] = {}
+        for movement in session.exec(select(StockMovement).where(
+            StockMovement.ref_type == "EXCHANGE", StockMovement.ref_id == int(ret.id or 0),
+            StockMovement.reason == "EXCHANGE_IN_LOOSE",
+        )).all():
+            loose_lot = get_lot_for_item(session, int(movement.item_id or 0))
+            parent_lot = session.get(InventoryLot, int(loose_lot.opened_from_lot_id or 0)) if loose_lot and loose_lot.opened_from_lot_id else None
+            if parent_lot and parent_lot.legacy_item_id:
+                partial_return_by_parent[int(parent_lot.legacy_item_id)] = int(movement.delta or 0)
 
         return {
             "id": ex.id,
@@ -1081,9 +1477,11 @@ def get_exchange_by_return(return_id: int):
                         ),
                         "batch_number": str(item.id) if item and item.id else None,
                         "expiry_date": str(item.expiry_date) if item and item.expiry_date else None,
+                        "stock": int(item.stock or 0) if item else 0,
                         "mrp": i.mrp,
                         "quantity": i.quantity,
                         "line_total": i.line_total,
+                        "opened_loose_quantity": int(i.opened_loose_quantity or 0) or partial_return_by_parent.get(int(i.item_id or 0)),
                         **item_stock_meta(session, int(i.item_id or 0)),
                     }
                     for i in ret_items
@@ -1109,6 +1507,7 @@ def get_exchange_by_return(return_id: int):
                         ),
                         "batch_number": str(item.id) if item and item.id else None,
                         "expiry_date": str(item.expiry_date) if item and item.expiry_date else None,
+                        "stock": int(item.stock or 0) if item else 0,
                         "mrp": i.mrp,
                         "quantity": i.quantity,
                         "line_total": i.line_total,
@@ -1385,7 +1784,6 @@ def create_exchange(payload: ExchangeCreate):
     exchange_datetime = normalize_return_datetime(payload.exchange_date)
 
     with get_session() as session:
-        assert_financial_year_unlocked(session, exchange_datetime, context="Exchange creation")
         sold_lookup = {}
         returned_lookup = {}
         charged_unit_lookup = {}
@@ -1433,7 +1831,7 @@ def create_exchange(payload: ExchangeCreate):
 
         # 1) Compute return subtotal using remaining qty
         return_subtotal = 0.0
-        ret_items_map = {}  # item_id -> (Item, qty)
+        ret_items_map = {}  # item_id -> (Item, qty, opened loose qty)
         return_line_total_by_item: Dict[int, float] = {}
         for line in payload.return_items:
             itm = session.get(Item, line.item_id)
@@ -1454,7 +1852,10 @@ def create_exchange(payload: ExchangeCreate):
                         detail=f"Return qty exceeds remaining for {itm.name} (remaining {remaining})"
                     )
 
-            ret_items_map[itm.id] = (itm, int(line.quantity))
+            opened_loose_quantity = int(getattr(line, "opened_loose_quantity", 0) or 0)
+            if opened_loose_quantity and int(line.quantity) != 1:
+                raise HTTPException(status_code=400, detail="A partial-pack return must consume exactly one returned pack")
+            ret_items_map[itm.id] = (itm, int(line.quantity), opened_loose_quantity)
 
             qty = int(line.quantity)
             base = float(itm.mrp) * qty
@@ -1472,6 +1873,19 @@ def create_exchange(payload: ExchangeCreate):
                 charged = after_tax * factor
             else:
                 charged = base
+            if opened_loose_quantity:
+                meta = item_stock_meta(session, int(itm.id or 0))
+                conversion = int(meta.get("conversion_qty") or 0)
+                if conversion <= 1:
+                    raise HTTPException(status_code=400, detail=f"Conversion quantity is missing for {itm.name}")
+                charged = round2(charged * opened_loose_quantity / conversion)
+                return_line_total_by_item[itm.id] = charged
+            custom_return_value = getattr(line, "custom_return_value", None)
+            if custom_return_value is not None:
+                if float(custom_return_value) < 0:
+                    raise HTTPException(status_code=400, detail="Custom return value cannot be negative")
+                charged = round2(float(custom_return_value))
+                return_line_total_by_item[itm.id] = charged
             return_subtotal += charged
 
         return_subtotal = round2(return_subtotal)
@@ -1488,7 +1902,10 @@ def create_exchange(payload: ExchangeCreate):
             if itm.stock < line.quantity:
                 raise HTTPException(status_code=400, detail=f"Insufficient stock for {itm.name}")
             new_items_map[itm.id] = (itm, int(line.quantity))
-            bill_subtotal += int(line.quantity) * float(itm.mrp)
+            selling_price = float(line.custom_unit_price) if line.custom_unit_price is not None else float(itm.mrp)
+            if selling_price < 0:
+                raise HTTPException(status_code=400, detail=f"Selling price cannot be negative for {itm.name}")
+            bill_subtotal += int(line.quantity) * selling_price
 
         bill_subtotal = round2(bill_subtotal)
         bill_total = round2(bill_subtotal * (1 - payload.discount_percent / 100.0))
@@ -1582,22 +1999,30 @@ def create_exchange(payload: ExchangeCreate):
         session.refresh(ret)
 
         # return items: stock IN + ledger
-        for itm, qty in ret_items_map.values():
-            itm.stock += qty
+        for itm, qty, opened_loose_quantity in ret_items_map.values():
+            # A partly used returned pack is not saleable as a sealed pack.
+            # Its usable child units go directly into the matching loose lot.
+            stock_in_qty = 0 if opened_loose_quantity else qty
+            itm.stock += stock_in_qty
             session.add(itm)
             apply_archive_rules(session, itm)
             sync_lot_quantity_for_item(session, itm)
 
-            add_movement(
-                session,
-                item_id=itm.id,
-                delta=qty,
-                reason="EXCHANGE_IN",
-                ref_type="EXCHANGE",
-                ref_id=ret.id,
-                note=f"Exchange return #{ret.id}",
-                ts=exchange_datetime,
-            )
+            if stock_in_qty:
+                add_movement(
+                    session,
+                    item_id=itm.id,
+                    delta=qty,
+                    reason="EXCHANGE_IN",
+                    ref_type="EXCHANGE",
+                    ref_id=ret.id,
+                    note=f"Exchange return #{ret.id}",
+                    ts=exchange_datetime,
+                )
+            else:
+                add_partial_pack_return_to_loose_stock(
+                    session, itm, opened_loose_quantity, ts=exchange_datetime, return_id=int(ret.id)
+                )
 
             if itm.id in return_line_total_by_item:
                 line_total = return_line_total_by_item[itm.id]
@@ -1606,14 +2031,15 @@ def create_exchange(payload: ExchangeCreate):
             else:
                 base = float(itm.mrp) * qty
                 line_total = base
-            if bill and itm.id not in charged_unit_lookup:
+            if bill and itm.id not in charged_unit_lookup and itm.id not in return_line_total_by_item:
                 after_disc = base * (1 - disc_pct / 100.0)
                 after_tax = after_disc * (1 + tax_pct / 100.0)
                 line_total = after_tax * factor
 
             session.add(ReturnItem(
                 return_id=ret.id, item_id=itm.id, item_name=itm.name,
-                mrp=itm.mrp, quantity=qty, line_total=round2(line_total)
+                mrp=itm.mrp, quantity=qty, line_total=round2(line_total),
+                opened_loose_quantity=opened_loose_quantity,
             ))
         session.flush()
 
@@ -1679,10 +2105,13 @@ def create_exchange(payload: ExchangeCreate):
                 ts=exchange_datetime,
             )
 
-            session.add(BillItem(
+            selling_price = float(next((line.custom_unit_price for line in payload.new_items if int(line.item_id) == int(itm.id) and line.custom_unit_price is not None), itm.mrp))
+            bill_item = BillItem(
                 bill_id=b.id, item_id=itm.id, item_name=itm.name,
-                mrp=itm.mrp, quantity=qty, line_total=round2(qty * itm.mrp)
-            ))
+                mrp=itm.mrp, quantity=qty, line_total=round2(qty * selling_price)
+            )
+            session.add(bill_item)
+            add_exchange_bill_allocation(session, bill_item, itm, qty)
         session.flush()
 
         ret_items = session.exec(select(ReturnItem).where(ReturnItem.return_id == ret.id)).all()
@@ -1709,6 +2138,7 @@ def create_exchange(payload: ExchangeCreate):
         session.add(exchange)
         session.flush()
         sync_exchange_customer_credit(session, exchange, bill, float(getattr(ret, "credit_amount", 0.0) or 0.0))
+        sync_bill_vouchers(session, b)
         log_audit(
             session,
             entity_type="SALES_RETURN",

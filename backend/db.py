@@ -3345,6 +3345,19 @@ def migrate_db():
         """))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_customeradvancerefund_receipt_id ON customeradvancerefund (receipt_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_customeradvancerefund_party_id ON customeradvancerefund (party_id)"))
+        car_cols = {c[1] for c in session.exec(text("PRAGMA table_info(customeradvancerefund)")).all()}
+        if "cash_amount" not in car_cols:
+            session.exec(text("ALTER TABLE customeradvancerefund ADD COLUMN cash_amount REAL NOT NULL DEFAULT 0"))
+        if "bank_amount" not in car_cols:
+            session.exec(text("ALTER TABLE customeradvancerefund ADD COLUMN bank_amount REAL NOT NULL DEFAULT 0"))
+        session.exec(text("""
+            UPDATE customeradvancerefund
+            SET cash_amount = CASE WHEN book = 'CASH' THEN amount ELSE cash_amount END,
+                bank_amount = CASE WHEN book = 'BANK' THEN amount ELSE bank_amount END
+            WHERE COALESCE(cash_amount, 0) = 0 AND COALESCE(bank_amount, 0) = 0
+        """))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_customeradvancerefund_cashbook_entry_id ON customeradvancerefund (cashbook_entry_id)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_customeradvancerefund_bankbook_entry_id ON customeradvancerefund (bankbook_entry_id)"))
         session.exec(text("""
             CREATE TABLE IF NOT EXISTS packopenevent (
                 id INTEGER PRIMARY KEY,

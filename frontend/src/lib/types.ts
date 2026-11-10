@@ -473,8 +473,10 @@ export interface CustomerAdvanceRefund {
   id: ID
   receipt_id: ID
   party_id: ID
-  book: 'CASH' | 'BANK'
+  book: 'CASH' | 'BANK' | 'SPLIT'
   amount: number
+  cash_amount?: number
+  bank_amount?: number
   refunded_at: string
   note?: string | null
   bank_mode?: string | null

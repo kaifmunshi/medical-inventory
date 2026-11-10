@@ -107,8 +107,10 @@ export async function applyPartyReceipt(
 }
 
 export async function refundPartyAdvance(partyId: number, receiptId: number, payload: {
-  book: 'CASH' | 'BANK'
+  book: 'CASH' | 'BANK' | 'SPLIT'
   amount: number
+  cash_amount?: number
+  bank_amount?: number
   refund_date?: string
   note?: string
   bank_mode?: 'UPI' | 'NEFT' | 'RTGS' | 'IMPS'

@@ -3,6 +3,7 @@ import {
   Box,
   Button,
   Dialog,
+  DialogActions,
   DialogContent,
   DialogTitle,
   IconButton,
@@ -16,6 +17,7 @@ import CloseIcon from '@mui/icons-material/Close'
 import DeleteIcon from '@mui/icons-material/Delete'
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined'
 import RestoreIcon from '@mui/icons-material/Restore'
+import ReplyIcon from '@mui/icons-material/Reply'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   editBillPayment,
@@ -26,6 +28,7 @@ import {
   undoBillPayment,
   type BillPaymentRow,
 } from '../../services/billing'
+import { refundPartyAdvance } from '../../services/parties'
 import { todayRange } from '../../lib/date'
 import BillSupplyPrintButton from './BillSupplyPrintButton'
 
@@ -54,6 +57,13 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
   const [editPaymentRow, setEditPaymentRow] = useState<BillPaymentRow | null>(null)
   const [deletePaymentRow, setDeletePaymentRow] = useState<BillPaymentRow | null>(null)
   const [recoverPaymentRow, setRecoverPaymentRow] = useState<BillPaymentRow | null>(null)
+  const [returnAdvanceRow, setReturnAdvanceRow] = useState<BillPaymentRow | null>(null)
+  const [returnBook, setReturnBook] = useState<'CASH' | 'BANK' | 'SPLIT'>('CASH')
+  const [returnBankMode, setReturnBankMode] = useState<'UPI' | 'NEFT' | 'RTGS' | 'IMPS'>('UPI')
+  const [returnAmount, setReturnAmount] = useState<number | ''>('')
+  const [returnCashAmount, setReturnCashAmount] = useState<number | ''>('')
+  const [returnDate, setReturnDate] = useState(todayFrom)
+  const [returnNote, setReturnNote] = useState('')
 
   const qPayments = useQuery({
     queryKey: ['bill-payments-panel', bill?.id],
@@ -74,6 +84,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
     queryClient.invalidateQueries({ queryKey: ['customer-ledger'] })
     queryClient.invalidateQueries({ queryKey: ['customer-open-bills'] })
     queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-parties'] })
     queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
     queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
     queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
@@ -89,6 +100,7 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
     queryClient.invalidateQueries({ queryKey: ['bankbook-daily-summary'] })
     queryClient.invalidateQueries({ queryKey: ['dash-credit-pending-total'] })
     queryClient.invalidateQueries({ queryKey: ['rpt-sales'] })
+    queryClient.invalidateQueries({ queryKey: ['accounting-vouchers'] })
   }
 
   async function syncBillAndPayments() {
@@ -238,6 +250,49 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
     },
   })
 
+  const mReturnAdvance = useMutation({
+    mutationFn: async () => {
+      if (!returnAdvanceRow?.receipt_party_id || !returnAdvanceRow?.receipt_id) throw new Error('Customer advance receipt is missing')
+      const amount = round2(Number(returnAmount || 0))
+      const available = round2(Number(returnAdvanceRow.receipt_unallocated_amount || 0))
+      if (amount <= 0) throw new Error('Return amount must be greater than 0')
+      if (amount > available + 0.0001) throw new Error(`Return amount cannot exceed Rs.${money(available)}`)
+      const cashAmount = returnBook === 'CASH' ? amount : returnBook === 'SPLIT' ? round2(Number(returnCashAmount || 0)) : 0
+      const bankAmount = returnBook === 'BANK' ? amount : returnBook === 'SPLIT' ? round2(amount - cashAmount) : 0
+      if (returnBook === 'SPLIT' && (cashAmount <= 0 || bankAmount <= 0)) throw new Error('Split return requires both cash and bank amounts')
+      return refundPartyAdvance(Number(returnAdvanceRow.receipt_party_id), Number(returnAdvanceRow.receipt_id), {
+        book: returnBook,
+        amount,
+        cash_amount: cashAmount,
+        bank_amount: bankAmount,
+        refund_date: returnDate || undefined,
+        bank_mode: returnBook === 'BANK' ? returnBankMode : undefined,
+        note: returnNote.trim() || `Advance returned for Bill #${bill?.bill_number || bill?.id}`,
+      })
+    },
+    onSuccess: async () => {
+      setReturnAdvanceRow(null)
+      setReturnAmount('')
+      setReturnNote('')
+      await syncBillAndPayments()
+    },
+  })
+
+  function openReturnAdvance(payment: BillPaymentRow) {
+    setReturnAdvanceRow(payment)
+    setReturnBook('CASH')
+    setReturnBankMode('UPI')
+    setReturnAmount(round2(Number(payment.receipt_unallocated_amount || 0)))
+    setReturnCashAmount('')
+    setReturnDate(todayFrom)
+    setReturnNote('')
+  }
+
+  function mutationError(error: unknown, fallback: string) {
+    const candidate = error as { response?: { data?: { detail?: string } }; message?: string }
+    return candidate?.response?.data?.detail || candidate?.message || fallback
+  }
+
   return (
     <>
       <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1}>
@@ -305,6 +360,15 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
                             </IconButton>
                           </span>
                         </Tooltip>
+                        {managedByReceipt && Number(p.receipt_unallocated_amount || 0) > 0.0001 ? (
+                          <Tooltip title={`Return Rs.${money(p.receipt_unallocated_amount)} customer advance`} arrow>
+                            <span>
+                              <IconButton size="small" onClick={() => openReturnAdvance(p)} disabled={bill?.is_deleted || mReturnAdvance.isPending} color="warning" sx={{ p: 0.25 }}>
+                                <ReplyIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        ) : null}
                         <Tooltip title="Delete payment" arrow>
                           <span>
                             <IconButton size="small" onClick={() => setDeletePaymentRow(p)} disabled={bill?.is_deleted || mEditPay.isPending || mDeletePay.isPending || mRecoverPay.isPending} color="error" sx={{ p: 0.25 }}>
@@ -454,6 +518,43 @@ export default function BillPaymentsPanel({ bill, onBillUpdated }: Props) {
             ) : null}
           </Stack>
         </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(returnAdvanceRow)} onClose={() => !mReturnAdvance.isPending && setReturnAdvanceRow(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Return Customer Advance</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2}>
+            <Typography>
+              This bill payment left Rs.{money(returnAdvanceRow?.receipt_unallocated_amount)} as customer advance.
+            </Typography>
+            <TextField select label="Return from" value={returnBook} onChange={(e) => { setReturnBook(e.target.value as 'CASH' | 'BANK' | 'SPLIT'); setReturnCashAmount('') }}>
+              <MenuItem value="CASH">Cashbook</MenuItem>
+              <MenuItem value="BANK">Bankbook</MenuItem>
+              <MenuItem value="SPLIT">Split: Cashbook + Bankbook</MenuItem>
+            </TextField>
+            {returnBook === 'SPLIT' ? (
+              <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+                <TextField fullWidth label="Cash amount" type="number" value={returnCashAmount} onChange={(e) => setReturnCashAmount(e.target.value === '' ? '' : Number(e.target.value))} inputProps={{ min: 0.01, max: Math.max(0, Number(returnAmount || 0) - 0.01), step: 0.01 }} />
+                <TextField fullWidth label="Bank amount" value={money(Math.max(0, Number(returnAmount || 0) - Number(returnCashAmount || 0)))} InputProps={{ readOnly: true }} />
+              </Stack>
+            ) : null}
+            {returnBook === 'BANK' || returnBook === 'SPLIT' ? (
+              <TextField select label="Bank mode" value={returnBankMode} onChange={(e) => setReturnBankMode(e.target.value as typeof returnBankMode)}>
+                {['UPI', 'NEFT', 'RTGS', 'IMPS'].map((mode) => <MenuItem key={mode} value={mode}>{mode}</MenuItem>)}
+              </TextField>
+            ) : null}
+            <TextField label="Amount" type="number" value={returnAmount} onChange={(e) => setReturnAmount(e.target.value === '' ? '' : Number(e.target.value))} inputProps={{ min: 0.01, max: Number(returnAdvanceRow?.receipt_unallocated_amount || 0), step: 0.01 }} />
+            <TextField label="Return date" type="date" value={returnDate} onChange={(e) => setReturnDate(e.target.value)} InputLabelProps={{ shrink: true }} />
+            <TextField label="Note (optional)" value={returnNote} onChange={(e) => setReturnNote(e.target.value)} multiline minRows={2} />
+            {mReturnAdvance.isError ? <Typography color="error">{mutationError(mReturnAdvance.error, 'Advance return failed')}</Typography> : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setReturnAdvanceRow(null)} disabled={mReturnAdvance.isPending}>Cancel</Button>
+          <Button variant="contained" color="warning" onClick={() => mReturnAdvance.mutate()} disabled={mReturnAdvance.isPending || Number(returnAmount || 0) <= 0 || Number(returnAmount || 0) > Number(returnAdvanceRow?.receipt_unallocated_amount || 0) || (returnBook === 'SPLIT' && (Number(returnCashAmount || 0) <= 0 || Number(returnCashAmount || 0) >= Number(returnAmount || 0)))}>
+            {mReturnAdvance.isPending ? 'Returning…' : 'Return Advance'}
+          </Button>
+        </DialogActions>
       </Dialog>
 
       <Dialog open={openPayDlg} onClose={() => setOpenPayDlg(false)} fullWidth maxWidth="sm">

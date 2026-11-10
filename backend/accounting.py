@@ -599,7 +599,13 @@ def post_customer_advance_refund_voucher(session, refund, party: Party) -> Vouch
     debtor_ledger = ensure_party_ledger(session, party)
     amount = round2(refund.amount)
     narration = refund.note or f"Advance returned to {party.name}"
-    money_ledger = ledgers["BANK_ACCOUNT" if str(refund.book).upper() == "BANK" else "CASH_IN_HAND"]
+    cash_amount = round2(getattr(refund, "cash_amount", 0) or (amount if str(refund.book).upper() == "CASH" else 0))
+    bank_amount = round2(getattr(refund, "bank_amount", 0) or (amount if str(refund.book).upper() == "BANK" else 0))
+    lines = [{"ledger_id": int(debtor_ledger.id), "entry_type": "DR", "amount": amount, "narration": narration}]
+    if cash_amount > 0:
+        lines.append({"ledger_id": int(ledgers["CASH_IN_HAND"].id), "entry_type": "CR", "amount": cash_amount, "narration": narration})
+    if bank_amount > 0:
+        lines.append({"ledger_id": int(ledgers["BANK_ACCOUNT"].id), "entry_type": "CR", "amount": bank_amount, "narration": narration})
     return upsert_voucher(
         session,
         voucher_type="PAYMENT",
@@ -609,10 +615,7 @@ def post_customer_advance_refund_voucher(session, refund, party: Party) -> Vouch
         voucher_no=f"AR-{refund.id}",
         narration=narration,
         total_amount=amount,
-        lines=[
-            {"ledger_id": int(debtor_ledger.id), "entry_type": "DR", "amount": amount, "narration": narration},
-            {"ledger_id": int(money_ledger.id), "entry_type": "CR", "amount": amount, "narration": narration},
-        ],
+        lines=lines,
     )
 
 

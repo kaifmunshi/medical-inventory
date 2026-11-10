@@ -1054,6 +1054,8 @@ class CustomerAdvanceRefund(SQLModel, table=True):
     party_id: int = Field(index=True)
     book: str = Field(index=True)  # CASH | BANK
     amount: float
+    cash_amount: float = 0.0
+    bank_amount: float = 0.0
     refunded_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"), index=True)
     note: Optional[str] = None
     bank_mode: Optional[str] = None
@@ -1578,6 +1580,8 @@ class PartyReceiptApply(SQLModel):
 class CustomerAdvanceRefundCreate(SQLModel):
     book: str
     amount: float
+    cash_amount: float = 0.0
+    bank_amount: float = 0.0
     refund_date: Optional[str] = None
     note: Optional[str] = None
     bank_mode: Optional[str] = None
@@ -1589,6 +1593,8 @@ class CustomerAdvanceRefundOut(SQLModel):
     party_id: int
     book: str
     amount: float
+    cash_amount: float = 0.0
+    bank_amount: float = 0.0
     refunded_at: str
     note: Optional[str] = None
     bank_mode: Optional[str] = None

@@ -199,6 +199,8 @@ export interface BillPaymentRow {
   is_receipt_managed?: boolean
   receipt_id?: number | null
   receipt_adjustment_id?: number | null
+  receipt_party_id?: number | null
+  receipt_unallocated_amount?: number
 }
 
 export async function listBillPayments(billId: number) {

@@ -2109,6 +2109,9 @@ def list_bill_payments(bill_id: int):
         out = []
         for p in pays:
             adjustment = receipt_adjustment_for_payment(session, int(p.id or 0))
+            receipt = session.get(PartyReceipt, int(adjustment.receipt_id)) if adjustment else None
+            if receipt:
+                sync_party_receipt_unallocated(session, int(receipt.id))
             out.append({
                 "id": p.id,
                 "bill_id": p.bill_id,
@@ -2125,6 +2128,8 @@ def list_bill_payments(bill_id: int):
                 "is_receipt_managed": adjustment is not None,
                 "receipt_id": getattr(adjustment, "receipt_id", None) if adjustment else None,
                 "receipt_adjustment_id": getattr(adjustment, "id", None) if adjustment else None,
+                "receipt_party_id": getattr(receipt, "party_id", None) if receipt else None,
+                "receipt_unallocated_amount": round2(as_f(getattr(receipt, "unallocated_amount", 0.0))) if receipt else 0.0,
             })
         return out
 

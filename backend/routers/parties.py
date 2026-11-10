@@ -1077,8 +1077,8 @@ def refund_customer_advance(party_id: int, receipt_id: int, payload: CustomerAdv
         if not receipt or int(receipt.party_id) != int(party_id) or receipt.is_deleted:
             raise HTTPException(status_code=404, detail="Active receipt not found")
         book = str(payload.book or "").strip().upper()
-        if book not in {"CASH", "BANK"}:
-            raise HTTPException(status_code=400, detail="book must be CASH or BANK")
+        if book not in {"CASH", "BANK", "SPLIT"}:
+            raise HTTPException(status_code=400, detail="book must be CASH, BANK, or SPLIT")
         amount = _round2(payload.amount)
         if amount <= 0:
             raise HTTPException(status_code=400, detail="Refund amount must be greater than 0")
@@ -1092,18 +1092,25 @@ def refund_customer_advance(party_id: int, receipt_id: int, payload: CustomerAdv
             raise HTTPException(status_code=400, detail=f"Refund exceeds customer's actual available advance of {refundable:.2f}")
         refund_ts = _normalize_payment_ts(payload.refund_date)
         assert_financial_year_unlocked(session, refund_ts, context="Customer advance refund")
-        bank_mode = str(payload.bank_mode or "UPI").strip().upper() if book == "BANK" else None
-        if book == "BANK" and bank_mode not in {"UPI", "NEFT", "RTGS", "IMPS"}:
+        cash_amount = amount if book == "CASH" else _round2(payload.cash_amount)
+        bank_amount = amount if book == "BANK" else _round2(payload.bank_amount)
+        if book == "SPLIT":
+            if cash_amount <= 0 or bank_amount <= 0:
+                raise HTTPException(status_code=400, detail="Split return requires both cash and bank amounts")
+            if abs(_round2(cash_amount + bank_amount) - amount) > 0.0001:
+                raise HTTPException(status_code=400, detail="Cash and bank amounts must equal the total return amount")
+        bank_mode = str(payload.bank_mode or "UPI").strip().upper() if bank_amount > 0 else None
+        if bank_amount > 0 and bank_mode not in {"UPI", "NEFT", "RTGS", "IMPS"}:
             raise HTTPException(status_code=400, detail="bank_mode must be UPI, NEFT, RTGS, or IMPS")
         note = _normalize_text(payload.note) or f"Advance return to {party.name} (receipt #{receipt.id})"
-        refund = CustomerAdvanceRefund(receipt_id=int(receipt.id), party_id=int(party.id), book=book, amount=amount, refunded_at=refund_ts, note=note, bank_mode=bank_mode)
+        refund = CustomerAdvanceRefund(receipt_id=int(receipt.id), party_id=int(party.id), book=book, amount=amount, cash_amount=cash_amount, bank_amount=bank_amount, refunded_at=refund_ts, note=note, bank_mode=bank_mode)
         session.add(refund)
         session.flush()
-        if book == "CASH":
-            entry = CashbookEntry(created_at=refund_ts, entry_type="WITHDRAWAL", amount=amount, note=note, party_id=int(party.id))
+        if cash_amount > 0:
+            entry = CashbookEntry(created_at=refund_ts, entry_type="WITHDRAWAL", amount=cash_amount, note=note, party_id=int(party.id))
             session.add(entry); session.flush(); refund.cashbook_entry_id = int(entry.id)
-        else:
-            entry = BankbookEntry(created_at=refund_ts, entry_type="WITHDRAWAL", mode=bank_mode or "UPI", amount=amount, txn_charges=0, note=note, party_id=int(party.id))
+        if bank_amount > 0:
+            entry = BankbookEntry(created_at=refund_ts, entry_type="WITHDRAWAL", mode=bank_mode or "UPI", amount=bank_amount, txn_charges=0, note=note, party_id=int(party.id))
             session.add(entry); session.flush(); refund.bankbook_entry_id = int(entry.id)
         session.add(refund)
         _sync_party_receipt_unallocated(session, receipt)

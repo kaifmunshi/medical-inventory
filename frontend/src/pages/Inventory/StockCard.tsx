@@ -39,6 +39,7 @@ import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
 import { getBill, type Bill } from '../../services/billing'
+import { listExchangeRecords, undoExchange } from '../../services/returns'
 import { fetchCustomers } from '../../services/customers'
 import type { Customer } from '../../lib/types'
 import {
@@ -467,6 +468,20 @@ function canRemoveManualAdjustRow(row: any) {
   )
 }
 
+function exchangeIdForLedgerRow(row: any, exchanges: any[]) {
+  const reason = String(row?.reason || '').toUpperCase()
+  const refType = String(row?.ref_type || '').toUpperCase()
+  const refId = Number(row?.ref_id || 0)
+  if (!refId) return null
+  if (refType === 'EXCHANGE' && reason.startsWith('EXCHANGE_IN')) {
+    return Number(exchanges.find((entry) => Number(entry.return_id) === refId)?.id || 0) || null
+  }
+  if ((refType === 'EXCHANGE' && reason === 'EXCHANGE_OUT') || (refType === 'BILL' && reason === 'BILL_EDIT')) {
+    return Number(exchanges.find((entry) => Number(entry.new_bill_id) === refId)?.id || 0) || null
+  }
+  return null
+}
+
 export default function StockCardPage() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -670,6 +685,17 @@ export default function StockCardPage() {
         limit: 1000,
       }),
     enabled: !!groupQ.data?.batches?.length,
+  })
+
+  const exchangeRecordsQ = useQuery({
+    queryKey: ['stock-card-exchanges', from, to],
+    queryFn: () => listExchangeRecords({
+      from_date: from || undefined,
+      to_date: to || undefined,
+      limit: 1000,
+      offset: 0,
+    }),
+    enabled: !!name,
   })
 
   const productRows = useMemo(
@@ -1015,6 +1041,26 @@ export default function StockCardPage() {
     },
   })
 
+  const mUndoExchange = useMutation({
+    mutationFn: (exchangeId: number) => undoExchange(exchangeId),
+    onSuccess: (result) => {
+      setSelectedMovementId(null)
+      refreshLedgerAfterBillChange()
+      queryClient.invalidateQueries({ queryKey: ['stock-card-exchanges'] })
+      queryClient.invalidateQueries({ queryKey: ['exchange-history'] })
+      queryClient.invalidateQueries({ queryKey: ['customer-returns'] })
+      queryClient.invalidateQueries({ queryKey: ['bills'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      toast.push(`Exchange #${result.exchange_id} deleted; stock, bill, return and settlement effects were reversed`, 'success')
+    },
+    onError: (err: any) => {
+      const message = err?.response?.data?.detail || err?.message || 'Exchange could not be deleted'
+      toast.push(String(message), 'error')
+    },
+  })
+
   const mEditManualAdjust = useMutation({
     mutationFn: () => {
       if (!editAdjustRow?.id) throw new Error('Adjustment is missing')
@@ -1274,6 +1320,7 @@ export default function StockCardPage() {
                   const tone = movementTone(delta)
                   const removableOpening = canRemoveOpeningRow(row)
                   const removableManualAdjust = canRemoveManualAdjustRow(row)
+                  const linkedExchangeId = exchangeIdForLedgerRow(row, exchangeRecordsQ.data || [])
                   const rowUnit = movementUnitLabel(row, currentBatch?.stock_unit_label)
                   return (
                     <tr
@@ -1408,6 +1455,25 @@ export default function StockCardPage() {
                               </span>
                             </Tooltip>
                           </Stack>
+                        ) : linkedExchangeId ? (
+                          <Tooltip title={`Delete exchange #${linkedExchangeId} and reverse its bill, return, settlement, vouchers and stock movements`} arrow>
+                            <span>
+                              <IconButton
+                                size="small"
+                                color="error"
+                                disabled={mUndoExchange.isPending}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  const ok = window.confirm(
+                                    `Delete exchange #${linkedExchangeId}?\n\nThis will permanently remove its replacement bill and sales return, reverse customer settlement and vouchers, restore all affected batch stock, and remove all Exchange and BILL_EDIT rows belonging to it.\n\nThis cannot be undone.`
+                                  )
+                                  if (ok) mUndoExchange.mutate(linkedExchangeId)
+                                }}
+                              >
+                                <DeleteIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
                         ) : null}
                       </td>
                     </tr>

@@ -193,6 +193,11 @@ export async function getExchangeByReturn(returnId: number) {
   return data as any
 }
 
+export async function getExchangeByReplacementBill(billId: number) {
+  const { data } = await api.get(`/returns/exchange/by-bill/${billId}`)
+  return data as { id: number; return_id: number; new_bill_id: number; source_bill_id?: number | null }
+}
+
 export async function listExchangeRecords(params: {
   from_date?: string
   to_date?: string

@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional, Dict
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import select
 from datetime import datetime
 from backend.accounting import sync_bill_vouchers
@@ -1230,6 +1231,23 @@ def update_exchange_items(exchange_id: int, payload: ExchangeEditUpdate):
         return {"id": exchange.id, "return_id": ret.id, "new_bill_id": replacement_bill.id, "return_value": return_total, "replacement_total": bill_total, "net_due": net_due}
 
 
+@router.get("/exchange/by-bill/{bill_id}", response_model=dict)
+def get_exchange_by_replacement_bill(bill_id: int):
+    """Resolve a replacement bill to its exchange for stock-card actions."""
+    with get_session() as session:
+        exchange = session.exec(
+            select(ExchangeRecord).where(ExchangeRecord.new_bill_id == bill_id)
+        ).first()
+        if not exchange:
+            raise HTTPException(status_code=404, detail=f"Bill #{bill_id} is not an exchange replacement bill")
+        return {
+            "id": exchange.id,
+            "return_id": exchange.return_id,
+            "new_bill_id": exchange.new_bill_id,
+            "source_bill_id": exchange.source_bill_id,
+        }
+
+
 @router.delete("/exchange/{exchange_id}", response_model=dict)
 def undo_exchange(exchange_id: int):
     """Atomically reverse an exchange while preserving an audit trail."""
@@ -1259,13 +1277,36 @@ def undo_exchange(exchange_id: int):
             (int(m.ref_id or 0) == int(ret.id or 0) and str(m.reason).startswith("EXCHANGE_IN"))
             or (int(m.ref_id or 0) == int(replacement_bill.id or 0) and str(m.reason) == "EXCHANGE_OUT")
         )]
+        # Bill edits made after the exchange belong to the replacement bill's
+        # lifecycle. Reverse and remove them with the exchange so the stock
+        # card cannot retain orphan BILL_EDIT rows.
+        replacement_bill_movements = session.exec(select(StockMovement).where(
+            func.upper(func.coalesce(StockMovement.ref_type, "")) == "BILL",
+            StockMovement.ref_id == int(replacement_bill.id or 0),
+        )).all()
+        linked_movement_ids = {int(m.id or 0) for m in linked_movements}
+        linked_movements.extend(
+            movement for movement in replacement_bill_movements
+            if int(movement.id or 0) not in linked_movement_ids
+        )
+        reverse_delta_by_item: Dict[int, int] = {}
         for movement in linked_movements:
-            item = session.get(Item, int(movement.item_id or 0))
+            item_id = int(movement.item_id or 0)
+            item = session.get(Item, item_id)
             if not item:
                 raise HTTPException(status_code=409, detail=f"Stock item {movement.item_id} is missing")
-            reverse_delta = -int(movement.delta or 0)
+            reverse_delta_by_item[item_id] = reverse_delta_by_item.get(item_id, 0) - int(movement.delta or 0)
+        for item_id, reverse_delta in reverse_delta_by_item.items():
+            item = session.get(Item, item_id)
             if int(item.stock or 0) + reverse_delta < 0:
-                raise HTTPException(status_code=409, detail=f"Cannot undo: returned stock for {item.name} has already been used")
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Cannot delete exchange #{exchange_id}: reversing all linked movements would make "
+                        f"batch #{item.id} ({item.name}) negative by "
+                        f"{abs(int(item.stock or 0) + reverse_delta)} unit(s). Later stock usage must be reversed first."
+                    ),
+                )
 
         for movement in linked_movements:
             item = session.get(Item, int(movement.item_id or 0))
@@ -1283,6 +1324,21 @@ def undo_exchange(exchange_id: int):
         log_audit(session, entity_type="SALES_RETURN", entity_id=int(ret.id or 0),
                   action="UNDO_EXCHANGE", note=f"Undid exchange #{exchange.id}", details=before)
         mark_voucher_deleted(session, source_type="BILL", source_id=int(replacement_bill.id or 0))
+        replacement_payments = session.exec(
+            select(BillPayment).where(BillPayment.bill_id == int(replacement_bill.id or 0))
+        ).all()
+        for payment in replacement_payments:
+            # Active payments were rejected above. Remove deleted payment
+            # shells and receipt allocations so the deleted exchange bill
+            # leaves no orphan references.
+            for adjustment in session.exec(
+                select(ReceiptBillAdjustment).where(
+                    ReceiptBillAdjustment.bill_payment_id == int(payment.id or 0)
+                )
+            ).all():
+                session.delete(adjustment)
+            mark_voucher_deleted(session, source_type="BILL_PAYMENT", source_id=int(payment.id or 0))
+            session.delete(payment)
         for row in session.exec(select(ReturnItem).where(ReturnItem.return_id == int(ret.id or 0))).all():
             session.delete(row)
         for row in session.exec(select(BillItemAllocation).where(BillItemAllocation.bill_id == int(replacement_bill.id or 0))).all():

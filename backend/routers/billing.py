@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import re
 import math
+import json
 from pydantic import BaseModel
 from sqlmodel import select
 from sqlalchemy import or_, exists, func, cast
@@ -14,7 +15,7 @@ from backend.controls import assert_financial_year_unlocked, get_active_financia
 from backend.utils.archive_rules import apply_archive_rules
 from backend.db import get_session
 from backend.models import (
-    Item, Category, Bill, BillItem, BillPayment, Return, ExchangeRecord,
+    Item, Category, Bill, BillItem, BillPayment, Return, ExchangeRecord, AuditLog,
     BillCreate, BillOut, BillItemOut,
     AppUser, Customer, Party, PartyReceipt, ReceiptBillAdjustment, CustomerAdvanceRefund,
     StockMovement,  # ✅ NEW
@@ -1409,76 +1410,29 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
                 raise HTTPException(status_code=404, detail=f"Item {iid} not found")
             db_items[iid] = itm
 
-        requested_qty_by_group: Dict[str, int] = {}
-        seed_item_by_group: Dict[str, Item] = {}
-        unit_price_by_group: Dict[str, float] = {}
-        requested_line_total_by_group: Dict[str, float] = {}
+        # Bill edits must preserve the exact inventory batch/item selected by
+        # the user. The previous implementation grouped equal name/brand rows
+        # and reallocated them FEFO, so removing one duplicate-name batch could
+        # silently remove a different batch instead.
+        new_qty_by_item: Dict[int, int] = {}
+        line_price_by_item: Dict[int, float] = {}
+        requested_line_total_by_item: Dict[int, float] = {}
         for line in payload.items:
             qty = as_i(line.quantity)
             if qty <= 0:
                 raise HTTPException(status_code=400, detail="Quantity must be > 0")
-            seed = db_items.get(as_i(line.item_id))
-            if not seed:
+            item_id = as_i(line.item_id)
+            item = db_items.get(item_id)
+            if not item:
                 raise HTTPException(status_code=404, detail=f"Item {line.item_id} not found")
-            gk = _group_key(seed.name, getattr(seed, "brand", None), _stock_kind(seed))
-            requested_qty_by_group[gk] = requested_qty_by_group.get(gk, 0) + qty
-            seed_item_by_group[gk] = seed
-            custom_price = bill_line_unit_price(line, seed)
-            if gk not in unit_price_by_group:
-                unit_price_by_group[gk] = custom_price
+            new_qty_by_item[item_id] = new_qty_by_item.get(item_id, 0) + qty
+            line_price_by_item[item_id] = bill_line_unit_price(line, item)
             requested_line_total = getattr(line, "line_total", None)
             if requested_line_total is not None:
                 if as_f(requested_line_total) < 0:
                     raise HTTPException(status_code=400, detail="line_total cannot be negative")
-                requested_line_total_by_group[gk] = round2(
-                    requested_line_total_by_group.get(gk, 0.0) + as_f(requested_line_total)
-                )
-
-        new_qty_by_item: Dict[int, int] = {}
-        line_price_by_item: Dict[int, float] = {}
-        requested_line_total_by_item: Dict[int, float] = {}
-
-        for gk, requested_qty in requested_qty_by_group.items():
-            seed = seed_item_by_group[gk]
-            group_name = str(seed.name or "")
-            group_brand = str(getattr(seed, "brand", "") or "")
-
-            candidates = session.exec(
-                select(Item).where(
-                    func.lower(Item.name) == func.lower(group_name),
-                    func.lower(func.coalesce(Item.brand, "")) == func.lower(group_brand),
-                )
-            ).all()
-            seed_kind = _stock_kind(seed)
-            candidates = sorted([it for it in candidates if _stock_kind(it) == seed_kind], key=_expiry_sort_key)
-
-            remaining = as_i(requested_qty)
-            total_available = 0
-            for it in candidates:
-                iid = as_i(getattr(it, "id", 0))
-                avail = max(0, as_i(getattr(it, "stock", 0)) + old_qty_by_item.get(iid, 0))
-                total_available += avail
-                if remaining <= 0 or avail <= 0:
-                    continue
-                take = min(remaining, avail)
-                new_qty_by_item[iid] = new_qty_by_item.get(iid, 0) + as_i(take)
-                line_price_by_item[iid] = as_f(unit_price_by_group.get(gk, getattr(seed, "mrp", 0.0)))
-                if gk in requested_line_total_by_group:
-                    group_total = requested_line_total_by_group[gk]
-                    requested_line_total_by_item[iid] = round2(
-                        requested_line_total_by_item.get(iid, 0.0)
-                        + (group_total * take / requested_qty)
-                    )
-                db_items[iid] = it
-                remaining -= take
-
-            if remaining > 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Insufficient stock for {group_name} ({group_brand or 'no brand'}). "
-                        f"Requested={requested_qty}, available across batches={total_available}."
-                    ),
+                requested_line_total_by_item[item_id] = round2(
+                    requested_line_total_by_item.get(item_id, 0.0) + as_f(requested_line_total)
                 )
 
         touched_item_ids = set(old_qty_by_item.keys()) | set(new_qty_by_item.keys())
@@ -1786,6 +1740,79 @@ def update_bill(bill_id: int, payload: BillUpdateIn):
 
         items = session.exec(select(BillItem).where(BillItem.bill_id == b.id)).all()
         return bill_to_out(session, b)
+
+
+@router.post("/{bill_id}/undo-latest-edit", response_model=BillOut)
+def undo_latest_bill_edit(bill_id: int):
+    """Restore the exact state before the latest bill edit."""
+    require_min_role("MANAGER", context="Bill edit undo")
+    with get_session() as session:
+        bill = session.get(Bill, bill_id)
+        if not bill or is_deleted_bill(bill):
+            raise HTTPException(status_code=404, detail="Active bill not found")
+        audit = session.exec(
+            select(AuditLog)
+            .where(
+                AuditLog.entity_type == "BILL",
+                AuditLog.entity_id == bill_id,
+                AuditLog.action == "UPDATE",
+            )
+            .order_by(AuditLog.id.desc())
+        ).first()
+        if not audit or not audit.details_json:
+            raise HTTPException(status_code=400, detail=f"Bill #{bill_id} has no reversible edit history")
+        try:
+            details = json.loads(audit.details_json)
+            before = details["before"]
+            before_bill = before["bill"]
+            before_items = before["items"]
+        except (TypeError, ValueError, KeyError):
+            raise HTTPException(status_code=409, detail=f"Bill #{bill_id}'s latest edit history is incomplete and cannot be safely undone")
+        if not before_items:
+            raise HTTPException(status_code=409, detail="Cannot undo to a bill with no items")
+        payload = BillUpdateIn(
+            items=[
+                BillEditItemIn(
+                    item_id=as_i(row.get("item_id")),
+                    quantity=as_i(row.get("quantity")),
+                    custom_unit_price=round2(
+                        as_f(row.get("line_total")) / as_i(row.get("quantity"))
+                        if as_i(row.get("quantity")) > 0 else as_f(row.get("mrp"))
+                    ),
+                    line_total=round2(as_f(row.get("line_total"))),
+                )
+                for row in before_items
+            ],
+            discount_percent=as_f(before_bill.get("discount_percent")),
+            payment_mode=str(before_bill.get("payment_mode") or "credit"),
+            payment_cash=as_f(before_bill.get("payment_cash")),
+            payment_online=as_f(before_bill.get("payment_online")),
+            payment_credit=max(0.0, as_f(before_bill.get("total_amount")) - as_f(before_bill.get("payment_cash")) - as_f(before_bill.get("payment_online"))),
+            customer_id=bill.customer_id,
+            party_id=bill.party_id,
+            final_amount=as_f(before_bill.get("total_amount")),
+            date_time=bill.date_time,
+            notes=bill.notes,
+        )
+        audit_id = int(audit.id or 0)
+
+    restored = update_bill(bill_id, payload)
+    with get_session() as session:
+        original_audit = session.get(AuditLog, audit_id)
+        newest_audit = session.exec(
+            select(AuditLog)
+            .where(AuditLog.entity_type == "BILL", AuditLog.entity_id == bill_id, AuditLog.action == "UPDATE")
+            .order_by(AuditLog.id.desc())
+        ).first()
+        if original_audit:
+            original_audit.action = "UPDATE_UNDONE"
+            session.add(original_audit)
+        if newest_audit and int(newest_audit.id or 0) != audit_id:
+            newest_audit.action = "UNDO_UPDATE"
+            newest_audit.note = f"Undid latest edit on bill #{bill_id}"
+            session.add(newest_audit)
+        session.commit()
+    return restored
 
 
 @router.delete("/{bill_id}")

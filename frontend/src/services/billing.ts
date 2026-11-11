@@ -49,6 +49,11 @@ export async function updateBill(id: number, payload: BillUpdate) {
   return data as Bill
 }
 
+export async function undoLatestBillEdit(id: number) {
+  const { data } = await api.post(`/billing/${id}/undo-latest-edit`)
+  return data as Bill
+}
+
 export async function mapBillCustomer(id: number, payload: { customer_id?: number; party_id?: number; notes?: string }) {
   const { data } = await api.patch(`/billing/${id}/customer`, payload)
   return data as Bill

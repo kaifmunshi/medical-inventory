@@ -38,7 +38,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import BillEditDialog from '../../components/billing/BillEditDialog'
 import BillPaymentsPanel from '../../components/billing/BillPaymentsPanel'
-import { getBill, type Bill } from '../../services/billing'
+import { getBill, undoLatestBillEdit, type Bill } from '../../services/billing'
 import { listExchangeRecords, undoExchange } from '../../services/returns'
 import { fetchCustomers } from '../../services/customers'
 import type { Customer } from '../../lib/types'
@@ -332,7 +332,20 @@ function visibleStockCardRows(rows: any[]) {
     if (shouldHide) hiddenRowIds.add(Number(row?.id || 0))
     return !shouldHide
   }) : rows
-  const balanceAdjustedRows = adjustVisibleBalances(rows, correctionFilteredRows, hiddenRowIds)
+  const billEditNetByKey = new Map<string, number>()
+  correctionFilteredRows.forEach((row) => {
+    if (String(row?.reason || '').toUpperCase() !== 'BILL_EDIT' || String(row?.ref_type || '').toUpperCase() !== 'BILL') return
+    const key = `${Number(row.ref_id || 0)}:${Number(row.item_id || 0)}`
+    billEditNetByKey.set(key, Number(billEditNetByKey.get(key) || 0) + Number(row.delta || 0))
+  })
+  const billEditFilteredRows = correctionFilteredRows.filter((row) => {
+    if (String(row?.reason || '').toUpperCase() !== 'BILL_EDIT' || String(row?.ref_type || '').toUpperCase() !== 'BILL') return true
+    const key = `${Number(row.ref_id || 0)}:${Number(row.item_id || 0)}`
+    const shouldHide = Number(billEditNetByKey.get(key) || 0) === 0
+    if (shouldHide) hiddenRowIds.add(Number(row.id || 0))
+    return !shouldHide
+  })
+  const balanceAdjustedRows = adjustVisibleBalances(rows, billEditFilteredRows, hiddenRowIds)
 
   const purchaseLinks = balanceAdjustedRows.filter(
     (row) => String(row?.reason || '').toUpperCase() === 'PURCHASE_LINK'
@@ -1061,6 +1074,23 @@ export default function StockCardPage() {
     },
   })
 
+  const mUndoBillEdit = useMutation({
+    mutationFn: (billId: number) => undoLatestBillEdit(billId),
+    onSuccess: (updated) => {
+      setSelectedMovementId(null)
+      refreshLedgerAfterBillChange(updated)
+      queryClient.invalidateQueries({ queryKey: ['bills'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      toast.push(`Latest quantity edit on bill #${updated.id} was undone`, 'success')
+    },
+    onError: (err: any) => {
+      const message = err?.response?.data?.detail || err?.message || 'Bill edit could not be undone'
+      toast.push(String(message), 'error')
+    },
+  })
+
   const mEditManualAdjust = useMutation({
     mutationFn: () => {
       if (!editAdjustRow?.id) throw new Error('Adjustment is missing')
@@ -1261,6 +1291,13 @@ export default function StockCardPage() {
       )
     }
 
+    const latestBillEditMovementIdByBill = new Map<number, number>()
+    rows.forEach((row) => {
+      if (String(row?.reason || '').toUpperCase() !== 'BILL_EDIT' || String(row?.ref_type || '').toUpperCase() !== 'BILL') return
+      const billId = Number(row.ref_id || 0)
+      latestBillEditMovementIdByBill.set(billId, Math.max(Number(latestBillEditMovementIdByBill.get(billId) || 0), Number(row.id || 0)))
+    })
+
     return (
       <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: 'hidden' }}>
         <Box
@@ -1321,6 +1358,11 @@ export default function StockCardPage() {
                   const removableOpening = canRemoveOpeningRow(row)
                   const removableManualAdjust = canRemoveManualAdjustRow(row)
                   const linkedExchangeId = exchangeIdForLedgerRow(row, exchangeRecordsQ.data || [])
+                  const billEditId = String(row?.reason || '').toUpperCase() === 'BILL_EDIT'
+                    && String(row?.ref_type || '').toUpperCase() === 'BILL'
+                    && Number(latestBillEditMovementIdByBill.get(Number(row.ref_id || 0)) || 0) === Number(row.id || 0)
+                    ? Number(row.ref_id || 0)
+                    : null
                   const rowUnit = movementUnitLabel(row, currentBatch?.stock_unit_label)
                   return (
                     <tr
@@ -1468,6 +1510,25 @@ export default function StockCardPage() {
                                     `Delete exchange #${linkedExchangeId}?\n\nThis will permanently remove its replacement bill and sales return, reverse customer settlement and vouchers, restore all affected batch stock, and remove all Exchange and BILL_EDIT rows belonging to it.\n\nThis cannot be undone.`
                                   )
                                   if (ok) mUndoExchange.mutate(linkedExchangeId)
+                                }}
+                              >
+                                <DeleteIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        ) : billEditId ? (
+                          <Tooltip title={`Undo the latest quantity edit on bill #${billEditId}`} arrow>
+                            <span>
+                              <IconButton
+                                size="small"
+                                color="error"
+                                disabled={mUndoBillEdit.isPending}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  const ok = window.confirm(
+                                    `Undo the latest quantity edit on bill #${billEditId}?\n\nThe previous bill items, totals, exact batch stock and accounting values will be restored. The correction rows will be removed from the visible Stock Card after they balance to zero.`
+                                  )
+                                  if (ok) mUndoBillEdit.mutate(billEditId)
                                 }}
                               >
                                 <DeleteIcon fontSize="small" />

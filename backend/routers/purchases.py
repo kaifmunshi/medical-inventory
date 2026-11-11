@@ -1004,19 +1004,88 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
             raise HTTPException(status_code=400, detail="GST percent must be between 0 and 100")
 
         old_qty = purchase_item_total_qty(item)
+        old_product_id = int(item.product_id or 0)
+        old_product_name = item.product_name
         delta = int(new_qty - old_qty)
         identity_changed = _purchase_line_identity_changed(raw, item)
         old_expiry = clean_date(item.expiry_date)
         new_expiry = require_expiry_date(raw.expiry_date, context=raw.product_name or "Purchase item")
         rack_number = int(raw.rack_number if raw.rack_number is not None else item.rack_number or 0)
 
+        replacement_product = None
         if identity_changed:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Purchase item #{item.id} cannot change product/batch identity here. "
-                    "Only expiry, rack, qty, free, rate, MRP, discount, and rounding can be edited in place."
-                ),
+            # A product entered under the wrong name can be corrected after a
+            # sale/return cycle, but only when the complete purchased batch is
+            # back and none of it is sitting in opened/loose stock. Bill and
+            # return rows keep their own name snapshots, so their history is
+            # not rewritten by correcting the live inventory batch.
+            child_lots = session.exec(
+                select(InventoryLot).where(InventoryLot.opened_from_lot_id == int(lot.id or 0))
+            ).all()
+            identity_blockers: List[str] = []
+            current_inventory_qty = int(inventory_item.stock or 0)
+            current_lot_sealed_qty = int(lot.sealed_qty or 0)
+            current_lot_loose_qty = int(lot.loose_qty or 0)
+            if stock_source != STOCK_SOURCE_CREATED:
+                identity_blockers.append(
+                    "this purchase row is linked to pre-existing inventory rather than a batch created by this purchase"
+                )
+            if current_inventory_qty != old_qty:
+                difference = old_qty - current_inventory_qty
+                if difference > 0:
+                    identity_blockers.append(
+                        f"{difference} unit(s) are still sold, returned to another batch, or otherwise missing "
+                        f"(inventory batch #{inventory_item.id} has {current_inventory_qty}; the purchase added {old_qty})"
+                    )
+                else:
+                    identity_blockers.append(
+                        f"inventory batch #{inventory_item.id} has {abs(difference)} extra unit(s) "
+                        f"({current_inventory_qty} in stock versus {old_qty} added by this purchase)"
+                    )
+            if current_lot_sealed_qty != old_qty:
+                identity_blockers.append(
+                    f"lot #{lot.id} has {current_lot_sealed_qty} sealed unit(s), but all {old_qty} purchased unit(s) must be sealed in this lot"
+                )
+            if current_lot_loose_qty:
+                identity_blockers.append(
+                    f"lot #{lot.id} still contains {current_lot_loose_qty} loose unit(s)"
+                )
+            nonempty_child_lots = [
+                child for child in child_lots
+                if int(child.sealed_qty or 0) != 0 or int(child.loose_qty or 0) != 0
+            ]
+            if nonempty_child_lots:
+                identity_blockers.append(
+                    "opened child lot stock remains: "
+                    + ", ".join(
+                        f"lot #{child.id} ({int(child.sealed_qty or 0)} sealed, {int(child.loose_qty or 0)} loose)"
+                        for child in nonempty_child_lots
+                    )
+                )
+            if identity_blockers:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Cannot correct purchase item #{item.id} from '{old_product_name}' to "
+                        f"'{clean_text(raw.product_name) or 'an unnamed product'}'. "
+                        + "Blocked because " + "; ".join(identity_blockers) + ". "
+                        + f"Return all {old_qty} unit(s) to inventory batch #{inventory_item.id} / lot #{lot.id}, "
+                        "close any opened loose stock, then try again. The completed sale and exchange records do not need to be deleted."
+                    ),
+                )
+            replacement_product = ensure_product(
+                session,
+                product_id=raw.product_id,
+                product_name=raw.product_name,
+                alias=raw.alias,
+                brand=raw.brand,
+                category_id=raw.category_id,
+                rack_number=raw.rack_number,
+                loose_sale_enabled=raw.loose_sale_enabled,
+                parent_unit_name=raw.parent_unit_name,
+                child_unit_name=raw.child_unit_name,
+                conversion_qty=raw.conversion_qty,
+                printed_price=raw.mrp,
             )
 
         stock_delta = delta if stock_source == STOCK_SOURCE_CREATED else 0
@@ -1060,6 +1129,11 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         inventory_item.rack_number = rack_number
         inventory_item.cost_price = effective_cost
         inventory_item.mrp = round2(raw.mrp)
+        if replacement_product is not None:
+            inventory_item.product_id = replacement_product.id
+            inventory_item.name = replacement_product.name
+            inventory_item.brand = replacement_product.brand
+            inventory_item.category_id = replacement_product.category_id
         inventory_item.updated_at = ts
         session.add(inventory_item)
 
@@ -1067,6 +1141,17 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         lot.rack_number = rack_number
         lot.cost_price = effective_cost
         lot.mrp = round2(raw.mrp)
+        if replacement_product is not None:
+            lot.product_id = int(replacement_product.id)
+            lot.conversion_qty = replacement_product.default_conversion_qty
+            # Empty child lots are historical shells, but leaving them on the
+            # old product would make lot reports internally inconsistent.
+            # Non-empty children were rejected above.
+            for child_lot in child_lots:
+                child_lot.product_id = int(replacement_product.id)
+                child_lot.conversion_qty = replacement_product.default_conversion_qty
+                child_lot.updated_at = ts
+                session.add(child_lot)
         lot.updated_at = ts
         session.add(lot)
         sync_open_loose_prices_from_parent_lot(session, lot, ts=ts)
@@ -1117,6 +1202,17 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
         item.discount_amount = line_discount
         item.rounding_adjustment = line_rounding
         item.line_total = line_total
+        if replacement_product is not None:
+            item.product_id = int(replacement_product.id)
+            item.product_name = replacement_product.name
+            item.brand = replacement_product.brand
+            changed_lines.append({
+                "purchase_item_id": int(item.id),
+                "old_product_id": old_product_id,
+                "old_product_name": old_product_name,
+                "new_product_id": int(replacement_product.id),
+                "new_product_name": replacement_product.name,
+            })
         session.add(item)
         if old_expiry != new_expiry:
             changed_lines.append({"purchase_item_id": int(item.id), "old_expiry": old_expiry, "new_expiry": new_expiry})

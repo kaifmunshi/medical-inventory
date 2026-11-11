@@ -3169,7 +3169,7 @@ export default function PurchasesPage() {
           <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ md: 'center' }} gap={1}>
             <Box>
               <Typography variant="h6">Edit Purchase Items</Typography>
-              <Typography variant="body2" color="text.secondary">Expiry, quantity, rate, discount, and rounding can be adjusted while stock stays non-negative.</Typography>
+              <Typography variant="body2" color="text.secondary">To correct a product, every purchased unit must be back in this exact sealed batch and no opened/loose stock may remain. If saving is blocked, the error will identify the missing quantity and affected batch or lot.</Typography>
             </Box>
             <Stack direction="row" gap={1} alignItems="center">
               <Button variant="outlined" onClick={() => setEditItemsOpen(false)}>Back to Purchase</Button>

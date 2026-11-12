@@ -657,21 +657,32 @@ export default function SupplierLedgerPage() {
     () => round2(Object.values(allocationDrafts).reduce((sum, value) => sum + Number(value || 0), 0)),
     [allocationDrafts],
   )
-  const paymentUsesAmountField = Boolean(editingPayment) || paymentWithoutBill
+  const paymentShowsAllocations = !editingPayment && !paymentWithoutBill
+  const paymentUsesAmountField = Boolean(editingPayment) || paymentWithoutBill || paymentType === 'payment'
   const supplierPaymentBaseTotal = paymentUsesAmountField ? round2(Number(paymentAmount || 0)) : allocationTotal
+  const paymentAllocationDifference = round2(supplierPaymentBaseTotal - allocationTotal)
+  const activeAllocationCount = Object.values(allocationDrafts).filter((value) => Number(value || 0) > 0).length
   const allocationIssueByPurchaseId = useMemo(() => {
     const issues: Record<number, string> = {}
     for (const [purchaseId, value] of Object.entries(allocationDrafts)) {
       const id = Number(purchaseId)
       const amount = Number(value || 0)
+      const purchase = purchases.find((row) => Number(row.id) === id)
       if (Number.isNaN(amount)) {
         issues[id] = 'Invalid amount'
       } else if (amount < 0) {
         issues[id] = 'Cannot be negative'
+      } else if (
+        amount > 0 &&
+        activeAllocationCount > 1 &&
+        purchase &&
+        amount > outstandingOf(purchase) + 0.01
+      ) {
+        issues[id] = 'Cannot exceed outstanding in a bulk allocation'
       }
     }
     return issues
-  }, [allocationDrafts, purchases])
+  }, [activeAllocationCount, allocationDrafts, purchases])
   const hasAllocationIssues = Object.keys(allocationIssueByPurchaseId).length > 0
   const supplierPaymentCash =
     paymentType !== 'payment' || paymentMode === 'online'
@@ -705,7 +716,8 @@ export default function SupplierLedgerPage() {
   const canSavePayment =
     Boolean(partyId) &&
     supplierPaymentBaseTotal > 0 &&
-    (paymentUsesAmountField || !hasAllocationIssues) &&
+    (!paymentShowsAllocations || !hasAllocationIssues) &&
+    (!paymentShowsAllocations || paymentType !== 'payment' || Math.abs(paymentAllocationDifference) <= 0.01) &&
     !splitPaymentInvalid &&
     !bankChargeInvalid &&
     (paymentType !== 'payment' || Math.abs(allocationDifference) <= 0.01) &&
@@ -1089,14 +1101,32 @@ export default function SupplierLedgerPage() {
   }
 
   function applyFullOutstanding(purchase: Purchase) {
-    const amount = money(outstandingOf(purchase))
+    const purchaseId = Number(purchase.id)
+    const usedElsewhere = Object.entries(allocationDrafts).reduce(
+      (sum, [id, value]) => Number(id) === purchaseId ? sum : sum + Number(value || 0),
+      0,
+    )
+    const available = paymentType === 'payment'
+      ? Math.max(0, supplierPaymentBaseTotal - usedElsewhere)
+      : outstandingOf(purchase)
+    const amount = money(Math.min(outstandingOf(purchase), available))
     setPaymentWithoutBill(false)
-    setPaymentAmount(amount)
-    setAllocationDrafts((prev) => ({ ...prev, [Number(purchase.id)]: amount }))
-    if (paymentType !== 'writeoff') {
-      if (paymentMode === 'online') setPaymentOnline(amount)
-      else setPaymentCash(amount)
+    setAllocationDrafts((prev) => ({ ...prev, [purchaseId]: amount }))
+  }
+
+  function fillPaymentAllocations() {
+    let remaining = supplierPaymentBaseTotal
+    const next: Record<number, string> = {}
+    for (const purchase of paymentAllocationPurchases) {
+      const amount = Math.min(outstandingOf(purchase), Math.max(0, remaining))
+      next[Number(purchase.id)] = money(amount)
+      remaining = round2(Math.max(0, remaining - amount))
     }
+    setAllocationDrafts(next)
+  }
+
+  function clearPaymentAllocations() {
+    setAllocationDrafts(Object.fromEntries(paymentAllocationPurchases.map((purchase) => [Number(purchase.id), '0'])))
   }
 
   function supplierNameFor(id: number) {
@@ -2077,6 +2107,9 @@ export default function SupplierLedgerPage() {
 	                    setPaymentWithoutBill(false)
 	                  } else {
 	                    setPaymentMode('cash')
+	                    if (!editingPayment && !paymentWithoutBill) {
+	                      setPaymentAmount(money(allocationTotal))
+	                    }
 	                  }
 	                }}
 	                fullWidth
@@ -2148,11 +2181,28 @@ export default function SupplierLedgerPage() {
                 value={paymentAmount}
                 onChange={(e) => setPaymentAmount(e.target.value)}
                 inputProps={{ min: 0, step: '0.01' }}
+                helperText={paymentShowsAllocations && paymentType === 'payment'
+                  ? 'Enter the full amount paid, then allocate the same total across purchase bills.'
+                  : undefined}
                 fullWidth
               />
-            ) : (
+            ) : null}
+
+            {paymentShowsAllocations ? (
               <>
-                <Typography variant="h6">Purchase Allocations</Typography>
+                <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} justifyContent="space-between" alignItems={{ sm: 'center' }}>
+                  <Typography variant="h6">Purchase Allocations</Typography>
+                  <Stack direction="row" gap={1}>
+                    {paymentType === 'payment' ? (
+                      <Button variant="outlined" onClick={fillPaymentAllocations} disabled={supplierPaymentBaseTotal <= 0 || paymentAllocationPurchases.length === 0}>
+                        Auto Fill
+                      </Button>
+                    ) : null}
+                    <Button variant="outlined" color="inherit" onClick={clearPaymentAllocations} disabled={paymentAllocationPurchases.length === 0}>
+                      Clear
+                    </Button>
+                  </Stack>
+                </Stack>
                 <Box sx={{ overflowX: 'auto' }}>
                   <table className="table">
                     <thead>
@@ -2219,7 +2269,7 @@ export default function SupplierLedgerPage() {
                   </table>
                 </Box>
               </>
-            )}
+            ) : null}
 
             {paymentType === 'payment' && paymentMode === 'split' ? (
               <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
@@ -2280,6 +2330,12 @@ export default function SupplierLedgerPage() {
 
 		            <Stack direction={{ xs: 'column', md: 'row' }} gap={3}>
 		              <Typography>{paymentUsesAmountField ? 'Payment Amount' : 'Applied Total'}: {money(supplierPaymentBaseTotal)}</Typography>
+		              {paymentShowsAllocations ? <Typography>Applied to Bills: {money(allocationTotal)}</Typography> : null}
+		              {paymentShowsAllocations && paymentType === 'payment' ? (
+		                <Typography fontWeight={700} color={Math.abs(paymentAllocationDifference) <= 0.01 ? 'text.primary' : 'warning.main'}>
+		                  Remaining to Allocate: {money(paymentAllocationDifference)}
+		                </Typography>
+		              ) : null}
 	              {paymentType === 'payment' ? (
 	                <>
 	                  <Typography>Cash: {money(supplierPaymentCash)}</Typography>

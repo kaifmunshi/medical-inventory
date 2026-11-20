@@ -87,9 +87,10 @@ export async function createPartyReceipt(
     payment_date?: string
     allow_cross_customer?: boolean
     adjustments: Array<{ bill_id: number; amount: number }>
+    loan_adjustments?: Array<{ loan_book: 'CASH' | 'BANK' | 'OPENING'; loan_entry_id: number; amount: number }>
   },
-): Promise<PartyReceipt> {
-  const res = await api.post<PartyReceipt>(`/parties/${partyId}/receipts`, payload)
+): Promise<PartyReceipt | null> {
+  const res = await api.post<PartyReceipt | null>(`/parties/${partyId}/receipts`, payload)
   return res.data
 }
 

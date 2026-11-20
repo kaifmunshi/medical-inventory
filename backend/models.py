@@ -1561,6 +1561,12 @@ class ReceiptAdjustmentIn(SQLModel):
     amount: float
 
 
+class ReceiptLoanAdjustmentIn(SQLModel):
+    loan_book: str
+    loan_entry_id: int
+    amount: float
+
+
 class PartyReceiptCreate(SQLModel):
     mode: str
     cash_amount: float = 0.0
@@ -1569,6 +1575,7 @@ class PartyReceiptCreate(SQLModel):
     payment_date: Optional[str] = None
     allow_cross_customer: bool = False
     adjustments: List[ReceiptAdjustmentIn] = Field(default_factory=list)
+    loan_adjustments: List[ReceiptLoanAdjustmentIn] = Field(default_factory=list)
 
 
 class PartyReceiptApply(SQLModel):

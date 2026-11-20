@@ -328,10 +328,10 @@ type ReceiptHistoryRow = {
   exchangeId?: number | null
 }
 
-export function customerClosingBalance(openingBalance: number, outstandingBills: number, unallocatedAdvance: number) {
+export function customerClosingBalance(openingBalance: number, outstandingBills: number, unallocatedAdvance: number, outstandingLoans = 0) {
   // Applied receipts are already included in each bill's outstanding amount.
   // Subtracting total receipts here would count applied payments twice.
-  return round2(openingBalance + outstandingBills - unallocatedAdvance)
+  return round2(openingBalance + outstandingBills + outstandingLoans - unallocatedAdvance)
 }
 
 export default function CustomerLedgerPage() {
@@ -355,6 +355,7 @@ export default function CustomerLedgerPage() {
   const [paymentDate, setPaymentDate] = useState(today)
   const [note, setNote] = useState('')
   const [adjustmentDrafts, setAdjustmentDrafts] = useState<Record<number, string>>({})
+  const [loanAdjustmentDrafts, setLoanAdjustmentDrafts] = useState<Record<string, string>>({})
   const [otherReceiptPartyId, setOtherReceiptPartyId] = useState('')
   const [billOpen, setBillOpen] = useState(false)
   const [billLoading, setBillLoading] = useState(false)
@@ -586,6 +587,7 @@ export default function CustomerLedgerPage() {
         payment_date?: string
         allow_cross_customer?: boolean
         adjustments: Array<{ bill_id: number; amount: number }>
+        loan_adjustments: Array<{ loan_book: 'CASH' | 'BANK' | 'OPENING'; loan_entry_id: number; amount: number }>
       }
     }) => createPartyReceipt(partyId, payload),
     onSuccess: () => {
@@ -599,6 +601,7 @@ export default function CustomerLedgerPage() {
       setPaymentDate(today)
       setNote('')
       setAdjustmentDrafts({})
+      setLoanAdjustmentDrafts({})
       setOtherReceiptPartyId('')
     },
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to record receipt'), 'error'),
@@ -725,11 +728,15 @@ export default function CustomerLedgerPage() {
   const receipts = receiptsQ.data || []
   const adjustments = receiptAdjustmentsQ.data || []
   const totalOutstanding = ledgerRows.reduce((sum, row) => sum + Number(row.outstanding_amount || 0), 0)
+  const totalLoanOutstanding = (loansQ.data || []).reduce((sum, loan) => sum + Number(loan.outstanding_amount || 0), 0)
   const totalReturnCredit = returnRows.reduce((sum, row) => sum + Number(row.credit_amount || 0), 0)
   const totalReturnRefund = returnRows.reduce((sum, row) => sum + Number(row.refund_cash || 0) + Number(row.refund_online || 0), 0)
   const totalExchangePaid = exchangeRows.reduce((sum, row) => sum + Number(row.exchange_payment_cash || 0) + Number(row.exchange_payment_online || 0), 0)
   const totalExchangeRefunded = exchangeRows.reduce((sum, row) => sum + Number(row.exchange_refund_cash || 0) + Number(row.exchange_refund_online || 0), 0)
   const adjustmentTotal = Object.values(adjustmentDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
+  const openLoans = (loansQ.data || []).filter((loan) => Number(loan.outstanding_amount || 0) > 0.009)
+  const loanAdjustmentTotal = Object.values(loanAdjustmentDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
+  const totalAppliedNow = adjustmentTotal + loanAdjustmentTotal
   const receiptTotal = Number(receiptAmount || 0)
   const receiptCashAmount = mode === 'cash' ? receiptTotal : mode === 'online' ? 0 : Number(cashAmount || 0)
   const receiptOnlineAmount = mode === 'online' ? receiptTotal : mode === 'cash' ? 0 : Number(onlineAmount || 0)
@@ -738,7 +745,7 @@ export default function CustomerLedgerPage() {
   const editReceiptOnlineAmount = editReceiptMode === 'online' ? editReceiptTotal : editReceiptMode === 'cash' ? 0 : Number(editReceiptOnline || 0)
   const editReceiptApplied = Object.values(editAdjustmentDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
   const editReceiptAdvance = Math.max(0, editReceiptTotal - editReceiptApplied)
-  const onAccountAmount = Math.max(0, receiptTotal - adjustmentTotal)
+  const onAccountAmount = Math.max(0, receiptTotal - totalAppliedNow)
   const applyAvailable = Number(applyTarget?.onAccount || 0)
   const applyAdjustmentTotal = Object.values(applyDrafts).reduce((sum, value) => sum + Number(value || 0), 0)
   const applyRemaining = Math.max(0, applyAvailable - applyAdjustmentTotal)
@@ -884,7 +891,7 @@ export default function CustomerLedgerPage() {
   const exchangeCreditAvailable = activeReceiptHistory.filter((row) => row.mode === 'credit').reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
   const receiptHistoryOnAccountTotal = activeReceiptHistory.reduce((sum, row) => sum + Number(row.onAccount || 0), 0)
   const openingBalance = signedPartyOpening(selectedParty)
-  const closingBalance = customerClosingBalance(openingBalance, totalOutstanding, receiptHistoryOnAccountTotal)
+  const closingBalance = customerClosingBalance(openingBalance, totalOutstanding, receiptHistoryOnAccountTotal, totalLoanOutstanding)
   const actualRefundableAdvance = round2(Math.max(0, -closingBalance))
   const refundableForReceipt = (row: ReceiptHistoryRow | null | undefined) => round2(
     row?.mode === 'credit'
@@ -985,6 +992,7 @@ export default function CustomerLedgerPage() {
     setAdjustmentDrafts(
       Object.fromEntries(openBills.map((bill) => [Number(bill.bill_id), '0'])),
     )
+    setLoanAdjustmentDrafts(Object.fromEntries(openLoans.map((loan) => [`${loan.loan_book}:${loan.loan_entry_id}`, '0'])))
     setMode('cash')
     setReceiptAmount('0')
     setCashAmount('0')
@@ -999,6 +1007,7 @@ export default function CustomerLedgerPage() {
     const billId = Number(bill.bill_id)
     const pending = round2(Number(bill.outstanding_amount || 0))
     setAdjustmentDrafts(Object.fromEntries(openBills.map((row) => [Number(row.bill_id), Number(row.bill_id) === billId ? money(pending) : '0'])))
+    setLoanAdjustmentDrafts(Object.fromEntries(openLoans.map((loan) => [`${loan.loan_book}:${loan.loan_entry_id}`, '0'])))
     setMode('cash')
     setReceiptAmount(money(pending))
     setCashAmount(money(pending))
@@ -1127,12 +1136,20 @@ export default function CustomerLedgerPage() {
       remaining = Math.max(0, remaining - amount)
     }
     setAdjustmentDrafts(next)
+    const nextLoans: Record<string, string> = {}
+    for (const loan of openLoans) {
+      const amount = Math.min(Number(loan.outstanding_amount || 0), Math.max(0, remaining))
+      nextLoans[`${loan.loan_book}:${loan.loan_entry_id}`] = amount > 0 ? money(amount) : '0'
+      remaining = Math.max(0, remaining - amount)
+    }
+    setLoanAdjustmentDrafts(nextLoans)
   }
 
   function clearReceiptAdjustments() {
     setAdjustmentDrafts(
       Object.fromEntries(receiptEntryBills.map((bill) => [Number(bill.bill_id), '0'])),
     )
+    setLoanAdjustmentDrafts(Object.fromEntries(openLoans.map((loan) => [`${loan.loan_book}:${loan.loan_entry_id}`, '0'])))
   }
 
   function openApplyAdvance(row: ReceiptHistoryRow, targetBillId: number | null = null) {
@@ -1233,6 +1250,7 @@ export default function CustomerLedgerPage() {
     queryClient.invalidateQueries({ queryKey: ['customer-receipts'] })
     queryClient.invalidateQueries({ queryKey: ['customer-receipt-adjustments'] })
     queryClient.invalidateQueries({ queryKey: ['customer-ledger-bill-payments'] })
+    queryClient.invalidateQueries({ queryKey: ['customer-ledger-loans'] })
     queryClient.invalidateQueries({ queryKey: ['bill-payments-panel'] })
     queryClient.invalidateQueries({ queryKey: ['credit-bills'] })
     queryClient.invalidateQueries({ queryKey: ['cashbook-day'] })
@@ -1283,7 +1301,11 @@ export default function CustomerLedgerPage() {
       toast.push('Receipt amount must be greater than 0', 'warning')
       return
     }
-    if (!confirmAdvance && adjustmentTotal > 0.0001 && onAccountAmount > 0.0001) {
+    if (totalAppliedNow > receiptTotal + 0.0001) {
+      toast.push('Bill and loan adjustments cannot exceed the receipt total', 'warning')
+      return
+    }
+    if (!confirmAdvance && totalAppliedNow > 0.0001 && onAccountAmount > 0.0001) {
       setReceiptAdvanceConfirmOpen(true)
       return
     }
@@ -1303,6 +1325,9 @@ export default function CustomerLedgerPage() {
             amount: Number(adjustmentDrafts[Number(bill.bill_id)] || 0),
           }))
           .filter((adj) => adj.amount > 0),
+        loan_adjustments: openLoans
+          .map((loan) => ({ loan_book: loan.loan_book, loan_entry_id: loan.loan_entry_id, amount: Number(loanAdjustmentDrafts[`${loan.loan_book}:${loan.loan_entry_id}`] || 0) }))
+          .filter((row) => row.amount > 0),
       },
     })
   }
@@ -1508,7 +1533,7 @@ export default function CustomerLedgerPage() {
                 { label: 'Receipts', value: `Rs ${money(receiptHistoryTotal)}`, color: 'success.main' },
                 { label: 'Returns', value: `Rs ${money(totalReturnCredit + totalReturnRefund)}`, color: 'warning.main' },
                 { label: 'Open Bills', value: String(openBills.length), color: 'primary.main' },
-                { label: 'Loan Due', value: `Rs ${money((loansQ.data || []).reduce((sum, loan) => sum + Number(loan.outstanding_amount || 0), 0))}`, color: 'error.main' },
+                { label: 'Loan Due', value: `Rs ${money(totalLoanOutstanding)}`, color: totalLoanOutstanding > 0 ? 'error.main' : 'success.main' },
               ].map((item) => (
                 <Box key={item.label}>
                   <Typography variant="caption" color="text.secondary" fontWeight={800}>
@@ -2157,7 +2182,7 @@ export default function CustomerLedgerPage() {
                 type="number"
                 value={receiptAmount}
                 onChange={(e) => handleReceiptAmountChange(e.target.value)}
-                helperText="Enter full received amount. Apply only what should go against bills."
+                helperText="Enter the full amount received, then allocate it across bills and pending loans."
                 fullWidth
               />
               <TextField
@@ -2213,12 +2238,12 @@ export default function CustomerLedgerPage() {
             </TextField>
 
             <Stack direction={{ xs: 'column', md: 'row' }} gap={1} justifyContent="space-between" alignItems={{ md: 'center' }}>
-              <Typography variant="h6">Bill Adjustments</Typography>
+              <Typography variant="h6">Outstanding Bills</Typography>
               <Stack direction="row" gap={1}>
-                <Button variant="outlined" onClick={fillAdjustmentsFromReceipt} disabled={receiptTotal <= 0 || receiptEntryBills.length === 0}>
+                <Button variant="outlined" onClick={fillAdjustmentsFromReceipt} disabled={receiptTotal <= 0 || (receiptEntryBills.length === 0 && openLoans.length === 0)}>
                   Auto Fill
                 </Button>
-                <Button variant="outlined" color="inherit" onClick={clearReceiptAdjustments} disabled={receiptEntryBills.length === 0}>
+                <Button variant="outlined" color="inherit" onClick={clearReceiptAdjustments} disabled={receiptEntryBills.length === 0 && openLoans.length === 0}>
                   Clear
                 </Button>
               </Stack>
@@ -2240,7 +2265,7 @@ export default function CustomerLedgerPage() {
                     const billDate = formatLedgerDateTime(bill.bill_date)
                     const usedElsewhere = Object.entries(adjustmentDrafts).reduce((sum, [id, value]) => {
                       return Number(id) === billId ? sum : sum + Number(value || 0)
-                    }, 0)
+                    }, loanAdjustmentTotal)
                     const remainingForThis = Math.max(0, receiptTotal - usedElsewhere)
                     return (
                     <tr key={bill.bill_id}>
@@ -2286,6 +2311,67 @@ export default function CustomerLedgerPage() {
                 </tbody>
               </table>
             </Box>
+
+            <Divider />
+            <Typography variant="h6">Pending Loans</Typography>
+            <Box sx={{ overflowX: 'auto' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Loan</th>
+                    <th>Date</th>
+                    <th>Original Amount</th>
+                    <th>Outstanding</th>
+                    <th>Remaining Receipt</th>
+                    <th>Receive Now</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openLoans.map((loan) => {
+                    const key = `${loan.loan_book}:${loan.loan_entry_id}`
+                    const usedElsewhere = adjustmentTotal + Object.entries(loanAdjustmentDrafts).reduce(
+                      (sum, [otherKey, value]) => otherKey === key ? sum : sum + Number(value || 0),
+                      0,
+                    )
+                    const remainingForThis = Math.max(0, receiptTotal - usedElsewhere)
+                    return (
+                      <tr key={key}>
+                        <td style={{ textAlign: 'left', minWidth: 170 }}>
+                          <Stack gap={0.25} alignItems="flex-start">
+                            <Typography fontWeight={800}>Loan #{loan.loan_entry_id}</Typography>
+                            <Typography variant="caption" color="text.secondary">{loan.loan_book} book{loan.note ? ` · ${loan.note}` : ''}</Typography>
+                          </Stack>
+                        </td>
+                        <td>{String(loan.loan_date || '').slice(0, 10) || '-'}</td>
+                        <td><Typography fontWeight={700}>Rs {money(loan.principal_amount)}</Typography></td>
+                        <td><Typography fontWeight={800} color="error.main">Rs {money(loan.outstanding_amount)}</Typography></td>
+                        <td>Rs {money(remainingForThis)}</td>
+                        <td>
+                          <TextField
+                            type="number"
+                            value={loanAdjustmentDrafts[key] ?? '0'}
+                            onChange={(e) => setLoanAdjustmentDrafts((prev) => ({ ...prev, [key]: normalizeAmountInput(e.target.value) }))}
+                            onFocus={() => {
+                              if (Number(loanAdjustmentDrafts[key] || 0) > 0 || remainingForThis <= 0) return
+                              setLoanAdjustmentDrafts((prev) => ({ ...prev, [key]: money(Math.min(Number(loan.outstanding_amount || 0), remainingForThis)) }))
+                            }}
+                            onBlur={(e) => {
+                              const value = Math.max(0, Math.min(Number(e.currentTarget.value || 0), Number(loan.outstanding_amount || 0), remainingForThis))
+                              setLoanAdjustmentDrafts((prev) => ({ ...prev, [key]: money(value) }))
+                            }}
+                            helperText="Focus to fill"
+                            sx={{ width: 150 }}
+                          />
+                        </td>
+                      </tr>
+                    )
+                  })}
+                  {openLoans.length === 0 && (
+                    <tr><td colSpan={6}><Box p={2} color="text.secondary">No pending loans for this customer.</Box></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </Box>
           </Stack>
         </DialogContent>
         <DialogActions
@@ -2307,6 +2393,9 @@ export default function CustomerLedgerPage() {
             </Typography>
             <Typography variant="body2">
               Applied to Bills: <Box component="span" sx={{ fontWeight: 900, color: 'warning.dark' }}>{money(adjustmentTotal)}</Box>
+            </Typography>
+            <Typography variant="body2">
+              Applied to Loans: <Box component="span" sx={{ fontWeight: 900, color: 'warning.dark' }}>{money(loanAdjustmentTotal)}</Box>
             </Typography>
             <Typography variant="body2">
               Advance / On Account: <Box component="span" sx={{ fontWeight: 900, color: 'error.dark' }}>{money(onAccountAmount)}</Box>

@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy import func, or_, text
 from sqlmodel import select
 
-from backend.accounting import ensure_party_ledger, mark_voucher_deleted, post_customer_advance_refund_voucher, post_party_receipt_voucher
+from backend.accounting import ensure_party_ledger, mark_voucher_deleted, post_customer_advance_refund_voucher, post_loan_adjustment_voucher, post_party_receipt_voucher
 from backend.controls import assert_financial_year_unlocked, log_audit
 from backend.db import get_session
 from backend.models import (
@@ -22,6 +22,8 @@ from backend.models import (
     DebtorLedgerRow,
     ExchangeRecord,
     Item,
+    LoanAdjustment,
+    LoanOpening,
     OpenBillOut,
     Party,
     PartyCreate,
@@ -268,6 +270,13 @@ def _party_net_advance(session, party: Party) -> float:
     outstanding = 0.0
     for bill in session.exec(select(Bill).where(Bill.is_deleted == False).where(_bill_matches_party_expr(party, customer_name))).all():  # noqa: E712
         outstanding += max(0.0, _as_float(bill.total_amount) - _as_float(bill.paid_amount) - _as_float(getattr(bill, "writeoff_amount", 0)))
+    from backend.routers.loans import _account
+    loan_outstanding = 0.0
+    for model, book in ((CashbookEntry, "CASH"), (BankbookEntry, "BANK")):
+        loans = session.exec(select(model).where(model.entry_type == "LOAN", model.party_id == int(party.id))).all()
+        loan_outstanding += sum(_as_float(_account(session, loan, book).outstanding_amount) for loan in loans)
+    opening_loans = session.exec(select(LoanOpening).where(LoanOpening.party_id == int(party.id), LoanOpening.is_deleted == False)).all()  # noqa: E712
+    loan_outstanding += sum(_as_float(_account(session, loan, "OPENING").outstanding_amount) for loan in opening_loans)
     advances = 0.0
     for row in session.exec(select(PartyReceipt).where(PartyReceipt.party_id == int(party.id), PartyReceipt.is_deleted == False)).all():  # noqa: E712
         _sync_party_receipt_unallocated(session, row)
@@ -275,7 +284,7 @@ def _party_net_advance(session, party: Party) -> float:
     opening = _as_float(party.opening_balance)
     if str(party.opening_balance_type or "DR").upper() == "CR":
         opening = -opening
-    return _round2(max(0.0, advances - opening - outstanding))
+    return _round2(max(0.0, advances - opening - outstanding - loan_outstanding))
 
 
 def _receipt_remaining_channels(session, receipt: PartyReceipt) -> tuple[float, float]:
@@ -947,8 +956,8 @@ def list_receipt_adjustments(party_id: int) -> List[ReceiptBillAdjustmentOut]:
         return sorted(out, key=lambda row: int(row.id), reverse=True)
 
 
-@router.post("/{party_id}/receipts", response_model=PartyReceiptOut, status_code=201)
-def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyReceiptOut:
+@router.post("/{party_id}/receipts", response_model=Optional[PartyReceiptOut], status_code=201)
+def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> Optional[PartyReceiptOut]:
     with get_session() as session:
         _sync_customer_debtor_parties(session)
         party = session.get(Party, party_id)
@@ -959,6 +968,43 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
         cash, online, total_amount = _validate_receipt_mode(payload.mode, payload.cash_amount, payload.online_amount)
         receipt_ts = _normalize_payment_ts(payload.payment_date)
         assert_financial_year_unlocked(session, receipt_ts, context="Customer receipt")
+
+        normalized_loan_adjustments = []
+        loan_total = 0.0
+        planned_by_loan = {}
+        if payload.loan_adjustments:
+            require_min_role("MANAGER", context="Loan repayment")
+            from backend.routers.loans import _account, _loan_date, _loan_model
+
+            for loan_adj in payload.loan_adjustments:
+                book = str(loan_adj.loan_book or "").strip().upper()
+                if book not in {"CASH", "BANK", "OPENING"}:
+                    raise HTTPException(status_code=400, detail="loan_book must be CASH, BANK or OPENING")
+                loan = session.get(_loan_model(book), int(loan_adj.loan_entry_id))
+                if not loan or (book != "OPENING" and loan.entry_type != "LOAN") or (book == "OPENING" and loan.is_deleted):
+                    raise HTTPException(status_code=404, detail=f"Loan {book} #{loan_adj.loan_entry_id} not found")
+                if int(loan.party_id or 0) != int(party.id):
+                    raise HTTPException(status_code=400, detail="Selected loan does not belong to this customer")
+                amount = _round2(loan_adj.amount)
+                if amount <= 0:
+                    raise HTTPException(status_code=400, detail="Loan repayment amounts must be greater than 0")
+                account = _account(session, loan, book)
+                loan_key = (book, int(loan.id))
+                planned = _round2(planned_by_loan.get(loan_key, 0.0) + amount)
+                if planned > account.outstanding_amount + 0.0001:
+                    raise HTTPException(status_code=400, detail=f"Repayment exceeds outstanding loan amount of {account.outstanding_amount:.2f}")
+                if receipt_ts[:10] < _loan_date(loan):
+                    raise HTTPException(status_code=400, detail="Repayment date cannot be before the selected loan date")
+                loan_total = _round2(loan_total + amount)
+                planned_by_loan[loan_key] = planned
+                normalized_loan_adjustments.append((loan, book, amount))
+
+        if loan_total > total_amount + 0.0001:
+            raise HTTPException(status_code=400, detail="Loan repayments cannot exceed receipt total")
+        customer_receipt_total = _round2(total_amount - loan_total)
+        loan_cash_total = _round2(loan_total * (cash / total_amount)) if total_amount > 0 else 0.0
+        customer_receipt_cash = _round2(cash - loan_cash_total)
+        customer_receipt_online = _round2(customer_receipt_total - customer_receipt_cash)
 
         open_bills = {
             int(bill.id): bill
@@ -971,6 +1017,7 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
 
         adjustment_total = 0.0
         normalized_adjustments = []
+        planned_by_bill = {}
         for adj in payload.adjustments:
             bill = session.get(Bill, int(adj.bill_id)) if payload.allow_cross_customer else open_bills.get(int(adj.bill_id))
             bill_party = _debtor_party_for_bill(session, bill) if bill else None
@@ -987,45 +1034,39 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
             amount = _round2(adj.amount)
             if amount <= 0:
                 raise HTTPException(status_code=400, detail="Adjustment amounts must be greater than 0")
-            if amount > outstanding + 0.0001:
+            planned = _round2(planned_by_bill.get(int(bill.id), 0.0) + amount)
+            if planned > outstanding + 0.0001:
                 raise HTTPException(status_code=400, detail=f"Adjustment for bill {adj.bill_id} exceeds outstanding amount")
             adjustment_total = _round2(adjustment_total + amount)
+            planned_by_bill[int(bill.id)] = planned
             normalized_adjustments.append((bill, amount))
 
-        if adjustment_total > total_amount + 0.0001:
+        if adjustment_total > customer_receipt_total + 0.0001:
             raise HTTPException(status_code=400, detail="Adjusted amount cannot exceed receipt total")
 
-        unallocated = _round2(total_amount - adjustment_total)
-        receipt = PartyReceipt(
-            party_id=party.id,
-            received_at=receipt_ts,
-            mode=str(payload.mode).strip().lower(),
-            cash_amount=cash,
-            online_amount=online,
-            total_amount=total_amount,
-            unallocated_amount=unallocated,
-            note=_normalize_text(payload.note),
-            is_deleted=False,
-            deleted_at=None,
-        )
-        session.add(receipt)
-        session.flush()
-        log_audit(
-            session,
-            entity_type="PARTY_RECEIPT",
-            entity_id=int(receipt.id),
-            action="CREATE",
-            note=f"Created customer receipt #{receipt.id}",
-            details={"party_id": party.id, "total_amount": receipt.total_amount, "unallocated_amount": receipt.unallocated_amount},
-        )
+        receipt = None
+        if customer_receipt_total > 0.0001:
+            unallocated = _round2(customer_receipt_total - adjustment_total)
+            receipt_mode = "split" if customer_receipt_cash > 0.0001 and customer_receipt_online > 0.0001 else "online" if customer_receipt_online > 0.0001 else "cash"
+            receipt = PartyReceipt(
+                party_id=party.id, received_at=receipt_ts, mode=receipt_mode,
+                cash_amount=customer_receipt_cash, online_amount=customer_receipt_online,
+                total_amount=customer_receipt_total, unallocated_amount=unallocated,
+                note=_normalize_text(payload.note), is_deleted=False, deleted_at=None,
+            )
+            session.add(receipt)
+            session.flush()
+            log_audit(session, entity_type="PARTY_RECEIPT", entity_id=int(receipt.id), action="CREATE",
+                      note=f"Created customer receipt #{receipt.id}",
+                      details={"party_id": party.id, "total_amount": receipt.total_amount, "unallocated_amount": receipt.unallocated_amount})
 
         for bill, amount in normalized_adjustments:
-            cash_share = _round2((cash / total_amount) * amount) if total_amount > 0 else 0.0
+            cash_share = _round2((customer_receipt_cash / customer_receipt_total) * amount) if customer_receipt_total > 0 else 0.0
             online_share = _round2(amount - cash_share)
             bill_payment = BillPayment(
                 bill_id=bill.id,
                 received_at=receipt_ts,
-                mode=str(payload.mode).strip().lower(),
+                mode=str(receipt.mode).strip().lower(),
                 cash_amount=cash_share,
                 online_amount=online_share,
                 writeoff_amount=0.0,
@@ -1050,18 +1091,37 @@ def create_party_receipt(party_id: int, payload: PartyReceiptCreate) -> PartyRec
             _recalculate_bill_payment_state(session, bill)
             session.add(bill)
 
-        post_party_receipt_voucher(
-            session,
-            int(receipt.id),
-            party,
-            receipt.received_at,
-            float(receipt.total_amount or 0),
-            float(receipt.cash_amount or 0),
-            float(receipt.online_amount or 0),
-            receipt.note,
-        )
+        remaining_loan_cash = loan_cash_total
+        for loan, book, amount in normalized_loan_adjustments:
+            cash_part = _round2(min(amount, remaining_loan_cash))
+            online_part = _round2(amount - cash_part)
+            for settlement_book, part in (("CASH", cash_part), ("BANK", online_part)):
+                if part <= 0.0001:
+                    continue
+                loan_adjustment = LoanAdjustment(
+                    loan_entry_id=int(loan.id), loan_book=book, party_id=int(party.id), adjustment_type="MONEY",
+                    amount=part, note=_normalize_text(payload.note), adjusted_at=receipt_ts, settlement_book=settlement_book,
+                )
+                session.add(loan_adjustment)
+                session.flush()
+                post_loan_adjustment_voucher(session, loan_adjustment, party)
+                if settlement_book == "CASH":
+                    entry = CashbookEntry(entry_type="LOAN_REPAYMENT", amount=part, created_at=receipt_ts, party_id=int(party.id), note=payload.note or f"Loan repayment from {party.name}")
+                    session.add(entry); session.flush(); loan_adjustment.cashbook_entry_id = int(entry.id)
+                    remaining_loan_cash = _round2(remaining_loan_cash - part)
+                else:
+                    entry = BankbookEntry(entry_type="LOAN_REPAYMENT", mode="UPI", amount=part, txn_charges=0, created_at=receipt_ts, party_id=int(party.id), note=payload.note or f"Loan repayment from {party.name}")
+                    session.add(entry); session.flush(); loan_adjustment.bankbook_entry_id = int(entry.id)
+                session.add(loan_adjustment)
+
+        if receipt is not None:
+            post_party_receipt_voucher(session, int(receipt.id), party, receipt.received_at,
+                                       float(receipt.total_amount or 0), float(receipt.cash_amount or 0),
+                                       float(receipt.online_amount or 0), receipt.note)
 
         session.commit()
+        if receipt is None:
+            return None
         session.refresh(receipt)
         return _party_receipt_out(session, receipt)
 

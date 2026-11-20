@@ -1244,6 +1244,35 @@ export default function BankBookPage() {
     return out
   }, [allLedgerDates, ledgerRows, qDailySummary.data])
 
+  const runningBalanceByRow = useMemo(() => {
+    const balances = new Map<any, number>()
+    let balance = recordsFilter === 'DAY' ? Number(day?.opening_balance || 0) : 0
+    let currentDate = ''
+    const chronologicalRows = [...(ledgerRows as any[])].sort((a, b) => {
+      const byTime = String(a.created_at || '').localeCompare(String(b.created_at || ''))
+      if (byTime !== 0) return byTime
+      return Number(a.sort_order || 0) - Number(b.sort_order || 0)
+    })
+    for (const row of chronologicalRows) {
+      const date = isoDate(row.created_at)
+      if (recordsFilter === 'ALL' && date !== currentDate) {
+        currentDate = date
+        balance = Number(dailySummaryByDate[date]?.opening_balance || 0)
+      }
+      const type = String(row.entry_type || '').toUpperCase()
+      if (type !== 'OPENING') {
+        const amount = Number(row.amount || 0)
+        balance += type === 'RECEIPT' || type === 'LOAN_REPAYMENT' ? amount : -amount
+      }
+      balances.set(row, balance)
+    }
+    return balances
+  }, [recordsFilter, day?.opening_balance, ledgerRows, dailySummaryByDate])
+
+  const ledgerClosingBalance = recordsFilter === 'DAY'
+    ? Number(day?.closing_balance ?? day?.opening_balance ?? 0)
+    : Number(dailySummaryByDate[allLedgerDates[allLedgerDates.length - 1]]?.closing_balance || 0)
+
   const visibleRows = useMemo(
     () => ledgerRows.filter((row: any) => matchesFilters(row, typeFilter, deferredNoteFilter)),
     [deferredNoteFilter, ledgerRows, typeFilter],
@@ -1671,6 +1700,7 @@ export default function BankBookPage() {
                 <TableCell align="right">Charges</TableCell>
                 <TableCell>Source</TableCell>
                 <TableCell align="right">Action</TableCell>
+                <TableCell align="right">Balance (Rs.)</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -1691,11 +1721,11 @@ export default function BankBookPage() {
                   qAllCashbookContra.isLoading ||
                   qDailySummary.isLoading) ? (
                 <TableRow>
-                  <TableCell colSpan={8}>Loading...</TableCell>
+                  <TableCell colSpan={9}>Loading...</TableCell>
                 </TableRow>
               ) : visibleRows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8}>
+                  <TableCell colSpan={9}>
                     {hasActiveFilters
                       ? 'No entries match the filters.'
                       : recordsFilter === 'DAY'
@@ -1718,7 +1748,7 @@ export default function BankBookPage() {
                     <Fragment key={row.id}>
                       {showDayHeader ? (
                         <TableRow>
-                          <TableCell colSpan={8} sx={{ bgcolor: '#edf4f1', borderTop: idx > 0 ? '2px solid rgba(0,0,0,0.65)' : undefined }}>
+                          <TableCell colSpan={9} sx={{ bgcolor: '#edf4f1', borderTop: idx > 0 ? '2px solid rgba(0,0,0,0.65)' : undefined }}>
                             <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} alignItems={{ md: 'center' }}>
                               <Typography variant="body2" sx={{ fontWeight: 800, minWidth: 120 }}>
                                 {date}
@@ -1899,9 +1929,13 @@ export default function BankBookPage() {
                             '-'
                           )}
                         </TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 800 }}>
+                          {money(runningBalanceByRow.get(row))}
+                        </TableCell>
                       </TableRow>
                       {(row.subRows || []).map((sub: any) => (
                         <TableRow key={`${row.id}-sub-${sub.payment_id || sub.bill_id || sub.key || sub.kind}`} sx={{ bgcolor: recordsFilter === 'ALL' ? dayColorMap[date] : '#fafafa' }}>
+                          <TableCell />
                           <TableCell />
                           <TableCell />
                           <TableCell />
@@ -1955,6 +1989,9 @@ export default function BankBookPage() {
                 <TableCell colSpan={2} sx={{ fontWeight: 700 }}>
                   Net: Rs {money(computed.netChange)}
                 </TableCell>
+                <TableCell align="right" sx={{ fontWeight: 800 }}>
+                  {money(ledgerClosingBalance)}
+                </TableCell>
               </TableRow>
               {recordsFilter === 'DAY' ? (
                 <TableRow>
@@ -1965,6 +2002,7 @@ export default function BankBookPage() {
                     Rs {money(totalsBottom.opening)} / Rs {money(totalsBottom.closing)}
                   </TableCell>
                   <TableCell colSpan={3} />
+                  <TableCell align="right" sx={{ fontWeight: 800 }}>{money(ledgerClosingBalance)}</TableCell>
                 </TableRow>
               ) : null}
             </TableFooter>

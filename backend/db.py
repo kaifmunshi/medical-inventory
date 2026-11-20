@@ -2635,6 +2635,7 @@ def migrate_db():
                 category_id INTEGER,
                 default_rack_number INTEGER NOT NULL DEFAULT 0,
                 printed_price REAL NOT NULL DEFAULT 0,
+                is_home_product INTEGER NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -2645,6 +2646,10 @@ def migrate_db():
         if "printed_price" not in product_col_names:
             session.exec(text(
                 "ALTER TABLE product ADD COLUMN printed_price REAL NOT NULL DEFAULT 0"
+            ))
+        if "is_home_product" not in product_col_names:
+            session.exec(text(
+                "ALTER TABLE product ADD COLUMN is_home_product INTEGER NOT NULL DEFAULT 0"
             ))
         if "default_rack_number" not in product_col_names:
             session.exec(text(
@@ -2676,6 +2681,7 @@ def migrate_db():
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_product_category_id ON product (category_id)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_product_default_rack_number ON product (default_rack_number)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_product_is_active ON product (is_active)"))
+        session.exec(text("CREATE INDEX IF NOT EXISTS ix_product_is_home_product ON product (is_home_product)"))
         session.exec(text("CREATE INDEX IF NOT EXISTS ix_product_loose_sale_enabled ON product (loose_sale_enabled)"))
         session.commit()
 

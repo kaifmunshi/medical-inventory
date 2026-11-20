@@ -203,8 +203,11 @@ function chargedLine(bill: any, item: any) {
   return round2(Number(item?.mrp || 0) * Number(item?.quantity || 0) * factor)
 }
 
-function reasonLabel(reason: string) {
+function reasonLabel(reason: string, refType?: string | null) {
   const key = String(reason || '').toUpperCase()
+  const source = String(refType || '').toUpperCase()
+  if (source === 'HOME_PRODUCT_OPENING') return 'Opening'
+  if (source === 'HOME_PRODUCT_RECEIPT') return 'Production In'
   const labels: Record<string, string> = {
     OPENING: 'Opening',
     INVENTORY_ADD: 'Inventory Add',
@@ -1400,7 +1403,7 @@ export default function StockCardPage() {
                       </td>
                       <td style={{ maxWidth: 340, whiteSpace: 'normal', wordBreak: 'break-word' }}>
                         <Stack gap={0.2}>
-                          <Typography sx={{ fontWeight: 800 }}>{reasonLabel(row.reason)}</Typography>
+                          <Typography sx={{ fontWeight: 800 }}>{reasonLabel(row.reason, row.ref_type)}</Typography>
                           {refLabel || formattedNote ? (
                             <Typography variant="caption" color="text.secondary" component="div">
                               {sourceLink && refLabel ? (

@@ -189,6 +189,9 @@ class Product(SQLModel, table=True):
     category_id: Optional[int] = Field(default=None, index=True)
     default_rack_number: int = Field(default=0, index=True)
     printed_price: float = 0.0
+    # Products made by the shop itself.  They intentionally use the same
+    # inventory lots, bills, returns and ledgers as purchased products.
+    is_home_product: bool = Field(default=False, index=True)
     parent_unit_name: Optional[str] = None
     child_unit_name: Optional[str] = None
     loose_sale_enabled: bool = Field(default=False, index=True)
@@ -534,6 +537,10 @@ class ProductCreate(SQLModel):
     category_id: Optional[int] = None
     default_rack_number: int = 0
     printed_price: float = 0.0
+    is_home_product: bool = False
+    opening_quantity: int = 0
+    opening_expiry_date: Optional[str] = None
+    opening_cost_price: float = 0.0
     parent_unit_name: Optional[str] = None
     child_unit_name: Optional[str] = None
     loose_sale_enabled: bool = False
@@ -547,6 +554,7 @@ class ProductUpdate(SQLModel):
     category_id: Optional[int] = None
     default_rack_number: Optional[int] = None
     printed_price: Optional[float] = None
+    is_home_product: Optional[bool] = None
     parent_unit_name: Optional[str] = None
     child_unit_name: Optional[str] = None
     loose_sale_enabled: Optional[bool] = None
@@ -562,6 +570,7 @@ class ProductOut(SQLModel):
     category_id: Optional[int] = None
     default_rack_number: int
     printed_price: float
+    is_home_product: bool = False
     parent_unit_name: Optional[str] = None
     child_unit_name: Optional[str] = None
     loose_sale_enabled: bool = False

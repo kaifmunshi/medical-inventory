@@ -8,6 +8,10 @@ export interface ProductPayload {
   category_id?: number
   default_rack_number?: number
   printed_price?: number
+  is_home_product?: boolean
+  opening_quantity?: number
+  opening_expiry_date?: string
+  opening_cost_price?: number
   parent_unit_name?: string
   child_unit_name?: string
   loose_sale_enabled?: boolean
@@ -55,6 +59,7 @@ export async function fetchProducts(params?: {
   uncategorized_only?: boolean
   active_only?: boolean
   inactive_only?: boolean
+  is_home_product?: boolean
   limit?: number
   offset?: number
 }): Promise<Product[]> {
@@ -69,6 +74,7 @@ export async function fetchAllProducts(params?: {
   uncategorized_only?: boolean
   active_only?: boolean
   inactive_only?: boolean
+  is_home_product?: boolean
 }): Promise<Product[]> {
   const limit = 1000
   let offset = 0
@@ -98,6 +104,7 @@ export async function fetchProductsPage(params?: {
   uncategorized_only?: boolean
   active_only?: boolean
   inactive_only?: boolean
+  is_home_product?: boolean
   limit?: number
   offset?: number
 }): Promise<ProductPage> {
@@ -107,6 +114,20 @@ export async function fetchProductsPage(params?: {
 
 export async function createProduct(payload: ProductPayload): Promise<Product> {
   const res = await api.post<Product>('/products', payload)
+  return res.data
+}
+
+export type HomeStockPayload = {
+  quantity: number
+  mrp: number
+  cost_price?: number
+  expiry_date?: string
+  rack_number?: number
+  note?: string
+}
+
+export async function addHomeProductStock(id: number, payload: HomeStockPayload) {
+  const res = await api.post(`/products/${id}/home-stock`, payload)
   return res.data
 }
 

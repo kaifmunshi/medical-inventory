@@ -24,7 +24,7 @@ import CallMergeIcon from '@mui/icons-material/CallMerge'
 import KeyboardDoubleArrowDownIcon from '@mui/icons-material/KeyboardDoubleArrowDown'
 import KeyboardDoubleArrowUpIcon from '@mui/icons-material/KeyboardDoubleArrowUp'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { useLocation, useSearchParams } from 'react-router-dom'
 import {
   notifyProductMasterChanged,
   subscribeProductMasterChanged,
@@ -36,6 +36,7 @@ import {
 } from '../../lib/productSimilarity'
 import {
   createProduct,
+  addHomeProductStock,
   createBrand,
   createCategory,
   deleteProduct,
@@ -69,12 +70,17 @@ const emptyForm: ProductForm = {
   parent_unit_name: '',
   child_unit_name: '',
   default_conversion_qty: undefined,
+  opening_quantity: 0,
+  opening_expiry_date: '',
+  opening_cost_price: 0,
 }
 
 export default function ProductsPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const [searchParams] = useSearchParams()
+  const location = useLocation()
+  const homeProductsMode = location.pathname === '/home-products'
   const [q, setQ] = useState(searchParams.get('q') || '')
   const [brandFilter, setBrandFilter] = useState(searchParams.get('brand') || '')
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilterValue>(null)
@@ -94,6 +100,8 @@ export default function ProductsPage() {
   const [newBrandName, setNewBrandName] = useState('')
   const [newCategoryName, setNewCategoryName] = useState('')
   const [showScrollJumps, setShowScrollJumps] = useState(false)
+  const [stockProduct, setStockProduct] = useState<Product | null>(null)
+  const [stockForm, setStockForm] = useState({ quantity: 0, mrp: 0, cost_price: 0, expiry_date: '', rack_number: 0, note: '' })
 
   useEffect(() => {
     setQ(searchParams.get('q') || '')
@@ -154,7 +162,7 @@ export default function ProductsPage() {
   })
 
   const productsQ = useQuery<ProductPage, Error>({
-    queryKey: ['products-master', q, brandFilter, categoryFilter, showInactive, page, rowsPerPage],
+    queryKey: ['products-master', homeProductsMode, q, brandFilter, categoryFilter, showInactive, page, rowsPerPage],
     queryFn: () =>
       fetchProductsPage({
         q: q.trim() || undefined,
@@ -163,6 +171,7 @@ export default function ProductsPage() {
         uncategorized_only: categoryFilter === NO_CATEGORY_FILTER,
         active_only: !showInactive,
         inactive_only: showInactive,
+        is_home_product: homeProductsMode ? true : undefined,
         limit: rowsPerPage,
         offset: page * rowsPerPage,
       }),
@@ -254,6 +263,18 @@ export default function ProductsPage() {
     onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to merge product'), 'error'),
   })
 
+  const addStockM = useMutation({
+    mutationFn: ({ id, payload }: { id: number; payload: typeof stockForm }) => addHomeProductStock(id, payload),
+    onSuccess: () => {
+      toast.push('Home product quantity added', 'success')
+      setStockProduct(null)
+      queryClient.invalidateQueries({ queryKey: ['inventory-items'] })
+      queryClient.invalidateQueries({ queryKey: ['billing-items'] })
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+    },
+    onError: (err: any) => toast.push(String(err?.response?.data?.detail || err?.message || 'Failed to add quantity'), 'error'),
+  })
+
   const categories = categoriesQ.data || []
   const createBrandM = useMutation({
     mutationFn: createBrand,
@@ -310,7 +331,7 @@ export default function ProductsPage() {
 
   function openAdd() {
     setEditing(null)
-    setForm(emptyForm)
+    setForm({ ...emptyForm, is_home_product: homeProductsMode })
     setOpen(true)
   }
 
@@ -327,8 +348,23 @@ export default function ProductsPage() {
       parent_unit_name: row.parent_unit_name || '',
       child_unit_name: row.child_unit_name || '',
       default_conversion_qty: row.default_conversion_qty || undefined,
+      is_home_product: Boolean(row.is_home_product),
     })
     setOpen(true)
+  }
+
+  function openAddQuantity(row: Product) {
+    setStockProduct(row)
+    setStockForm({ quantity: 0, mrp: Number(row.printed_price || 0), cost_price: 0, expiry_date: '', rack_number: Number(row.default_rack_number || 0), note: '' })
+  }
+
+  function submitAddQuantity() {
+    if (!stockProduct) return
+    if (stockForm.quantity <= 0 || stockForm.mrp <= 0) {
+      toast.push('Quantity and MRP are required', 'error')
+      return
+    }
+    addStockM.mutate({ id: Number(stockProduct.id), payload: stockForm })
   }
 
   function closeForm() {
@@ -371,6 +407,10 @@ export default function ProductsPage() {
       parent_unit_name: form.parent_unit_name?.trim() || (form.loose_sale_enabled ? 'Pack' : 'Unit'),
       child_unit_name: form.loose_sale_enabled ? form.child_unit_name?.trim() || undefined : undefined,
       default_conversion_qty: form.loose_sale_enabled ? Number(form.default_conversion_qty || 1) : undefined,
+      is_home_product: homeProductsMode ? true : Boolean(form.is_home_product),
+      opening_quantity: homeProductsMode && !editing ? Number(form.opening_quantity || 0) : 0,
+      opening_expiry_date: homeProductsMode && !editing ? form.opening_expiry_date || undefined : undefined,
+      opening_cost_price: homeProductsMode && !editing ? Number(form.opening_cost_price || 0) : 0,
     }
     if (!payload.name) {
       toast.push('Product name is required', 'error')
@@ -542,9 +582,16 @@ export default function ProductsPage() {
       </Box>
 
       <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={2}>
-        <Typography variant="h5">Manage Product</Typography>
+        <Box>
+          <Typography variant="h5">{homeProductsMode ? 'Home Products' : 'Manage Product'}</Typography>
+          {homeProductsMode && (
+            <Typography variant="body2" color="text.secondary">
+              Products made in-house. They use the normal inventory, billing, returns, stock ledger, sales book, and reports.
+            </Typography>
+          )}
+        </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={openAdd}>
-          Add Product
+          {homeProductsMode ? 'Add Home Product' : 'Add Product'}
         </Button>
       </Stack>
 
@@ -599,7 +646,7 @@ export default function ProductsPage() {
 
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}>
-          <Typography variant="subtitle1" fontWeight={700}>Product List</Typography>
+          <Typography variant="subtitle1" fontWeight={700}>{homeProductsMode ? 'Home Product List' : 'Product List'}</Typography>
           <Typography variant="body2" color="text.secondary">
             Page {page + 1} of {totalPages} • {rows.length} products
           </Typography>
@@ -615,6 +662,7 @@ export default function ProductsPage() {
                 <th>Category</th>
                 <th>Rack</th>
                 <th>Printed Price</th>
+                {!homeProductsMode && <th>Type</th>}
                 <th>Status</th>
                 <th></th>
               </tr>
@@ -636,6 +684,7 @@ export default function ProductsPage() {
                   <td>{categoryName(row.category_id)}</td>
                   <td>{row.default_rack_number || 0}</td>
                   <td>{Number(row.printed_price || 0).toFixed(2)}</td>
+                  {!homeProductsMode && <td>{row.is_home_product ? 'Home' : 'Regular'}</td>}
                   <td>{row.is_active ? 'Active' : 'Deleted'}</td>
                   <td className="product-actions-cell">
                     <Button
@@ -654,7 +703,7 @@ export default function ProductsPage() {
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={homeProductsMode ? 8 : 9}>
                     <Box p={2} color="text.secondary">No products found.</Box>
                   </td>
                 </tr>
@@ -680,6 +729,18 @@ export default function ProductsPage() {
           >
             Edit
           </MenuItem>
+          {homeProductsMode && actionsProduct?.is_active && (
+            <MenuItem
+              onClick={() => {
+                const product = actionsProduct
+                setActionsAnchor(null)
+                setActionsProduct(null)
+                if (product) openAddQuantity(product)
+              }}
+            >
+              Add Quantity
+            </MenuItem>
+          )}
           <MenuItem
             disabled={mergeM.isPending}
             onClick={() => {
@@ -722,7 +783,7 @@ export default function ProductsPage() {
       </Paper>
 
       <Dialog open={open} onClose={closeForm} fullWidth maxWidth="md">
-        <DialogTitle>{editing ? 'Edit Product' : 'Add Product'}</DialogTitle>
+        <DialogTitle>{editing ? `Edit ${homeProductsMode ? 'Home ' : ''}Product` : `Add ${homeProductsMode ? 'Home ' : ''}Product`}</DialogTitle>
         <DialogContent dividers>
           <Stack gap={2} sx={{ mt: 1 }}>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
@@ -787,6 +848,17 @@ export default function ProductsPage() {
                 sx={{ minWidth: 220 }}
               />
             </Stack>
+            {homeProductsMode && !editing && (
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Opening Stock</Typography>
+                <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
+                  <TextField label="Opening Quantity" type="number" value={form.opening_quantity || 0} onChange={(e) => patchForm({ opening_quantity: Number(e.target.value) })} inputProps={{ min: 0, step: 1 }} fullWidth />
+                  <TextField label="Cost per Unit" type="number" value={form.opening_cost_price || 0} onChange={(e) => patchForm({ opening_cost_price: Number(e.target.value) })} inputProps={{ min: 0, step: '0.01' }} fullWidth />
+                  <TextField label="Expiry Date (optional)" type="date" value={form.opening_expiry_date || ''} onChange={(e) => patchForm({ opening_expiry_date: e.target.value || undefined })} InputLabelProps={{ shrink: true }} fullWidth />
+                </Stack>
+                <Typography variant="caption" color="text.secondary">The printed price and default rack above are used for opening stock.</Typography>
+              </Paper>
+            )}
             <Stack spacing={1}>
               <FormControlLabel
                 control={
@@ -840,6 +912,29 @@ export default function ProductsPage() {
           <Button variant="contained" onClick={save} disabled={createM.isPending || updateM.isPending}>
             {editing ? 'Update' : 'Save'}
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(stockProduct)} onClose={() => setStockProduct(null)} fullWidth maxWidth="sm">
+        <DialogTitle>Add Quantity — {stockProduct?.name}</DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={2} sx={{ mt: 1 }}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+              <TextField label="Quantity to Add" type="number" value={stockForm.quantity || ''} onChange={(e) => setStockForm((p) => ({ ...p, quantity: Number(e.target.value) }))} inputProps={{ min: 1, step: 1 }} required fullWidth autoFocus />
+              <TextField label="MRP" type="number" value={stockForm.mrp || ''} onChange={(e) => setStockForm((p) => ({ ...p, mrp: Number(e.target.value) }))} inputProps={{ min: 0.01, step: '0.01' }} required fullWidth />
+            </Stack>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+              <TextField label="Cost per Unit" type="number" value={stockForm.cost_price || 0} onChange={(e) => setStockForm((p) => ({ ...p, cost_price: Number(e.target.value) }))} inputProps={{ min: 0, step: '0.01' }} fullWidth />
+              <TextField label="Expiry Date (optional)" type="date" value={stockForm.expiry_date} onChange={(e) => setStockForm((p) => ({ ...p, expiry_date: e.target.value }))} InputLabelProps={{ shrink: true }} fullWidth />
+              <TextField label="Rack" type="number" value={stockForm.rack_number} onChange={(e) => setStockForm((p) => ({ ...p, rack_number: Number(e.target.value) }))} inputProps={{ min: 0, step: 1 }} fullWidth />
+            </Stack>
+            <TextField label="Note (optional)" value={stockForm.note} onChange={(e) => setStockForm((p) => ({ ...p, note: e.target.value }))} fullWidth />
+            <Typography variant="caption" color="text.secondary">Matching MRP, expiry, and rack increases the existing batch. Otherwise a new batch is created automatically.</Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setStockProduct(null)}>Cancel</Button>
+          <Button variant="contained" onClick={submitAddQuantity} disabled={addStockM.isPending}>Add Quantity</Button>
         </DialogActions>
       </Dialog>
 

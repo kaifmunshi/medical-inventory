@@ -65,6 +65,7 @@ export default function AppRoutes() {
         <Route path="inventory" element={<Inventory />} />
         <Route path="inventory/stock-card" element={<StockCardPage />} />
         <Route path="products" element={<ProductsPage />} />
+        <Route path="home-products" element={<ProductsPage />} />
         <Route path="product-categories" element={<ProductCategoriesPage />} />
         <Route path="brand-master" element={<BrandMasterPage />} />
         <Route path="suppliers" element={<SuppliersPage />} />

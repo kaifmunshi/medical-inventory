@@ -81,6 +81,7 @@ export interface Product {
   category_id?: ID | null
   default_rack_number: number
   printed_price: number
+  is_home_product?: boolean
   parent_unit_name?: string | null
   child_unit_name?: string | null
   loose_sale_enabled?: boolean

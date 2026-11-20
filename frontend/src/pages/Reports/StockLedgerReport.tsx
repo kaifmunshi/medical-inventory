@@ -66,8 +66,11 @@ function formatSigned(value: number) {
   return `${value > 0 ? '+' : ''}${value}`
 }
 
-function reasonLabel(reason: string) {
+function reasonLabel(reason: string, refType?: string | null) {
   const key = String(reason || '').toUpperCase()
+  const source = String(refType || '').toUpperCase()
+  if (source === 'HOME_PRODUCT_OPENING') return 'Opening'
+  if (source === 'HOME_PRODUCT_RECEIPT') return 'Production In'
   const labels: Record<string, string> = {
     INVENTORY_ADD: 'Inventory Add',
     OPENING: 'Opening',
@@ -542,7 +545,7 @@ export default function StockLedgerReport(props: {
   }
 
   function displayReason(r: any) {
-    return reasonLabel(r?.reason || '')
+    return reasonLabel(r?.reason || '', r?.ref_type)
   }
 
   function openLedgerForGroup(g: GroupRow) {

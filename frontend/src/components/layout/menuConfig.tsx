@@ -61,6 +61,7 @@ export const appMenuGroups: AppMenuGroup[] = [
     items: [
       { to: '/inventory', label: 'Inventory', icon: <Inventory2 fontSize="small" />, hint: 'Item batches and stock' },
       { to: '/products', label: 'Manage Product', icon: <Inventory2 fontSize="small" />, hint: 'Product defaults and printed price' },
+      { to: '/home-products', label: 'Home Products', icon: <Factory fontSize="small" />, hint: 'Own products and their stock batches' },
       { to: '/brand-master', label: 'Brand Master', icon: <Factory fontSize="small" />, hint: 'Self-maintained brand list' },
       { to: '/product-categories', label: 'Product Categories', icon: <Category fontSize="small" />, hint: 'Category master' },
       { to: '/suppliers', label: 'Supplier Master', icon: <People fontSize="small" />, hint: 'Sundry creditors and supplier setup' },

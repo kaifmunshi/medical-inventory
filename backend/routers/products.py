@@ -8,6 +8,8 @@ from sqlalchemy import or_, func, text
 from sqlmodel import select
 
 from backend.controls import log_audit
+from backend.inventory_lot_sync import ensure_lot_for_inventory_item, sync_lot_quantity_for_item
+from backend.utils.archive_rules import apply_archive_rules
 from backend.db import create_data_repair_backup, get_session
 from backend.models import (
     Brand,
@@ -25,6 +27,7 @@ from backend.models import (
     ProductUpdate,
     Item,
     PurchaseItem,
+    StockMovement,
 )
 
 router = APIRouter()
@@ -44,6 +47,92 @@ class ProductPageOut(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class HomeStockIn(BaseModel):
+    quantity: int
+    mrp: float
+    cost_price: float = 0.0
+    expiry_date: Optional[str] = None
+    rack_number: int = 0
+    note: Optional[str] = None
+
+
+class HomeStockOut(BaseModel):
+    item_id: int
+    product_id: int
+    quantity_added: int
+    stock: int
+    mrp: float
+    cost_price: float
+    expiry_date: Optional[str] = None
+    rack_number: int
+
+
+def _add_home_stock(session, product: Product, payload: HomeStockIn, *, opening: bool = False) -> Item:
+    if not bool(product.is_home_product):
+        raise HTTPException(status_code=400, detail="Stock can only be received here for a home product")
+    qty = int(payload.quantity or 0)
+    mrp = float(payload.mrp or 0)
+    cost = float(payload.cost_price or 0)
+    rack = int(payload.rack_number or 0)
+    expiry = _clean(payload.expiry_date)
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be greater than zero")
+    if mrp <= 0:
+        raise HTTPException(status_code=400, detail="MRP must be greater than zero")
+    if cost < 0 or rack < 0:
+        raise HTTPException(status_code=400, detail="Cost and rack cannot be negative")
+    # Reuse an exact batch; a different MRP/expiry/rack remains a separate lot.
+    item_stmt = select(Item).where(
+            Item.product_id == int(product.id),
+            Item.mrp == mrp,
+            Item.rack_number == rack,
+            Item.is_archived == False,  # noqa: E712
+        )
+    item_stmt = item_stmt.where(Item.expiry_date == expiry) if expiry else item_stmt.where(Item.expiry_date.is_(None))
+    item = session.exec(item_stmt.order_by(Item.id.asc())).first()
+    ts = _now()
+    created = item is None
+    if created:
+        item = Item(
+            name=product.name,
+            brand=product.brand,
+            product_id=int(product.id),
+            category_id=product.category_id,
+            expiry_date=expiry,
+            mrp=mrp,
+            cost_price=cost,
+            stock=qty,
+            rack_number=rack,
+            created_at=ts,
+            updated_at=ts,
+        )
+        session.add(item)
+        session.flush()
+        ensure_lot_for_inventory_item(session, inventory_item=item, product=product, ts=ts)
+    else:
+        item.stock = int(item.stock or 0) + qty
+        item.cost_price = cost
+        item.updated_at = ts
+        item.is_archived = False
+        session.add(item)
+        sync_lot_quantity_for_item(session, item, ts=ts)
+    apply_archive_rules(session, item)
+    session.add(StockMovement(
+        item_id=int(item.id), ts=ts, delta=qty,
+        reason="INVENTORY_ADD" if created else "ADJUST",
+        ref_type="HOME_PRODUCT_OPENING" if opening else "HOME_PRODUCT_RECEIPT",
+        ref_id=int(product.id),
+        note=_clean(payload.note) or ("Opening quantity" if opening else "Quantity produced and added"),
+    ))
+    log_audit(
+        session, entity_type="HOME_PRODUCT", entity_id=int(product.id),
+        action="OPENING_STOCK" if opening else "ADD_STOCK",
+        note=f"Added {qty} units to {product.name}",
+        details={"item_id": int(item.id), "quantity": qty, "mrp": mrp, "cost_price": cost, "expiry_date": expiry, "rack_number": rack},
+    )
+    return item
 
 
 def _clean(v: Optional[str]) -> Optional[str]:
@@ -413,6 +502,7 @@ def list_products(
     uncategorized_only: bool = Query(False),
     active_only: bool = Query(True),
     inactive_only: bool = Query(False),
+    is_home_product: Optional[bool] = Query(None),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ) -> List[ProductOut]:
@@ -422,6 +512,8 @@ def list_products(
             stmt = stmt.where(Product.is_active == False)  # noqa: E712
         elif active_only:
             stmt = stmt.where(Product.is_active == True)  # noqa: E712
+        if is_home_product is not None:
+            stmt = stmt.where(Product.is_home_product == is_home_product)
         if uncategorized_only:
             stmt = stmt.where(Product.category_id.is_(None))
         elif category_id is not None:
@@ -452,6 +544,7 @@ def list_products_page(
     uncategorized_only: bool = Query(False),
     active_only: bool = Query(True),
     inactive_only: bool = Query(False),
+    is_home_product: Optional[bool] = Query(None),
     limit: int = Query(25, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ) -> ProductPageOut:
@@ -461,6 +554,8 @@ def list_products_page(
             filters.append(Product.is_active == False)  # noqa: E712
         elif active_only:
             filters.append(Product.is_active == True)  # noqa: E712
+        if is_home_product is not None:
+            filters.append(Product.is_home_product == is_home_product)
         if uncategorized_only:
             filters.append(Product.category_id.is_(None))
         elif category_id is not None:
@@ -508,6 +603,10 @@ def create_product(payload: ProductCreate) -> ProductOut:
         raise HTTPException(status_code=400, detail="Default rack cannot be negative")
     if printed_price < 0:
         raise HTTPException(status_code=400, detail="Printed price cannot be negative")
+    if int(payload.opening_quantity or 0) < 0:
+        raise HTTPException(status_code=400, detail="Opening quantity cannot be negative")
+    if float(payload.opening_cost_price or 0) < 0:
+        raise HTTPException(status_code=400, detail="Opening cost cannot be negative")
 
     with get_session() as session:
         _ensure_brand_row(session, brand)
@@ -538,6 +637,7 @@ def create_product(payload: ProductCreate) -> ProductOut:
             existing.category_id = payload.category_id
             existing.default_rack_number = default_rack_number
             existing.printed_price = printed_price
+            existing.is_home_product = bool(payload.is_home_product)
             existing.parent_unit_name = parent_unit_name
             existing.child_unit_name = child_unit_name
             existing.loose_sale_enabled = bool(payload.loose_sale_enabled)
@@ -565,6 +665,14 @@ def create_product(payload: ProductCreate) -> ProductOut:
                     "synced_conversion": synced_conversion,
                 },
             )
+            if int(payload.opening_quantity or 0) > 0:
+                _add_home_stock(session, existing, HomeStockIn(
+                    quantity=int(payload.opening_quantity),
+                    mrp=printed_price,
+                    cost_price=float(payload.opening_cost_price or 0),
+            expiry_date=payload.opening_expiry_date,
+                    rack_number=default_rack_number,
+                ), opening=True)
             session.commit()
             session.refresh(existing)
             return existing
@@ -577,6 +685,7 @@ def create_product(payload: ProductCreate) -> ProductOut:
             category_id=payload.category_id,
             default_rack_number=default_rack_number,
             printed_price=printed_price,
+            is_home_product=bool(payload.is_home_product),
             parent_unit_name=parent_unit_name,
             child_unit_name=child_unit_name,
             loose_sale_enabled=bool(payload.loose_sale_enabled),
@@ -595,9 +704,33 @@ def create_product(payload: ProductCreate) -> ProductOut:
             note=f"Created product {row.name}",
             details={"brand": row.brand, "category_id": row.category_id},
         )
+        if int(payload.opening_quantity or 0) > 0:
+            _add_home_stock(session, row, HomeStockIn(
+                quantity=int(payload.opening_quantity),
+                mrp=printed_price,
+                cost_price=float(payload.opening_cost_price or 0),
+                expiry_date=payload.opening_expiry_date,
+                rack_number=default_rack_number,
+            ), opening=True)
         session.commit()
         session.refresh(row)
         return row
+
+
+@router.post("/{product_id}/home-stock", response_model=HomeStockOut, status_code=201)
+def add_home_product_stock(product_id: int, payload: HomeStockIn) -> HomeStockOut:
+    with get_session() as session:
+        product = session.get(Product, product_id)
+        if not product or not product.is_active:
+            raise HTTPException(status_code=404, detail="Active home product not found")
+        item = _add_home_stock(session, product, payload)
+        session.commit()
+        session.refresh(item)
+        return HomeStockOut(
+            item_id=int(item.id), product_id=int(product.id), quantity_added=int(payload.quantity),
+            stock=int(item.stock), mrp=float(item.mrp), cost_price=float(item.cost_price or 0),
+            expiry_date=item.expiry_date, rack_number=int(item.rack_number or 0),
+        )
 
 
 @router.patch("/{product_id}", response_model=ProductOut)
@@ -638,6 +771,8 @@ def update_product(product_id: int, payload: ProductUpdate) -> ProductOut:
             if printed_price < 0:
                 raise HTTPException(status_code=400, detail="Printed price cannot be negative")
             row.printed_price = printed_price
+        if "is_home_product" in data:
+            row.is_home_product = bool(data["is_home_product"])
         if "parent_unit_name" in data:
             row.parent_unit_name = _clean(data["parent_unit_name"])
         if "child_unit_name" in data:
@@ -760,6 +895,11 @@ def merge_product(source_product_id: int, target_product_id: int) -> ProductMerg
             raise HTTPException(status_code=404, detail="Duplicate product not found")
         if not target:
             raise HTTPException(status_code=404, detail="Target product not found")
+        if bool(source.is_home_product) != bool(target.is_home_product):
+            raise HTTPException(
+                status_code=400,
+                detail="Home products can only be merged with other home products. Change the product type first if this is intentional.",
+            )
 
         backup_path = create_data_repair_backup(f"before_product_merge_{source_product_id}_into_{target_product_id}")
         ts = _now()

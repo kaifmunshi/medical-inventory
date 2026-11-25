@@ -1101,11 +1101,12 @@ export default function CreditBills() {
                   <thead>
                     <tr>
                       <th style={{ minWidth: 220 }}>Item</th>
-                      <th>Qty</th>
-                      <th>MRP</th>
-                      <th>SP</th>
-                      <th>Disc. %</th>
-                      <th>Computed Total</th>
+                      <th style={{ width: 100 }}>Expiry</th>
+                      <th style={{ width: 60 }}>Qty</th>
+                      <th style={{ width: 80 }}>MRP</th>
+                      <th style={{ width: 80 }}>SP</th>
+                      <th style={{ width: 80 }}>Disc. %</th>
+                      <th style={{ width: 110 }}>Computed Total</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1126,6 +1127,7 @@ export default function CreditBills() {
                               </Typography>
                             </Stack>
                           </td>
+                          <td>{String(it.expiry_date || '-').slice(0, 10)}</td>
                           <td>{qty}</td>
                           <td>{money(mrp)}</td>
                           <td>{money(sp)}</td>
@@ -1136,7 +1138,7 @@ export default function CreditBills() {
                     })}
                     {(detail.items || []).length === 0 && (
                       <tr>
-                        <td colSpan={6}>
+                          <td colSpan={7}>
                           <Box p={2} color="text.secondary">
                             No items.
                           </Box>

@@ -597,11 +597,11 @@ export default function ReturnsReport(props: {
                   <thead>
                     <tr>
                       <th style={{ minWidth: 220 }}>Item</th>
-                      <th>Qty</th>
-                      <th>MRP</th>
-                      <th>Sale Price</th>
-                      <th>Discount</th>
-                      <th>Line Refund</th>
+                      <th style={{ width: 60 }}>Qty</th>
+                      <th style={{ width: 80 }}>MRP</th>
+                      <th style={{ width: 90 }}>Sale Price</th>
+                      <th style={{ width: 80 }}>Discount</th>
+                      <th style={{ width: 100 }}>Line Refund</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -630,7 +630,7 @@ export default function ReturnsReport(props: {
                               </Typography>
                             </Stack>
                           </td>
-                          <td>{Number(it.quantity || 0)} {itemUnitLabel(it)}</td>
+                          <td>{Number(it.quantity || 0)}</td>
                           <td>₹{money(it.mrp)}</td>
                           <td>₹{money(sale)}</td>
                           <td>{discount > 0 ? `₹${money(discount)}` : '-'}</td>
@@ -648,10 +648,10 @@ export default function ReturnsReport(props: {
                   <thead>
                     <tr>
                       <th style={{ minWidth: 220 }}>Item</th>
-                      <th>Qty</th>
-                      <th>MRP</th>
-                      <th>SP</th>
-                      <th>Line Total</th>
+                      <th style={{ width: 60 }}>Qty</th>
+                      <th style={{ width: 80 }}>MRP</th>
+                      <th style={{ width: 80 }}>SP</th>
+                      <th style={{ width: 100 }}>Line Total</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -667,7 +667,7 @@ export default function ReturnsReport(props: {
                             </Typography>
                           </Stack>
                         </td>
-                        <td>{qty} {itemUnitLabel(it)}</td>
+                        <td>{qty}</td>
                         <td>{money(it.mrp)}</td>
                         <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>
                         <td>{money(lineTotal)}</td>
@@ -771,11 +771,11 @@ export default function ReturnsReport(props: {
                   <thead>
                     <tr>
                       <th style={{ minWidth: 220 }}>Item</th>
-                      <th>Qty</th>
-                      <th>MRP</th>
-                      <th>Sale Price</th>
-                      <th>Discount</th>
-                      <th>Line Refund</th>
+                      <th style={{ width: 60 }}>Qty</th>
+                      <th style={{ width: 80 }}>MRP</th>
+                      <th style={{ width: 90 }}>Sale Price</th>
+                      <th style={{ width: 80 }}>Discount</th>
+                      <th style={{ width: 100 }}>Line Refund</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -799,7 +799,7 @@ export default function ReturnsReport(props: {
                               </Typography>
                             </Stack>
                           </td>
-                          <td>{qty} {itemUnitLabel(it)}</td>
+                          <td>{qty}</td>
                           <td>₹{money(mrp)}</td>
                           <td>₹{money(sale)}</td>
                           <td>{discount > 0 ? `₹${money(discount)}` : '-'}</td>
@@ -1003,11 +1003,11 @@ export default function ReturnsReport(props: {
                   <thead>
                     <tr>
                       <th style={{ minWidth: 220 }}>Item</th>
-                      <th>Qty</th>
-                      <th>MRP</th>
-                      <th>Sale Price</th>
-                      <th>Discount</th>
-                      <th>Line Total</th>
+                      <th style={{ width: 60 }}>Qty</th>
+                      <th style={{ width: 80 }}>MRP</th>
+                      <th style={{ width: 90 }}>Sale Price</th>
+                      <th style={{ width: 80 }}>Discount</th>
+                      <th style={{ width: 100 }}>Line Total</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1038,7 +1038,7 @@ export default function ReturnsReport(props: {
                               ) : null}
                             </Stack>
                           </td>
-                          <td>{qty} {itemUnitLabel(it)}</td>
+                          <td>{qty}</td>
                           <td>₹{money(it.mrp)}</td>
                           <td>₹{money(sale)}</td>
                           <td>{discount > 0 ? `₹${money(discount)}` : '-'}</td>

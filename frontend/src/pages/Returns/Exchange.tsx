@@ -11,10 +11,16 @@ import ItemPicker, { type PickerItem } from '../../components/billing/ItemPicker
 import BillPickerDialog from '../../components/billing/BillPickerDialog'
 import { useToast } from '../../components/ui/Toaster'
 
-type RetRow = { item_id:number; name:string; brand?: string | null; qty:number; max:number; mrp:number; charged_unit_price?: number; remaining_value?: number; custom_return_value?: number | ''; editing_return_value?: boolean; loose_sale_enabled?: boolean; is_loose_stock?: boolean; conversion_qty?: number | null; child_unit_name?: string | null; opened_loose_quantity?: number }
-type AddRow = { item_id:number; name:string; brand?: string | null; qty:number | ''; mrp:number; selling_price?: number | ''; available_stock?: number; inventory_lot_id?: number | null }
+type RetRow = { item_id:number; name:string; brand?: string | null; expiry_date?: string | null; qty:number; max:number; mrp:number; charged_unit_price?: number; remaining_value?: number; custom_return_value?: number | ''; editing_return_value?: boolean; loose_sale_enabled?: boolean; is_loose_stock?: boolean; conversion_qty?: number | null; child_unit_name?: string | null; opened_loose_quantity?: number }
+type AddRow = { item_id:number; name:string; brand?: string | null; expiry_date?: string | null; qty:number | ''; mrp:number; selling_price?: number | ''; available_stock?: number; inventory_lot_id?: number | null }
 
 function round2(n:number){ return Math.round(n*100)/100 }
+function formatExpiry(value?: string | null) {
+  const raw = String(value || '').slice(0, 10)
+  if (!raw) return '-'
+  const [year, month, day] = raw.split('-')
+  return year && month && day ? `${day}-${month}-${year}` : raw
+}
 function asString(x:any){
   if (typeof x === 'string') return x
   try { return JSON.stringify(x, null, 2) } catch { return String(x) }
@@ -163,6 +169,7 @@ export default function Exchange() {
         const current: any = currentReturnByItem.get(Number(item.item_id))
         return {
           item_id: Number(item.item_id), name: item.item_name, brand: item.brand || null,
+          expiry_date: item.expiry_date || null,
           qty: Number(current?.quantity || 0), max: Number(remainingByItem.get(Number(item.item_id)) || 0) + Number(currentQtyByItem.get(Number(item.item_id)) || 0),
           mrp: Number(item.mrp || 0), charged_unit_price: Number(item.charged_unit_price || 0) || undefined,
           remaining_value: Number(item.remaining_value || 0), custom_return_value: current ? Number(current.line_total || 0) : undefined,
@@ -173,6 +180,7 @@ export default function Exchange() {
       }))
       const originalReplacementItems = (details.bill?.items || []).map((item: any) => ({
         item_id: Number(item.item_id), name: item.item_name, brand: item.brand || null,
+        expiry_date: item.expiry_date || null,
         qty: Number(item.quantity || 0), mrp: Number(item.mrp || 0), selling_price: Number(item.line_total || 0) / Math.max(1, Number(item.quantity || 0)),
         available_stock: Number(item.stock || 0) + Number(item.quantity || 0), inventory_lot_id: item.inventory_lot_id || null,
       }))
@@ -312,6 +320,7 @@ export default function Exchange() {
         item_id,
         name: nameOf(it),
         brand: brandOf(it) || summaryById[item_id]?.brand || null,
+        expiry_date: it.expiry_date || summaryById[item_id]?.expiry_date || null,
         qty: 0,
         max: remaining,
         mrp,
@@ -613,6 +622,7 @@ export default function Exchange() {
               <thead>
                 <tr>
                   <th>Item</th>
+                  <th style={{ width: 100 }}>Expiry</th>
                   <th>Avail. to Exchange</th>
                   <th>Return Qty</th>
                   <th>MRP</th>
@@ -633,6 +643,7 @@ export default function Exchange() {
                         ) : null}
                       </Stack>
                     </td>
+                    <td>{formatExpiry(r.expiry_date)}</td>
                     <td>{r.max}</td>
                     <td>
                       <Stack gap={0.75} alignItems="flex-start">
@@ -710,6 +721,7 @@ export default function Exchange() {
                 <thead>
                   <tr>
                     <th>Item</th>
+                    <th style={{ width: 100 }}>Expiry</th>
                     <th>MRP</th>
                     <th>Selling Price</th>
                     <th>Qty</th>
@@ -730,6 +742,7 @@ export default function Exchange() {
                           ) : null}
                         </Stack>
                       </td>
+                      <td>{formatExpiry(r.expiry_date)}</td>
                       <td>{r.mrp}</td>
                       <td>
                         <TextField
@@ -1118,10 +1131,10 @@ export default function Exchange() {
             const mrp = Number(it.mrp) || 0
             if (idx >= 0) {
               const c = [...prev]
-              c[idx] = { ...c[idx], qty: Number(c[idx].qty || 0) + 1, mrp, selling_price: c[idx].selling_price ?? mrp, brand: it.brand ?? c[idx].brand ?? null }
+              c[idx] = { ...c[idx], qty: Number(c[idx].qty || 0) + 1, mrp, selling_price: c[idx].selling_price ?? mrp, brand: it.brand ?? c[idx].brand ?? null, expiry_date: it.expiry_date ?? c[idx].expiry_date ?? null }
               return c
             }
-            return [...prev, { item_id: it.id, name: it.name, brand: it.brand || null, mrp, selling_price: mrp, qty: 1, available_stock: Number(it.stock || 0), inventory_lot_id: it.inventory_lot_id || null }]
+            return [...prev, { item_id: it.id, name: it.name, brand: it.brand || null, expiry_date: it.expiry_date || null, mrp, selling_price: mrp, qty: 1, available_stock: Number(it.stock || 0), inventory_lot_id: it.inventory_lot_id || null }]
           })
         }}
       />

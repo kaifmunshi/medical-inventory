@@ -31,6 +31,7 @@ type BillLine = {
   item_id: number
   name: string
   brand?: string | null
+  expiry_date?: string | null
   soldQty: number
   mrp: number
   charged_unit_price?: number
@@ -41,6 +42,7 @@ type Row = {
   item_id: number
   name: string
   brand?: string | null
+  expiry_date?: string | null
   qty: number
   max: number
   mrp: number
@@ -427,6 +429,7 @@ export default function Returns() {
           item_id: itemId,
           name: it.item_name || it.name || it.item?.name || `#${it.item_id}`,
           brand: it.brand || it.item_brand || it.item?.brand || summaryById[itemId]?.brand || null,
+          expiry_date: it.expiry_date || summaryById[itemId]?.expiry_date || null,
           soldQty: Number(it.quantity),
           mrp: Number(it.mrp),
           charged_unit_price: Number(summaryById[itemId]?.charged_unit_price ?? 0) || undefined,
@@ -444,6 +447,7 @@ export default function Returns() {
             item_id: l.item_id,
             name: l.name,
             brand: l.brand,
+            expiry_date: l.expiry_date,
             qty: 0,
             max: remaining,
             mrp: l.mrp,
@@ -615,16 +619,17 @@ export default function Returns() {
           </Stack>
 
           <Box sx={{ overflowX: 'auto' }}>
-            <table className="table">
+            <table className="table" style={{ tableLayout: 'fixed', width: '100%', minWidth: 980 }}>
               <thead>
                 <tr>
-                  <th>Item</th>
-                  <th>Avail. to Return</th>
-                  <th>Return Qty</th>
-                  <th>MRP</th>
-                  <th>Sold Price</th>
-                  <th>Line Refund</th>
-                  <th></th>
+                  <th style={{ width: '38%' }}>Item</th>
+                  <th style={{ width: '11%' }}>Expiry</th>
+                  <th style={{ width: '8%' }}>Avail. to Return</th>
+                  <th style={{ width: '10%' }}>Return Qty</th>
+                  <th style={{ width: '8%' }}>MRP</th>
+                  <th style={{ width: '9%' }}>Sold Price</th>
+                  <th style={{ width: '12%' }}>Line Refund</th>
+                  <th style={{ width: '4%' }}></th>
                 </tr>
               </thead>
               <tbody>
@@ -640,6 +645,7 @@ export default function Returns() {
                         ) : null}
                       </Stack>
                     </td>
+                    <td>{formatExpiry(r.expiry_date)}</td>
                     <td>{r.max}</td>
                     <td>
                       <TextField
@@ -647,7 +653,7 @@ export default function Returns() {
                         value={r.qty}
                         onChange={e => setQty(i, Number(e.target.value || 0))}
                         inputProps={{ min: 0, max: r.max }}
-                        sx={{ width: 110 }}
+                        sx={{ width: 88 }}
                       />
                     </td>
                     <td>
@@ -662,8 +668,9 @@ export default function Returns() {
                     </td>
                     <td>₹{soldUnitPrice(r).toFixed(2)}</td>
                     <td>{(lineRefunds[i] ?? 0).toFixed(2)}</td>
-                    <td>
+                    <td style={{ paddingLeft: 2, paddingRight: 2 }}>
                       <IconButton
+                        size="small"
                         onClick={() => {
                           setQty(i, 0)
                           toast.push('Cleared line', 'info')
@@ -676,7 +683,7 @@ export default function Returns() {
                 ))}
                 {rows.length === 0 && (
                   <tr>
-                    <td colSpan={7}>
+                    <td colSpan={8}>
                       <Box p={2}>No items.</Box>
                     </td>
                   </tr>

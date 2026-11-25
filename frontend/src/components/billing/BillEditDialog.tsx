@@ -34,6 +34,7 @@ type EditLine = {
   item_id: number
   item_name: string
   brand?: string | null
+  expiry_date?: string | null
   mrp: number
   quantity: number
   custom_unit_price: number
@@ -456,6 +457,7 @@ export default function BillEditDialog({
         item_id: Number(it.item_id),
         item_name: String(it.item_name || it.name || `#${it.item_id}`),
         brand: it.brand ?? null,
+        expiry_date: it.expiry_date ?? null,
         mrp,
         quantity: qty,
         custom_unit_price: custom,
@@ -724,6 +726,7 @@ export default function BillEditDialog({
         return {
           ...row,
           brand: String(row.brand || '').trim() ? row.brand : meta.brand ?? null,
+          expiry_date: row.expiry_date ?? meta.expiry_date ?? null,
           stock: meta.stock ?? row.stock,
           inventory_lot_id: meta.inventory_lot_id ?? row.inventory_lot_id ?? null,
           opened_from_lot_id: meta.opened_from_lot_id ?? row.opened_from_lot_id ?? null,
@@ -760,6 +763,7 @@ export default function BillEditDialog({
           item_id: itemId,
           item_name: String(it.name || `#${itemId}`),
           brand: it.brand ?? null,
+          expiry_date: it.expiry_date ?? null,
           mrp: Number(it.mrp || 0),
           quantity: 1,
           custom_unit_price: Number(it.mrp || 0),
@@ -1377,16 +1381,17 @@ export default function BillEditDialog({
 
             <Paper sx={{ p: 2 }}>
               <Box sx={{ overflowX: 'auto' }}>
-                <table className="table" style={{ tableLayout: 'fixed', width: '100%' }}>
+                <table className="table" style={{ tableLayout: 'fixed', width: '100%', minWidth: 1250 }}>
                   <thead>
                     <tr>
-                      <th style={{ width: '42%' }}>Item</th>
-                      <th style={{ width: '10%' }}>MRP</th>
-                      <th style={{ width: '8%' }}>Qty</th>
-                      <th style={{ width: '10%' }}>Discount %</th>
-                      <th style={{ width: '12%' }}>Selling Price</th>
-                      <th style={{ width: '12%' }}>Line Total</th>
-                      <th style={{ width: '6%' }}></th>
+                      <th style={{ width: '35%' }}>Item</th>
+                      <th style={{ width: '9%' }}>MRP</th>
+                      <th style={{ width: '11%' }}>Expiry</th>
+                      <th style={{ width: '7%' }}>Qty</th>
+                      <th style={{ width: '9%' }}>Discount %</th>
+                      <th style={{ width: '11%' }}>Selling Price</th>
+                      <th style={{ width: '11%' }}>Line Total</th>
+                      <th style={{ width: '7%' }}></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1404,6 +1409,7 @@ export default function BillEditDialog({
                           </Stack>
                         </td>
                         <td>{money(it.mrp)}</td>
+                        <td>{formatExpiry(it.expiry_date)}</td>
                         <td style={{ textAlign: 'center' }}>
                           <TextField
                             size="small"

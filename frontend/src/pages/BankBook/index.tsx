@@ -2051,10 +2051,11 @@ export default function BankBookPage() {
                   <thead>
                     <tr>
                       <th style={{ minWidth: 220 }}>Item</th>
-                      <th>Qty</th>
-                      <th>MRP</th>
-                      <th>SP</th>
-                      <th>Line Total</th>
+                      <th style={{ width: 100 }}>Expiry</th>
+                      <th style={{ width: 60 }}>Qty</th>
+                      <th style={{ width: 80 }}>MRP</th>
+                      <th style={{ width: 80 }}>SP</th>
+                      <th style={{ width: 100 }}>Line Total</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2073,6 +2074,7 @@ export default function BankBookPage() {
                               </Typography>
                             </Stack>
                           </td>
+                          <td>{String(it.expiry_date || '-').slice(0, 10)}</td>
                           <td>{qty}</td>
                           <td>{money(mrp)}</td>
                           <td>{money(qty > 0 ? lineTotal / qty : 0)}</td>

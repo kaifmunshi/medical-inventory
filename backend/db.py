@@ -2579,6 +2579,17 @@ def migrate_db():
                       WHERE ex.return_id = "return".id
                   )
             """))
+        if "refund_mode" not in return_col_names:
+            session.exec(text('ALTER TABLE "return" ADD COLUMN refund_mode TEXT NOT NULL DEFAULT \'cash\''))
+            session.exec(text("""
+                UPDATE "return"
+                SET refund_mode = CASE
+                    WHEN COALESCE(credit_amount, 0) > 0 THEN 'credit'
+                    WHEN COALESCE(refund_cash, 0) > 0 AND COALESCE(refund_online, 0) > 0 THEN 'split'
+                    WHEN COALESCE(refund_online, 0) > 0 THEN 'online'
+                    ELSE 'cash'
+                END
+            """))
         session.commit()
 
         # ---------- bill item allocation migration ----------

@@ -1014,6 +1014,18 @@ def update_purchase_items_in_place(session, purchase: Purchase, raw_items: List[
 
         replacement_product = None
         if identity_changed:
+            raw_product_id = int(raw.product_id or 0)
+            if raw_product_id == old_product_id and (
+                (clean_text(raw.product_name) or "") != (clean_text(item.product_name) or "")
+                or (clean_text(raw.brand) or "") != (clean_text(item.brand) or "")
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Purchase item edit cannot change product/batch identity while retaining "
+                        f"product #{old_product_id}. Select the intended product or restore the original name and brand."
+                    ),
+                )
             # A product entered under the wrong name can be corrected after a
             # sale/return cycle, but only when the complete purchased batch is
             # back and none of it is sitting in opened/loose stock. Bill and

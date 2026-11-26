@@ -241,6 +241,9 @@ def return_item_to_out(session, row: ReturnItem) -> ReturnItemOut:
 
 
 def infer_refund_mode(r: Return) -> str:
+    stored = str(getattr(r, "refund_mode", "") or "").strip().lower()
+    if stored in {"cash", "online", "split", "credit"}:
+        return stored
     credit = round2(float(getattr(r, "credit_amount", 0.0) or 0.0))
     cash = round2(float(getattr(r, "refund_cash", 0.0) or 0.0))
     online = round2(float(getattr(r, "refund_online", 0.0) or 0.0))
@@ -930,6 +933,7 @@ def update_exchange_settlement(exchange_id: int, payload: ExchangeSettlementUpda
 
         ret.date_time = new_datetime
         ret.subtotal_return = return_value
+        ret.refund_mode = "credit" if refund_credit > MONEY_EPSILON else "split" if refund_cash > MONEY_EPSILON and refund_online > MONEY_EPSILON else "online" if refund_online > MONEY_EPSILON else "cash"
         ret.refund_cash = refund_cash
         ret.refund_online = refund_online
         ret.credit_amount = refund_credit
@@ -1205,7 +1209,7 @@ def update_exchange_items(exchange_id: int, payload: ExchangeEditUpdate):
         mode = str(payload.payment_mode or "cash").lower()
         if mode not in {"cash", "online", "split", "credit"}:
             raise HTTPException(status_code=400, detail="Invalid exchange payment mode")
-        ret.date_time = new_datetime; ret.subtotal_return = return_total; ret.refund_cash = ref_cash; ret.refund_online = ref_online; ret.credit_amount = ref_credit; ret.rounding_adjustment = rounding_adjustment
+        ret.date_time = new_datetime; ret.subtotal_return = return_total; ret.refund_mode = "credit" if ref_credit > MONEY_EPSILON else "split" if ref_cash > MONEY_EPSILON and ref_online > MONEY_EPSILON else "online" if ref_online > MONEY_EPSILON else "cash"; ret.refund_cash = ref_cash; ret.refund_online = ref_online; ret.credit_amount = ref_credit; ret.rounding_adjustment = rounding_adjustment
         replacement_bill.date_time = new_datetime; replacement_bill.discount_percent = payload.discount_percent; replacement_bill.subtotal = bill_subtotal; replacement_bill.total_amount = bill_total
         replacement_bill.payment_mode = mode; replacement_bill.payment_cash = pay_cash; replacement_bill.payment_online = pay_online
         settled_by_return = round2(max(0.0, bill_total - max(0.0, net_due)))
@@ -1428,6 +1432,7 @@ def update_return_refund(return_id: int, payload: ReturnRefundUpdate):
             return return_to_out(session, r)
 
         r.date_time = new_return_datetime
+        r.refund_mode = mode
         r.refund_cash = rc
         r.refund_online = ro
         r.credit_amount = new_credit_amount
@@ -1718,6 +1723,7 @@ def create_return(payload: ReturnCreate):
                 date_time=return_datetime,
                 source_bill_id=payload.source_bill_id,
                 subtotal_return=subtotal_return,
+                refund_mode=payload.refund_mode,
                 credit_amount=credit_amount,
                 refund_cash=rc,
                 refund_online=ro,
@@ -2043,6 +2049,7 @@ def create_exchange(payload: ExchangeCreate):
             date_time=exchange_datetime,
             source_bill_id=payload.source_bill_id,
             subtotal_return=return_subtotal,
+            refund_mode=str(payload.payment_mode or "cash").lower(),
             credit_amount=(round2(abs(net_due)) if net_due < 0 and payload.payment_mode == "credit" else round2(payload.refund_credit)),
             refund_cash=r_cash,
             refund_online=r_online,

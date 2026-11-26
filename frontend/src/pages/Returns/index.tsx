@@ -278,7 +278,9 @@ export default function Returns() {
       0,
       Number(bill?.total_amount || 0) - Number(bill?.paid_amount || 0) - Number(bill?.writeoff_amount || 0),
     ))
-    const credit = clamp2(Math.min(total, outstanding))
+    // Cash/online/split are explicit direct-refund choices. Only the credit
+    // choice should reduce the source bill's outstanding balance first.
+    const credit = mode === 'credit' ? clamp2(Math.min(total, outstanding)) : 0
     let remaining = clamp2(total - credit)
     let cash = 0
     let online = 0
@@ -343,6 +345,21 @@ export default function Returns() {
       originalTotal: clamp2(Number(bill.original_total_amount ?? total)),
     }
   }, [bill])
+
+  useEffect(() => {
+    // A paid bill has nothing for the Credit option to adjust. Do not retain a
+    // now-hidden credit selection when the user loads a different bill.
+    if (mode === 'credit' && settlementPreview.outstanding <= 0) setMode('cash')
+  }, [mode, settlementPreview.outstanding])
+
+  useEffect(() => {
+    // Credit is based on the exact returned-item value. Manual cash round-off
+    // is intentionally available only for money refunded directly.
+    if (mode === 'credit' && clamp2(finalRefund) !== computedRefund) {
+      setFinalTouched(false)
+      setFinalRefund(computedRefund)
+    }
+  }, [computedRefund, finalRefund, mode])
 
   const customerBalancePreview = useMemo(() => {
     const before = signedCustomerBalance(customerAccount)
@@ -566,6 +583,10 @@ export default function Returns() {
       toast.push(`Final refund must be within ±₹${RETURN_ROUND_TOLERANCE} of computed ₹${computedRefund.toFixed(2)}`, 'warning')
       return
     }
+    if (settlementPreview.unresolved > 0) {
+      toast.push(`Rs ${money(settlementPreview.unresolved)} cannot be settled using the selected mode`, 'warning')
+      return
+    }
     if (mode === 'split' && clamp2(Number(refundCashSplit || 0) + Number(refundOnlineSplit || 0)) !== clamp2(finalRefund)) {
       toast.push(`Cash + Online must equal Rs ${money(finalRefund)}`, 'warning')
       return
@@ -720,10 +741,12 @@ export default function Returns() {
                 SelectProps={{ native: true }}
                 sx={{ width: 180 }}
               >
-                <option value="cash">Cash</option>
-                <option value="online">Online</option>
-                <option value="split">Cash + Online</option>
-                <option value="credit">Auto settle (credit first)</option>
+                <option value="cash">Cash refund</option>
+                <option value="online">Online refund</option>
+                <option value="split">Cash + Online refund</option>
+                {settlementPreview.outstanding > 0 ? (
+                  <option value="credit">Credit</option>
+                ) : null}
               </TextField>
 
               {mode === 'split' ? (
@@ -772,6 +795,7 @@ export default function Returns() {
                 type="number"
                 sx={{ width: 180 }}
                 value={finalRefund}
+                disabled={mode === 'credit'}
                 onChange={e => {
                   setFinalTouched(true)
                   setFinalRefund(Number(e.target.value || 0))
@@ -781,6 +805,7 @@ export default function Returns() {
 
               <Button
                 variant="outlined"
+                disabled={mode === 'credit'}
                 onClick={() => {
                   setFinalTouched(true)
                   setFinalRefund(v => clamp2((v || 0) - 5))
@@ -790,6 +815,7 @@ export default function Returns() {
               </Button>
               <Button
                 variant="outlined"
+                disabled={mode === 'credit'}
                 onClick={() => {
                   setFinalTouched(true)
                   setFinalRefund(v => clamp2((v || 0) + 5))
@@ -799,6 +825,7 @@ export default function Returns() {
               </Button>
               <Button
                 variant="outlined"
+                disabled={mode === 'credit'}
                 onClick={() => {
                   setFinalTouched(true)
                   setFinalRefund(round5Nearest(refund))
@@ -808,6 +835,7 @@ export default function Returns() {
               </Button>
               <Button
                 variant="text"
+                disabled={mode === 'credit'}
                 onClick={() => {
                   setFinalTouched(false)
                   setFinalRefund(clamp2(refund))
@@ -836,10 +864,14 @@ export default function Returns() {
                 </Stack>
                 <Typography variant="body2">
                   {mode === 'cash'
-                    ? `Refundable paid amount is Rs ${money(settlementPreview.availableCash)} in Cash mode. Any unpaid balance is adjusted first.`
+                    ? `Rs ${money(settlementPreview.cash)} will be refunded in cash. This does not adjust the bill's outstanding balance.`
                     : mode === 'online'
-                      ? `Refundable paid amount is Rs ${money(settlementPreview.availableOnline)} in Online mode. Any unpaid balance is adjusted first.`
-                      : `The system will adjust pending credit first, then return any balance from paid cash/online.`}
+                      ? `Rs ${money(settlementPreview.online)} will be refunded online. This does not adjust the bill's outstanding balance.`
+                      : mode === 'split'
+                        ? `The selected cash and online amounts will be refunded directly. This does not adjust the bill's outstanding balance.`
+                        : settlementPreview.total > settlementPreview.outstanding
+                          ? `Rs ${money(settlementPreview.credit)} will adjust the outstanding bill first; the remaining Rs ${money(settlementPreview.cash + settlementPreview.online)} will be refunded.`
+                          : `Rs ${money(settlementPreview.credit)} will be credited against this bill's outstanding balance.`}
                 </Typography>
                 {settlementPreview.unresolved > 0 ? (
                   <Typography variant="body2" color="error">

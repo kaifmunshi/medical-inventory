@@ -554,6 +554,9 @@ def _validate_receipt_mode(mode: str, cash_amount: float, online_amount: float) 
 
 
 def _infer_return_refund_mode(row: Return) -> str:
+    stored = str(getattr(row, "refund_mode", "") or "").strip().lower()
+    if stored in {"cash", "online", "split", "credit"}:
+        return stored
     credit = _round2(float(getattr(row, "credit_amount", 0.0) or 0.0))
     cash = _round2(float(getattr(row, "refund_cash", 0.0) or 0.0))
     online = _round2(float(getattr(row, "refund_online", 0.0) or 0.0))
